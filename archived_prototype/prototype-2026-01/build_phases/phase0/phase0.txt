@@ -1,0 +1,119 @@
+### **PHASE 0 — FOUNDATION & READINESS CHECKLIST (SAVE THIS DRAFT)**
+
+**Purpose:**
+Lock the universe’s laws *before* the Big Bang. This phase ensures legal clarity, technical discipline, data integrity, and IP defensibility before any public build or capital deployment.
+
+---
+
+## 1. Vision & Scope Lock
+
+* ☐ One-sentence MX Platform mission (non-marketing, internal truth)
+* ☐ Core problem statement (what dies if MX doesn’t exist)
+* ☐ Explicit non-goals (what MX will **never** be)
+* ☐ Success definition for Phase 1 (binary: pass/fail)
+
+---
+
+## 2. IP & Legal Foundations (Non-Negotiable)
+
+* ☐ IP Manifesto finalized (NFT holder ownership, platform carve-outs)
+* ☐ License framework selected:
+
+  * ☐ Personal / Commercial / Enterprise tiers
+  * ☐ Derivative works policy defined
+* ☐ Terms of Service (draft v1)
+* ☐ IP assignment clarity (what contributors give vs keep)
+* ☐ Jurisdiction + governing law selected
+* ☐ Risk disclosures written (AI output, financial, advisory, experimental)
+
+---
+
+## 3. Data & Prompt Architecture
+
+* ☐ Prompt-farming consent language approved
+* ☐ User → Agent → Outcome logging schema finalized
+* ☐ Immutable prompt/version hashing plan
+* ☐ Analytics definitions:
+
+  * ☐ Success
+  * ☐ Failure
+  * ☐ Drift
+* ☐ Barometer variables defined (system health metrics)
+
+---
+
+## 4. Agent System Design (Paper-Only)
+
+* ☐ Agent taxonomy (roles, scopes, hard limits)
+* ☐ Permission boundaries (what agents **cannot** do)
+* ☐ Prompt evolution rules (who can modify “master prompts”)
+* ☐ Kill-switch logic (human override conditions)
+* ☐ Adversarial testing plan (how agents are stress-tested)
+
+---
+
+## 5. Economic & Incentive Model
+
+* ☐ Token/NFT utility clearly defined (no speculation language)
+* ☐ Value flow diagram (who creates → who captures)
+* ☐ Prompt contribution reward logic (if any)
+* ☐ Anti-extraction protections (prevent farming abuse)
+* ☐ Sustainability assumptions documented
+
+---
+
+## 6. Technical Readiness (No Code Yet)
+
+* ☐ Stack assumptions documented (frontend, backend, data, AI)
+* ☐ Vendor lock-in risks identified
+* ☐ Cost model v0 (low / mid / high probability bands)
+* ☐ Security threat model (at least 5 realistic threats)
+* ☐ Audit checkpoints scheduled (internal)
+
+---
+
+## 7. Governance & Control
+
+* ☐ Founder control map (what you retain permanently)
+* ☐ Upgrade authority defined
+* ☐ Emergency powers clause drafted
+* ☐ Community influence boundaries written
+* ☐ Fork policy defined (when + how ecosystem splits)
+
+---
+
+## 8. Roadmap Gating Rules
+
+* ☐ Clear criteria to exit Phase 0
+* ☐ Red-flag conditions that halt the project
+* ☐ Fork paths pre-approved (legal + technical)
+* ☐ Documentation standards set (nothing undocumented ships)
+
+---
+
+## 9. Psychological Discipline (Yes, This Matters)
+
+* ☐ “No rush” rule codified
+* ☐ Perfection > speed principle written
+* ☐ Feature freeze discipline agreed
+* ☐ Ego check: external validation **not** a milestone
+
+---
+
+## 10. Phase 0 Exit Deliverables (Hard Requirement)
+
+You **do not** move forward unless all exist:
+
+* ☐ Signed IP Manifesto (internal)
+* ☐ TOS v1 (legal-ready draft)
+* ☐ Master architecture doc (non-technical)
+* ☐ Barometer metric list
+* ☐ Phase 1 scope lock (1 page max)
+
+---
+
+**Phase 0 Philosophy:**
+
+> *Nothing is built until everything is understood.*
+
+When you’re ready, say **“next”** and I’ll give you the **Legal-Ready IP Manifesto (clean, one-page, file-worthy)** or another component of your choosing.

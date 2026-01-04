@@ -1,0 +1,72 @@
+Sample MX Odds CalculationTo illustrate how MX Odds works in practice, here is a concrete, end-to-end example for a hypothetical memecoin token called $MOONCAT (as of a snapshot on December 27, 2025).We will compute MX Odds v1 as a final probabilistic score ranging 0–100 (higher = stronger favorable signal), fully decomposed into its core components: APE, CIS, TEI, and MVM. All steps use the locked mathematical primitives referenced in the roadmap (Fibonacci weighting + Tesla harmonics).Input Data (Normalized Snapshot)Metric
+Raw Value
+Normalized (0–1)
+24h Price Momentum
++180%
+0.92
+Liquidity Depth (TVL)
+$8.2M
+0.75
+Community Sentiment
+87% positive
+0.87
+Holder Concentration
+Top 10 hold 28%
+0.68
+On-Chain Integrity
+No rug flags
+1.00
+Data Source Reliability
+3/3 APIs healthy
+1.00
+Token Age
+14 days
+0.45
+External Harmonic (market cycle proxy)
+Bull phase
+0.80
+
+Step 1: APE – Composite Alpha DecompositionAPE estimates upside potential by decomposing alpha drivers.APE Equation (simplified stack):
+
+APE = (Momentum × 0.3) + (Sentiment × 0.25) + (Liquidity × 0.2) + (External Harmonic × 0.15) + (Token Age Bonus × 0.1)
+
+→ APE = (0.92 × 0.3) + (0.87 × 0.25) + (0.75 × 0.2) + (0.80 × 0.15) + (0.45 × 0.1)
+→ APE = 0.276 + 0.2175 + 0.15 + 0.12 + 0.045
+→ APE = 0.8085 (80.85% alpha potential)Step 2: CIS – Integrity Gates (Hard-Fail Rules)CIS applies binary/threshold gates. Any failure downgrades or invalidates the score.Locked Gates (sample set):Holder Concentration < 40% → PASS (0.68 → safe)
+On-Chain Integrity Score = 1.00 → PASS
+Data Source Reliability ≥ 0.9 → PASS
+No known rug/pull events → PASS
+
+All gates PASS → CIS Multiplier = 1.00
+(If any failed → multiplier drops to 0.0–0.5, or hard-fail to LOCKDOWN)Step 3: TEI – Token Efficiency IndexTEI measures efficiency and resource soundness per token.TEI Equation:
+
+TEI = (Liquidity Depth × 0.5) + (Holder Distribution × 0.3) + (Data Reliability × 0.2)
+
+→ TEI = (0.75 × 0.5) + (0.68 × 0.3) + (1.00 × 0.2)
+→ TEI = 0.375 + 0.204 + 0.20
+→ TEI = 0.779 (77.9% efficiency)Step 4: MVM – Multi-Variable Model (Final Synthesis)MVM aggregates the components using Fibonacci-weighted harmonic blending (locked constants: 1, 2, 3, 5, 8 → normalized weights).Weight Distribution (Fibonacci-derived):APE (upside): weight 8
+CIS (integrity): weight 5 (defensive priority)
+TEI (efficiency): weight 3
+Tesla Harmonic Adjustment: weight 2 (external resonance factor = 0.80)
+
+MVM Raw Aggregate:
+
+MVM_raw = (APE × 8) + (CIS × 5) + (TEI × 3) + (Harmonic × 2)
+        = (0.8085 × 8) + (1.00 × 5) + (0.779 × 3) + (0.80 × 2)
+        = 6.468 + 5.00 + 2.337 + 1.60
+        = 15.405
+
+Total Possible (max values): 8 + 5 + 3 + 2 = 18
+Final MX Odds = (MVM_raw / 18) × 100→ MX Odds = (15.405 / 18) × 100 = 85.58Final Output: MX Odds Score for $MOONCATMX Odds = 85.6 / 100
+State: SAFE (all APIs healthy, no degradation)
+Interpretation: Strong probabilistic favorability with intact integrity and high efficiency.Full Decomposition (as shown in dashboard tooltips)
+
+MX Odds: 85.6
+├── APE (Alpha Potential)        80.9%  → weight 8  → contrib 35.9%
+├── CIS (Integrity Gates)       100.0%  → weight 5  → contrib 27.8%
+├── TEI (Token Efficiency)       77.9%  → weight 3  → contrib 13.0%
+└── Tesla Harmonic Adjustment    80.0%  → weight 2  → contrib 8.9%
+└── Guardian State: SAFE
+
+This calculation is fully deterministic — identical inputs will always yield 85.6. Every component is traceable, and no heuristics were applied. In a real deployment, the dashboard would display interactive tooltips for each line, and the score would feed into agent consensus or simulation ladders.This example demonstrates the MX Platform’s commitment to mathematical purity, explainability, and resilience — core to its fork-aware design.
+
