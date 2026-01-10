@@ -419,3 +419,42 @@ async def leaderboard(limit: int = 20):
     if not _gamification:
         return {"items": []}
     return {"items": _gamification.leaderboard(limit=limit)}
+
+
+@router_v1.get("/assertions")
+async def list_uma_assertions(status: Optional[str] = None, limit: int = 50):
+    """Stage 4: List UMA Optimistic Oracle assertions tied to MERID blocks."""
+    from oracles.uma import get_uma_client
+    
+    uma_client = get_uma_client()
+    assertions = uma_client.list_assertions(status=status, limit=limit)
+    
+    return {
+        "assertions": [a.to_dict() for a in assertions],
+        "count": len(assertions),
+    }
+
+
+@router_v1.get("/assertions/{assertion_id}")
+async def get_uma_assertion(assertion_id: str):
+    """Stage 4: Get specific UMA assertion details."""
+    from oracles.uma import get_uma_client
+    
+    uma_client = get_uma_client()
+    assertion = uma_client.get_assertion(assertion_id)
+    
+    if assertion is None:
+        return {"status": "not_found", "assertion_id": assertion_id}
+    
+    return assertion.to_dict()
+
+
+@router_v1.post("/assertions/{assertion_id}/settle")
+async def settle_uma_assertion(assertion_id: str):
+    """Stage 4: Settle UMA assertion after liveness period."""
+    from oracles.uma import get_uma_client
+    
+    uma_client = get_uma_client()
+    result = uma_client.settle_assertion(assertion_id)
+    
+    return result

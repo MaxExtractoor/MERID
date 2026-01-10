@@ -6,14 +6,14 @@ class GovernanceModule {
     if (_lockdownActive) {
       return false;
     }
-    
+
     final decision = GovernanceDecision(
       action: action,
       actor: actor,
       timestamp: DateTime.now(),
       approved: _evaluateAction(action),
     );
-    
+
     _decisions.add(decision);
     return decision.approved;
   }

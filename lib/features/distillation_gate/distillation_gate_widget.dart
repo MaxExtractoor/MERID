@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:merid/core/theme.dart';
-import 'package:merid/core/mock_data.dart';
+import 'package:merid/services/llm_service.dart';
+import 'package:merid/body_protocol/memory/memory_module.dart';
+import 'package:merid/body_protocol/eyes/eyes_module.dart';
 
 class DistillationGateWidget extends StatefulWidget {
   final Function(String, String)? onProcess;
@@ -17,15 +19,15 @@ class DistillationGateWidget extends StatefulWidget {
 
 class _DistillationGateWidgetState extends State<DistillationGateWidget> {
   final TextEditingController _inputController = TextEditingController();
+  final LLMService _llmService = LLMService();
+  final MemoryModule _memoryModule = MemoryModule();
+  final EyesModule _eyesModule = EyesModule();
+
   String _rawCognition = '';
   String _distilledOutput = '';
   bool _showRaw = false;
   bool _processing = false;
-  Map<String, dynamic> _ekgMetrics = {
-    'entropy': 3.2,
-    'confidence': 0.87,
-    'bias': 0.12,
-  };
+  Map<String, dynamic> _ekgMetrics = {};
 
   @override
   Widget build(BuildContext context) {
@@ -47,7 +49,8 @@ class _DistillationGateWidgetState extends State<DistillationGateWidget> {
             _buildDistilledOutput(),
             const SizedBox(height: 16),
           ],
-          if (_ekgMetrics.isNotEmpty && _distilledOutput.isNotEmpty) _buildEKGMeter(),
+          if (_ekgMetrics.isNotEmpty && _distilledOutput.isNotEmpty)
+            _buildEKGMeter(),
         ],
       ),
     );
@@ -141,30 +144,38 @@ class _DistillationGateWidgetState extends State<DistillationGateWidget> {
 
     setState(() {
       _processing = true;
+      _rawCognition = '';
+      _distilledOutput = '';
     });
 
-    await Future.delayed(const Duration(milliseconds: 800));
+    try {
+      // Process through Eyes module
+      await _eyesModule.processInput(input);
 
-    final mode = _detectMode(input);
-    
-    setState(() {
-      _rawCognition = MockData.getRawCognition(mode);
-      _distilledOutput = MockData.getDistilledOutput(mode);
-      _processing = false;
-      _showRaw = false;
-    });
+      // Generate raw cognition via Brain + LLM
+      final rawCognition = await _llmService.generateRawCognition(input);
 
-    widget.onProcess?.call(_rawCognition, _distilledOutput);
-  }
+      // Process through LLM for distilled output
+      final llmResponse = await _llmService.process(input);
 
-  String _detectMode(String input) {
-    final lower = input.toLowerCase();
-    if (lower.contains('status') || lower.contains('report')) return 'status';
-    if (lower.contains('market') || lower.contains('exploit')) return 'market_exploit';
-    if (lower.contains('quantum')) return 'quantum';
-    if (lower.contains('intuition') || lower.contains('gut')) return 'intuition';
-    if (lower.contains('manifest')) return 'manifestation';
-    return 'status';
+      // Get EKG metrics from Memory
+      final ekgMetrics = await _memoryModule.getEKGMetrics();
+
+      setState(() {
+        _rawCognition = rawCognition;
+        _distilledOutput = llmResponse.text;
+        _ekgMetrics = ekgMetrics;
+        _processing = false;
+        _showRaw = false;
+      });
+
+      widget.onProcess?.call(_rawCognition, _distilledOutput);
+    } catch (e) {
+      setState(() {
+        _distilledOutput = 'Error processing input: $e';
+        _processing = false;
+      });
+    }
   }
 
   Widget _buildRawCognition() {
@@ -180,7 +191,9 @@ class _DistillationGateWidgetState extends State<DistillationGateWidget> {
           child: Row(
             children: [
               Icon(
-                _showRaw ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_right,
+                _showRaw
+                    ? Icons.keyboard_arrow_down
+                    : Icons.keyboard_arrow_right,
                 color: MeridTheme.textSecondary,
                 size: 16,
               ),
@@ -237,10 +250,11 @@ class _DistillationGateWidgetState extends State<DistillationGateWidget> {
           decoration: BoxDecoration(
             color: MeridTheme.surface,
             borderRadius: BorderRadius.circular(4),
-            border: Border.all(color: MeridTheme.emerald.withOpacity(0.5), width: 2),
+            border: Border.all(
+                color: MeridTheme.emerald.withValues(alpha: 0.5), width: 2),
             boxShadow: [
               BoxShadow(
-                color: MeridTheme.emerald.withOpacity(0.2),
+                color: MeridTheme.emerald.withValues(alpha: 0.2),
                 blurRadius: 12,
               ),
             ],
@@ -258,9 +272,11 @@ class _DistillationGateWidgetState extends State<DistillationGateWidget> {
   }
 
   Widget _buildEKGMeter() {
-    final entropy = _ekgMetrics['entropy'] as double;
-    final confidence = _ekgMetrics['confidence'] as double;
-    final bias = _ekgMetrics['bias'] as double;
+    if (_ekgMetrics.isEmpty) return const SizedBox.shrink();
+
+    final entropy = (_ekgMetrics['entropy'] as num?)?.toDouble() ?? 0.0;
+    final confidence = (_ekgMetrics['confidence'] as num?)?.toDouble() ?? 0.0;
+    final bias = (_ekgMetrics['bias'] as num?)?.toDouble() ?? 0.0;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -323,7 +339,7 @@ class _DistillationGateWidgetState extends State<DistillationGateWidget> {
                     borderRadius: BorderRadius.circular(4),
                     boxShadow: [
                       BoxShadow(
-                        color: color.withOpacity(0.5),
+                        color: color.withValues(alpha: 0.5),
                         blurRadius: 4,
                       ),
                     ],

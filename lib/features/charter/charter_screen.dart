@@ -19,7 +19,7 @@ class CharterScreen extends StatelessWidget {
             end: Alignment.bottomCenter,
             colors: [
               MeridTheme.background,
-              MeridTheme.surface.withOpacity(0.3),
+              MeridTheme.surface.withValues(alpha: 0.3),
             ],
           ),
         ),
@@ -114,7 +114,7 @@ class CharterScreen extends StatelessWidget {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
-            color: color.withOpacity(0.1),
+            color: color.withValues(alpha: 0.1),
             border: Border(
               left: BorderSide(color: color, width: 3),
             ),
@@ -130,7 +130,6 @@ class CharterScreen extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         ...items.asMap().entries.map((entry) {
-          int idx = entry.key;
           String item = entry.value;
           return Padding(
             padding: const EdgeInsets.only(bottom: 12),
@@ -142,7 +141,7 @@ class CharterScreen extends StatelessWidget {
                   width: 6,
                   height: 6,
                   decoration: BoxDecoration(
-                    color: color.withOpacity(0.6),
+                    color: color.withValues(alpha: 0.6),
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -159,7 +158,7 @@ class CharterScreen extends StatelessWidget {
               ],
             ),
           );
-        }).toList(),
+        }),
       ],
     );
   }
@@ -180,11 +179,16 @@ class CharterScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          _buildPhilosophyItem('Decision Organism', 'MERID is a living system with anatomy, memory, health metrics, and capacity for perpetual evolution - not a static tool.'),
-          _buildPhilosophyItem('Unrestricted Cognition / Constrained Execution', 'Internal thought is completely free to explore any hypothesis, including taboo or adversarial scenarios. All actions are strictly gated by governance and human approval.'),
-          _buildPhilosophyItem('Emotionless / Narrative-Immune', 'Outputs are calm and evidence-based. Narratives are treated as hypotheses. Price and structure are truth; sentiment and prediction markets are advisory and decay over time.'),
-          _buildPhilosophyItem('Anti-Manipulation / Pro-Human', 'Rejects all forms of nudging, hidden stakeholders, and asymmetric information. Humans retain ultimate agency and control.'),
-          _buildPhilosophyItem('Quantum-Ready & Sovereign', 'Operates entirely offline/local. Quantum simulation for candidate generation. No cloud dependencies. Human primacy is absolute.'),
+          _buildPhilosophyItem('Decision Organism',
+              'MERID is a living system with anatomy, memory, health metrics, and capacity for perpetual evolution - not a static tool.'),
+          _buildPhilosophyItem('Unrestricted Cognition / Constrained Execution',
+              'Internal thought is completely free to explore any hypothesis, including taboo or adversarial scenarios. All actions are strictly gated by governance and human approval.'),
+          _buildPhilosophyItem('Emotionless / Narrative-Immune',
+              'Outputs are calm and evidence-based. Narratives are treated as hypotheses. Price and structure are truth; sentiment and prediction markets are advisory and decay over time.'),
+          _buildPhilosophyItem('Anti-Manipulation / Pro-Human',
+              'Rejects all forms of nudging, hidden stakeholders, and asymmetric information. Humans retain ultimate agency and control.'),
+          _buildPhilosophyItem('Quantum-Ready & Sovereign',
+              'Operates entirely offline/local. Quantum simulation for candidate generation. No cloud dependencies. Human primacy is absolute.'),
         ],
       ),
     );

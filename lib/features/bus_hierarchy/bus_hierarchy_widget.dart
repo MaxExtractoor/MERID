@@ -122,7 +122,9 @@ class _BusHierarchyWidgetState extends State<BusHierarchyWidget> {
         color: MeridTheme.surfaceLight,
         borderRadius: BorderRadius.circular(4),
         border: Border.all(
-          color: widget.isActive ? MeridTheme.amber.withOpacity(0.5) : MeridTheme.surfaceLight,
+          color: widget.isActive
+              ? MeridTheme.amber.withValues(alpha: 0.5)
+              : MeridTheme.surfaceLight,
           width: 1,
         ),
       ),
@@ -147,9 +149,8 @@ class _BusHierarchyWidgetState extends State<BusHierarchyWidget> {
           ),
         ],
       ),
-    )
-        .animate(onPlay: (controller) => controller.repeat())
-        .shimmer(duration: 2000.ms, color: MeridTheme.amber.withOpacity(0.1));
+    ).animate(onPlay: (controller) => controller.repeat()).shimmer(
+        duration: 2000.ms, color: MeridTheme.amber.withValues(alpha: 0.1));
   }
 
   Widget _buildLayerSliders() {
@@ -169,7 +170,7 @@ class _BusHierarchyWidgetState extends State<BusHierarchyWidget> {
             padding: const EdgeInsets.only(bottom: 16),
             child: _buildLayerSlider(layer),
           );
-        }).toList(),
+        }),
       ],
     );
   }
@@ -229,7 +230,7 @@ class _BusHierarchyWidgetState extends State<BusHierarchyWidget> {
         color: MeridTheme.surface,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: MeridTheme.amber.withOpacity(0.5),
+          color: MeridTheme.amber.withValues(alpha: 0.5),
           width: 2,
         ),
       ),

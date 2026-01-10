@@ -1,0 +1,237 @@
+﻿from __future__ import annotations
+
+# Stage 2 Agents: async reasoning pipeline, research tools, and structured outputs.
+
+import asyncio
+import json
+from typing import Any, Dict, List
+
+import httpx
+
+from core.event_bus import event_stream
+from core.settings import MAX_TOOL_RESULTS, OLLAMA_BASE_URL, OLLAMA_GENERATE_ENDPOINT
+from core.time_authority import current_time
+from tools import web_search
+from utils.logger import get_logger
+
+_OLLAMA_URL = f"{OLLAMA_BASE_URL.rstrip('/')}{OLLAMA_GENERATE_ENDPOINT}"
+
+
+class BaseAgent:
+    """Shared async agent primitive for all MERID roles."""
+
+    def __init__(
+        self,
+        agent_id: str,
+        model_name: str,
+        role_prompt: str,
+        *,
+        tool_budget: int = 2,
+        is_truth_layer: bool = False,
+        include_patterns: bool = False,
+    ) -> None:
+        self.agent_id = agent_id
+        self.model_name = model_name
+        self.role_prompt = role_prompt.strip()
+        self.tool_budget = max(0, tool_budget)
+        self.is_truth_layer = is_truth_layer
+        self.include_patterns = include_patterns
+        self.trust: float = 1.0
+        self.logger = get_logger(f"agents.{agent_id}")
+
+    async def process(self, energy: Dict[str, Any], phase: str = "reasoning") -> Dict[str, Any]:
+        """Execute the agent reasoning pipeline for a single energy packet."""
+        await event_stream.publish(
+            "agent:start",
+            {"agent": self.agent_id, "energy_id": energy["energy_id"], "phase": phase},
+        )
+        self.logger.info("Processing energy %s", energy["energy_id"])
+
+        research_findings = await self._gather_research(energy)
+        extra_context = await self._additional_context(energy, research_findings)
+        prompt = self._build_prompt(energy, phase, research_findings, extra_context)
+
+        raw_response = await self._invoke_model(prompt)
+        parsed = self._parse_response(raw_response)
+
+        result = {
+            "agent_id": self.agent_id,
+            "vote": parsed["vote"],
+            "confidence": parsed["confidence"],
+            "reasoning": parsed["reasoning"],
+            "simulation": parsed["simulation"],
+            "raw": parsed["raw"],
+            "trust": self.trust,
+            "research": research_findings,
+        }
+
+        await event_stream.publish(
+            "agent:result",
+            {"agent": self.agent_id, "energy_id": energy["energy_id"], "result": result},
+        )
+        return result
+
+    async def _gather_research(self, energy: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Run lightweight research bursts via the shared toolchain."""
+        if self.tool_budget <= 0:
+            return []
+
+        payload = str(energy.get("payload", "")).strip()
+        source = energy.get("source", "user")
+
+        queries = [
+            payload[:160],
+            f"{source} signal context {payload[:120]}",
+            "crypto macro trend latest catalysts",
+        ]
+        queries.extend(self._custom_queries(energy))
+
+        seen: List[str] = []
+        findings: List[Dict[str, Any]] = []
+        for query in queries:
+            normalized = query.strip()
+            if not normalized or normalized.lower() in seen:
+                continue
+            seen.append(normalized.lower())
+            if len(findings) >= self.tool_budget:
+                break
+            result = await asyncio.to_thread(web_search, normalized, MAX_TOOL_RESULTS)
+            findings.append({"query": normalized, "results": result.get("results", [])})
+        return findings
+
+    def _build_prompt(
+        self,
+        energy: Dict[str, Any],
+        phase: str,
+        research: List[Dict[str, Any]],
+        extra_context: str = "",
+    ) -> str:
+        research_section = ""
+        if research:
+            snippets: List[str] = []
+            for chunk in research:
+                summary = "; ".join(
+                    f"{item.get('title', '')}: {item.get('snippet', '')[:180]}"
+                    for item in chunk.get("results", [])[:2]
+                )
+                if summary:
+                    snippets.append(f"- {chunk['query']}: {summary}")
+            if snippets:
+                research_section = "\nResearch Findings:\n" + "\n".join(snippets)
+
+        context_block = ""
+        if extra_context:
+            context_block = f"\nAdditional Context:\n{extra_context.strip()}\n"
+
+        return f"""
+{self.role_prompt}
+
+Timestamp: {current_time()["utc_iso"]}
+Energy Source: {energy.get("source")}
+Payload: {energy.get("payload")}
+Phase: {phase}
+Agent ID: {self.agent_id}
+Model: {self.model_name}
+
+Instructions:
+- Think step-by-step with evidence.
+- Reference provided research when relevant.
+- Be explicit about uncertainty and assumptions.
+- Respond strictly in JSON with keys reasoning, vote, confidence, simulation.
+{context_block}
+{research_section}
+"""
+
+    async def _invoke_model(self, prompt: str) -> str:
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "temperature": 0.35,
+            "stream": False,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=90) as client:
+                response = await client.post(_OLLAMA_URL, json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as exc:  # pragma: no cover - network
+            self.logger.error("Model invocation failed: %s", exc)
+            raise
+
+        return data.get("response") or data.get("output") or json.dumps(data)
+
+    def _parse_response(self, raw: str) -> Dict[str, Any]:
+        fallback = {
+            "reasoning": raw[:400],
+            "vote": "abstain",
+            "confidence": 0.45,
+            "simulation": "Insufficient structured response",
+            "raw": raw,
+        }
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            self.logger.warning("[%s] JSON parsing failed.", self.agent_id)
+            return fallback
+
+        reasoning = str(parsed.get("reasoning", "")).strip() or fallback["reasoning"]
+        simulation = str(parsed.get("simulation", "")).strip() or fallback["simulation"]
+        confidence = float(parsed.get("confidence", fallback["confidence"]) or fallback["confidence"])
+        vote = self._normalize_vote(parsed.get("vote", "abstain"))
+
+        return {
+            "reasoning": reasoning,
+            "vote": vote,
+            "confidence": max(0.0, min(confidence, 1.0)),
+            "simulation": simulation,
+            "raw": raw,
+        }
+
+    def _normalize_vote(self, value: Any) -> str:
+        mapping = {
+            "accept": "accept",
+            "+1": "accept",
+            "approve": "accept",
+            "yes": "accept",
+            "reject": "reject",
+            "-1": "reject",
+            "no": "reject",
+            "deny": "reject",
+            "abstain": "abstain",
+            "0": "abstain",
+            "hold": "abstain",
+        }
+        normalized = str(value).strip().lower()
+        return mapping.get(normalized, "abstain")
+
+    def update_trust(self, value: float) -> None:
+        """Allow external systems (Neo4j) to sync trust values."""
+        self.trust = value
+
+    def _custom_queries(self, energy: Dict[str, Any]) -> List[str]:
+        """Agents can override to add tailored research queries."""
+        return []
+
+    async def _additional_context(
+        self, energy: Dict[str, Any], research: List[Dict[str, Any]]
+    ) -> str:
+        """Agents may contribute extra prompt context (e.g., history)."""
+        if not self.include_patterns:
+            return ""
+
+        from memory.patterns import pattern_engine  # Local import to avoid cycles
+
+        insights = pattern_engine.insights(20)
+        parts = []
+        if insights["keywords"]:
+            keyword_summary = ", ".join(f"{item['label']} ({item['count']})" for item in insights["keywords"])
+            parts.append(f"Top keywords: {keyword_summary}")
+        if insights["sources"]:
+            source_summary = ", ".join(f"{item['label']} ({item['count']})" for item in insights["sources"])
+            parts.append(f"Source distribution: {source_summary}")
+        if insights["validation_status"]:
+            status_summary = ", ".join(f"{item['label']} ({item['count']})" for item in insights["validation_status"])
+            parts.append(f"Validation states: {status_summary}")
+
+        return "\n".join(parts)

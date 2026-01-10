@@ -2,7 +2,7 @@ import 'dart:math';
 
 class BrainModule {
   final Random _random = Random();
-  
+
   Map<String, dynamic> processInput(String input, {String mode = 'status'}) {
     return {
       'raw_cognition': _generateRawCognition(input, mode),
@@ -40,7 +40,7 @@ class BrainModule {
 [COGNITION] Quantum advantage confirmed - delta >0.1
 ''';
       default:
-        return '[BRAIN] Processing: $input';
+        return '[BRAIN] Processing: input';
     }
   }
 

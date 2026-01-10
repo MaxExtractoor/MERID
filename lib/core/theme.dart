@@ -4,17 +4,17 @@ class MeridTheme {
   static const Color background = Color(0xFF020617);
   static const Color surface = Color(0xFF0f172a);
   static const Color surfaceLight = Color(0xFF1e293b);
-  
+
   static const Color amber = Color(0xFFf59e0b);
   static const Color emerald = Color(0xFF10b981);
   static const Color rose = Color(0xFFf43f5e);
-  
+
   static const Color textPrimary = Color(0xFFf1f5f9);
   static const Color textSecondary = Color(0xFF94a3b8);
   static const Color textDim = Color(0xFF64748b);
-  
+
   static const String fontFamily = 'JetBrainsMono';
-  
+
   static ThemeData get darkTheme {
     return ThemeData(
       brightness: Brightness.dark,
@@ -28,13 +28,17 @@ class MeridTheme {
       ),
       fontFamily: fontFamily,
       textTheme: const TextTheme(
-        displayLarge: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: textPrimary),
-        displayMedium: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: textPrimary),
-        displaySmall: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: textPrimary),
+        displayLarge: TextStyle(
+            fontSize: 32, fontWeight: FontWeight.bold, color: textPrimary),
+        displayMedium: TextStyle(
+            fontSize: 24, fontWeight: FontWeight.bold, color: textPrimary),
+        displaySmall: TextStyle(
+            fontSize: 20, fontWeight: FontWeight.bold, color: textPrimary),
         bodyLarge: TextStyle(fontSize: 16, color: textPrimary),
         bodyMedium: TextStyle(fontSize: 14, color: textSecondary),
         bodySmall: TextStyle(fontSize: 12, color: textDim),
-        labelLarge: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: textPrimary),
+        labelLarge: TextStyle(
+            fontSize: 14, fontWeight: FontWeight.w600, color: textPrimary),
       ),
       appBarTheme: const AppBarTheme(
         backgroundColor: background,
@@ -47,12 +51,12 @@ class MeridTheme {
           fontFamily: fontFamily,
         ),
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: surface,
         elevation: 0,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
-          side: BorderSide(color: surfaceLight, width: 1),
+          side: const BorderSide(color: surfaceLight, width: 1),
         ),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
@@ -81,7 +85,7 @@ class MeridTheme {
       ),
     );
   }
-  
+
   static BoxDecoration glowBox({
     Color color = amber,
     double intensity = 0.3,
@@ -89,17 +93,17 @@ class MeridTheme {
     return BoxDecoration(
       color: surface,
       borderRadius: BorderRadius.circular(8),
-      border: Border.all(color: color.withOpacity(0.5), width: 1),
+      border: Border.all(color: color.withValues(alpha: 0.5), width: 1),
       boxShadow: [
         BoxShadow(
-          color: color.withOpacity(intensity),
+          color: color.withValues(alpha: intensity),
           blurRadius: 12,
           spreadRadius: 0,
         ),
       ],
     );
   }
-  
+
   static TextStyle monoStyle({
     double fontSize = 14,
     Color color = textPrimary,

@@ -9,7 +9,7 @@ class SimulationModule {
   }) {
     int successCount = 0;
     List<double> timelines = [];
-    
+
     for (int i = 0; i < scenarios; i++) {
       final result = _simulateScenario(hypothesis);
       if (result['success']) {
@@ -17,11 +17,13 @@ class SimulationModule {
         timelines.add(result['timeline']);
       }
     }
-    
+
     final successRate = successCount / scenarios;
-    final avgTimeline = timelines.isEmpty ? 0.0 : timelines.reduce((a, b) => a + b) / timelines.length;
+    final avgTimeline = timelines.isEmpty
+        ? 0.0
+        : timelines.reduce((a, b) => a + b) / timelines.length;
     final variance = _calculateVariance(timelines, avgTimeline);
-    
+
     return {
       'hypothesis': hypothesis,
       'scenarios_run': scenarios,
@@ -43,14 +45,14 @@ class SimulationModule {
   }) {
     final lag = 8 + _random.nextInt(15);
     final divergence = 0.5 + _random.nextDouble() * 0.4;
-    
+
     int successCount = 0;
     for (int i = 0; i < 1000; i++) {
       if (_random.nextDouble() < 0.75 + divergence * 0.1) {
         successCount++;
       }
     }
-    
+
     return {
       'detected': lag > 5,
       'source_a': sourceA,
@@ -59,7 +61,7 @@ class SimulationModule {
       'divergence_percent': divergence,
       'front_run_scenarios': 1000,
       'success_rate': successCount / 1000,
-      'recommendation': lag > 5 
+      'recommendation': lag > 5
           ? 'Arbitrage opportunity detected - no execution without approval'
           : 'No significant lag detected',
       'confidence': 0.9 + _random.nextDouble() * 0.08,
@@ -70,7 +72,7 @@ class SimulationModule {
     final baseSuccessProb = 0.7 + _random.nextDouble() * 0.2;
     final success = _random.nextDouble() < baseSuccessProb;
     final timeline = 24 + _random.nextDouble() * 48;
-    
+
     return {
       'success': success,
       'timeline': timeline,

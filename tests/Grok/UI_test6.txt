@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MERID Vigilance Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@1.0.0/dist/chartjs-chart-matrix.min.js"></script> <!-- For heat map -->
+    <style>
+        body {
+            background: #f0f4f8;
+            color: #333;
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        .header {
+            background: #1f4e79;
+            color: white;
+            padding: 10px;
+            display: flex;
+            align-items: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 18px;
+        }
+        .tabs {
+            margin-left: 20px;
+        }
+        .tab-button {
+            background: none;
+            border: none;
+            color: white;
+            padding: 10px 15px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .tab-button.active {
+            background: #337ab7;
+        }
+        .main-container {
+            display: flex;
+            height: calc(100vh - 40px);
+        }
+        .sidebar {
+            width: 250px;
+            background: #e7e7e7;
+            border-right: 1px solid #ccc;
+            padding: 10px;
+            overflow-y: auto;
+        }
+        .sidebar ul {
+            list-style: none;
+            padding: 0;
+        }
+        .sidebar li {
+            padding: 5px;
+            cursor: pointer;
+        }
+        .sidebar li:hover {
+            background: #d9d9d9;
+        }
+        .content {
+            flex: 1;
+            padding: 10px;
+            overflow-y: auto;
+        }
+        .panel {
+            background: white;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .panel h3 {
+            margin: 0 0 10px;
+            font-size: 16px;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 5px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background: #f5f5f5;
+        }
+        .chart-container {
+            height: 200px;
+        }
+        #query-editor {
+            width: 100%;
+            height: 200px;
+            box-sizing: border-box;
+        }
+        #query-result {
+            margin-top: 10px;
+            background: #f5f5f5;
+            padding: 10px;
+        }
+        #spinner {
+            display: none;
+            text-align: center;
+            font-size: 24px;
+            color: #337ab7;
+        }
+        .lockdown {
+            background: #d9534f;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .amber-shift {
+            filter: sepia(1) hue-rotate(30deg) saturate(2);
+        }
+        #raw, #distilled {
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            background: #f5f5f5;
+        }
+        #raw {
+            color: #0f0;
+            background: #000;
+            display: none;
+        }
+        #user-input {
+            width: 100%;
+            padding: 10px;
+            margin-top: 10px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MERID Vigilance Dashboard</h1>
+        <div class="tabs">
+            <button class="tab-button active" onclick="showTab('dashboard')">Dashboard</button>
+            <button class="tab-button" onclick="showTab('query')">Query Tool</button>
+            <button class="tab-button" onclick="showTab('monitoring')">Monitoring</button>
+        </div>
+    </div>
+    <div class="main-container">
+        <div class="sidebar">
+            <ul id="sidebar-list">
+                <li>Agents
+                    <ul>
+                        <li>Eyes (Data Ingestion)</li>
+                        <li>Brain (Reasoning)</li>
+                        <li>Immune (Anomaly Detection)</li>
+                        <li>Perception</li>
+                    </ul>
+                </li>
+                <li>Databases</li>
+                <li>Tables</li>
+                <li>Views</li>
+                <li>Functions</li>
+            </ul>
+        </div>
+        <div class="content">
+            <div id="dashboard-tab" class="tab-content">
+                <div class="panel">
+                    <h3>Top Agents Performance</h3>
+                    <table id="top-agents-table">
+                        <thead>
+                            <tr>
+                                <th>Agent</th>
+                                <th>Status</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Data populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+                <div class="panel" style="display: inline-block; width: 48%;">
+                    <h3>Active Sessions</h3>
+                    <div class="chart-container">
+                        <canvas id="sessions-pie"></canvas>
+                    </div>
+                </div>
+                <div class="panel" style="display: inline-block; width: 48%;">
+                    <h3>Memory Usage</h3>
+                    <div class="chart-container">
+                        <canvas id="memory-line"></canvas>
+                    </div>
+                </div>
+                <div class="panel">
+                    <h3>Anomalies Detected (Heat Map - Data Density)</h3>
+                    <div class="chart-container">
+                        <canvas id="anomalies-heatmap"></canvas>
+                    </div>
+                </div>
+                <div class="panel" style="display: inline-block; width: 48%;">
+                    <h3>CPU Usage (Reasoning Load)</h3>
+                    <div class="chart-container">
+                        <canvas id="cpu-line"></canvas>
+                    </div>
+                </div>
+                <div class="panel" style="display: inline-block; width: 48%;">
+                    <h3>Signal Storage Size</h3>
+                    <div class="chart-container">
+                        <canvas id="storage-line"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div id="query-tab" class="tab-content" style="display: none;">
+                <div class="panel">
+                    <h3>Query Tool</h3>
+                    <textarea id="query-editor" rows="10"></textarea>
+                    <button onclick="runQuery()">Run Query</button>
+                    <div id="query-result"></div>
+                </div>
+            </div>
+            <div id="monitoring-tab" class="tab-content" style="display: none;">
+                <div class="panel">
+                    <h3>Monitoring Overview</h3>
+                    <p>Real-time vigilance and signal flow metrics.</p>
+                    <button class="lockdown" id="lockdown">Lockdown System</button>
+                </div>
+                <div class="panel">
+                    <h3>RAW COGNITION Log</h3>
+                    <pre id="raw"></pre>
+                </div>
+                <div class="panel">
+                    <h3>DISTILLED OUTPUT</h3>
+                    <div id="distilled">Awaiting processing...</div>
+                </div>
+            </div>
+            <div id="spinner">Processing...</div>
+            <input type="text" id="user-input" placeholder="Enter query (e.g., Status Report) then press Enter">
+        </div>
+    </div>
+
+    <script>
+        let sessionsChart, memoryChart, anomaliesHeatmap, cpuChart, storageChart;
+
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(content => content.style.display = 'none');
+            document.getElementById(tabId + '-tab').style.display = 'block';
+            document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+        }
+
+        function initCharts() {
+            sessionsChart = new Chart(document.getElementById('sessions-pie'), {
+                type: 'pie',
+                data: {
+                    labels: ['Active', 'Idle'],
+                    datasets: [{
+                        data: [60, 40],
+                        backgroundColor: ['#5cb85c', '#d3d3d3']
+                    }]
+                },
+                options: { responsive: true }
+            });
+
+            memoryChart = new Chart(document.getElementById('memory-line'), {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 10}, (_, i) => `T${i}`),
+                    datasets: [{
+                        label: 'Memory %',
+                        data: Array(10).fill(0),
+                        borderColor: '#337ab7'
+                    }]
+                },
+                options: { responsive: true, scales: { y: { beginAtZero: true } } }
+            });
+
+            anomaliesHeatmap = new Chart(document.getElementById('anomalies-heatmap'), {
+                type: 'matrix',
+                data: {
+                    datasets: [{
+                        label: 'Data Density',
+                        data: generateHeatmapData(),
+                        backgroundColor(c) { return `hsl(${240 - c.raw * 240}, 75%, 60%)`; },
+                        width: 30,
+                        height: 30
+                    }]
+                },
+                options: { responsive: true, scales: { x: { type: 'linear' }, y: { type: 'linear' } } }
+            });
+
+            cpuChart = new Chart(document.getElementById('cpu-line'), {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 10}, (_, i) => `T${i}`),
+                    datasets: [{
+                        label: 'CPU %',
+                        data: Array(10).fill(0),
+                        borderColor: '#d9534f'
+                    }]
+                },
+                options: { responsive: true, scales: { y: { beginAtZero: true } } }
+            });
+
+            storageChart = new Chart(document.getElementById('storage-line'), {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 10}, (_, i) => `T${i}`),
+                    datasets: [{
+                        label: 'Storage (MB)',
+                        data: Array(10).fill(0),
+                        borderColor: '#f0ad4e'
+                    }]
+                },
+                options: { responsive: true, scales: { y: { beginAtZero: true } } }
+            });
+        }
+
+        function generateHeatmapData() {
+            const data = [];
+            for (let x = 0; x < 10; x++) {
+                for (let y = 0; y < 10; y++) {
+                    data.push({ x, y, v: Math.random() });
+                }
+            }
+            return data;
+        }
+
+        function updateRealTimeData() {
+            // Simulate data
+            const activeSessions = Math.floor(Math.random() * 50) + 50;
+            const idleSessions = 100 - activeSessions;
+            const memory = Math.random() * 100;
+            const cpu = Math.random() * 100;
+            const storage = Math.random() * 100 + 20;
+            const anomaliesData = generateHeatmapData();
+
+            // Update pie
+            sessionsChart.data.datasets[0].data = [activeSessions, idleSessions];
+            sessionsChart.update();
+
+            // Shift and push line data
+            memoryChart.data.datasets[0].data.shift();
+            memoryChart.data.datasets[0].data.push(memory);
+            memoryChart.update();
+
+            cpuChart.data.datasets[0].data.shift();
+            cpuChart.data.datasets[0].data.push(cpu);
+            cpuChart.update();
+
+            storageChart.data.datasets[0].data.shift();
+            storageChart.data.datasets[0].data.push(storage);
+            storageChart.update();
+
+            // Update heatmap
+            anomaliesHeatmap.data.datasets[0].data = anomaliesData;
+            anomaliesHeatmap.update();
+
+            // Update table
+            const tableBody = document.querySelector('#top-agents-table tbody');
+            tableBody.innerHTML = '';
+            ['Eyes', 'Brain', 'Immune', 'Perception'].forEach(agent => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${agent}</td>
+                    <td>${Math.random() > 0.5 ? 'Active' : 'Idle'}</td>
+                    <td>${Math.random().toFixed(2)}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        function runQuery() {
+            const query = document.getElementById('query-editor').value;
+            document.getElementById('query-result').innerHTML = `Executed: ${query}<br>Result: Simulated data returned.`;
+        }
+
+        function simulateProcessing(query) {
+            document.getElementById('spinner').style.display = 'block';
+            setTimeout(() => {
+                document.getElementById('raw').style.display = 'block';
+                document.getElementById('raw').textContent = `Analyzing "${query}"... invariants checked... no risks.`;
+                document.getElementById('distilled').innerHTML = `<strong>Distilled Output:</strong><br>Query: "${query}"<br>Status: Nominal. Habit Nudge: Review agents regularly.`;
+                document.getElementById('spinner').style.display = 'none';
+            }, 2000);
+        }
+
+        document.getElementById('lockdown').addEventListener('click', () => {
+            alert('System Locked Down - All operations halted.');
+            document.body.classList.add('amber-shift');
+        });
+
+        document.getElementById('user-input').addEventListener('keypress', e => {
+            if (e.key === 'Enter' && e.target.value.trim()) {
+                simulateProcessing(e.target.value.trim());
+                e.target.value = '';
+            }
+        });
+
+        initCharts();
+        setInterval(updateRealTimeData, 3000); // Real-time update
+    </script>
+</body>
+</html>

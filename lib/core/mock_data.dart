@@ -9,19 +9,20 @@ class MockData {
     'maker_confidence': 0.89,
     'lockdown': false,
   };
-  
+
   static const Map<String, dynamic> marketExploit = {
     'detected': true,
     'source_a': 'Polymarket',
     'source_b': 'Binance',
     'lag_seconds': 12,
     'divergence_percent': 0.80,
-    'recommendation': 'Arbitrage opportunity detected - no execution without approval',
+    'recommendation':
+        'Arbitrage opportunity detected - no execution without approval',
     'confidence': 0.94,
     'front_run_scenarios': 1000,
     'success_rate': 0.78,
   };
-  
+
   static const Map<String, dynamic> quantumOptimization = {
     'algorithm': 'QAOA',
     'problem': 'Portfolio Mean-Variance QUBO',
@@ -34,7 +35,7 @@ class MockData {
     'reproducibility_score': 0.92,
     'comparison_gate': 'PASS (delta >0.1, variance <0.5)',
   };
-  
+
   static const Map<String, dynamic> intuitionMode = {
     'type': 'Sentiment Divergence',
     'gut_feel_signal': 'bearish',
@@ -44,9 +45,9 @@ class MockData {
     'self_supervised_confidence': 0.72,
     'historical_accuracy': 0.65,
   };
-  
+
   static const Map<String, dynamic> manifestationSim = {
-    'hypothesis': 'BTC breaks $105K within 48h',
+    'hypothesis': r'BTC breaks $105K within 48h',
     'scenarios_run': 1000,
     'success_rate': 0.78,
     'avg_timeline_hours': 36,
@@ -54,7 +55,7 @@ class MockData {
     'multiverse_variance': 0.15,
     'recommendation': 'High probability - monitor for confirmation',
   };
-  
+
   static String getRawCognition(String mode) {
     switch (mode) {
       case 'status':
@@ -106,7 +107,7 @@ class MockData {
       case 'manifestation':
         return '''
 [SIMULATION] Manifestation mode: multiverse hypothesis testing
-[BRAIN] Hypothesis: "BTC breaks $105K within 48h"
+[BRAIN] Hypothesis: "BTC breaks \$105K within 48h"
 [SIMULATION] Running 1000 parallel scenarios...
 [OPTIMIZATION] Success rate: 78% (780/1000)
 [BRAIN] Average timeline: 36 hours
@@ -119,7 +120,7 @@ class MockData {
         return '[SYSTEM] No cognition data available.';
     }
   }
-  
+
   static String getDistilledOutput(String mode) {
     switch (mode) {
       case 'status':
@@ -131,7 +132,7 @@ class MockData {
       case 'intuition':
         return 'Gut feel signal: divergence detected. Sentiment shows bearish (-68%) while price action is bullish (+45%). Self-supervised model suggests narrative noise. Recommendation: test hypothesis in simulation before action. Historical accuracy: 65%. Confidence: 72%.';
       case 'manifestation':
-        return 'Manifested hypothesis "BTC breaks $105K within 48h" across 1000 scenarios. Success rate: 78% (confidence interval 74-82%). Average timeline: 36 hours. Multiverse variance: 15%. Recommendation: high probability outcome - monitor for real-world confirmation.';
+        return 'Manifested hypothesis "BTC breaks \$105K within 48h" across 1000 scenarios. Success rate: 78% (confidence interval 74-82%). Average timeline: 36 hours. Multiverse variance: 15%. Recommendation: high probability outcome - monitor for real-world confirmation.';
       default:
         return 'No output available.';
     }

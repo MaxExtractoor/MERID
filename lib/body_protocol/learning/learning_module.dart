@@ -10,7 +10,7 @@ class LearningModule {
     final sentimentScore = -0.8 + _random.nextDouble() * 1.6;
     final priceAction = -0.5 + _random.nextDouble();
     final divergence = (sentimentScore - priceAction).abs();
-    
+
     return {
       'type': divergence > 0.5 ? 'Sentiment Divergence' : 'Alignment',
       'gut_feel_signal': sentimentScore < 0 ? 'bearish' : 'bullish',

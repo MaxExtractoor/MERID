@@ -1,9 +1,46 @@
 import 'package:flutter/material.dart';
 import 'package:merid/core/theme.dart';
 import 'package:merid/core/constants.dart';
+import 'package:merid/core/database.dart';
 
-class PortsWidget extends StatelessWidget {
+class PortsWidget extends StatefulWidget {
   const PortsWidget({super.key});
+
+  @override
+  State<PortsWidget> createState() => _PortsWidgetState();
+}
+
+class _PortsWidgetState extends State<PortsWidget> {
+  final MeridDatabase _db = MeridDatabase();
+  List<Map<String, dynamic>> _ports = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPorts();
+  }
+
+  Future<void> _loadPorts() async {
+    final ports = await _db.getAllPorts();
+    if (ports.isEmpty) {
+      // Initialize default ports
+      for (var entry in MeridConstants.portTiers.entries) {
+        await _db.updatePortStatus(
+          name: entry.key,
+          tier: entry.value,
+          status: MeridConstants.portStatus[entry.key] ?? 'unknown',
+        );
+      }
+      final updatedPorts = await _db.getAllPorts();
+      setState(() {
+        _ports = updatedPorts;
+      });
+    } else {
+      setState(() {
+        _ports = ports;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -15,16 +52,21 @@ class PortsWidget extends StatelessWidget {
         children: [
           _buildHeader(),
           const SizedBox(height: 16),
-          ...MeridConstants.portTiers.entries.map((entry) {
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: _buildPortItem(
-                entry.key,
-                entry.value,
-                MeridConstants.portStatus[entry.key] ?? 'unknown',
-              ),
-            );
-          }).toList(),
+          if (_ports.isEmpty)
+            const Center(
+              child: CircularProgressIndicator(),
+            )
+          else
+            ..._ports.map((port) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _buildPortItem(
+                  port['name'] as String,
+                  port['tier'] as int,
+                  port['status'] as String,
+                ),
+              );
+            }),
         ],
       ),
     );
@@ -71,7 +113,7 @@ class PortsWidget extends StatelessWidget {
         color: MeridTheme.surface,
         borderRadius: BorderRadius.circular(4),
         border: Border.all(
-          color: statusColor.withOpacity(0.5),
+          color: statusColor.withValues(alpha: 0.5),
           width: 1,
         ),
       ),
@@ -85,7 +127,7 @@ class PortsWidget extends StatelessWidget {
               shape: BoxShape.circle,
               boxShadow: [
                 BoxShadow(
-                  color: statusColor.withOpacity(0.5),
+                  color: statusColor.withValues(alpha: 0.5),
                   blurRadius: 4,
                 ),
               ],
@@ -118,9 +160,9 @@ class PortsWidget extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: tierColor.withOpacity(0.2),
+              color: tierColor.withValues(alpha: 0.2),
               borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: tierColor.withOpacity(0.5)),
+              border: Border.all(color: tierColor.withValues(alpha: 0.5)),
             ),
             child: Text(
               'Tier $tier',

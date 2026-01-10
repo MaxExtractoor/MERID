@@ -109,6 +109,13 @@ Control room mixer console with:
 - Status indicators (secure, active, quarantined)
 - Hostile-by-default threat model
 
+### 8. Stage 5 Data Feeds (Backend + Frontend)
+- **Heatmap feed** (`/api/v1/heatmap`): Hyperliquid + CoinGlass liquidation density, venue totals, and perp-market arbitrage candidates. Rendered in both React dashboard (Intel Grid) and Flutter ControlStation Distillation Gate.
+- **Perp ticker feed** (`/api/v1/ticker`): Top perp quotes (price, basis, funding, OI, volume) plus funding extremes. Shown in React Perp Ticker card and Flutter intel panels.
+- **AI assist feed** (`/api/v1/assist`): Latest simulation intent summary, drivers, risk flags, news highlights, and embedded heatmap/ticker excerpts powering AI chat assist panels in both frontends.
+- **Hover explainability feed** (`/api/v1/hover-metadata`): Structured hover cards (theta, funding bias, oracle gap, risk flags) used for Stage 5 explainability overlays in React and ControlStation.
+- **Agent charters** (`/api/v1/charters`): Swarm charter registry for Stage 8 meta-agent orchestration, surfaced in future UI updates.
+
 ---
 
 ## 🛡️ Invariants & Safeguards
@@ -147,6 +154,48 @@ flutter build ios --release  # iOS
 Download **JetBrains Mono** and place TTF files in `assets/fonts/`:
 - `JetBrainsMono-Regular.ttf`
 - `JetBrainsMono-Bold.ttf`
+
+### ControlStation Launch Guide
+
+The Flutter ControlStation mirrors the React dashboard and surfaces the PoS stream, token economy, oracle anchoring, and whale alerts. Launch it alongside the backend for a full-stack local run.
+
+#### Requirements
+- Flutter SDK 3.16+ (stable)
+- Chrome (web target) or a mobile/desktop runtime (Android Studio, Xcode, Windows/macOS desktop)
+
+#### Steps
+```bash
+# From repo root
+cd merid_flutter    # adjust if your flutter app lives elsewhere
+
+# Install deps (first time)
+flutter pub get
+
+# Recommended for quick testing (web)
+flutter run -d chrome
+
+# Other targets
+flutter run -d android   # Android device/emulator
+flutter run -d ios       # iOS simulator (macOS)
+flutter run -d windows   # or macos/linux
+```
+
+#### Environment
+
+Create a `.env` (or use `--dart-define`) with:
+
+```
+MERID_API_URL=http://127.0.0.1:8000/api/v1
+# MERID_API_URL=https://your-remote-merid/api/v1   # for remote deployments
+```
+
+The app polls `/api/v1/blocks/latest` every ~20 seconds and renders:
+- Latest PoS block with confidence + decayed/anchor context
+- Token balances and miner rewards
+- Whale alerts pushed via backend
+- Platform/hybrid indicators (Polymarket/Augur) once enabled
+
+Hot reload is fully supported, making it ideal for rapid UI iterations on the ControlStation panel.
 
 ---
 

@@ -98,9 +98,10 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
             margin: const EdgeInsets.only(top: 8),
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: MeridTheme.amber.withOpacity(0.1),
+              color: MeridTheme.amber.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: MeridTheme.amber.withOpacity(0.3)),
+              border:
+                  Border.all(color: MeridTheme.amber.withValues(alpha: 0.3)),
             ),
             child: Text(
               'Insights from "Source" treated as non-privileged hypotheses',
@@ -132,7 +133,7 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
           controller: _hypothesisController,
           style: MeridTheme.monoStyle(fontSize: 14),
           decoration: InputDecoration(
-            hintText: 'e.g., BTC breaks $105K within 48h',
+            hintText: 'e.g., BTC breaks 105K within 48h',
             hintStyle: MeridTheme.monoStyle(
               fontSize: 14,
               color: MeridTheme.textDim,
@@ -170,7 +171,8 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
               height: 16,
               child: CircularProgressIndicator(
                 strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation<Color>(MeridTheme.background),
+                valueColor:
+                    AlwaysStoppedAnimation<Color>(MeridTheme.background),
               ),
             )
           : Text(
@@ -187,7 +189,7 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
   void _runSimulation() async {
     final hypothesis = _hypothesisController.text.trim();
     if (hypothesis.isEmpty) {
-      _hypothesisController.text = 'BTC breaks \$105K within 48h';
+      _hypothesisController.text = 'BTC breaks \\105K within 48h';
       return;
     }
 
@@ -211,7 +213,7 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
   Widget _buildResults() {
     final successRate = _manifestationResults!['success_rate'] as double;
     final isHighProbability = successRate > 0.75;
-    
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: MeridTheme.glowBox(
@@ -225,7 +227,8 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
             children: [
               Icon(
                 isHighProbability ? Icons.check_circle : Icons.info,
-                color: isHighProbability ? MeridTheme.emerald : MeridTheme.amber,
+                color:
+                    isHighProbability ? MeridTheme.emerald : MeridTheme.amber,
                 size: 20,
               ),
               const SizedBox(width: 8),
@@ -235,7 +238,9 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
                   style: MeridTheme.monoStyle(
                     fontSize: 14,
                     weight: FontWeight.bold,
-                    color: isHighProbability ? MeridTheme.emerald : MeridTheme.amber,
+                    color: isHighProbability
+                        ? MeridTheme.emerald
+                        : MeridTheme.amber,
                   ),
                 ),
               ),
@@ -248,20 +253,29 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
             isHighProbability ? MeridTheme.emerald : MeridTheme.amber,
           ),
           const SizedBox(height: 16),
-          _buildResultRow('Scenarios Run', _manifestationResults!['scenarios_run'].toString()),
-          _buildResultRow('Success Count', '${_manifestationResults!['success_count']}/${_manifestationResults!['scenarios_run']}'),
-          _buildResultRow('Success Rate', '${(successRate * 100).toStringAsFixed(1)}%', isHighProbability ? MeridTheme.emerald : MeridTheme.amber),
-          _buildResultRow('Avg Timeline', '${_manifestationResults!['avg_timeline_hours'].toStringAsFixed(1)} hours'),
+          _buildResultRow('Scenarios Run',
+              _manifestationResults!['scenarios_run'].toString()),
+          _buildResultRow('Success Count',
+              '${_manifestationResults!['success_count']}/${_manifestationResults!['scenarios_run']}'),
+          _buildResultRow(
+              'Success Rate',
+              '${(successRate * 100).toStringAsFixed(1)}%',
+              isHighProbability ? MeridTheme.emerald : MeridTheme.amber),
+          _buildResultRow('Avg Timeline',
+              '${_manifestationResults!['avg_timeline_hours'].toStringAsFixed(1)} hours'),
           _buildResultRow(
             'Confidence Interval',
             '[${(_manifestationResults!['confidence_interval'][0] * 100).toStringAsFixed(0)}% - ${(_manifestationResults!['confidence_interval'][1] * 100).toStringAsFixed(0)}%]',
           ),
-          _buildResultRow('Multiverse Variance', _manifestationResults!['multiverse_variance'].toStringAsFixed(3)),
+          _buildResultRow('Multiverse Variance',
+              _manifestationResults!['multiverse_variance'].toStringAsFixed(3)),
           const Divider(color: MeridTheme.surfaceLight, height: 24),
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: isHighProbability ? MeridTheme.emerald.withOpacity(0.1) : MeridTheme.amber.withOpacity(0.1),
+              color: isHighProbability
+                  ? MeridTheme.emerald.withValues(alpha: 0.1)
+                  : MeridTheme.amber.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
@@ -276,9 +290,10 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: MeridTheme.amber.withOpacity(0.1),
+              color: MeridTheme.amber.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: MeridTheme.amber.withOpacity(0.3)),
+              border:
+                  Border.all(color: MeridTheme.amber.withValues(alpha: 0.3)),
             ),
             child: Row(
               children: [
@@ -344,7 +359,7 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
                   borderRadius: BorderRadius.circular(6),
                   boxShadow: [
                     BoxShadow(
-                      color: color.withOpacity(0.5),
+                      color: color.withValues(alpha: 0.5),
                       blurRadius: 8,
                     ),
                   ],
@@ -379,7 +394,8 @@ class _ManifestationScreenState extends State<ManifestationScreen> {
               style: MeridTheme.monoStyle(
                 fontSize: 12,
                 color: valueColor ?? MeridTheme.textPrimary,
-                weight: valueColor != null ? FontWeight.bold : FontWeight.normal,
+                weight:
+                    valueColor != null ? FontWeight.bold : FontWeight.normal,
               ),
             ),
           ),

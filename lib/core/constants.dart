@@ -1,7 +1,7 @@
 class MeridConstants {
   static const String version = '2.0.0';
   static const String mode = 'LOCAL';
-  
+
   static const List<String> charterPrinciples = [
     'PRIME DIRECTIVE: Unrestricted Cognition / Constrained Execution',
     'DISTILLATION GATE: Raw internal thought → Human-legible abstraction',
@@ -11,7 +11,7 @@ class MeridConstants {
     'EXTENSIBILITY: Tiered ports (1=read, 2=ephemeral, 3=state, 4=execution)',
     'UGAI/CAIDP: Accountability constraints, human primacy, termination rights',
   ];
-  
+
   static const List<String> invariants = [
     'HLC-1: Human-legible outputs (entropy <4.5, plain English)',
     'SLP-1: Lockdown on violation (freeze/isolate/purge/respawn)',
@@ -24,7 +24,7 @@ class MeridConstants {
     'KILL SWITCH: Freeze execution, selective purge, God Key recovery',
     'QUANTUM RULES: Candidate generator only, uncertainty mandatory',
   ];
-  
+
   static const List<String> agents = [
     'Brain',
     'Heart',
@@ -33,7 +33,7 @@ class MeridConstants {
     'Reflection',
     'Council',
   ];
-  
+
   static const List<String> busLayers = [
     'Reasoning',
     'Perception',
@@ -42,7 +42,7 @@ class MeridConstants {
     'Optimization',
     'Security',
   ];
-  
+
   static const Map<String, int> portTiers = {
     'Local Memory': 1,
     'Simulation': 2,
@@ -52,7 +52,7 @@ class MeridConstants {
     'Prediction Market': 3,
     'Blockchain Bridge': 4,
   };
-  
+
   static const Map<String, String> portStatus = {
     'Local Memory': 'secure',
     'Simulation': 'secure',

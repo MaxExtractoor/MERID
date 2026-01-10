@@ -1,0 +1,12 @@
+version: '3.9'
+services:
+  whoogle:
+    image: benbusby/whoogle-search:latest
+    container_name: whoogle
+    ports:
+      - "5000:5000"
+    environment:
+      - WHOOGLE_CONFIG_STYLE=logicodev
+      - WHOOGLE_CONFIG_DARK=1
+      - WHOOGLE_CONFIG_THEME=system
+    restart: unless-stopped

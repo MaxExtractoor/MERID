@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:merid/core/theme.dart';
-import 'package:merid/body_protocol/optimization/optimization_module.dart';
+import 'package:merid/services/quantum_service.dart';
 
 class QuantumSimScreen extends StatefulWidget {
   const QuantumSimScreen({super.key});
@@ -11,9 +11,9 @@ class QuantumSimScreen extends StatefulWidget {
 }
 
 class _QuantumSimScreenState extends State<QuantumSimScreen> {
-  final OptimizationModule _optimization = OptimizationModule();
-  Map<String, dynamic>? _qaoaResults;
-  Map<String, dynamic>? _vqeResults;
+  final QuantumService _quantumService = QuantumService();
+  QuantumResult? _qaoaResults;
+  QuantumResult? _vqeResults;
   bool _running = false;
 
   @override
@@ -119,7 +119,8 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
                     height: 16,
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(MeridTheme.background),
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(MeridTheme.background),
                     ),
                   )
                 : Text(
@@ -156,42 +157,91 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
   void _runQAOA() async {
     setState(() {
       _running = true;
+      _qaoaResults = null;
     });
 
-    await Future.delayed(const Duration(seconds: 2));
+    try {
+      // Example portfolio data
+      final covariances = {
+        'BTC': 0.15,
+        'ETH': 0.12,
+        'SOL': 0.18,
+      };
+      final expectedReturns = [0.08, 0.06, 0.10];
+      
+      final result = await _quantumService.runQAOA(
+        covariances: covariances,
+        expectedReturns: expectedReturns,
+        riskAversion: 0.5,
+        samples: 50,
+      );
 
-    final results = _optimization.runQuantumOptimization(
-      algorithm: 'QAOA',
-      problem: 'Portfolio Mean-Variance QUBO',
-    );
-
-    setState(() {
-      _qaoaResults = results;
-      _running = false;
-    });
+      setState(() {
+        _qaoaResults = result;
+        _running = false;
+      });
+    } catch (e) {
+      setState(() {
+        _running = false;
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: MeridTheme.rose,
+          ),
+        );
+      }
+    }
   }
 
   void _runVQE() async {
     setState(() {
       _running = true;
+      _vqeResults = null;
     });
 
-    await Future.delayed(const Duration(milliseconds: 1500));
+    try {
+      // Example returns data
+      final returns = List.generate(100, (i) => 0.01 + (i % 20) * 0.001);
+      
+      final result = await _quantumService.runVQE(
+        returns: returns,
+        confidenceLevel: 0.95,
+        samples: 50,
+      );
 
-    final results = _optimization.runVQE(
-      problem: 'CVaR Risk Minimization',
-    );
-
-    setState(() {
-      _vqeResults = results;
-      _running = false;
-    });
+      setState(() {
+        _vqeResults = result;
+        _running = false;
+      });
+    } catch (e) {
+      setState(() {
+        _running = false;
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: MeridTheme.rose,
+          ),
+        );
+      }
+    }
   }
 
   Widget _buildQAOAResults() {
+    final result = _qaoaResults!;
+    final advantage = result.advantage;
+    
     return Container(
       padding: const EdgeInsets.all(20),
-      decoration: MeridTheme.glowBox(color: MeridTheme.emerald, intensity: 0.3),
+      decoration: MeridTheme.glowBox(
+        color: advantage ? MeridTheme.emerald : MeridTheme.amber,
+        intensity: 0.3,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -200,21 +250,26 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
             style: MeridTheme.monoStyle(
               fontSize: 14,
               weight: FontWeight.bold,
-              color: MeridTheme.emerald,
+              color: advantage ? MeridTheme.emerald : MeridTheme.amber,
             ),
           ),
           const SizedBox(height: 16),
-          _buildResultRow('Algorithm', _qaoaResults!['algorithm']),
-          _buildResultRow('Problem', _qaoaResults!['problem']),
-          _buildResultRow('Candidates Generated', _qaoaResults!['candidates_generated'].toString()),
+          _buildResultRow('Algorithm', result.algorithm),
+          _buildResultRow('Problem Type', result.problemType),
+          _buildResultRow('Samples', result.samples.toString()),
           const Divider(color: MeridTheme.surfaceLight, height: 24),
-          _buildResultRow('Classical Baseline', _qaoaResults!['classical_baseline'].toStringAsFixed(3)),
-          _buildResultRow('Quantum Best', _qaoaResults!['quantum_best'].toStringAsFixed(3)),
-          _buildResultRow('Delta vs Classical', '+${(_qaoaResults!['delta_vs_classical'] * 100).toStringAsFixed(1)}%', MeridTheme.emerald),
-          _buildResultRow('Variance', _qaoaResults!['variance'].toStringAsFixed(3)),
-          _buildResultRow('Sampling Entropy', _qaoaResults!['sampling_entropy'].toStringAsFixed(2)),
-          _buildResultRow('Noise Estimate', _qaoaResults!['noise_estimate'].toStringAsFixed(3)),
-          _buildResultRow('Reproducibility', '${(_qaoaResults!['reproducibility_score'] * 100).toStringAsFixed(0)}%'),
+          _buildResultRow('Classical Cost',
+              result.classicalCost.toStringAsFixed(4)),
+          _buildResultRow('Quantum Cost',
+              result.quantumCost.toStringAsFixed(4)),
+          _buildResultRow(
+              'Delta (Δ)',
+              result.delta.toStringAsFixed(4),
+              advantage ? MeridTheme.emerald : MeridTheme.textSecondary),
+          _buildResultRow('Uncertainty',
+              '${(result.uncertainty * 100).toStringAsFixed(1)}%'),
+          _buildResultRow('Variance (σ²)',
+              result.variance.toStringAsFixed(3)),
           const Divider(color: MeridTheme.surfaceLight, height: 24),
           Container(
             padding: const EdgeInsets.all(12),
@@ -222,9 +277,7 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
               color: MeridTheme.background,
               borderRadius: BorderRadius.circular(4),
               border: Border.all(
-                color: _qaoaResults!['comparison_gate'].toString().contains('PASS')
-                    ? MeridTheme.emerald
-                    : MeridTheme.rose,
+                color: advantage ? MeridTheme.emerald : MeridTheme.rose,
               ),
             ),
             child: Column(
@@ -240,12 +293,10 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  _qaoaResults!['comparison_gate'],
+                  result.comparisonSummary,
                   style: MeridTheme.monoStyle(
                     fontSize: 12,
-                    color: _qaoaResults!['comparison_gate'].toString().contains('PASS')
-                        ? MeridTheme.emerald
-                        : MeridTheme.rose,
+                    color: advantage ? MeridTheme.emerald : MeridTheme.rose,
                   ),
                 ),
               ],
@@ -255,11 +306,13 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: MeridTheme.amber.withOpacity(0.1),
+              color: MeridTheme.amber.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
-              _qaoaResults!['recommendation'],
+              advantage
+                  ? 'Quantum advantage confirmed. Delta >0.1 and variance <0.5. Candidate approved for consideration.'
+                  : 'No quantum advantage detected. Classical solution preferred.',
               style: MeridTheme.monoStyle(
                 fontSize: 12,
                 color: MeridTheme.textPrimary,
@@ -272,9 +325,15 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
   }
 
   Widget _buildVQEResults() {
+    final result = _vqeResults!;
+    final advantage = result.advantage;
+    
     return Container(
       padding: const EdgeInsets.all(20),
-      decoration: MeridTheme.glowBox(color: MeridTheme.amber, intensity: 0.3),
+      decoration: MeridTheme.glowBox(
+        color: advantage ? MeridTheme.emerald : MeridTheme.amber,
+        intensity: 0.3,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -283,24 +342,69 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
             style: MeridTheme.monoStyle(
               fontSize: 14,
               weight: FontWeight.bold,
-              color: MeridTheme.amber,
+              color: advantage ? MeridTheme.emerald : MeridTheme.amber,
             ),
           ),
           const SizedBox(height: 16),
-          _buildResultRow('Algorithm', _vqeResults!['algorithm']),
-          _buildResultRow('Problem', _vqeResults!['problem']),
-          _buildResultRow('Ground State Energy', _vqeResults!['ground_state_energy'].toStringAsFixed(3)),
-          _buildResultRow('Variance', _vqeResults!['variance'].toStringAsFixed(3)),
-          _buildResultRow('Convergence Iterations', _vqeResults!['convergence_iterations'].toString()),
+          _buildResultRow('Algorithm', result.algorithm),
+          _buildResultRow('Problem Type', result.problemType),
+          _buildResultRow('Samples', result.samples.toString()),
+          const Divider(color: MeridTheme.surfaceLight, height: 24),
+          _buildResultRow('Classical CVaR',
+              result.classicalCost.toStringAsFixed(4)),
+          _buildResultRow('Quantum CVaR',
+              result.quantumCost.toStringAsFixed(4)),
+          _buildResultRow(
+              'Delta (Δ)',
+              result.delta.toStringAsFixed(4),
+              advantage ? MeridTheme.emerald : MeridTheme.textSecondary),
+          _buildResultRow('Uncertainty',
+              '${(result.uncertainty * 100).toStringAsFixed(1)}%'),
+          _buildResultRow('Variance (σ²)',
+              result.variance.toStringAsFixed(3)),
+          const Divider(color: MeridTheme.surfaceLight, height: 24),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: MeridTheme.background,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                color: advantage ? MeridTheme.emerald : MeridTheme.rose,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'COMPARISON GATE',
+                  style: MeridTheme.monoStyle(
+                    fontSize: 11,
+                    weight: FontWeight.bold,
+                    color: MeridTheme.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  result.comparisonSummary,
+                  style: MeridTheme.monoStyle(
+                    fontSize: 12,
+                    color: advantage ? MeridTheme.emerald : MeridTheme.rose,
+                  ),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: MeridTheme.amber.withOpacity(0.1),
+              color: MeridTheme.amber.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
-              _vqeResults!['recommendation'],
+              advantage
+                  ? 'Quantum advantage confirmed for CVaR risk minimization. Lower tail risk detected.'
+                  : 'No quantum advantage detected. Classical CVaR calculation preferred.',
               style: MeridTheme.monoStyle(
                 fontSize: 12,
                 color: MeridTheme.textPrimary,
@@ -334,7 +438,8 @@ class _QuantumSimScreenState extends State<QuantumSimScreen> {
               style: MeridTheme.monoStyle(
                 fontSize: 12,
                 color: valueColor ?? MeridTheme.textPrimary,
-                weight: valueColor != null ? FontWeight.bold : FontWeight.normal,
+                weight:
+                    valueColor != null ? FontWeight.bold : FontWeight.normal,
               ),
             ),
           ),

@@ -8,25 +8,25 @@ class SpineMessageBus {
 
   void send(BusMessage message) {
     _messageLog.add(message);
-    
+
     if (!_validateBusHierarchy(message)) {
       _handleViolation(message);
       return;
     }
-    
+
     _notifyListeners(message);
   }
 
   bool _validateBusHierarchy(BusMessage message) {
     final hierarchy = ['individual', 'group', 'governance', 'master'];
     final currentIndex = hierarchy.indexOf(message.busLevel);
-    
+
     if (currentIndex == -1) return false;
-    
+
     if (message.bypassAttempt) {
       return false;
     }
-    
+
     return true;
   }
 

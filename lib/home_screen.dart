@@ -21,7 +21,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   bool _systemActive = false;
   bool _lockdown = false;
-  double _makerConfidence = 0.89;
+  final double _makerConfidence = 0.89;
 
   @override
   Widget build(BuildContext context) {
@@ -33,45 +33,133 @@ class _HomeScreenState extends State<HomeScreen> {
             end: Alignment.bottomCenter,
             colors: [
               MeridTheme.background,
-              _lockdown 
-                  ? MeridTheme.rose.withOpacity(0.1)
-                  : MeridTheme.surface.withOpacity(0.3),
+              _lockdown
+                  ? MeridTheme.rose.withValues(alpha: 0.1)
+                  : MeridTheme.surface.withValues(alpha: 0.3),
             ],
           ),
         ),
-        child: SafeArea(
-          child: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              _buildHeader(),
-              const SizedBox(height: 24),
-              BusHierarchyWidget(
-                isActive: _systemActive,
-                onLockdown: () {
-                  setState(() {
-                    _lockdown = !_lockdown;
-                  });
-                },
-              ),
-              const SizedBox(height: 24),
-              DistillationGateWidget(
-                onProcess: (raw, distilled) {
-                  setState(() {
-                    _systemActive = true;
-                  });
-                  Future.delayed(const Duration(seconds: 3), () {
-                    if (mounted) {
+        child: Stack(
+          children: [
+            SafeArea(
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  _buildHeader(),
+                  const SizedBox(height: 24),
+                  BusHierarchyWidget(
+                    isActive: _systemActive,
+                    onLockdown: () {
                       setState(() {
-                        _systemActive = false;
+                        _lockdown = !_lockdown;
                       });
-                    }
-                  });
-                },
+                    },
+                  ),
+                  const SizedBox(height: 24),
+                  DistillationGateWidget(
+                    onProcess: (raw, distilled) {
+                      setState(() {
+                        _systemActive = true;
+                      });
+                      Future.delayed(const Duration(seconds: 3), () {
+                        if (mounted) {
+                          setState(() {
+                            _systemActive = false;
+                          });
+                        }
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 24),
+                  _buildActionButtons(),
+                  const SizedBox(height: 24),
+                  const PortsWidget(),
+                ],
+              ),
+            ),
+            if (_lockdown) _buildLockdownOverlay(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLockdownOverlay() {
+    return Container(
+      color: MeridTheme.rose.withValues(alpha: 0.9),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.all(32),
+          margin: const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: MeridTheme.background,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: MeridTheme.rose, width: 2),
+            boxShadow: [
+              BoxShadow(
+                color: MeridTheme.rose.withValues(alpha: 0.5),
+                blurRadius: 20,
+                spreadRadius: 5,
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.lock,
+                color: MeridTheme.rose,
+                size: 48,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'SYSTEM CONTAINED',
+                style: MeridTheme.monoStyle(
+                  fontSize: 24,
+                  weight: FontWeight.bold,
+                  color: MeridTheme.rose,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'SLP-1 LOCKDOWN ACTIVE',
+                style: MeridTheme.monoStyle(
+                  fontSize: 14,
+                  color: MeridTheme.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'All execution frozen. Governance gate requires human approval.',
+                style: MeridTheme.monoStyle(
+                  fontSize: 12,
+                  color: MeridTheme.textSecondary,
+                ),
+                textAlign: TextAlign.center,
               ),
               const SizedBox(height: 24),
-              _buildActionButtons(),
-              const SizedBox(height: 24),
-              const PortsWidget(),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    _lockdown = false;
+                  });
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: MeridTheme.emerald,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                ),
+                child: Text(
+                  'RELEASE LOCKDOWN',
+                  style: MeridTheme.monoStyle(
+                    fontSize: 12,
+                    weight: FontWeight.bold,
+                    color: MeridTheme.background,
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -113,15 +201,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 width: 12,
                 height: 12,
                 decoration: BoxDecoration(
-                  color: _lockdown 
-                      ? MeridTheme.rose 
+                  color: _lockdown
+                      ? MeridTheme.rose
                       : (_systemActive ? MeridTheme.emerald : MeridTheme.amber),
                   shape: BoxShape.circle,
                   boxShadow: [
                     BoxShadow(
-                      color: _lockdown 
-                          ? MeridTheme.rose 
-                          : (_systemActive ? MeridTheme.emerald : MeridTheme.amber),
+                      color: _lockdown
+                          ? MeridTheme.rose
+                          : (_systemActive
+                              ? MeridTheme.emerald
+                              : MeridTheme.amber),
                       blurRadius: 8,
                       spreadRadius: 2,
                     ),
@@ -142,7 +232,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   onTap: () {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (context) => const CharterScreen()),
+                      MaterialPageRoute(
+                          builder: (context) => const CharterScreen()),
                     );
                   },
                   child: Container(
@@ -150,12 +241,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     decoration: BoxDecoration(
                       color: MeridTheme.surface,
                       borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: MeridTheme.emerald.withOpacity(0.5)),
+                      border: Border.all(
+                          color: MeridTheme.emerald.withValues(alpha: 0.5)),
                     ),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Icon(Icons.shield, color: MeridTheme.emerald, size: 16),
+                        const Icon(Icons.shield,
+                            color: MeridTheme.emerald, size: 16),
                         const SizedBox(width: 8),
                         Text(
                           'CHARTER v2.0',
@@ -178,7 +271,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     color: MeridTheme.surface,
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(
-                      color: (_makerConfidence < 0.8 ? MeridTheme.amber : MeridTheme.emerald).withOpacity(0.5),
+                      color: (_makerConfidence < 0.8
+                              ? MeridTheme.amber
+                              : MeridTheme.emerald)
+                          .withValues(alpha: 0.5),
                     ),
                   ),
                   child: Column(
@@ -209,7 +305,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                   child: Container(
                                     height: 6,
                                     decoration: BoxDecoration(
-                                      color: _makerConfidence < 0.8 ? MeridTheme.amber : MeridTheme.emerald,
+                                      color: _makerConfidence < 0.8
+                                          ? MeridTheme.amber
+                                          : MeridTheme.emerald,
                                       borderRadius: BorderRadius.circular(3),
                                     ),
                                   ),
@@ -222,7 +320,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             '${(_makerConfidence * 100).toInt()}%',
                             style: MeridTheme.monoStyle(
                               fontSize: 11,
-                              color: _makerConfidence < 0.8 ? MeridTheme.amber : MeridTheme.emerald,
+                              color: _makerConfidence < 0.8
+                                  ? MeridTheme.amber
+                                  : MeridTheme.emerald,
                               weight: FontWeight.bold,
                             ),
                           ),
@@ -239,7 +339,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: MeridTheme.rose.withOpacity(0.2),
+                color: MeridTheme.rose.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(color: MeridTheme.rose),
               ),
@@ -290,7 +390,8 @@ class _HomeScreenState extends State<HomeScreen> {
               MeridTheme.rose,
               () => Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const MarketExploitScreen()),
+                MaterialPageRoute(
+                    builder: (context) => const MarketExploitScreen()),
               ),
             ),
             _buildActionButton(
@@ -299,7 +400,8 @@ class _HomeScreenState extends State<HomeScreen> {
               MeridTheme.amber,
               () => Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const QuantumSimScreen()),
+                MaterialPageRoute(
+                    builder: (context) => const QuantumSimScreen()),
               ),
             ),
             _buildActionButton(
@@ -308,7 +410,8 @@ class _HomeScreenState extends State<HomeScreen> {
               MeridTheme.amber,
               () => Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const IntuitionScreen()),
+                MaterialPageRoute(
+                    builder: (context) => const IntuitionScreen()),
               ),
             ),
             _buildActionButton(
@@ -317,7 +420,8 @@ class _HomeScreenState extends State<HomeScreen> {
               MeridTheme.emerald,
               () => Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const ManifestationScreen()),
+                MaterialPageRoute(
+                    builder: (context) => const ManifestationScreen()),
               ),
             ),
           ],
@@ -326,7 +430,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildActionButton(String label, IconData icon, Color color, VoidCallback onTap) {
+  Widget _buildActionButton(
+      String label, IconData icon, Color color, VoidCallback onTap) {
     return InkWell(
       onTap: _lockdown ? null : onTap,
       child: Container(
@@ -335,7 +440,9 @@ class _HomeScreenState extends State<HomeScreen> {
           color: MeridTheme.surface,
           borderRadius: BorderRadius.circular(4),
           border: Border.all(
-            color: _lockdown ? MeridTheme.surfaceLight : color.withOpacity(0.5),
+            color: _lockdown
+                ? MeridTheme.surfaceLight
+                : color.withValues(alpha: 0.5),
           ),
         ),
         child: Row(
@@ -351,7 +458,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 label,
                 style: MeridTheme.monoStyle(
                   fontSize: 12,
-                  color: _lockdown ? MeridTheme.textDim : MeridTheme.textPrimary,
+                  color:
+                      _lockdown ? MeridTheme.textDim : MeridTheme.textPrimary,
                   weight: FontWeight.bold,
                 ),
               ),

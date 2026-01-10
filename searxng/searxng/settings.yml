@@ -1,0 +1,101 @@
+# see https://docs.searxng.org/admin/engines/index.html#engines
+use_default_settings: true
+server:
+  # bind_address: "127.0.0.1"
+  secret_key: "ultrasecretkey" # change this!
+  limiter: false # can be enabled to limit amount of requests per IP
+  image_proxy: false
+  public_instance: false
+  base_url: false # set custom base_url. Possible values: false or "https://your.searx.me/"
+
+general:
+  debug: false # if true, logging is more verbose
+  instance_name: "SearXNG"
+  privacypolicy_url: false
+  donation_url: https://docs.searxng.org/donate.html
+  contact_url: false
+  enable_metrics: true
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: ""
+  ban_time_on_fail: 5 # ban time in seconds if there is a search failure
+  max_ban_time_on_fail: 120 # max ban time in seconds if there are too many failures
+  query_locale: http_prefer
+  suspended_times:
+    Baidu: 259200
+    Gigablast: 86400
+
+server:
+  port: 8888
+  bind_address: "0.0.0.0"
+  secret_key: "ultrasecretkey" # change this!
+  limiter: false # can be enabled to limit amount of requests per IP
+  image_proxy: false
+  http_protocol_version: "1.0" # to improve security
+  method: "GET" # use "GET" or "POST" HTTP methods
+  default_http_headers:
+    X-Content-Type-Options: nosniff
+    X-XSS-Protection: 1; mode=block
+    X-Download-Options: noopen
+    X-Robots-Tag: noindex, nofollow
+    Referrer-Policy: no-referrer
+
+ui:
+  static_path: ""
+  templates_path: ""
+  default_theme: oscar
+  default_locale: ""
+  theme_args:
+    oscar_style: logicodev
+  center_alignment: true
+  query_in_title: true
+  results_on_new_tab: false
+  advanced_search: true
+  infinite_scroll: true
+
+preferences:
+  lock: []
+
+csp:
+  default-src: "'self'"
+
+engines:
+  - name: google
+    shortcut: go
+    engine: google
+    categories: general
+    paging: true
+    time_range_support: true
+    safesearch: true
+    enable_http: true
+
+  - name: bing
+    shortcut: bi
+    engine: bing
+    categories: general
+    paging: true
+    time_range_support: true
+    safesearch: true
+    enable_http: true
+
+  - name: duckduckgo
+    shortcut: ddg
+    engine: duckduckgo
+    categories: general
+    paging: true
+    time_range_support: true
+    safesearch: true
+    enable_http: true
+
+  - name: wikipedia
+    shortcut: wp
+    engine: wikipedia
+    categories: general
+    paging: true
+    search_type: text
+
+  # Add more engines as needed
+
+# Comments: Engines are configured here. Enable/disable by adding/removing. See https://docs.searxng.org/admin/engines/index.html for more.

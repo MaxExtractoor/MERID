@@ -9,15 +9,16 @@ class OptimizationModule {
   }) {
     final candidatesGenerated = 50;
     final classicalBaseline = 1.45;
-    final quantumBest = classicalBaseline * (1.08 + _random.nextDouble() * 0.12);
+    final quantumBest =
+        classicalBaseline * (1.08 + _random.nextDouble() * 0.12);
     final delta = (quantumBest - classicalBaseline) / classicalBaseline;
     final variance = 0.2 + _random.nextDouble() * 0.2;
     final samplingEntropy = 2.5 + _random.nextDouble() * 0.8;
     final noiseEstimate = 0.02 + _random.nextDouble() * 0.08;
     final reproducibility = 0.85 + _random.nextDouble() * 0.12;
-    
+
     final comparisonGate = (delta > 0.1 && variance < 0.5) ? 'PASS' : 'FAIL';
-    
+
     return {
       'algorithm': algorithm,
       'problem': problem,
@@ -33,7 +34,8 @@ class OptimizationModule {
       'sampling_entropy': samplingEntropy,
       'noise_estimate': noiseEstimate,
       'reproducibility_score': reproducibility,
-      'comparison_gate': '$comparisonGate (delta ${delta > 0.1 ? '>' : '<'}0.1, variance ${variance < 0.5 ? '<' : '>'}0.5)',
+      'comparison_gate':
+          '$comparisonGate (delta ${delta > 0.1 ? '>' : '<'}0.1, variance ${variance < 0.5 ? '<' : '>'}0.5)',
       'recommendation': comparisonGate == 'PASS'
           ? 'Quantum advantage confirmed - recommend for human review'
           : 'Quantum candidates do not meet threshold - use classical',
@@ -45,7 +47,7 @@ class OptimizationModule {
   }) {
     final energy = -2.5 - _random.nextDouble() * 1.5;
     final variance = 0.15 + _random.nextDouble() * 0.15;
-    
+
     return {
       'algorithm': 'VQE',
       'problem': problem,

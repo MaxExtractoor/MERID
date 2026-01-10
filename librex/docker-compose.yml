@@ -1,0 +1,13 @@
+version: '3.9'
+services:
+  librex:
+    image: librex/librex:latest
+    container_name: librex
+    ports:
+      - "8081:8080"  # Avoid conflict with SearXNG
+    environment:
+      - TZ=America/New_York
+      - CONFIG_GOOGLE_DOMAIN=com
+      - CONFIG_GOOGLE_LANGUAGE=en
+      - CONFIG_STYLE=dark  # Optional theme
+    restart: unless-stopped
