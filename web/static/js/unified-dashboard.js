@@ -79,6 +79,9 @@ function refreshSection(section) {
         case 'alerts':
             refreshAlerts();
             break;
+        case 'arbitrage':
+            refreshArbitrage();
+            break;
         case 'dashboard':
             fetchPrices();
             fetchIntelligence();
@@ -1675,7 +1678,195 @@ async function markAllRead() {
     }
 }
 
-// Utility functions
+// ============================================
+// ARBITRAGE FUNCTIONS
+// ============================================
+
+async function refreshArbitrage() {
+    try {
+        // Fetch status
+        const statusRes = await fetch('/api/v1/arbitrage/status');
+        const status = await statusRes.json();
+        
+        // Update stats
+        document.getElementById('arb-opportunities').textContent = status.recent_opportunities_count || 0;
+        
+        // Count active scanners
+        const scanners = status.scanners || {};
+        const activeCount = Object.values(scanners).filter(s => s.state === 'running').length;
+        document.getElementById('arb-scanners-active').textContent = `${activeCount}/4`;
+        
+        // Update execution status
+        const gate = status.execution_gate || {};
+        const execEnabled = gate.execution_enabled;
+        const execEl = document.getElementById('arb-execution-status');
+        execEl.textContent = execEnabled ? 'ENABLED' : 'DISABLED';
+        execEl.className = 'stat-value ' + (execEnabled ? 'positive' : 'warning');
+        
+        // Update gate info
+        document.getElementById('gate-enabled').textContent = execEnabled ? 'YES' : 'NO';
+        document.getElementById('gate-enabled').className = 'badge ' + (execEnabled ? 'badge-success' : 'badge-danger');
+        
+        const killSwitch = gate.kill_switch_active;
+        document.getElementById('gate-killswitch').textContent = killSwitch ? 'ON' : 'OFF';
+        document.getElementById('gate-killswitch').className = 'badge ' + (killSwitch ? 'badge-danger' : 'badge-success');
+        
+        document.getElementById('gate-daily-exec').textContent = 
+            `${gate.daily_executions || 0}/${gate.limits?.max_daily_executions || 100}`;
+        document.getElementById('gate-daily-vol').textContent = 
+            `$${(gate.daily_volume_usd || 0).toLocaleString()}`;
+        
+        // Update scanner statuses
+        updateScannerList(scanners);
+        
+        // Fetch opportunities
+        const oppsRes = await fetch('/api/v1/arbitrage/opportunities?limit=20');
+        const oppsData = await oppsRes.json();
+        
+        // Calculate total potential profit
+        const totalProfit = (oppsData.opportunities || [])
+            .reduce((sum, o) => sum + (o.net_profit_usd || 0), 0);
+        document.getElementById('arb-potential-profit').textContent = `$${totalProfit.toFixed(2)}`;
+        
+        // Render opportunities
+        renderOpportunities(oppsData.opportunities || []);
+        
+    } catch (e) {
+        console.error('Failed to refresh arbitrage:', e);
+    }
+}
+
+function updateScannerList(scanners) {
+    const scannerNames = {
+        'cross_cex': 'Cross-CEX',
+        'dex_cex': 'DEX-CEX',
+        'perp_spot': 'Perp-Spot',
+        'funding_rate': 'Funding Rate'
+    };
+    
+    const container = document.getElementById('arb-scanners');
+    if (!container) return;
+    
+    container.innerHTML = Object.entries(scanners).map(([key, scanner]) => {
+        const state = scanner.state || 'stopped';
+        const isRunning = state === 'running';
+        const scannerId = scanner.scanner_id || key + '_scanner';
+        const name = scannerNames[key] || key;
+        const metrics = scanner.metrics || {};
+        
+        return `
+            <div class="scanner-item">
+                <div class="scanner-info">
+                    <span class="scanner-name">${name}</span>
+                    <span class="scanner-stats">
+                        ${metrics.opportunities_found || 0} found | 
+                        ${metrics.profitable_opportunities || 0} profitable
+                    </span>
+                </div>
+                <span class="scanner-status ${isRunning ? 'running' : 'stopped'}">${state.toUpperCase()}</span>
+                <button class="btn btn-xs" onclick="toggleScanner('${scannerId}')">${isRunning ? 'Stop' : 'Start'}</button>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderOpportunities(opportunities) {
+    const container = document.getElementById('arb-opportunities-list');
+    if (!container) return;
+    
+    if (!opportunities || opportunities.length === 0) {
+        container.innerHTML = '<div class="empty-state">No opportunities detected. Start scanners to begin.</div>';
+        return;
+    }
+    
+    container.innerHTML = opportunities.map(opp => {
+        const profit = opp.net_profit_usd || 0;
+        const margin = opp.profit_margin_pct || 0;
+        const type = opp.arb_type || 'unknown';
+        const canExec = opp.can_execute;
+        
+        const legs = (opp.legs || []).map(leg => 
+            `${leg.side.toUpperCase()} ${leg.quantity?.toFixed(4)} @ ${leg.venue}`
+        ).join(' → ');
+        
+        return `
+            <div class="opportunity-card ${canExec ? 'executable' : ''}">
+                <div class="opp-header">
+                    <span class="opp-type">${type.replace('_', '-').toUpperCase()}</span>
+                    <span class="opp-profit positive">+$${profit.toFixed(2)} (${margin.toFixed(3)}%)</span>
+                </div>
+                <div class="opp-legs">${legs}</div>
+                <div class="opp-meta">
+                    <span>Risk: ${((opp.execution_risk || 0) * 100).toFixed(0)}%</span>
+                    <span>Liquidity: ${((opp.liquidity_score || 0) * 100).toFixed(0)}%</span>
+                    ${opp.notes ? `<span class="opp-notes">${opp.notes}</span>` : ''}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function toggleScanner(scannerId) {
+    try {
+        // Get current status
+        const statusRes = await fetch(`/api/v1/arbitrage/scanners/${scannerId}`);
+        const status = await statusRes.json();
+        
+        const isRunning = status.state === 'running';
+        const action = isRunning ? 'stop' : 'start';
+        
+        await fetch(`/api/v1/arbitrage/scanners/${scannerId}/${action}`, { method: 'POST' });
+        
+        // Refresh after short delay
+        setTimeout(refreshArbitrage, 500);
+    } catch (e) {
+        console.error('Failed to toggle scanner:', e);
+        alert('Failed to toggle scanner: ' + e.message);
+    }
+}
+
+async function startAllScanners() {
+    try {
+        await fetch('/api/v1/arbitrage/start-all', { method: 'POST' });
+        setTimeout(refreshArbitrage, 1000);
+    } catch (e) {
+        console.error('Failed to start scanners:', e);
+        alert('Failed to start scanners: ' + e.message);
+    }
+}
+
+async function stopAllScanners() {
+    try {
+        await fetch('/api/v1/arbitrage/stop-all', { method: 'POST' });
+        setTimeout(refreshArbitrage, 500);
+    } catch (e) {
+        console.error('Failed to stop scanners:', e);
+        alert('Failed to stop scanners: ' + e.message);
+    }
+}
+
+async function activateKillSwitch() {
+    const reason = prompt('Enter reason for kill switch activation:');
+    if (!reason) return;
+    
+    try {
+        await fetch('/api/v1/arbitrage/gate/kill-switch/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason })
+        });
+        alert('Kill switch activated');
+        refreshArbitrage();
+    } catch (e) {
+        console.error('Failed to activate kill switch:', e);
+        alert('Failed to activate kill switch: ' + e.message);
+    }
+}
+
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -1687,3 +1878,427 @@ function formatTime(timestamp) {
     const date = new Date(timestamp);
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+
+// ============================================
+// NEW FEATURES - OPERATIONS SECTION
+// ============================================
+
+// Monitoring
+async function refreshMonitoring() {
+    try {
+        const [dashboardRes, healthChecksRes] = await Promise.all([
+            fetch('/api/v1/monitoring/dashboard'),
+            fetch('/api/v1/monitoring/health/checks')
+        ]);
+        
+        const dashboard = await dashboardRes.json();
+        const healthChecks = await healthChecksRes.json();
+        
+        // Update stats from system data
+        const system = dashboard.system;
+        if (system) {
+            if (system.cpu_percent !== undefined) {
+                document.getElementById('mon-cpu').textContent = system.cpu_percent.toFixed(1) + '%';
+            }
+            if (system.memory_percent !== undefined) {
+                document.getElementById('mon-memory').textContent = system.memory_percent.toFixed(1) + '%';
+            }
+            if (system.disk_percent !== undefined) {
+                document.getElementById('mon-disk').textContent = system.disk_percent.toFixed(1) + '%';
+            }
+        } else {
+            document.getElementById('mon-cpu').textContent = '--';
+            document.getElementById('mon-memory').textContent = '--';
+            document.getElementById('mon-disk').textContent = '--';
+        }
+        
+        // Health status
+        const health = dashboard.health;
+        const healthStatus = health?.status || 'unknown';
+        const healthEl = document.getElementById('mon-health');
+        healthEl.textContent = healthStatus.toUpperCase();
+        healthEl.className = `stat-value ${healthStatus === 'healthy' ? 'positive' : healthStatus === 'unhealthy' ? 'negative' : ''}`;
+        
+        // Render health checks
+        const healthList = document.getElementById('health-checks-list');
+        if (healthList) {
+            const checks = healthChecks.checks || healthChecks;
+            if (checks && Object.keys(checks).length > 0) {
+                healthList.innerHTML = Object.entries(checks).map(([name, check]) => `
+                    <div class="health-item">
+                        <span class="health-name">${name}</span>
+                        <span class="health-status ${check.status || 'unknown'}">${(check.status || 'unknown').toUpperCase()}</span>
+                    </div>
+                `).join('');
+            } else {
+                healthList.innerHTML = '<div class="empty-state">No health checks configured</div>';
+            }
+        }
+        
+        // Render metrics from dashboard
+        const metricsList = document.getElementById('perf-metrics-list');
+        if (metricsList) {
+            const perf = dashboard.performance;
+            const metricsSummary = dashboard.metrics_summary;
+            const metricsData = [
+                ['Total Trades', perf?.total_trades || 0],
+                ['Win Rate', (perf?.win_rate || 0).toFixed(1) + '%'],
+                ['Total P&L', '$' + (perf?.total_pnl || 0).toFixed(2)],
+                ['Current Equity', '$' + (perf?.current_equity || 100000).toLocaleString()],
+                ['Max Drawdown', (perf?.max_drawdown_pct || 0).toFixed(2) + '%'],
+                ['HTTP Requests', metricsSummary?.http_requests || 0],
+                ['WS Connections', metricsSummary?.ws_connections || 0],
+                ['Total Metrics', metricsSummary?.total_metrics || 0],
+            ];
+            metricsList.innerHTML = metricsData.map(([name, value]) => `
+                <div class="metric-item">
+                    <span class="metric-name">${name}</span>
+                    <span class="metric-value">${value}</span>
+                </div>
+            `).join('');
+        }
+    } catch (e) {
+        console.error('Failed to refresh monitoring:', e);
+    }
+}
+
+// Rate Limiting
+async function refreshRateLimits() {
+    try {
+        const [statusRes, rulesRes, blockedRes] = await Promise.all([
+            fetch('/api/v1/ratelimit/status'),
+            fetch('/api/v1/ratelimit/rules'),
+            fetch('/api/v1/ratelimit/blocked')
+        ]);
+        
+        const status = await statusRes.json();
+        const rules = await rulesRes.json();
+        const blocked = await blockedRes.json();
+        
+        // Rules is an object with rule_id keys
+        const rulesArr = Object.entries(rules);
+        
+        // Update stats
+        document.getElementById('rl-total-rules').textContent = rulesArr.length;
+        document.getElementById('rl-blocked').textContent = blocked.count || Object.keys(blocked.blocked || blocked).length || 0;
+        document.getElementById('rl-throttled').textContent = status.throttled_count || 0;
+        document.getElementById('rl-requests').textContent = status.total_requests || '--';
+        
+        // Render rules
+        const rulesList = document.getElementById('ratelimit-rules-list');
+        if (rulesList) {
+            rulesList.innerHTML = rulesArr.length > 0 ? rulesArr.map(([id, rule]) => `
+                <div class="rule-item">
+                    <span class="rule-name">${id}</span>
+                    <span class="rule-limit">${rule.requests_per_minute || '--'}/min</span>
+                </div>
+            `).join('') : '<div class="empty-state">No rules configured</div>';
+        }
+        
+        // Render blocked
+        const blockedList = document.getElementById('blocked-list');
+        if (blockedList) {
+            const blockedItems = blocked.blocked || Object.entries(blocked);
+            if (Array.isArray(blockedItems) && blockedItems.length > 0) {
+                blockedList.innerHTML = blockedItems.slice(0, 10).map(item => {
+                    const id = item.identifier || item[0] || item;
+                    const until = item.until || item[1]?.until;
+                    return `
+                        <div class="blocked-item">
+                            <span class="blocked-id">${id}</span>
+                            <span class="blocked-until">${until ? new Date(until * 1000).toLocaleTimeString() : '--'}</span>
+                        </div>
+                    `;
+                }).join('');
+            } else {
+                blockedList.innerHTML = '<div class="empty-state">No blocked identifiers</div>';
+            }
+        }
+    } catch (e) {
+        console.error('Failed to refresh rate limits:', e);
+    }
+}
+
+// Backup
+async function refreshBackup() {
+    try {
+        const [statusRes, snapshotsRes, schedulesRes, recoveryRes] = await Promise.all([
+            fetch('/api/v1/backup/status'),
+            fetch('/api/v1/backup/snapshots'),
+            fetch('/api/v1/backup/schedules'),
+            fetch('/api/v1/backup/recovery/points')
+        ]);
+        
+        const status = await statusRes.json();
+        const snapshots = await snapshotsRes.json();
+        const schedules = await schedulesRes.json();
+        const recovery = await recoveryRes.json();
+        
+        // Update stats
+        document.getElementById('backup-total').textContent = snapshots.count || 0;
+        document.getElementById('backup-last').textContent = status.last_backup ? 
+            new Date(status.last_backup * 1000).toLocaleDateString() : 'Never';
+        document.getElementById('backup-schedules').textContent = Object.keys(schedules).length || 0;
+        document.getElementById('backup-recovery').textContent = recovery.count || 0;
+        
+        // Render snapshots
+        const snapshotsList = document.getElementById('snapshots-list');
+        if (snapshotsList && snapshots.snapshots) {
+            snapshotsList.innerHTML = snapshots.snapshots.slice(0, 5).map(snap => `
+                <div class="snapshot-item">
+                    <span class="snapshot-id">${snap.snapshot_id?.substring(0, 8) || '--'}...</span>
+                    <span class="snapshot-type">${snap.snapshot_type || 'full'}</span>
+                    <span class="snapshot-time">${snap.created_at ? new Date(snap.created_at * 1000).toLocaleString() : '--'}</span>
+                </div>
+            `).join('') || '<div class="empty-state">No snapshots</div>';
+        }
+        
+        // Render schedules
+        const schedulesList = document.getElementById('backup-schedules-list');
+        if (schedulesList) {
+            const schedArr = Object.entries(schedules);
+            schedulesList.innerHTML = schedArr.length > 0 ? schedArr.map(([id, sched]) => `
+                <div class="schedule-item">
+                    <span class="schedule-name">${sched.name || id}</span>
+                    <span class="schedule-interval">${sched.interval_hours || '--'}h</span>
+                    <span class="schedule-status ${sched.enabled ? 'active' : 'inactive'}">${sched.enabled ? 'Active' : 'Inactive'}</span>
+                </div>
+            `).join('') : '<div class="empty-state">No schedules</div>';
+        }
+    } catch (e) {
+        console.error('Failed to refresh backup:', e);
+    }
+}
+
+async function createSnapshot() {
+    try {
+        const res = await fetch('/api/v1/backup/snapshots', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ snapshot_type: 'full', description: 'Manual snapshot' })
+        });
+        if (res.ok) {
+            alert('Snapshot created successfully');
+            refreshBackup();
+        }
+    } catch (e) {
+        console.error('Failed to create snapshot:', e);
+        alert('Failed to create snapshot');
+    }
+}
+
+// Plugins
+async function refreshPlugins() {
+    try {
+        const statusRes = await fetch('/api/v1/plugins/status');
+        const status = await statusRes.json();
+        
+        // Extract data from status response
+        const loader = status.loader || {};
+        const hooks = status.hooks || {};
+        const sandbox = status.sandbox || {};
+        
+        // Update stats
+        document.getElementById('plugins-installed').textContent = loader.loaded_count || 0;
+        document.getElementById('plugins-active').textContent = loader.running_count || 0;
+        document.getElementById('plugins-hooks').textContent = hooks.total_hooks || 0;
+        document.getElementById('plugins-sandbox').textContent = sandbox.active_sandboxes !== undefined ? 
+            (sandbox.active_sandboxes > 0 ? 'Active' : 'Ready') : 'Ready';
+        
+        // Render plugins
+        const pluginsList = document.getElementById('plugins-list');
+        if (pluginsList) {
+            const plugins = loader.plugins || {};
+            const pluginsArr = Object.entries(plugins);
+            pluginsList.innerHTML = pluginsArr.length > 0 ? pluginsArr.map(([id, p]) => `
+                <div class="plugin-item">
+                    <span class="plugin-name">${p.name || id}</span>
+                    <span class="plugin-version">${p.version || '--'}</span>
+                    <span class="plugin-status ${p.running ? 'active' : 'inactive'}">${p.running ? 'Running' : 'Loaded'}</span>
+                </div>
+            `).join('') : '<div class="empty-state">No plugins installed</div>';
+        }
+        
+        // Render hooks from status
+        const hooksList = document.getElementById('hooks-list');
+        if (hooksList) {
+            const hooksData = hooks.hooks || {};
+            const hooksArr = Object.entries(hooksData);
+            hooksList.innerHTML = hooksArr.length > 0 ? hooksArr.slice(0, 10).map(([id, h]) => `
+                <div class="hook-item">
+                    <span class="hook-name">${h.name || id}</span>
+                    <span class="hook-handlers">${h.handler_count || 0} handlers</span>
+                </div>
+            `).join('') : '<div class="empty-state">No hooks registered</div>';
+        }
+    } catch (e) {
+        console.error('Failed to refresh plugins:', e);
+    }
+}
+
+async function discoverPlugins() {
+    try {
+        const res = await fetch('/api/v1/plugins/discover', { method: 'POST' });
+        const data = await res.json();
+        alert(`Discovered ${data.discovered || 0} plugins`);
+        refreshPlugins();
+    } catch (e) {
+        console.error('Failed to discover plugins:', e);
+    }
+}
+
+// Compliance
+async function refreshCompliance() {
+    try {
+        const statusRes = await fetch('/api/v1/compliance/status');
+        const status = await statusRes.json();
+        
+        // Extract data from status
+        const auditStats = status.audit_stats || {};
+        const txStats = status.transaction_stats || {};
+        const reportGen = status.report_generator || {};
+        const retention = status.retention_manager || {};
+        
+        // Update stats
+        document.getElementById('comp-entries').textContent = auditStats.total_events || 0;
+        document.getElementById('comp-transactions').textContent = txStats.total_transactions || 0;
+        document.getElementById('comp-reports').textContent = reportGen.generated_reports || 0;
+        document.getElementById('comp-retention').textContent = '2555';
+        
+        // Render audit info
+        const auditList = document.getElementById('audit-entries-list');
+        if (auditList) {
+            const categories = auditStats.events_by_category || {};
+            const catArr = Object.entries(categories);
+            if (catArr.length > 0) {
+                auditList.innerHTML = catArr.map(([cat, count]) => `
+                    <div class="audit-item">
+                        <span class="audit-action">${cat}</span>
+                        <span class="audit-time">${count} events</span>
+                    </div>
+                `).join('');
+            } else {
+                auditList.innerHTML = `
+                    <div class="audit-item">
+                        <span class="audit-action">Total Events</span>
+                        <span class="audit-time">${auditStats.total_events || 0}</span>
+                    </div>
+                    <div class="audit-item">
+                        <span class="audit-action">Last Hash</span>
+                        <span class="audit-time">${auditStats.last_hash || 'genesis'}</span>
+                    </div>
+                `;
+            }
+        }
+        
+        // Render report configs
+        const reportsList = document.getElementById('compliance-reports-list');
+        if (reportsList) {
+            const configs = reportGen.configs || {};
+            const configArr = Object.entries(configs);
+            reportsList.innerHTML = configArr.length > 0 ? configArr.slice(0, 5).map(([id, cfg]) => `
+                <div class="report-item">
+                    <span class="report-type">${cfg.name || id}</span>
+                    <span class="report-date">${cfg.auto_generate ? 'Auto' : 'Manual'}</span>
+                </div>
+            `).join('') : '<div class="empty-state">No report configs</div>';
+        }
+    } catch (e) {
+        console.error('Failed to refresh compliance:', e);
+    }
+}
+
+async function generateReport() {
+    const reportType = prompt('Enter report type (daily, weekly, monthly, annual):');
+    if (!reportType) return;
+    
+    try {
+        const res = await fetch('/api/v1/compliance/reports/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ report_type: reportType })
+        });
+        if (res.ok) {
+            alert('Report generation started');
+            refreshCompliance();
+        }
+    } catch (e) {
+        console.error('Failed to generate report:', e);
+        alert('Failed to generate report');
+    }
+}
+
+// Wallet
+async function refreshWallet() {
+    try {
+        const statusRes = await fetch('/api/v1/wallet/status');
+        const status = await statusRes.json();
+        
+        // Extract data from status
+        const keyManager = status.key_manager || {};
+        const vaultManager = status.vault_manager || {};
+        const walletConnect = status.wallet_connect || {};
+        const hardwareWallet = status.hardware_wallet || {};
+        
+        // Update stats
+        document.getElementById('wallet-vaults').textContent = vaultManager.total_vaults || 0;
+        document.getElementById('wallet-keys').textContent = keyManager.total_keys || 0;
+        document.getElementById('wallet-sessions').textContent = walletConnect.total_sessions || 0;
+        document.getElementById('wallet-hw').textContent = hardwareWallet.connected_devices || 0;
+        
+        // Render vaults
+        const vaultsList = document.getElementById('vaults-list');
+        if (vaultsList) {
+            const vaults = vaultManager.vaults || {};
+            const vaultsArr = Object.entries(vaults);
+            vaultsList.innerHTML = vaultsArr.length > 0 ? vaultsArr.map(([id, v]) => `
+                <div class="vault-item">
+                    <span class="vault-name">${v.name || id}</span>
+                    <span class="vault-type">${v.vault_type || 'standard'}</span>
+                    <span class="vault-keys">$${(v.total_value_usd || 0).toLocaleString()}</span>
+                </div>
+            `).join('') : '<div class="empty-state">No vaults</div>';
+        }
+        
+        // Render WalletConnect sessions
+        const sessionsList = document.getElementById('wc-sessions-list');
+        if (sessionsList) {
+            const sessions = walletConnect.sessions || [];
+            sessionsList.innerHTML = sessions.length > 0 ? sessions.map(s => `
+                <div class="session-item">
+                    <span class="session-peer">${s.peer_name || s.topic?.substring(0, 8) || '--'}</span>
+                    <span class="session-chain">${s.chain || '--'}</span>
+                </div>
+            `).join('') : '<div class="empty-state">No active sessions</div>';
+        }
+    } catch (e) {
+        console.error('Failed to refresh wallet:', e);
+    }
+}
+
+// Update refreshSection to include new sections
+const originalRefreshSection = refreshSection;
+refreshSection = function(section) {
+    switch(section) {
+        case 'monitoring':
+            refreshMonitoring();
+            break;
+        case 'ratelimit':
+            refreshRateLimits();
+            break;
+        case 'backup':
+            refreshBackup();
+            break;
+        case 'plugins':
+            refreshPlugins();
+            break;
+        case 'compliance':
+            refreshCompliance();
+            break;
+        case 'wallet':
+            refreshWallet();
+            break;
+        default:
+            originalRefreshSection(section);
+    }
+};

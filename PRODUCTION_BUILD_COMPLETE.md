@@ -323,6 +323,124 @@ WebSocket Broadcast (live UI)
 - Feature flags for live trading, prediction markets, news, backtesting
 - **API:** `/api/v1/institutional/config`, `/config/validate`
 
+### **Phase 14 (NEW): Data Schemas & Canonical Types** ✅ COMPLETE
+
+- `schemas/intent.py` - IntentEnvelope (trading intent structure)
+- `schemas/consensus.py` - ConsensusBlock (hashable, replayable)
+- `schemas/arbitrage.py` - ArbitrageOpportunity (legs, cost model)
+- `schemas/execution.py` - ExecutionResult (fills, fees, status)
+- `schemas/simulation.py` - SimulationReport (scenarios, outcomes)
+- `schemas/risk.py` - RiskPreview (factors, position/market risk)
+- **API:** `/api/v1/schemas/*` - Schema documentation and validation
+- **Version:** 1.0.0 - Canonical types for all future modules
+
+### **Phase 15 (NEW): Arbitrage Engine (Execution Layer)** ✅ COMPLETE
+
+- `arbitrage/scanner_base.py` - Base scanner with metrics and callbacks
+- `arbitrage/cross_cex_scanner.py` - Cross-exchange price diff scanner
+- `arbitrage/dex_cex_scanner.py` - DEX vs CEX arbitrage scanner
+- `arbitrage/perp_spot_scanner.py` - Perpetual vs spot basis scanner
+- `arbitrage/funding_rate_scanner.py` - Funding rate capture scanner
+- `arbitrage/cost_model.py` - Gas, slippage, latency, MEV estimation
+- `arbitrage/execution_gate.py` - Profit thresholds, kill-switch, rate limiting
+- **API:** `/api/v1/arbitrage/*` - Scanner control, opportunities, gate status
+- **UI:** Arbitrage section with scanner controls and opportunity display
+- **CRITICAL:** Execution DISABLED by default until scanners proven
+
+### **Phase 16 (NEW): Prediction Market Time-Exploit Engine** ✅ COMPLETE
+
+- `prediction/oracle_latency.py` - Oracle latency detection and profiling
+- `prediction/resolution_tracker.py` - Event resolution clock tracking
+- `prediction/probability_decay.py` - Implied probability decay curves
+- `prediction/time_exploit_scanner.py` - Combined timing exploit scanner
+- `prediction/cross_hedge.py` - Prediction ↔ spot cross-hedge logic
+- **API:** `/api/v1/prediction/*` - Oracle, resolution, decay, exploit, hedge
+- **CRITICAL:** ALERT-ONLY mode by default - HIGH REGULATORY RISK
+- Execution whitelisting per market/platform required
+
+### **Phase 17 (NEW): Wallet & Custody System** ✅ COMPLETE
+
+- `wallet/key_manager.py` - AES-256-GCM encrypted key storage, PBKDF2 derivation
+- `wallet/vault.py` - Trading/Treasury/Cold/Hot vault separation
+- `wallet/wallet_connect.py` - WalletConnect v2 QR flow integration
+- `wallet/hardware_wallet.py` - Ledger/Trezor hardware wallet support
+- `wallet/wallet_manager.py` - Central wallet coordination
+- **API:** `/api/v1/wallet/*` - Keys, vaults, WalletConnect, hardware signing
+- **Security:** 2FA required, daily limits, emergency lock/wipe
+- Vault transfer approvals for large amounts
+
+### **Phase 18 (NEW): Offline / Air-Gapped Mode** ✅ COMPLETE
+
+- `offline/data_cache.py` - Local persistent cache with compression
+- `offline/replay_engine.py` - Deterministic replay at variable speeds
+- `offline/data_import.py` - CSV/JSON/USB import support
+- `offline/qr_transfer.py` - QR-based signed intent transfer
+- `offline/offline_mode.py` - Central offline mode coordination
+- **API:** `/api/v1/offline/*` - Cache, replay, import, QR, mode control
+- **Features:** Auto mode switching, intent queue, state persistence
+- Enables sovereign operation without internet
+
+### **Phase 19 (NEW): Notification & Alert System** ✅ COMPLETE
+
+- `notifications/channels.py` - Email, SMS, Push, Webhook channels
+- `notifications/alert_rules.py` - Rule conditions and evaluation engine
+- `notifications/escalation.py` - Multi-level escalation policies
+- `notifications/notification_manager.py` - Central notification coordination
+- **API:** `/api/v1/notifications/*` - Send, rules, escalations, channels
+- **Features:** Quiet hours, rate limiting, auto-escalation actions
+- Default rules for price drops, drawdown, system health
+
+### **Phase 20 (NEW): Compliance & Audit Trail** ✅ COMPLETE
+
+- `compliance/audit_logger.py` - Tamper-evident hash chain audit logging
+- `compliance/transaction_log.py` - Financial transaction logging
+- `compliance/regulatory_reports.py` - Daily, monthly, tax, SAR reports
+- `compliance/data_retention.py` - 7-year retention, legal holds
+- `compliance/compliance_manager.py` - Central compliance coordination
+- **API:** `/api/v1/compliance/*` - Audit, transactions, reports, retention
+- **Features:** Chain verification, reconciliation, legal holds
+- SEC Rule 17a-4, SOX compliance ready
+
+### **Phase 21 (NEW): Plugin / Extension System** ✅ COMPLETE
+
+- `plugins/plugin_base.py` - Base classes for Strategy, DataSource, Indicator plugins
+- `plugins/plugin_loader.py` - Dynamic loading, lifecycle management
+- `plugins/plugin_registry.py` - Discovery, search, dependency resolution
+- `plugins/hooks.py` - Extensibility hooks for core functionality
+- `plugins/sandbox.py` - Permission-based sandboxed execution
+- **API:** `/api/v1/plugins/*` - Load, enable, configure, hooks, sandbox
+- **Features:** Priority handlers, resource limits, violation tracking
+- 16 core hooks for trading, data, agents, system events
+
+### **Phase 22 (NEW): Performance Monitoring & Metrics** ✅ COMPLETE
+
+- `monitoring/metrics_collector.py` - Counter, gauge, histogram, timer metrics
+- `monitoring/system_monitor.py` - CPU, memory, disk, network monitoring
+- `monitoring/performance_tracker.py` - Trade P&L, Sharpe ratio, drawdown
+- `monitoring/health_checker.py` - Component health checks with thresholds
+- **API:** `/api/v1/monitoring/*` - Metrics, system, performance, health
+- **Features:** Prometheus export, equity curves, failure thresholds
+- Real-time dashboards and historical data
+
+### **Phase 23 (NEW): API Rate Limiting & Throttling** ✅ COMPLETE
+
+- `ratelimit/token_bucket.py` - Token bucket algorithm implementation
+- `ratelimit/rate_limiter.py` - Per-IP, per-user, per-endpoint limits
+- `ratelimit/throttle.py` - Adaptive throttling based on error/latency
+- `ratelimit/middleware.py` - FastAPI middleware integration
+- **API:** `/api/v1/ratelimit/*` - Rules, blocked, whitelist, throttle
+- **Features:** Block lists, whitelists, manual throttle override
+- Default rules for trading, auth, and general endpoints
+
+### **Phase 24 (NEW): Backup & Recovery System** ✅ COMPLETE
+
+- `backup/snapshot.py` - Full/incremental snapshots with compression
+- `backup/backup_manager.py` - Scheduled backups, job management
+- `backup/recovery.py` - Recovery points, component-level restore
+- **API:** `/api/v1/backup/*` - Snapshots, backups, schedules, recovery
+- **Features:** Checksum verification, automatic rollback on failure
+- Default schedules: daily full, 6-hour incremental
+
 ---
 
 ## PRODUCTION READINESS ASSESSMENT
@@ -340,6 +458,16 @@ WebSocket Broadcast (live UI)
 9. ✅ **No mock data** - All data from real sources
 10. ✅ **No pseudocode** - All implementations complete
 11. ✅ **Boot time** - 50 seconds (within 60s constraint)
+12. ✅ **Arbitrage Engine** - 4 scanners with execution gating
+13. ✅ **Prediction Engine** - Oracle latency, decay curves, cross-hedge
+14. ✅ **Wallet System** - Encrypted keys, vaults, hardware wallets
+15. ✅ **Offline Mode** - Air-gapped operation, QR transfers
+16. ✅ **Notifications** - Multi-channel with escalation policies
+17. ✅ **Compliance** - 7-year retention, legal holds, reports
+18. ✅ **Plugin System** - Sandboxed execution, 16 hooks
+19. ✅ **Monitoring** - Metrics, health checks, Prometheus export
+20. ✅ **Rate Limiting** - Token bucket, adaptive throttling
+21. ✅ **Backup/Recovery** - Snapshots, scheduled backups, rollback
 
 ---
 

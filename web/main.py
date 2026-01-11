@@ -57,6 +57,17 @@ from web.api.system_control import router as system_control_router
 from web.api.data_endpoints import router as data_endpoints_router
 from web.api.live_stream import router as live_stream_router
 from web.api.institutional import router as institutional_router
+from web.api.schemas import router as schemas_router
+from web.api.arbitrage import router as arbitrage_router
+from web.api.prediction import router as prediction_router
+from web.api.wallet import router as wallet_router
+from web.api.offline import router as offline_router
+from web.api.notifications import router as notifications_router
+from web.api.compliance import router as compliance_router
+from web.api.plugins import router as plugins_router
+from web.api.monitoring import router as monitoring_router
+from web.api.ratelimit import router as ratelimit_router
+from web.api.backup import router as backup_router
 
 root_router = APIRouter()
 router = APIRouter(prefix="/api")
@@ -142,6 +153,17 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(data_endpoints_router)
     application.include_router(live_stream_router)
     application.include_router(institutional_router)
+    application.include_router(schemas_router)
+    application.include_router(arbitrage_router)
+    application.include_router(prediction_router)
+    application.include_router(wallet_router)
+    application.include_router(offline_router)
+    application.include_router(notifications_router)
+    application.include_router(compliance_router)
+    application.include_router(plugins_router)
+    application.include_router(monitoring_router)
+    application.include_router(ratelimit_router)
+    application.include_router(backup_router)
     return application
 
 

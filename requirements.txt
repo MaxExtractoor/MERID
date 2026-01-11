@@ -82,3 +82,74 @@ websocket-client==1.9.0
 
 # System Monitoring
 psutil==7.2.1
+
+# QR Code Generation
+qrcode[pil]==7.4.2
+Pillow==10.4.0
+
+# Image Processing for QR scanning
+pyzbar==0.1.9
+opencv-python-headless==4.10.0.84
+
+# SMS/Push Notifications
+twilio==9.3.0
+firebase-admin==6.5.0
+
+# Hardware Wallet Support (optional - install separately if needed)
+# ledgerblue==0.1.54
+# trezorlib==0.13.9
+
+# Compression
+lz4==4.3.3
+zstandard==0.23.0
+
+# CSV/Excel Processing
+openpyxl==3.1.5
+xlrd==2.0.1
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Background Tasks
+celery==5.4.0
+kombu==5.4.2
+
+# Caching
+cachetools==5.5.0
+aiocache==0.12.3
+
+# Prometheus Metrics
+prometheus-client==0.21.0
+
+# Health Checks
+py-healthcheck==1.10.1
+
+# Configuration Management
+dynaconf==3.2.6
+python-decouple==3.8
+
+# Date/Time
+python-dateutil==2.9.0
+pytz==2024.2
+
+# JSON Schema Validation
+jsonschema==4.23.0
+
+# Async Utilities
+anyio==4.7.0
+asyncio-throttle==1.0.2
+
+# File Watching
+watchdog==6.0.0
+
+# CLI Tools
+click==8.1.7
+rich==13.9.4
+typer==0.15.1
+
+# Documentation
+mkdocs==1.6.1
+mkdocs-material==9.5.47
+
+# License: MIT
+# All packages are production-ready and actively maintained

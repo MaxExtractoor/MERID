@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MERID - Unified Control Center</title>
     <link rel="stylesheet" href="/static/css/institutional.css">
+    <link rel="stylesheet" href="/static/css/professional.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/unified-dashboard.css">
@@ -93,60 +94,40 @@
         <aside class="sidebar">
             <div class="sidebar-section">
                 <div class="sidebar-title">OVERVIEW</div>
-                <a href="#dashboard" class="sidebar-link active" data-section="dashboard">
-                    <span class="link-icon">&#128200;</span> Dashboard
-                </a>
-                <a href="#intelligence" class="sidebar-link" data-section="intelligence">
-                    <span class="link-icon">&#128161;</span> Intelligence
-                </a>
-                <a href="#predictions" class="sidebar-link" data-section="predictions">
-                    <span class="link-icon">&#127922;</span> Predictions
-                </a>
+                <a href="#dashboard" class="sidebar-link active" data-section="dashboard">Dashboard</a>
+                <a href="#intelligence" class="sidebar-link" data-section="intelligence">Intelligence</a>
+                <a href="#predictions" class="sidebar-link" data-section="predictions">Predictions</a>
             </div>
             <div class="sidebar-section">
                 <div class="sidebar-title">SYSTEMS</div>
-                <a href="#systems" class="sidebar-link" data-section="systems">
-                    <span class="link-icon">&#9632;</span> Four Systems
-                </a>
-                <a href="#agents" class="sidebar-link" data-section="agents">
-                    <span class="link-icon">&#129302;</span> Agents
-                </a>
-                <a href="#consensus" class="sidebar-link" data-section="consensus">
-                    <span class="link-icon">&#9878;</span> Consensus
-                </a>
-                <a href="#simulation" class="sidebar-link" data-section="simulation">
-                    <span class="link-icon">&#9881;</span> Simulation
-                </a>
+                <a href="#systems" class="sidebar-link" data-section="systems">Four Systems</a>
+                <a href="#agents" class="sidebar-link" data-section="agents">Agents</a>
+                <a href="#consensus" class="sidebar-link" data-section="consensus">Consensus</a>
+                <a href="#simulation" class="sidebar-link" data-section="simulation">Simulation</a>
             </div>
             <div class="sidebar-section">
                 <div class="sidebar-title">MONITORING</div>
-                <a href="#shadow" class="sidebar-link" data-section="shadow">
-                    <span class="link-icon">&#128065;</span> Shadow MERID
-                </a>
-                <a href="#risk" class="sidebar-link" data-section="risk">
-                    <span class="link-icon">&#9888;</span> Risk
-                </a>
-                <a href="#audit" class="sidebar-link" data-section="audit">
-                    <span class="link-icon">&#128220;</span> Audit Trail
-                </a>
-                <a href="#execution" class="sidebar-link" data-section="execution">
-                    <span class="link-icon">&#128176;</span> Execution
-                </a>
-                <a href="#analytics" class="sidebar-link" data-section="analytics">
-                    <span class="link-icon">&#128200;</span> Analytics
-                </a>
+                <a href="#shadow" class="sidebar-link" data-section="shadow">Shadow MERID</a>
+                <a href="#risk" class="sidebar-link" data-section="risk">Risk</a>
+                <a href="#audit" class="sidebar-link" data-section="audit">Audit Trail</a>
+                <a href="#execution" class="sidebar-link" data-section="execution">Execution</a>
+                <a href="#analytics" class="sidebar-link" data-section="analytics">Analytics</a>
             </div>
             <div class="sidebar-section">
                 <div class="sidebar-title">TOOLS</div>
-                <a href="#portfolio" class="sidebar-link" data-section="portfolio">
-                    <span class="link-icon">&#128188;</span> Portfolio
-                </a>
-                <a href="#backtest" class="sidebar-link" data-section="backtest">
-                    <span class="link-icon">&#128202;</span> Backtest
-                </a>
-                <a href="#alerts" class="sidebar-link" data-section="alerts">
-                    <span class="link-icon">&#128276;</span> Alerts
-                </a>
+                <a href="#arbitrage" class="sidebar-link" data-section="arbitrage">Arbitrage</a>
+                <a href="#portfolio" class="sidebar-link" data-section="portfolio">Portfolio</a>
+                <a href="#backtest" class="sidebar-link" data-section="backtest">Backtest</a>
+                <a href="#alerts" class="sidebar-link" data-section="alerts">Alerts</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">OPERATIONS</div>
+                <a href="#monitoring" class="sidebar-link" data-section="monitoring">Monitoring</a>
+                <a href="#ratelimit" class="sidebar-link" data-section="ratelimit">Rate Limits</a>
+                <a href="#backup" class="sidebar-link" data-section="backup">Backup</a>
+                <a href="#plugins" class="sidebar-link" data-section="plugins">Plugins</a>
+                <a href="#compliance" class="sidebar-link" data-section="compliance">Compliance</a>
+                <a href="#wallet" class="sidebar-link" data-section="wallet">Wallet</a>
             </div>
         </aside>
 
@@ -976,6 +957,110 @@
                 </div>
             </section>
 
+            <!-- Section: Arbitrage -->
+            <section id="arbitrage" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Arbitrage Engine</h1>
+                    <p class="section-subtitle">Cross-exchange and basis arbitrage opportunities</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="arb-opportunities">0</div>
+                        <div class="stat-label">Opportunities</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value positive" id="arb-potential-profit">$0</div>
+                        <div class="stat-label">Potential Profit</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="arb-scanners-active">0/4</div>
+                        <div class="stat-label">Scanners Active</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value warning" id="arb-execution-status">DISABLED</div>
+                        <div class="stat-label">Execution</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Scanner Status</h2>
+                            <div class="panel-actions">
+                                <button class="btn btn-sm btn-success" onclick="startAllScanners()">Start All</button>
+                                <button class="btn btn-sm btn-danger" onclick="stopAllScanners()">Stop All</button>
+                            </div>
+                        </div>
+                        <div class="panel-body">
+                            <div id="arb-scanners" class="scanner-list">
+                                <div class="scanner-item">
+                                    <span class="scanner-name">Cross-CEX</span>
+                                    <span class="scanner-status stopped">Stopped</span>
+                                    <button class="btn btn-xs" onclick="toggleScanner('cross_cex_scanner')">Toggle</button>
+                                </div>
+                                <div class="scanner-item">
+                                    <span class="scanner-name">DEX-CEX</span>
+                                    <span class="scanner-status stopped">Stopped</span>
+                                    <button class="btn btn-xs" onclick="toggleScanner('dex_cex_scanner')">Toggle</button>
+                                </div>
+                                <div class="scanner-item">
+                                    <span class="scanner-name">Perp-Spot</span>
+                                    <span class="scanner-status stopped">Stopped</span>
+                                    <button class="btn btn-xs" onclick="toggleScanner('perp_spot_scanner')">Toggle</button>
+                                </div>
+                                <div class="scanner-item">
+                                    <span class="scanner-name">Funding Rate</span>
+                                    <span class="scanner-status stopped">Stopped</span>
+                                    <button class="btn btn-xs" onclick="toggleScanner('funding_rate_scanner')">Toggle</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Execution Gate</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div class="gate-status">
+                                <div class="gate-item">
+                                    <span>Execution Enabled</span>
+                                    <span id="gate-enabled" class="badge badge-danger">NO</span>
+                                </div>
+                                <div class="gate-item">
+                                    <span>Kill Switch</span>
+                                    <span id="gate-killswitch" class="badge badge-success">OFF</span>
+                                </div>
+                                <div class="gate-item">
+                                    <span>Daily Executions</span>
+                                    <span id="gate-daily-exec">0/100</span>
+                                </div>
+                                <div class="gate-item">
+                                    <span>Daily Volume</span>
+                                    <span id="gate-daily-vol">$0</span>
+                                </div>
+                            </div>
+                            <div class="gate-controls mt-3">
+                                <button class="btn btn-danger btn-sm" onclick="activateKillSwitch()">Kill Switch</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel panel-mt">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Recent Opportunities</h2>
+                        <button class="btn btn-sm" onclick="refreshArbitrage()">Refresh</button>
+                    </div>
+                    <div class="panel-body">
+                        <div id="arb-opportunities-list" class="opportunities-list">
+                            <div class="empty-state">No opportunities detected. Start scanners to begin.</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <!-- Section: Backtest -->
             <section id="backtest" class="content-section">
                 <div class="section-header">
@@ -1113,6 +1198,313 @@
                     </div>
                 </div>
             </section>
+
+            <!-- Section: Monitoring -->
+            <section id="monitoring" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">System Monitoring</h1>
+                    <p class="section-subtitle">Real-time metrics, health checks, and performance tracking</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="mon-cpu">--%</div>
+                        <div class="stat-label">CPU Usage</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="mon-memory">--%</div>
+                        <div class="stat-label">Memory</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="mon-disk">--%</div>
+                        <div class="stat-label">Disk</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="mon-health">--</div>
+                        <div class="stat-label">Health Status</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Health Checks</h2>
+                            <button class="btn btn-sm" onclick="refreshMonitoring()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="health-checks-list" class="health-list">
+                                <div class="empty-state">Loading health checks...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Performance Metrics</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="perf-metrics-list" class="metrics-list">
+                                <div class="empty-state">Loading metrics...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Rate Limits -->
+            <section id="ratelimit" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Rate Limiting</h1>
+                    <p class="section-subtitle">API throttling and request management</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="rl-total-rules">--</div>
+                        <div class="stat-label">Active Rules</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="rl-blocked">--</div>
+                        <div class="stat-label">Blocked IPs</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="rl-throttled">--</div>
+                        <div class="stat-label">Throttled</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="rl-requests">--</div>
+                        <div class="stat-label">Requests/min</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Rate Limit Rules</h2>
+                            <button class="btn btn-sm" onclick="refreshRateLimits()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="ratelimit-rules-list" class="rules-list">
+                                <div class="empty-state">Loading rules...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Blocked Identifiers</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="blocked-list" class="blocked-list">
+                                <div class="empty-state">No blocked identifiers</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Backup -->
+            <section id="backup" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Backup & Recovery</h1>
+                    <p class="section-subtitle">Snapshots, scheduled backups, and disaster recovery</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="backup-total">--</div>
+                        <div class="stat-label">Total Snapshots</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="backup-last">--</div>
+                        <div class="stat-label">Last Backup</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="backup-schedules">--</div>
+                        <div class="stat-label">Schedules</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="backup-recovery">--</div>
+                        <div class="stat-label">Recovery Points</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Snapshots</h2>
+                            <button class="btn btn-sm btn-primary" onclick="createSnapshot()">Create Snapshot</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="snapshots-list" class="snapshots-list">
+                                <div class="empty-state">Loading snapshots...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Backup Schedules</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="backup-schedules-list" class="schedules-list">
+                                <div class="empty-state">Loading schedules...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Plugins -->
+            <section id="plugins" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Plugin System</h1>
+                    <p class="section-subtitle">Extensions, hooks, and sandboxed execution</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="plugins-installed">--</div>
+                        <div class="stat-label">Installed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="plugins-active">--</div>
+                        <div class="stat-label">Active</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="plugins-hooks">--</div>
+                        <div class="stat-label">Hooks</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="plugins-sandbox">--</div>
+                        <div class="stat-label">Sandbox Status</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Installed Plugins</h2>
+                            <button class="btn btn-sm" onclick="discoverPlugins()">Discover</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="plugins-list" class="plugins-list">
+                                <div class="empty-state">No plugins installed</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Available Hooks</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="hooks-list" class="hooks-list">
+                                <div class="empty-state">Loading hooks...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Compliance -->
+            <section id="compliance" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Compliance & Audit</h1>
+                    <p class="section-subtitle">Regulatory reporting, audit logs, and retention policies</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="comp-entries">--</div>
+                        <div class="stat-label">Audit Entries</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="comp-transactions">--</div>
+                        <div class="stat-label">Transactions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="comp-reports">--</div>
+                        <div class="stat-label">Reports</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="comp-retention">--</div>
+                        <div class="stat-label">Retention Days</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Recent Audit Entries</h2>
+                            <button class="btn btn-sm" onclick="refreshCompliance()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="audit-entries-list" class="audit-list">
+                                <div class="empty-state">Loading audit entries...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Compliance Reports</h2>
+                            <button class="btn btn-sm btn-primary" onclick="generateReport()">Generate</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="compliance-reports-list" class="reports-list">
+                                <div class="empty-state">No reports generated</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Wallet -->
+            <section id="wallet" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Wallet & Custody</h1>
+                    <p class="section-subtitle">Key management, vaults, and hardware wallet integration</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="wallet-vaults">--</div>
+                        <div class="stat-label">Vaults</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="wallet-keys">--</div>
+                        <div class="stat-label">Keys</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="wallet-sessions">--</div>
+                        <div class="stat-label">WC Sessions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="wallet-hw">--</div>
+                        <div class="stat-label">Hardware</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Vaults</h2>
+                            <button class="btn btn-sm" onclick="refreshWallet()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="vaults-list" class="vaults-list">
+                                <div class="empty-state">Loading vaults...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">WalletConnect Sessions</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="wc-sessions-list" class="sessions-list">
+                                <div class="empty-state">No active sessions</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
@@ -1135,5 +1527,6 @@
     </div>
 
     <script src="/static/js/unified-dashboard.js"></script>
+    <script src="/static/js/professional-ui.js"></script>
 </body>
 </html>

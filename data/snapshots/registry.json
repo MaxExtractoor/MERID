@@ -1,0 +1,26 @@
+{
+  "snapshots": [
+    {
+      "snapshot_id": "snap_99be2a235415",
+      "snapshot_type": "full",
+      "status": "completed",
+      "components": [
+        "config",
+        "agents",
+        "consensus"
+      ],
+      "file_path": "data\\snapshots\\snap_99be2a235415_20260111_121112.json.gz",
+      "size_bytes": 2729,
+      "compressed": true,
+      "checksum": "6cd967b859742a412142494e8bc85f5ca66d32def5a428b3b48446165286c343",
+      "created_at": 1768133471.9921718,
+      "created_at_iso": "2026-01-11T12:11:11.992172+00:00",
+      "completed_at": 1768133472.0253882,
+      "duration_seconds": 0.03321647644042969,
+      "parent_snapshot_id": null,
+      "description": "Manual snapshot",
+      "tags": []
+    }
+  ],
+  "updated_at": 1768133472.0389757
+}

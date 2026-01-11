@@ -80,8 +80,15 @@
     margin-bottom: 20px;
 }
 
-@media (max-width: 1200px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+.stats-grid-4 {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+@media (max-width: 1200px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } .stats-grid-4 { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } .stats-grid-4 { grid-template-columns: repeat(2, 1fr); } }
 
 .stat-card {
     background: rgba(255,255,255,0.02);
@@ -1057,4 +1064,131 @@
     text-align: center;
     padding: 20px;
     color: #ef4444;
+}
+
+/* ============================================
+   NEW FEATURES - OPERATIONS SECTION STYLES
+   ============================================ */
+
+/* Health Checks */
+.health-list, .metrics-list, .rules-list, .blocked-list,
+.snapshots-list, .schedules-list, .plugins-list, .hooks-list,
+.audit-list, .reports-list, .vaults-list, .sessions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.health-item, .metric-item, .rule-item, .blocked-item,
+.snapshot-item, .schedule-item, .plugin-item, .hook-item,
+.audit-item, .report-item, .vault-item, .session-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.health-item:hover, .metric-item:hover, .rule-item:hover,
+.snapshot-item:hover, .plugin-item:hover, .vault-item:hover {
+    background: rgba(255,255,255,0.04);
+    border-color: rgba(255,255,255,0.1);
+}
+
+/* Health Status Colors */
+.health-status {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.health-status.healthy, .health-status.ok, .health-status.operational {
+    background: rgba(16, 185, 129, 0.2);
+    color: #10b981;
+}
+
+.health-status.degraded, .health-status.warning {
+    background: rgba(251, 191, 36, 0.2);
+    color: #fbbf24;
+}
+
+.health-status.unhealthy, .health-status.down, .health-status.critical {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+}
+
+.health-status.unknown {
+    background: rgba(156, 163, 175, 0.2);
+    color: #9ca3af;
+}
+
+/* Metric Items */
+.metric-name, .rule-name, .plugin-name, .vault-name,
+.snapshot-id, .schedule-name, .hook-name, .audit-action {
+    font-weight: 500;
+    color: #e8e8ed;
+}
+
+.metric-value, .rule-limit, .plugin-version, .vault-type,
+.snapshot-type, .schedule-interval, .hook-handlers {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: #00d4aa;
+}
+
+/* Status Badges */
+.schedule-status, .plugin-status {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.schedule-status.active, .plugin-status.active {
+    background: rgba(16, 185, 129, 0.2);
+    color: #10b981;
+}
+
+.schedule-status.inactive, .plugin-status.inactive {
+    background: rgba(156, 163, 175, 0.2);
+    color: #9ca3af;
+}
+
+/* Blocked Items */
+.blocked-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: #ef4444;
+}
+
+.blocked-until {
+    font-size: 11px;
+    color: #888;
+}
+
+/* Snapshot Items */
+.snapshot-time, .audit-time, .report-date {
+    font-size: 11px;
+    color: #888;
+}
+
+/* Vault Items */
+.vault-keys {
+    font-size: 11px;
+    color: #888;
+}
+
+/* Session Items */
+.session-peer {
+    font-weight: 500;
+    color: #e8e8ed;
+}
+
+.session-chain {
+    font-size: 11px;
+    color: #00d4aa;
 }
