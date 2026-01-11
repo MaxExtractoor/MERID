@@ -114,9 +114,6 @@ def create_app() -> FastAPI:
     return application
 
 
-app = create_app()
-
-
 def _bool_env(key: str, default: bool = False) -> bool:
     return str(os.getenv(key, str(default))).lower() in {"1", "true", "yes", "on"}
 
@@ -458,3 +455,7 @@ async def settle_uma_assertion(assertion_id: str):
     result = uma_client.settle_assertion(assertion_id)
     
     return result
+
+
+# Create app instance after all routes are defined
+app = create_app()

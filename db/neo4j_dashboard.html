@@ -55,6 +55,7 @@
             border: 1px solid rgba(16, 185, 129, 0.3);
             border-radius: 12px;
             padding: 20px;
+            -webkit-backdrop-filter: blur(10px);
             backdrop-filter: blur(10px);
             transition: all 0.3s ease;
         }
@@ -91,6 +92,7 @@
             border-radius: 12px;
             padding: 30px;
             margin-bottom: 30px;
+            -webkit-backdrop-filter: blur(10px);
             backdrop-filter: blur(10px);
         }
 
@@ -122,6 +124,10 @@
             gap: 15px;
             margin-bottom: 20px;
             flex-wrap: wrap;
+        }
+
+        .controls-query {
+            margin-top: 15px;
         }
 
         .btn {
@@ -161,6 +167,7 @@
             border-radius: 12px;
             padding: 25px;
             margin-bottom: 30px;
+            -webkit-backdrop-filter: blur(10px);
             backdrop-filter: blur(10px);
         }
 
@@ -194,6 +201,7 @@
             border: 1px solid rgba(139, 92, 246, 0.3);
             border-radius: 12px;
             padding: 25px;
+            -webkit-backdrop-filter: blur(10px);
             backdrop-filter: blur(10px);
         }
 
@@ -304,6 +312,26 @@
             border: 2px solid rgba(255, 255, 255, 0.3);
         }
 
+        .legend-agent {
+            background: #10b981;
+        }
+
+        .legend-memory {
+            background: #0ea5e9;
+        }
+
+        .legend-consensus {
+            background: #fbbf24;
+        }
+
+        .legend-market {
+            background: #8b5cf6;
+        }
+
+        .legend-alert {
+            background: #ef4444;
+        }
+
         .status-indicator {
             display: inline-block;
             width: 10px;
@@ -381,23 +409,23 @@
             <canvas id="graph-canvas"></canvas>
             <div class="legend">
                 <div class="legend-item">
-                    <div class="legend-color" style="background: #10b981;"></div>
+                    <div class="legend-color legend-agent"></div>
                     <span>Agent</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background: #0ea5e9;"></div>
+                    <div class="legend-color legend-memory"></div>
                     <span>Memory</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background: #fbbf24;"></div>
+                    <div class="legend-color legend-consensus"></div>
                     <span>Consensus</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background: #8b5cf6;"></div>
+                    <div class="legend-color legend-market"></div>
                     <span>Market</span>
                 </div>
                 <div class="legend-item">
-                    <div class="legend-color" style="background: #ef4444;"></div>
+                    <div class="legend-color legend-alert"></div>
                     <span>Alert</span>
                 </div>
             </div>
@@ -410,7 +438,7 @@
                 id="cypher-query" 
                 placeholder="Enter Cypher query here...&#10;&#10;Example:&#10;MATCH (a:Agent)-[r:REMEMBERS]->(m:Memory)&#10;RETURN a.name, m.content, r.timestamp&#10;LIMIT 10"
             ></textarea>
-            <div class="controls" style="margin-top: 15px;">
+            <div class="controls controls-query">
                 <button class="btn" onclick="executeQuery()">Execute Query</button>
                 <button class="btn btn-secondary" onclick="loadExampleQueries()">Load Examples</button>
                 <button class="btn" onclick="clearQuery()">Clear</button>

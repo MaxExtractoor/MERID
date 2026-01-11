@@ -34,37 +34,6 @@ class _OracleContext {
     return const Color(0xFFF87171);
   }
 
-  Future<void> _fetchSwarmSnapshot() async {
-    try {
-      final response =
-          await http.get(Uri.parse('$_apiBase/swarm/agents?limit=50'));
-      if (response.statusCode != 200) return;
-      final data = json.decode(response.body) as Map<String, dynamic>;
-      setState(() {
-        _swarmSnapshot = SwarmSnapshot.fromJson(data);
-      });
-    } catch (_) {
-      // ignore errors for now
-    }
-  }
-
-  Future<void> _fetchLineageEvents() async {
-    try {
-      final response =
-          await http.get(Uri.parse('$_apiBase/swarm/lineage?limit=100'));
-      if (response.statusCode != 200) return;
-      final data = json.decode(response.body) as Map<String, dynamic>;
-      final events = (data['events'] as List<dynamic>? ?? [])
-          .map((e) => LineageEvent.fromJson(e as Map<String, dynamic>))
-          .toList();
-      setState(() {
-        _lineageEvents = events;
-      });
-    } catch (_) {
-      // ignore errors for now
-    }
-  }
-
   String get badgeLabel {
     if (!hasData || gap == null) return "ORACLE N/A";
     final magnitude = gap!.abs() * 100;
@@ -116,12 +85,14 @@ class HeatmapSnapshot {
       {this.generatedAt,
       required this.symbols,
       required this.venues,
-      this.arbitrage});
+      this.arbitrage,
+      this.liquidations = const []});
 
   final double? generatedAt;
   final List<HeatmapSymbol> symbols;
   final List<HeatmapVenue> venues;
   final Map<String, dynamic>? arbitrage;
+  final List<Map<String, dynamic>> liquidations;
 
   factory HeatmapSnapshot.fromJson(Map<String, dynamic> json) {
     return HeatmapSnapshot(
@@ -133,6 +104,9 @@ class HeatmapSnapshot {
           .map((e) => HeatmapVenue.fromJson(e as Map<String, dynamic>))
           .toList(),
       arbitrage: json['arbitrage'] as Map<String, dynamic>?,
+      liquidations: (json['liquidations'] as List<dynamic>? ?? [])
+          .map((e) => e as Map<String, dynamic>)
+          .toList(),
     );
   }
 }
@@ -254,6 +228,7 @@ class AssistSnapshot {
     required this.news,
     this.summary,
     this.confidence,
+    this.suggestions = const [],
   });
 
   final double? timestamp;
@@ -264,6 +239,7 @@ class AssistSnapshot {
   final List<Map<String, dynamic>> news;
   final String? summary;
   final double? confidence;
+  final List<Map<String, dynamic>> suggestions;
 
   factory AssistSnapshot.fromJson(Map<String, dynamic> json) {
     return AssistSnapshot(
@@ -281,6 +257,9 @@ class AssistSnapshot {
           .toList(),
       summary: json['summary']?.toString(),
       confidence: (json['confidence'] as num?)?.toDouble(),
+      suggestions: (json['suggestions'] as List<dynamic>? ?? [])
+          .map((e) => (e as Map<String, dynamic>?) ?? {})
+          .toList(),
     );
   }
 }
@@ -324,6 +303,9 @@ class HoverMetadata {
       cards: (json['hover_cards'] as List<dynamic>? ?? [])
           .map((e) => HoverCardData.fromJson(e as Map<String, dynamic>))
           .toList(),
+      riskFlags: (json['risk_flags'] as List<dynamic>? ?? [])
+          .map((e) => e as Map<String, dynamic>)
+          .toList(),
     );
   }
 }
@@ -350,6 +332,51 @@ class LineageEvent {
       event: json['event']?.toString() ?? 'spawn',
       timestamp: (json['timestamp'] as num?)?.toDouble() ?? 0,
       score: (json['score'] as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
+class SwarmAgent {
+  SwarmAgent({
+    required this.agentId,
+    required this.role,
+    required this.expertise,
+    required this.votes,
+  });
+
+  final String agentId;
+  final String role;
+  final double expertise;
+  final int votes;
+
+  factory SwarmAgent.fromJson(Map<String, dynamic> json) {
+    return SwarmAgent(
+      agentId: json['agent_id']?.toString() ?? '',
+      role: json['role']?.toString() ?? 'agent',
+      expertise: (json['expertise'] as num?)?.toDouble() ?? 0,
+      votes: (json['votes'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+class SwarmSnapshot {
+  SwarmSnapshot({
+    required this.agents,
+    required this.totalAgents,
+    required this.activeAgents,
+  });
+
+  final List<SwarmAgent> agents;
+  final int totalAgents;
+  final int activeAgents;
+
+  factory SwarmSnapshot.fromJson(Map<String, dynamic> json) {
+    return SwarmSnapshot(
+      agents: (json['agents'] as List<dynamic>? ?? [])
+          .map((e) => SwarmAgent.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      totalAgents: (json['total'] as num?)?.toInt() ?? 0,
+      activeAgents: (json['active'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -1107,6 +1134,90 @@ class _ControlStationState extends State<ControlStation> {
     }
   }
 
+  Future<void> _fetchHeatmap() async {
+    try {
+      final response = await http.get(Uri.parse('$_apiBase/heatmap?limit=40'));
+      if (response.statusCode != 200) return;
+      final data = json.decode(response.body) as Map<String, dynamic>;
+      setState(() {
+        _heatmapSnapshot = HeatmapSnapshot.fromJson(data);
+      });
+    } catch (_) {
+      // ignore errors
+    }
+  }
+
+  Future<void> _fetchTicker() async {
+    try {
+      final response = await http.get(Uri.parse('$_apiBase/ticker?limit=25'));
+      if (response.statusCode != 200) return;
+      final data = json.decode(response.body) as Map<String, dynamic>;
+      setState(() {
+        _tickerSnapshot = TickerSnapshot.fromJson(data);
+      });
+    } catch (_) {
+      // ignore errors
+    }
+  }
+
+  Future<void> _fetchAssist() async {
+    try {
+      final response = await http.get(Uri.parse('$_apiBase/assist'));
+      if (response.statusCode != 200) return;
+      final data = json.decode(response.body) as Map<String, dynamic>;
+      setState(() {
+        _assistSnapshot = AssistSnapshot.fromJson(data);
+      });
+    } catch (_) {
+      // ignore errors
+    }
+  }
+
+  Future<void> _fetchHoverMetadata() async {
+    try {
+      final response = await http.get(Uri.parse('$_apiBase/hover'));
+      if (response.statusCode != 200) return;
+      final data = json.decode(response.body) as Map<String, dynamic>;
+      setState(() {
+        _hoverMetadata = HoverMetadata.fromJson(data);
+      });
+    } catch (_) {
+      // ignore errors
+    }
+  }
+
+  Future<void> _fetchSwarmSnapshot() async {
+    try {
+      final response =
+          await http.get(Uri.parse('$_apiBase/swarm/agents?limit=50'));
+      if (response.statusCode != 200) return;
+      final data = json.decode(response.body) as Map<String, dynamic>;
+      setState(() {
+        _swarmSnapshot = SwarmSnapshot.fromJson(data);
+      });
+    } catch (_) {
+      // ignore errors
+    }
+  }
+
+  Future<void> _fetchLineageEvents() async {
+    try {
+      final response =
+          await http.get(Uri.parse('$_apiBase/swarm/lineage?limit=100'));
+      if (response.statusCode != 200) return;
+      final data = json.decode(response.body) as Map<String, dynamic>;
+      final events = (data['events'] as List<dynamic>? ?? [])
+          .map((e) => LineageEvent.fromJson(e as Map<String, dynamic>))
+          .toList();
+      setState(() {
+        _lineageEvents.clear();
+        _lineageEvents.addAll(events);
+      });
+    } catch (_) {
+      // ignore errors
+    }
+  }
+
   Future<void> _submitConnection() async {
     setState(() {
       _connectBusy = true;
@@ -1665,6 +1776,92 @@ class _ControlStationState extends State<ControlStation> {
               )
               .toList(),
         ),
+      ],
+    );
+  }
+
+  Widget _buildIntelPanels() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "INTEL PANELS",
+          style: TextStyle(color: Color(0xFF10B981), fontSize: 12),
+        ),
+        const SizedBox(height: 8),
+        if (_heatmapSnapshot != null)
+          Text(
+            "Heatmap: ${_heatmapSnapshot!.liquidations.length} liquidations",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_tickerSnapshot != null)
+          Text(
+            "Ticker: ${_tickerSnapshot!.tickers.length} tickers",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_assistSnapshot != null)
+          Text(
+            "Assist: ${_assistSnapshot!.suggestions.length} suggestions",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildIntelStrip() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "INTEL STRIP",
+          style: TextStyle(color: Color(0xFF0EA5E9), fontSize: 12),
+        ),
+        const SizedBox(height: 8),
+        if (_swarmSnapshot != null)
+          Text(
+            "Swarm: ${_swarmSnapshot!.activeAgents}/${_swarmSnapshot!.totalAgents} agents active",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_lineageEvents.isNotEmpty)
+          Text(
+            "Lineage: ${_lineageEvents.length} events tracked",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_marlMetrics != null)
+          Text(
+            "MARL: ${_marlMetrics!.status} (${_marlMetrics!.algorithm})",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_psoMetrics != null)
+          Text(
+            "PSO: ${_psoMetrics!.status}",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_sourceHealth.isNotEmpty)
+          Text(
+            "Sources: ${_sourceHealth.length} monitored",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_agentTrust.isNotEmpty)
+          Text(
+            "Trust: ${_agentTrust.length} agents tracked",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_consensusHistory.isNotEmpty)
+          Text(
+            "Consensus: ${_consensusHistory.length} history entries",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_hardeningStatus != null)
+          Text(
+            "Hardening: ${_hardeningStatus!.poisoningAlertCount} alerts",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        if (_hoverMetadata != null)
+          Text(
+            "Hover: ${_hoverMetadata!.cards.length} cards",
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
       ],
     );
   }
