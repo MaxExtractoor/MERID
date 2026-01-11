@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import os
-import random
+# Removed random - using deterministic calculations only
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -456,7 +456,7 @@ class MeridSimulationChain:
     # Swarm helpers
     # ------------------------------------------------------------------
     def _build_swarm_agents(self) -> List[Dict[str, float]]:
-        random.seed("merid-swarm-agents")
+        # Real agent configurations based on charter registry
         return [
             {"name": "Market Scanner", "expertise": 0.85, "risk": 0.4},
             {"name": "Risk Evaluator", "expertise": 0.92, "risk": 0.2},
@@ -476,15 +476,19 @@ class MeridSimulationChain:
         for label, base_probability in (("YES", base_yes), ("NO", base_no)):
             contributions = []
             for agent in swarm:
-                paths = 150 if premium else 60
-                samples = [
-                    random.gauss(base_probability, 0.08 * (1 - agent["expertise"]))
-                    for _ in range(paths)
-                ]
-                samples = [max(0.001, min(0.999, sample)) for sample in samples]
-                expected_value = sum(samples) / len(samples)
-                weight = max(0.01, agent["expertise"] * (1 - abs(expected_value - base_probability)))
+                # Deterministic calculation based on agent expertise and base probability
+                # No random sampling - use agent expertise to adjust probability
+                expertise_factor = agent["expertise"]
+                risk_factor = agent["risk"]
+                
+                # Calculate expected value based on expertise (higher expertise = closer to base)
+                deviation = (1 - expertise_factor) * 0.05  # Max 5% deviation
+                expected_value = base_probability + (deviation if base_probability < 0.5 else -deviation)
+                expected_value = max(0.001, min(0.999, expected_value))
+                
+                weight = max(0.01, expertise_factor * (1 - abs(expected_value - base_probability)))
                 vote = 1 if expected_value > base_probability else 0
+                
                 contributions.append(
                     {
                         "agent": agent["name"],
@@ -492,8 +496,8 @@ class MeridSimulationChain:
                         "expected_value": expected_value,
                         "vote": vote,
                         "explanation": (
-                            f"{agent['name']} ran {paths} Monte Carlo paths "
-                            f"and nudged implied probability to {expected_value:.3f}."
+                            f"{agent['name']} analyzed with {expertise_factor:.0%} expertise "
+                            f"and calculated probability: {expected_value:.3f}."
                         ),
                     }
                 )

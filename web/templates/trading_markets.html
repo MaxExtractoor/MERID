@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID - Prediction Markets</title>
+    <link rel="stylesheet" href="/static/css/merid.css">
+    <link rel="stylesheet" href="/static/css/production.css">
+    <link rel="stylesheet" href="/static/css/icons.css">
+    <link rel="stylesheet" href="/static/css/markets.css">
+</head>
+<body class="markets-layout">
+    <!-- Top Navigation -->
+    <nav class="top-nav">
+        <div class="nav-left">
+            <img src="/static/merid_logo.png" alt="MERID" class="nav-logo">
+            <span class="nav-title">MERID Prediction Markets</span>
+        </div>
+        <div class="nav-center">
+            <input type="text" class="search-bar" id="market-search" placeholder="Search markets...">
+        </div>
+        <div class="nav-right">
+            <button class="nav-btn" onclick="window.location.href='/'">
+                <span class="icon-dashboard"></span> Dashboard
+            </button>
+            <button class="nav-btn" onclick="window.location.href='/trading/perps'">
+                <span class="icon-trading"></span> Perps
+            </button>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="markets-container">
+        <!-- Left Panel - Market Browser -->
+        <div class="markets-panel">
+            <div class="panel-header">
+                <h2>Markets</h2>
+                <div class="filter-controls">
+                    <select class="filter-select" id="category-filter" title="Filter by category">
+                        <option value="all">All Categories</option>
+                        <option value="crypto">Crypto</option>
+                        <option value="politics">Politics</option>
+                        <option value="sports">Sports</option>
+                        <option value="finance">Finance</option>
+                    </select>
+                    <select class="filter-select" id="platform-filter" title="Filter by platform">
+                        <option value="all">All Platforms</option>
+                        <option value="polymarket">Polymarket</option>
+                        <option value="augur">Augur</option>
+                        <option value="manifold">Manifold</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Arbitrage Opportunities -->
+            <div class="arbitrage-section">
+                <div class="section-header">
+                    <h3><span class="icon-trading"></span> Arbitrage Opportunities</h3>
+                    <button class="btn-small" onclick="scanArbitrage()">Scan</button>
+                </div>
+                <div id="arbitrage-list" class="arbitrage-list">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </div>
+
+            <!-- Market List -->
+            <div class="markets-list" id="markets-list">
+                <!-- Populated by JavaScript -->
+            </div>
+        </div>
+
+        <!-- Center Panel - Market Details -->
+        <div class="market-details-panel">
+            <div id="market-details">
+                <div class="empty-state">Select a market to view details</div>
+            </div>
+        </div>
+
+        <!-- Right Panel - Positions & Trading -->
+        <div class="positions-panel">
+            <div class="panel-tabs">
+                <button class="panel-tab active" data-tab="trade">Quick Trade</button>
+                <button class="panel-tab" data-tab="positions">Positions</button>
+                <button class="panel-tab" data-tab="history">History</button>
+            </div>
+
+            <!-- Quick Trade Tab -->
+            <div class="tab-content active" id="trade-tab">
+                <div class="trade-form">
+                    <h3>Quick Trade</h3>
+                    <div id="trade-form-content">
+                        <div class="empty-state">Select a market to trade</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Positions Tab -->
+            <div class="tab-content" id="positions-tab">
+                <div class="positions-summary">
+                    <div class="summary-item">
+                        <span class="summary-label">Total Value</span>
+                        <span class="summary-value" id="total-value">$0.00</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="summary-label">Open Positions</span>
+                        <span class="summary-value" id="position-count">0</span>
+                    </div>
+                </div>
+                <div id="positions-list" class="positions-list">
+                    <div class="empty-state">No open positions</div>
+                </div>
+            </div>
+
+            <!-- History Tab -->
+            <div class="tab-content" id="history-tab">
+                <div id="history-list" class="history-list">
+                    <div class="empty-state">No trade history</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/trading_markets.js"></script>
+</body>
+</html>

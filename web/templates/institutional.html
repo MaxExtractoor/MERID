@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID - Institutional Control Center</title>
+    <link rel="stylesheet" href="/static/css/institutional.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Top Navigation Bar -->
+    <nav class="top-nav">
+        <div class="nav-brand">
+            <div class="brand-logo">M</div>
+            <div class="brand-text">
+                <span class="brand-name">MERID</span>
+                <span class="brand-subtitle">Institutional Control Center</span>
+            </div>
+        </div>
+        <div class="nav-status">
+            <div class="status-item" id="global-status">
+                <span class="status-dot status-operational"></span>
+                <span class="status-text">OPERATIONAL</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Risk Level:</span>
+                <span class="risk-badge risk-low" id="risk-level">LOW</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">UTC:</span>
+                <span class="status-value" id="utc-time">--:--:--</span>
+            </div>
+        </div>
+        <div class="nav-actions">
+            <button class="nav-btn nav-btn-warning" id="lockdown-btn" onclick="toggleLockdown()">
+                <span class="btn-icon">&#9888;</span> LOCKDOWN
+            </button>
+            <button class="nav-btn" onclick="refreshAll()">
+                <span class="btn-icon">&#8635;</span> Refresh
+            </button>
+        </div>
+    </nav>
+
+    <!-- Main Layout -->
+    <div class="main-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-title">SYSTEMS</div>
+                <a href="#systems" class="sidebar-link active" data-section="systems">
+                    <span class="link-icon">&#9632;</span> Four-System Status
+                </a>
+                <a href="#intents" class="sidebar-link" data-section="intents">
+                    <span class="link-icon">&#10148;</span> Intent Management
+                </a>
+                <a href="#vault" class="sidebar-link" data-section="vault">
+                    <span class="link-icon">&#128274;</span> Vault Governance
+                </a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">MONITORING</div>
+                <a href="#shadow" class="sidebar-link" data-section="shadow">
+                    <span class="link-icon">&#128065;</span> Shadow MERID
+                </a>
+                <a href="#risk" class="sidebar-link" data-section="risk">
+                    <span class="link-icon">&#9888;</span> Risk & Compliance
+                </a>
+                <a href="#metrics" class="sidebar-link" data-section="metrics">
+                    <span class="link-icon">&#128200;</span> Metrics
+                </a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">OPERATIONS</div>
+                <a href="#transfers" class="sidebar-link" data-section="transfers">
+                    <span class="link-icon">&#8644;</span> Capital Transfers
+                </a>
+                <a href="#circuits" class="sidebar-link" data-section="circuits">
+                    <span class="link-icon">&#9889;</span> Circuit Breakers
+                </a>
+                <a href="#audit" class="sidebar-link" data-section="audit">
+                    <span class="link-icon">&#128196;</span> Audit Trail
+                </a>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Section: Four-System Status -->
+            <section id="systems" class="content-section active">
+                <div class="section-header">
+                    <h1 class="section-title">Four-System Architecture</h1>
+                    <p class="section-subtitle">Real-time status of sovereign system boundaries</p>
+                </div>
+
+                <div class="systems-grid">
+                    <!-- Intelligence System -->
+                    <div class="system-card" data-system="intelligence">
+                        <div class="system-header">
+                            <div class="system-icon intelligence">I</div>
+                            <div class="system-info">
+                                <h3 class="system-name">INTELLIGENCE</h3>
+                                <span class="system-role">Analysis & Signal Generation</span>
+                            </div>
+                            <div class="system-status">
+                                <span class="status-indicator operational"></span>
+                            </div>
+                        </div>
+                        <div class="system-metrics">
+                            <div class="metric">
+                                <span class="metric-label">Health Score</span>
+                                <span class="metric-value" id="intel-health">98%</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Active Intents</span>
+                                <span class="metric-value" id="intel-intents">12</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Violations (24h)</span>
+                                <span class="metric-value" id="intel-violations">0</span>
+                            </div>
+                        </div>
+                        <div class="system-authority">
+                            <span class="authority-label">Capital Authority:</span>
+                            <span class="authority-value">$0</span>
+                        </div>
+                        <div class="system-constraints">
+                            <span class="constraint forbidden">NO execution</span>
+                            <span class="constraint forbidden">NO treasury access</span>
+                        </div>
+                    </div>
+
+                    <!-- Trading System -->
+                    <div class="system-card" data-system="trading">
+                        <div class="system-header">
+                            <div class="system-icon trading">T</div>
+                            <div class="system-info">
+                                <h3 class="system-name">TRADING</h3>
+                                <span class="system-role">Position Management</span>
+                            </div>
+                            <div class="system-status">
+                                <span class="status-indicator operational"></span>
+                            </div>
+                        </div>
+                        <div class="system-metrics">
+                            <div class="metric">
+                                <span class="metric-label">Health Score</span>
+                                <span class="metric-value" id="trading-health">96%</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Active Intents</span>
+                                <span class="metric-value" id="trading-intents">5</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Violations (24h)</span>
+                                <span class="metric-value" id="trading-violations">0</span>
+                            </div>
+                        </div>
+                        <div class="system-authority">
+                            <span class="authority-label">Capital Authority:</span>
+                            <span class="authority-value">$50,000</span>
+                        </div>
+                        <div class="system-constraints">
+                            <span class="constraint forbidden">NO treasury direct</span>
+                            <span class="constraint forbidden">NO bypass consensus</span>
+                        </div>
+                    </div>
+
+                    <!-- Treasury System -->
+                    <div class="system-card" data-system="treasury">
+                        <div class="system-header">
+                            <div class="system-icon treasury">$</div>
+                            <div class="system-info">
+                                <h3 class="system-name">TREASURY</h3>
+                                <span class="system-role">Capital Preservation</span>
+                            </div>
+                            <div class="system-status">
+                                <span class="status-indicator operational"></span>
+                            </div>
+                        </div>
+                        <div class="system-metrics">
+                            <div class="metric">
+                                <span class="metric-label">Health Score</span>
+                                <span class="metric-value" id="treasury-health">100%</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Active Intents</span>
+                                <span class="metric-value" id="treasury-intents">2</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Violations (24h)</span>
+                                <span class="metric-value" id="treasury-violations">0</span>
+                            </div>
+                        </div>
+                        <div class="system-authority">
+                            <span class="authority-label">Capital Authority:</span>
+                            <span class="authority-value">$0 (Custodial Only)</span>
+                        </div>
+                        <div class="system-constraints">
+                            <span class="constraint forbidden">NO speculation</span>
+                            <span class="constraint forbidden">NO single-sig withdraw</span>
+                        </div>
+                    </div>
+
+                    <!-- Governance System -->
+                    <div class="system-card" data-system="governance">
+                        <div class="system-header">
+                            <div class="system-icon governance">G</div>
+                            <div class="system-info">
+                                <h3 class="system-name">GOVERNANCE</h3>
+                                <span class="system-role">Meta-Control & Arbitration</span>
+                            </div>
+                            <div class="system-status">
+                                <span class="status-indicator operational"></span>
+                            </div>
+                        </div>
+                        <div class="system-metrics">
+                            <div class="metric">
+                                <span class="metric-label">Health Score</span>
+                                <span class="metric-value" id="governance-health">100%</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Active Intents</span>
+                                <span class="metric-value" id="governance-intents">1</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Violations (24h)</span>
+                                <span class="metric-value" id="governance-violations">0</span>
+                            </div>
+                        </div>
+                        <div class="system-authority">
+                            <span class="authority-label">Capital Authority:</span>
+                            <span class="authority-value">$0 (Approval Only)</span>
+                        </div>
+                        <div class="system-constraints">
+                            <span class="constraint forbidden">NO direct execution</span>
+                            <span class="constraint forbidden">NO self-approval</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- System Interaction Matrix -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">System Interaction Matrix</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="interaction-matrix">
+                            <table class="matrix-table">
+                                <thead>
+                                    <tr>
+                                        <th>From / To</th>
+                                        <th>Intelligence</th>
+                                        <th>Trading</th>
+                                        <th>Treasury</th>
+                                        <th>Governance</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td class="row-header">Intelligence</td>
+                                        <td class="cell-self">-</td>
+                                        <td class="cell-allowed">get_position_status</td>
+                                        <td class="cell-allowed">get_available_capital</td>
+                                        <td class="cell-allowed">submit_proposal</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="row-header">Trading</td>
+                                        <td class="cell-allowed">get_analysis</td>
+                                        <td class="cell-self">-</td>
+                                        <td class="cell-allowed">request_capital</td>
+                                        <td class="cell-allowed">request_approval</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="row-header">Treasury</td>
+                                        <td class="cell-blocked">BLOCKED</td>
+                                        <td class="cell-allowed">get_capital_needs</td>
+                                        <td class="cell-self">-</td>
+                                        <td class="cell-allowed">request_approval</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="row-header">Governance</td>
+                                        <td class="cell-allowed">get_risk_assessment</td>
+                                        <td class="cell-allowed">halt_trading</td>
+                                        <td class="cell-allowed">freeze_allocations</td>
+                                        <td class="cell-self">-</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Intent Management -->
+            <section id="intents" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Intent Management</h1>
+                    <p class="section-subtitle">All actions flow through intent-based approval</p>
+                </div>
+
+                <div class="intent-stats">
+                    <div class="stat-card">
+                        <div class="stat-value" id="pending-intents">0</div>
+                        <div class="stat-label">Pending</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="awaiting-approval">0</div>
+                        <div class="stat-label">Awaiting Approval</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="simulating-intents">0</div>
+                        <div class="stat-label">Simulating</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="executed-today">0</div>
+                        <div class="stat-label">Executed Today</div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Pending Intents</h2>
+                        <div class="panel-actions">
+                            <select class="filter-select" id="intent-filter" title="Filter intents by system" aria-label="Filter intents by system">
+                                <option value="">All Systems</option>
+                                <option value="intelligence">Intelligence</option>
+                                <option value="trading">Trading</option>
+                                <option value="treasury">Treasury</option>
+                                <option value="governance">Governance</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <div class="intent-list" id="intent-list">
+                            <div class="empty-state">No pending intents</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Vault Governance -->
+            <section id="vault" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Vault Governance</h1>
+                    <p class="section-subtitle">Multi-signature treasury control</p>
+                </div>
+
+                <div class="vault-status-grid">
+                    <div class="vault-card">
+                        <div class="vault-card-header">
+                            <span class="vault-icon">&#128274;</span>
+                            <span class="vault-title">Vault Status</span>
+                        </div>
+                        <div class="vault-card-body">
+                            <div class="vault-metric">
+                                <span class="label">Status</span>
+                                <span class="value" id="vault-status">ACTIVE</span>
+                            </div>
+                            <div class="vault-metric">
+                                <span class="label">Active Keys</span>
+                                <span class="value" id="active-keys">6/6</span>
+                            </div>
+                            <div class="vault-metric">
+                                <span class="label">Pending Ops</span>
+                                <span class="value" id="pending-ops">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="vault-card">
+                        <div class="vault-card-header">
+                            <span class="vault-icon">&#128176;</span>
+                            <span class="vault-title">Daily Limits</span>
+                        </div>
+                        <div class="vault-card-body">
+                            <div class="vault-metric">
+                                <span class="label">Daily Outflow</span>
+                                <span class="value" id="daily-outflow">$0</span>
+                            </div>
+                            <div class="vault-metric">
+                                <span class="label">Daily Limit</span>
+                                <span class="value" id="daily-limit">$50,000</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill progress-zero" id="outflow-progress"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="vault-card">
+                        <div class="vault-card-header">
+                            <span class="vault-icon">&#128337;</span>
+                            <span class="vault-title">Timelocks</span>
+                        </div>
+                        <div class="vault-card-body">
+                            <div class="timelock-item">
+                                <span class="timelock-op">External Withdraw</span>
+                                <span class="timelock-duration">24h</span>
+                            </div>
+                            <div class="timelock-item">
+                                <span class="timelock-op">DeFi Deploy</span>
+                                <span class="timelock-duration">48h</span>
+                            </div>
+                            <div class="timelock-item">
+                                <span class="timelock-op">Key Rotation</span>
+                                <span class="timelock-duration">7d</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Key Holders</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="key-holders-grid" id="key-holders">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Pending Operations</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="operations-list" id="vault-operations">
+                            <div class="empty-state">No pending operations</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Shadow MERID -->
+            <section id="shadow" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Shadow MERID</h1>
+                    <p class="section-subtitle">Parallel simulation for validation</p>
+                </div>
+
+                <div class="shadow-comparison">
+                    <div class="comparison-card production">
+                        <div class="comparison-header">
+                            <h3>PRODUCTION</h3>
+                            <span class="badge live">LIVE</span>
+                        </div>
+                        <div class="comparison-metrics">
+                            <div class="comp-metric">
+                                <span class="label">Equity</span>
+                                <span class="value" id="prod-equity">$100,000</span>
+                            </div>
+                            <div class="comp-metric">
+                                <span class="label">P&L</span>
+                                <span class="value positive" id="prod-pnl">+$0</span>
+                            </div>
+                            <div class="comp-metric">
+                                <span class="label">Positions</span>
+                                <span class="value" id="prod-positions">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="comparison-divider">
+                        <span class="divider-icon">&#8596;</span>
+                        <span class="divergence-label">Divergence</span>
+                        <span class="divergence-value" id="divergence-pct">0%</span>
+                    </div>
+
+                    <div class="comparison-card shadow">
+                        <div class="comparison-header">
+                            <h3>SHADOW</h3>
+                            <span class="badge simulation">SIMULATION</span>
+                        </div>
+                        <div class="comparison-metrics">
+                            <div class="comp-metric">
+                                <span class="label">Equity</span>
+                                <span class="value" id="shadow-equity">$100,000</span>
+                            </div>
+                            <div class="comp-metric">
+                                <span class="label">P&L</span>
+                                <span class="value positive" id="shadow-pnl">+$0</span>
+                            </div>
+                            <div class="comp-metric">
+                                <span class="label">Positions</span>
+                                <span class="value" id="shadow-positions">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Shadow Performance</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="shadow-stats">
+                            <div class="shadow-stat">
+                                <span class="stat-label">Total Trades</span>
+                                <span class="stat-value" id="shadow-trades">0</span>
+                            </div>
+                            <div class="shadow-stat">
+                                <span class="stat-label">Win Rate</span>
+                                <span class="stat-value" id="shadow-winrate">0%</span>
+                            </div>
+                            <div class="shadow-stat">
+                                <span class="stat-label">Max Drawdown</span>
+                                <span class="stat-value" id="shadow-drawdown">0%</span>
+                            </div>
+                            <div class="shadow-stat">
+                                <span class="stat-label">Divergences</span>
+                                <span class="stat-value" id="shadow-divergences">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ShadowGuardian Status -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">ShadowGuardian-13</h2>
+                        <div class="panel-actions">
+                            <button class="btn-sm" onclick="triggerReplay()">Run Replay</button>
+                            <button class="btn-sm btn-warning" onclick="runStressTest()">Stress Test</button>
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <div class="guardian-status">
+                            <div class="guardian-metric">
+                                <span class="label">State</span>
+                                <span class="value" id="guardian-state">IDLE</span>
+                            </div>
+                            <div class="guardian-metric">
+                                <span class="label">Consecutive Alerts</span>
+                                <span class="value" id="guardian-alerts">0</span>
+                            </div>
+                            <div class="guardian-metric">
+                                <span class="label">Threat Level</span>
+                                <span class="value threat-none" id="guardian-threat">NONE</span>
+                            </div>
+                        </div>
+                        <div class="divergence-thresholds">
+                            <div class="threshold-item">
+                                <span class="threshold-label">Alert</span>
+                                <span class="threshold-value">3%</span>
+                            </div>
+                            <div class="threshold-item">
+                                <span class="threshold-label">Pause</span>
+                                <span class="threshold-value">5%</span>
+                            </div>
+                            <div class="threshold-item">
+                                <span class="threshold-label">Lockdown</span>
+                                <span class="threshold-value">10%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Aave Treasury Integration -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Aave Treasury Stash</h2>
+                        <div class="panel-actions">
+                            <button class="btn-sm btn-primary" onclick="stashProfits()">Stash Profits</button>
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <div class="aave-status">
+                            <div class="aave-metric">
+                                <span class="label">Total Supplied</span>
+                                <span class="value" id="aave-supplied">$0</span>
+                            </div>
+                            <div class="aave-metric">
+                                <span class="label">Health Factor</span>
+                                <span class="value" id="aave-health">10.0</span>
+                            </div>
+                            <div class="aave-metric">
+                                <span class="label">Est. APY</span>
+                                <span class="value" id="aave-apy">6.5%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Risk & Compliance -->
+            <section id="risk" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Risk & Compliance</h1>
+                    <p class="section-subtitle">Real-time risk monitoring and compliance status</p>
+                </div>
+
+                <div class="risk-overview">
+                    <div class="risk-gauge">
+                        <div class="gauge-container">
+                            <svg viewBox="0 0 200 100" class="gauge-svg">
+                                <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#2a2a3e" stroke-width="20"/>
+                                <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#riskGradient)" stroke-width="20" stroke-dasharray="251.2" stroke-dashoffset="200" id="risk-arc"/>
+                                <defs>
+                                    <linearGradient id="riskGradient">
+                                        <stop offset="0%" stop-color="#10b981"/>
+                                        <stop offset="50%" stop-color="#fbbf24"/>
+                                        <stop offset="100%" stop-color="#ef4444"/>
+                                    </linearGradient>
+                                </defs>
+                            </svg>
+                            <div class="gauge-value" id="risk-score">15%</div>
+                            <div class="gauge-label">Risk Score</div>
+                        </div>
+                    </div>
+
+                    <div class="risk-factors">
+                        <div class="risk-factor">
+                            <span class="factor-name">Lockdown Status</span>
+                            <span class="factor-value good" id="lockdown-factor">Inactive</span>
+                        </div>
+                        <div class="risk-factor">
+                            <span class="factor-name">Contract Violations</span>
+                            <span class="factor-value good" id="violations-factor">0</span>
+                        </div>
+                        <div class="risk-factor">
+                            <span class="factor-name">Capital Utilization</span>
+                            <span class="factor-value good" id="capital-factor">0%</span>
+                        </div>
+                        <div class="risk-factor">
+                            <span class="factor-name">Compliance Status</span>
+                            <span class="factor-value good" id="compliance-factor">Compliant</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Violations by Type (24h)</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="violations-chart">
+                            <canvas id="violations-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Capital Transfers -->
+            <section id="transfers" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Capital Transfers</h1>
+                    <p class="section-subtitle">All capital movements with cooldowns and approvals</p>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Pending Transfers</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="transfers-list" id="transfers-list">
+                            <div class="empty-state">No pending transfers</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Circuit Breakers -->
+            <section id="circuits" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Circuit Breakers</h1>
+                    <p class="section-subtitle">Fault tolerance and cascade prevention</p>
+                </div>
+
+                <div class="circuits-grid" id="circuits-grid">
+                    <!-- Populated by JS -->
+                </div>
+            </section>
+
+            <!-- Section: Audit Trail -->
+            <section id="audit" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Audit Trail</h1>
+                    <p class="section-subtitle">Complete cryptographic audit log</p>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Recent Events</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="audit-list" id="audit-list">
+                            <div class="empty-state">No audit events</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Metrics -->
+            <section id="metrics" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">System Metrics</h1>
+                    <p class="section-subtitle">Prometheus-compatible observability</p>
+                </div>
+
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-header">Agent Observations</div>
+                        <div class="metric-value" id="metric-observations">0</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-header">Agent Votes</div>
+                        <div class="metric-value" id="metric-votes">0</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-header">Consensus Rounds</div>
+                        <div class="metric-value" id="metric-consensus">0</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-header">Stream Events</div>
+                        <div class="metric-value" id="metric-streams">0</div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Processing Latency</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="chart-container">
+                            <canvas id="latency-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Lockdown Modal -->
+    <div class="modal" id="lockdown-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>System Lockdown</h2>
+                <button class="modal-close" onclick="closeLockdownModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="lockdown-options">
+                    <label class="lockdown-option">
+                        <input type="radio" name="lockdown-level" value="partial">
+                        <span class="option-label">Partial</span>
+                        <span class="option-desc">Block new trades, allow monitoring</span>
+                    </label>
+                    <label class="lockdown-option">
+                        <input type="radio" name="lockdown-level" value="full" checked>
+                        <span class="option-label">Full</span>
+                        <span class="option-desc">Block all automated actions</span>
+                    </label>
+                    <label class="lockdown-option">
+                        <input type="radio" name="lockdown-level" value="emergency">
+                        <span class="option-label">Emergency</span>
+                        <span class="option-desc">Halt everything, close positions</span>
+                    </label>
+                </div>
+                <div class="lockdown-reason">
+                    <label>Reason:</label>
+                    <textarea id="lockdown-reason" placeholder="Enter reason for lockdown..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeLockdownModal()">Cancel</button>
+                <button class="btn btn-danger" onclick="confirmLockdown()">Confirm Lockdown</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/institutional.js"></script>
+</body>
+</html>

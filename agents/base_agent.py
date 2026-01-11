@@ -13,6 +13,7 @@ from core.settings import MAX_TOOL_RESULTS, OLLAMA_BASE_URL, OLLAMA_GENERATE_END
 from core.time_authority import current_time
 from tools import web_search
 from utils.logger import get_logger
+from agents.reflection_layer import reflection_layer
 
 _OLLAMA_URL = f"{OLLAMA_BASE_URL.rstrip('/')}{OLLAMA_GENERATE_ENDPOINT}"
 
@@ -49,6 +50,12 @@ class BaseAgent:
 
         research_findings = await self._gather_research(energy)
         extra_context = await self._additional_context(energy, research_findings)
+        
+        # Add reflection context for self-learning
+        reflection_context = reflection_layer.get_agent_context(self.agent_id)
+        if reflection_context:
+            extra_context = f"{extra_context}\n\nReflection Context:\n{reflection_context}"
+        
         prompt = self._build_prompt(energy, phase, research_findings, extra_context)
 
         raw_response = await self._invoke_model(prompt)
@@ -64,6 +71,15 @@ class BaseAgent:
             "trust": self.trust,
             "research": research_findings,
         }
+        
+        # Record decision for reflection and learning
+        reflection_layer.record_decision(
+            agent_id=self.agent_id,
+            energy_id=energy["energy_id"],
+            decision=parsed["vote"],
+            confidence=parsed["confidence"],
+            reasoning=parsed["reasoning"]
+        )
 
         await event_stream.publish(
             "agent:result",

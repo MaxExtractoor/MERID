@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID - Consensus Betting</title>
+    <link rel="stylesheet" href="/static/css/merid.css">
+    <link rel="stylesheet" href="/static/css/production.css">
+    <link rel="stylesheet" href="/static/css/icons.css">
+    <link rel="stylesheet" href="/static/css/betting.css">
+</head>
+<body class="betting-layout">
+    <!-- Top Navigation -->
+    <nav class="top-nav">
+        <div class="nav-left">
+            <img src="/static/merid_logo.png" alt="MERID" class="nav-logo">
+            <span class="nav-title">MERID Consensus Betting</span>
+        </div>
+        <div class="nav-center">
+            <div class="user-balance">
+                <span class="balance-label">Balance:</span>
+                <span class="balance-value" id="user-balance">$0.00</span>
+            </div>
+        </div>
+        <div class="nav-right">
+            <button class="nav-btn" onclick="showDepositModal()">
+                <span class="icon-wallet"></span> Deposit
+            </button>
+            <button class="nav-btn" onclick="window.location.href='/'">
+                <span class="icon-dashboard"></span> Dashboard
+            </button>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="betting-container">
+        <!-- Left Panel - Upcoming Blocks -->
+        <div class="blocks-panel">
+            <div class="panel-header">
+                <h2>Upcoming Blocks</h2>
+                <button class="btn-small" onclick="refreshBlocks()">Refresh</button>
+            </div>
+            
+            <div id="blocks-list" class="blocks-list">
+                <!-- Populated by JavaScript -->
+            </div>
+        </div>
+
+        <!-- Center Panel - Betting Interface -->
+        <div class="betting-panel">
+            <div id="betting-content">
+                <div class="empty-state">Select a block to place bets</div>
+            </div>
+        </div>
+
+        <!-- Right Panel - My Bets & Stats -->
+        <div class="stats-panel">
+            <div class="panel-tabs">
+                <button class="panel-tab active" data-tab="bets">My Bets</button>
+                <button class="panel-tab" data-tab="stats">Stats</button>
+                <button class="panel-tab" data-tab="leaderboard">Leaderboard</button>
+            </div>
+
+            <!-- My Bets Tab -->
+            <div class="tab-content active" id="bets-tab">
+                <div class="bets-summary">
+                    <div class="summary-item">
+                        <span class="summary-label">Active Bets</span>
+                        <span class="summary-value" id="active-bets">0</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="summary-label">Total Wagered</span>
+                        <span class="summary-value" id="total-wagered">$0.00</span>
+                    </div>
+                </div>
+                <div id="my-bets-list" class="bets-list">
+                    <div class="empty-state">No active bets</div>
+                </div>
+            </div>
+
+            <!-- Stats Tab -->
+            <div class="tab-content" id="stats-tab">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">Win Rate</div>
+                        <div class="stat-value" id="win-rate">0%</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Bets</div>
+                        <div class="stat-value" id="total-bets">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Won</div>
+                        <div class="stat-value positive" id="total-won">$0.00</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Net Profit</div>
+                        <div class="stat-value" id="net-profit">$0.00</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Leaderboard Tab -->
+            <div class="tab-content" id="leaderboard-tab">
+                <div id="leaderboard-list" class="leaderboard-list">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Deposit Modal -->
+    <div id="deposit-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Deposit Funds</h3>
+                <button class="close-btn" onclick="closeDepositModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="deposit-amount">Amount (USD)</label>
+                    <input type="number" id="deposit-amount" value="100" min="1" step="1" class="form-input">
+                </div>
+                <button class="btn-primary" onclick="deposit()">Deposit</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/betting.js"></script>
+</body>
+</html>

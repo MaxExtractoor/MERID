@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID - Perps Trading</title>
+    <link rel="stylesheet" href="/static/css/merid.css">
+    <link rel="stylesheet" href="/static/css/production.css">
+    <link rel="stylesheet" href="/static/css/icons.css">
+    <link rel="stylesheet" href="/static/css/trading.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body class="trading-layout">
+    <!-- Top Navigation -->
+    <nav class="top-nav">
+        <div class="nav-left">
+            <img src="/static/merid_logo.png" alt="MERID" class="nav-logo">
+            <span class="nav-title">MERID Perps Trading</span>
+        </div>
+        <div class="nav-center">
+            <div class="asset-selector">
+                <button class="asset-btn active" data-asset="BTC">BTC</button>
+                <button class="asset-btn" data-asset="ETH">ETH</button>
+                <button class="asset-btn" data-asset="SOL">SOL</button>
+                <button class="asset-btn" data-asset="AVAX">AVAX</button>
+            </div>
+        </div>
+        <div class="nav-right">
+            <div class="mode-badge paper-mode" id="trading-mode-badge" onclick="togglePaperTrading()" title="Click to toggle trading mode">
+                📄 PAPER TRADING
+            </div>
+            <div class="price-ticker" id="current-price">
+                <span class="ticker-label">BTC</span>
+                <span class="ticker-price">$43,250.50</span>
+                <span class="ticker-change positive">+2.5%</span>
+            </div>
+            <button class="nav-btn" onclick="window.location.href='/'">
+                <span class="icon-dashboard"></span> Dashboard
+            </button>
+        </div>
+    </nav>
+
+    <!-- Main Trading Layout -->
+    <div class="trading-container">
+        <!-- Left Panel - Chart & TA Tools -->
+        <div class="chart-panel">
+            <div class="chart-header">
+                <div class="chart-controls">
+                    <select class="timeframe-select" id="timeframe" title="Select chart timeframe">
+                        <option value="1m">1m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m">15m</option>
+                        <option value="1h" selected>1h</option>
+                        <option value="4h">4h</option>
+                        <option value="1d">1D</option>
+                    </select>
+                    <div class="indicator-toggles">
+                        <button class="indicator-btn" data-indicator="rsi" title="RSI">RSI</button>
+                        <button class="indicator-btn" data-indicator="macd" title="MACD">MACD</button>
+                        <button class="indicator-btn" data-indicator="bb" title="Bollinger Bands">BB</button>
+                        <button class="indicator-btn" data-indicator="volume" title="Volume">VOL</button>
+                    </div>
+                </div>
+            </div>
+            <div id="trading-chart" class="trading-chart"></div>
+            
+            <!-- Technical Indicators Panel -->
+            <div class="indicators-panel">
+                <div class="indicator-card">
+                    <span class="indicator-label">RSI (14)</span>
+                    <span class="indicator-value" id="rsi-value">65.2</span>
+                </div>
+                <div class="indicator-card">
+                    <span class="indicator-label">MACD</span>
+                    <span class="indicator-value" id="macd-value">+12.5</span>
+                </div>
+                <div class="indicator-card">
+                    <span class="indicator-label">Volume</span>
+                    <span class="indicator-value" id="volume-value">1.2M</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center Panel - Order Entry -->
+        <div class="order-panel">
+            <div class="panel-header">
+                <h3>Order Entry</h3>
+                <div class="order-type-tabs">
+                    <button class="tab-btn active" data-type="market">Market</button>
+                    <button class="tab-btn" data-type="limit">Limit</button>
+                    <button class="tab-btn" data-type="stop">Stop</button>
+                </div>
+            </div>
+
+            <div class="order-form">
+                <!-- Side Selection -->
+                <div class="side-selector">
+                    <button class="side-btn long-btn active" data-side="long">
+                        <span class="icon-trading"></span> LONG
+                    </button>
+                    <button class="side-btn short-btn" data-side="short">
+                        <span class="icon-trading"></span> SHORT
+                    </button>
+                </div>
+
+                <!-- Leverage Slider -->
+                <div class="form-group">
+                    <label for="leverage">Leverage: <span id="leverage-display">1x</span></label>
+                    <input type="range" id="leverage" min="1" max="20" value="1" class="leverage-slider">
+                    <div class="leverage-marks">
+                        <span>1x</span>
+                        <span>5x</span>
+                        <span>10x</span>
+                        <span>20x</span>
+                    </div>
+                </div>
+
+                <!-- Position Size -->
+                <div class="form-group">
+                    <label for="position-size">Position Size (USD)</label>
+                    <input type="number" id="position-size" value="1000" min="10" step="10" class="form-input">
+                    <div class="quick-amounts">
+                        <button class="quick-btn" data-amount="100">$100</button>
+                        <button class="quick-btn" data-amount="500">$500</button>
+                        <button class="quick-btn" data-amount="1000">$1K</button>
+                        <button class="quick-btn" data-amount="5000">$5K</button>
+                    </div>
+                </div>
+
+                <!-- Limit Price (for limit orders) -->
+                <div class="form-group limit-price-group" id="limit-price-group">
+                    <label for="limit-price">Limit Price</label>
+                    <input type="number" id="limit-price" step="0.01" class="form-input">
+                </div>
+
+                <!-- Stop Price (for stop orders) -->
+                <div class="form-group stop-price-group" id="stop-price-group">
+                    <label for="stop-price">Stop Price</label>
+                    <input type="number" id="stop-price" step="0.01" class="form-input">
+                </div>
+
+                <!-- Risk Metrics -->
+                <div class="risk-metrics">
+                    <div class="metric-row">
+                        <span>Entry Price:</span>
+                        <span id="entry-price">$43,250.50</span>
+                    </div>
+                    <div class="metric-row">
+                        <span>Liquidation Price:</span>
+                        <span id="liq-price" class="text-danger">$38,925.45</span>
+                    </div>
+                    <div class="metric-row">
+                        <span>Est. Slippage:</span>
+                        <span id="est-slippage">2.3 bps</span>
+                    </div>
+                    <div class="metric-row">
+                        <span>Fees:</span>
+                        <span id="est-fees">$0.50</span>
+                    </div>
+                </div>
+
+                <!-- One-Click Execute -->
+                <button class="btn-execute" id="execute-btn" onclick="executeOrder()">
+                    <span class="icon-trading"></span> EXECUTE TRADE
+                </button>
+
+                <!-- Strategy Optimizer -->
+                <div class="strategy-section">
+                    <h4>Strategy Optimizer</h4>
+                    <div class="strategy-modes">
+                        <button class="strategy-btn" data-mode="scalp">
+                            <span class="mode-label">SCALP</span>
+                            <span class="mode-desc">Sub-second entries</span>
+                        </button>
+                        <button class="strategy-btn" data-mode="intraday">
+                            <span class="mode-label">INTRADAY</span>
+                            <span class="mode-desc">Same-day trades</span>
+                        </button>
+                        <button class="strategy-btn" data-mode="swing">
+                            <span class="mode-label">SWING</span>
+                            <span class="mode-desc">Multi-day holds</span>
+                        </button>
+                        <button class="strategy-btn" data-mode="snipe">
+                            <span class="mode-label">SNIPE</span>
+                            <span class="mode-desc">Instant execution</span>
+                        </button>
+                    </div>
+                    
+                    <!-- Agent Recommendations -->
+                    <div class="agent-recommendations" id="agent-recs">
+                        <div class="rec-header">
+                            <span class="icon-agents"></span> Agent Recommendations
+                        </div>
+                        <div class="rec-list" id="rec-list">
+                            <div class="rec-item">
+                                <span class="rec-agent">ArbitrageAgent</span>
+                                <span class="rec-action">No opportunities detected</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel - Positions & Orders -->
+        <div class="positions-panel">
+            <div class="panel-tabs">
+                <button class="panel-tab active" data-tab="positions">Positions</button>
+                <button class="panel-tab" data-tab="orders">Orders</button>
+                <button class="panel-tab" data-tab="history">History</button>
+            </div>
+
+            <!-- Positions Tab -->
+            <div class="tab-content active" id="positions-tab">
+                <div class="positions-summary">
+                    <div class="summary-item">
+                        <span class="summary-label">Total PnL</span>
+                        <span class="summary-value positive" id="total-pnl">+$245.80</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="summary-label">Open Positions</span>
+                        <span class="summary-value" id="open-positions">3</span>
+                    </div>
+                </div>
+
+                <div class="positions-list" id="positions-list">
+                    <!-- Positions will be populated by JavaScript -->
+                </div>
+            </div>
+
+            <!-- Orders Tab -->
+            <div class="tab-content" id="orders-tab">
+                <div class="orders-list" id="orders-list">
+                    <div class="empty-state">No active orders</div>
+                </div>
+            </div>
+
+            <!-- History Tab -->
+            <div class="tab-content" id="history-tab">
+                <div class="history-list" id="history-list">
+                    <div class="empty-state">No trade history</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Live Streams Panel (Bottom) -->
+    <div class="streams-panel">
+        <div class="stream-tabs">
+            <button class="stream-tab active" data-stream="trades">Trade Stream</button>
+            <button class="stream-tab" data-stream="agents">Agent Decisions</button>
+            <button class="stream-tab" data-stream="simulation">Simulation</button>
+        </div>
+        
+        <div class="stream-content">
+            <div class="stream-feed active" id="trades-stream">
+                <!-- Trade stream items -->
+            </div>
+            <div class="stream-feed" id="agents-stream">
+                <!-- Agent decision items -->
+            </div>
+            <div class="stream-feed" id="simulation-stream">
+                <!-- Simulation process items -->
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/trading_perps.js"></script>
+</body>
+</html>

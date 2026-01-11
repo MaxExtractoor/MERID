@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, Dict, List
 
 from agents.registry import load_agents
+from agents.reflection_layer import reflection_layer
 from core.event_bus import event_stream
 from core.settings import CONSENSUS_THRESHOLD
 from core.state import state as global_state
@@ -72,7 +73,12 @@ class MeridCore:
 
         if vote_result["approved"]:
             await self._handle_approved_energy(energy, vote_result, responses)
-            await self._validate_reality(energy, vote_result)
+            validation_result = await self._validate_reality(energy, vote_result)
+            
+            # Record outcome for reflection layer
+            reality_gap = validation_result.get("reality_gap")
+            validated = validation_result.get("validated", True)
+            reflection_layer.record_outcome(energy_id, validated, reality_gap)
         else:
             self.logger.info(
                 "Energy %s dissipated (consensus %.3f < %.2f)",
@@ -80,6 +86,8 @@ class MeridCore:
                 vote_result["consensus"],
                 CONSENSUS_THRESHOLD,
             )
+            # Record rejection outcome
+            reflection_layer.record_outcome(energy_id, validated=False)
 
         self.agents = self.spawner.refresh_population()
         return vote_result

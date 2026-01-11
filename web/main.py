@@ -18,11 +18,14 @@ from fastapi import (
     HTTPException,
     Header,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
@@ -42,6 +45,18 @@ from simulation.engine import build_simulation_chain
 from swarm.agents.charters import CHARTER_REGISTRY
 from swarm.performance import performance_ledger
 from utils.logger import get_logger
+from web.api.reflection import router as reflection_router
+from web.api.mining import router as mining_router
+from web.api.auth import router as auth_router
+from web.api.referrals import router as referrals_router
+from web.api.trading import router as trading_router
+from web.api.betting import router as betting_router
+from web.api.streams import router as streams_router
+from web.api.paper_trading import router as paper_trading_router
+from web.api.system_control import router as system_control_router
+from web.api.data_endpoints import router as data_endpoints_router
+from web.api.live_stream import router as live_stream_router
+from web.api.institutional import router as institutional_router
 
 root_router = APIRouter()
 router = APIRouter(prefix="/api")
@@ -78,8 +93,12 @@ def _templates():
     return _context_value("templates")
 
 
-def create_app() -> FastAPI:
-    application = FastAPI(title="MERID Core", version="2.0")
+def create_app(lifespan=None) -> FastAPI:
+    application = FastAPI(title="MERID Core", version="2.0", lifespan=lifespan)
+    
+    # Mount static files
+    application.mount("/static", StaticFiles(directory="web/static"), name="static")
+    
     templates = Jinja2Templates(directory="web/templates")
     simulation_chain = build_simulation_chain(
         use_mock=str(os.getenv("MERID_POLYMARKET_MOCK", "")).lower() in {"1", "true", "yes"}
@@ -111,6 +130,18 @@ def create_app() -> FastAPI:
     application.include_router(root_router)
     application.include_router(router)
     application.include_router(router_v1)
+    application.include_router(reflection_router)
+    application.include_router(mining_router)
+    application.include_router(auth_router)
+    application.include_router(referrals_router)
+    application.include_router(trading_router)
+    application.include_router(betting_router)
+    application.include_router(streams_router)
+    application.include_router(paper_trading_router)
+    application.include_router(system_control_router)
+    application.include_router(data_endpoints_router)
+    application.include_router(live_stream_router)
+    application.include_router(institutional_router)
     return application
 
 
@@ -200,7 +231,73 @@ class FilterPayload(BaseModel):
 
 
 @root_router.get("/")
-async def home(request: Request):
+async def root():
+    """Root endpoint - redirect to dashboard."""
+    return RedirectResponse(url="/dashboard")
+
+@root_router.get("/simulation")
+async def simulation_monitor():
+    """Simulation monitor page."""
+    templates = _templates()
+    return templates.TemplateResponse("simulation.html", {"request": {}})
+
+@root_router.get("/live")
+async def live_monitor(request: Request):
+    """Live intelligence monitor page."""
+    templates = _templates()
+    return templates.TemplateResponse("live_monitor.html", {"request": request})
+
+@root_router.get("/dashboard")
+async def dashboard(request: Request):
+    """Unified control center - combines dashboard and institutional views."""
+    templates = _templates()
+    return templates.TemplateResponse("unified.html", {"request": request})
+
+@root_router.get("/dashboard/legacy")
+async def dashboard_legacy():
+    """Legacy dashboard page."""
+    templates = _templates()
+    return templates.TemplateResponse("dashboard.html", {"request": {}})
+
+@root_router.get("/trading/perps")
+async def perps_trading(request: Request):
+    return _templates().TemplateResponse(
+        "trading_perps.html",
+        {"request": request},
+    )
+
+@root_router.get("/trading/markets")
+async def prediction_markets(request: Request):
+    return _templates().TemplateResponse(
+        "trading_markets.html",
+        {"request": request},
+    )
+
+@root_router.get("/betting")
+async def betting_system(request: Request):
+    return _templates().TemplateResponse(
+        "betting.html",
+        {"request": request},
+    )
+
+@root_router.get("/institutional")
+async def institutional_dashboard(request: Request):
+    """Institutional-grade control center."""
+    return _templates().TemplateResponse(
+        "institutional.html",
+        {"request": request},
+    )
+
+@root_router.get("/control")
+async def control_center(request: Request):
+    """Alias for institutional dashboard."""
+    return _templates().TemplateResponse(
+        "institutional.html",
+        {"request": request},
+    )
+
+@root_router.get("/legacy")
+async def legacy_home(request: Request):
     return _templates().TemplateResponse(
         "index.html",
         {
@@ -459,3 +556,132 @@ async def settle_uma_assertion(assertion_id: str):
 
 # Create app instance after all routes are defined
 app = create_app()
+
+# Initialize and start agent orchestrator on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize system on startup."""
+    from core.agent_orchestrator import get_agent_orchestrator
+    from core.consensus_engine import get_consensus_engine
+    from utils.logger import get_logger
+    import asyncio
+    
+    startup_logger = get_logger("web.main.startup")
+    startup_logger.info("Initializing MERID agent orchestrator...")
+    orchestrator = get_agent_orchestrator()
+    
+    # Start orchestrator in background
+    asyncio.create_task(orchestrator.start())
+    
+    # Start consensus engine
+    startup_logger.info("Starting consensus engine...")
+    consensus = get_consensus_engine()
+    asyncio.create_task(consensus.start())
+    
+    # Start continuous simulation miner
+    startup_logger.info("Starting simulation miner...")
+    from simulation.continuous_miner import get_continuous_miner
+    miner = get_continuous_miner()
+    asyncio.create_task(miner.start())
+    
+    # Start audit trail
+    startup_logger.info("Starting audit trail...")
+    from core.audit_trail import get_audit_trail
+    audit = get_audit_trail()
+    asyncio.create_task(audit.start())
+    
+    # Start execution engine
+    startup_logger.info("Starting execution engine...")
+    from trading.execution import get_execution_engine
+    execution = get_execution_engine()
+    asyncio.create_task(execution.start())
+    
+    # Start streaming agent mesh (8 mandatory agents)
+    startup_logger.info("Starting streaming agent mesh...")
+    from agents.agent_mesh import agent_mesh
+    asyncio.create_task(agent_mesh.initialize())
+    asyncio.create_task(agent_mesh.start())
+    
+    # Start prediction markets aggregator
+    startup_logger.info("Starting prediction markets aggregator...")
+    from monitoring.prediction_markets import get_prediction_aggregator
+    prediction_agg = get_prediction_aggregator()
+    asyncio.create_task(prediction_agg.start())
+    
+    # Start alert manager and wire to price feed
+    startup_logger.info("Starting alert manager...")
+    from core.alerts import get_alert_manager
+    from data.live_price_feed import get_live_price_feed
+    alert_mgr = get_alert_manager()
+    asyncio.create_task(alert_mgr.start())
+    
+    # Wire alerts to live price feed
+    price_feed = get_live_price_feed()
+    def on_price_update(price_data):
+        alert_mgr.update_price(price_data.symbol, price_data.price)
+    price_feed.subscribe(on_price_update)
+    
+    # Start health monitor
+    startup_logger.info("Starting health monitor...")
+    from core.health import get_health_monitor
+    health_mon = get_health_monitor()
+    asyncio.create_task(health_mon.start())
+    
+    startup_logger.info("MERID system started successfully")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown."""
+    from core.agent_orchestrator import get_agent_orchestrator
+    from core.consensus_engine import get_consensus_engine
+    from simulation.continuous_miner import get_continuous_miner
+    from core.audit_trail import get_audit_trail
+    from trading.execution import get_execution_engine
+    from agents.agent_mesh import agent_mesh
+    from monitoring.prediction_markets import get_prediction_aggregator
+    from core.alerts import get_alert_manager
+    from core.health import get_health_monitor
+    from utils.logger import get_logger
+    
+    shutdown_logger = get_logger("web.main.shutdown")
+    shutdown_logger.info("Shutting down MERID system...")
+    
+    # Stop health monitor
+    health_mon = get_health_monitor()
+    await health_mon.stop()
+    
+    # Stop alert manager
+    alert_mgr = get_alert_manager()
+    await alert_mgr.stop()
+    
+    # Stop prediction markets
+    prediction_agg = get_prediction_aggregator()
+    await prediction_agg.stop()
+    
+    # Stop streaming agent mesh
+    await agent_mesh.stop()
+    
+    # Stop execution engine
+    execution = get_execution_engine()
+    await execution.stop()
+    
+    # Stop audit trail (to capture final events)
+    audit = get_audit_trail()
+    await audit.stop()
+    
+    # Stop simulation miner
+    miner = get_continuous_miner()
+    await miner.stop()
+    
+    # Stop consensus engine
+    consensus = get_consensus_engine()
+    await consensus.stop()
+    
+    # Stop orchestrator
+    orchestrator = get_agent_orchestrator()
+    orchestrator.stop()
+    shutdown_logger.info("MERID system stopped")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8001)

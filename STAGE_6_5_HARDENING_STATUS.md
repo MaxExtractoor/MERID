@@ -6,7 +6,7 @@ Stage 6.5 implements adversarial hardening to protect MERID against data poisoni
 
 ---
 
-## ✅ Implemented Components
+## Implemented Components
 
 ### 1. Core Hardening Modules
 

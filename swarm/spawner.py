@@ -43,7 +43,28 @@ class SwarmSpawner:
         self._lineage: Dict[str, LineageRecord] = {}
         self.logger = get_logger("swarm.spawner")
         self._id_counter = itertools.count(1)
+        
+        # Tracking for mining metrics
+        self._replication_count = 0
+        self._termination_count = 0
+        self._evolution_count = 0
 
+    def get_active_agents(self) -> List:
+        """Get list of currently active agents."""
+        return list(self._active_agents)
+    
+    def get_replication_count(self) -> int:
+        """Get total number of agent replications."""
+        return self._replication_count
+    
+    def get_termination_count(self) -> int:
+        """Get total number of agent terminations."""
+        return self._termination_count
+    
+    def get_evolution_count(self) -> int:
+        """Get total number of charter evolutions."""
+        return self._evolution_count
+    
     def bootstrap(self, agents: Sequence) -> List:
         self._active_agents = list(agents)
         now = current_time()["utc_iso"]
@@ -125,3 +146,16 @@ class SwarmSpawner:
             if agent.agent_id == agent_id:
                 return agent
         return None
+
+
+_spawner: SwarmSpawner | None = None
+
+
+def get_spawner() -> SwarmSpawner:
+    """Get or create global swarm spawner."""
+    global _spawner
+    if _spawner is None:
+        from swarm.performance import SwarmPerformanceLedger
+        ledger = SwarmPerformanceLedger()
+        _spawner = SwarmSpawner(ledger)
+    return _spawner

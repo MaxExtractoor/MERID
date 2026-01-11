@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID - Real-Time Analytics Dashboard</title>
+    <link rel="stylesheet" href="/static/css/merid.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        .live-indicator { display: inline-flex; align-items: center; gap: 6px; }
+        .live-dot { width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .price-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+        .price-card { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border: 1px solid #2a2a4a; border-radius: 12px; padding: 20px; }
+        .price-symbol { font-size: 14px; color: #888; margin-bottom: 4px; }
+        .price-value { font-size: 28px; font-weight: 700; color: #fff; font-family: 'SF Mono', monospace; }
+        .price-change { font-size: 14px; margin-top: 8px; }
+        .price-change.positive { color: #10b981; }
+        .price-change.negative { color: #ef4444; }
+        .price-exchange { font-size: 11px; color: #666; margin-top: 4px; text-transform: uppercase; }
+        .analytics-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; }
+        .system-metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+        .system-metric { background: #1a1a2e; border-radius: 8px; padding: 16px; text-align: center; }
+        .system-metric .label { font-size: 11px; color: #888; text-transform: uppercase; }
+        .system-metric .value { font-size: 24px; font-weight: 600; color: #10b981; margin-top: 4px; }
+        .agent-list { max-height: 400px; overflow-y: auto; }
+        .agent-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #2a2a4a; }
+        .agent-item:last-child { border-bottom: none; }
+        .agent-name { font-weight: 500; }
+        .agent-status { font-size: 12px; padding: 4px 8px; border-radius: 4px; }
+        .agent-status.active { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+        .agent-status.idle { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+        .news-feed { max-height: 300px; overflow-y: auto; }
+        .news-item { padding: 12px; border-left: 3px solid #10b981; margin-bottom: 12px; background: #1a1a2e; border-radius: 0 8px 8px 0; }
+        .news-item.bullish { border-left-color: #10b981; }
+        .news-item.bearish { border-left-color: #ef4444; }
+        .news-item.neutral { border-left-color: #6366f1; }
+        .news-title { font-weight: 500; margin-bottom: 4px; }
+        .news-source { font-size: 12px; color: #888; }
+        .sentiment-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .sentiment-badge.bullish { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+        .sentiment-badge.bearish { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+        .sentiment-badge.neutral { background: rgba(99, 102, 241, 0.2); color: #6366f1; }
+        .divergence-display { text-align: center; padding: 24px; background: linear-gradient(135deg, #1a1a2e 0%, #0f3460 100%); border-radius: 12px; }
+        .divergence-score { font-size: 48px; font-weight: 700; }
+        .divergence-score.nominal { color: #10b981; }
+        .divergence-score.alert { color: #f59e0b; }
+        .divergence-score.critical { color: #ef4444; }
+        .divergence-label { font-size: 14px; color: #888; margin-top: 8px; }
+        .refresh-time { font-size: 11px; color: #666; text-align: right; margin-top: 8px; }
+        .live-header { display: flex; justify-content: space-between; align-items: center; }
+        .live-title { margin: 0; }
+        .status-grid { margin-top: 16px; }
+        .shadow-metrics { margin-top: 16px; }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="merid-header">
+        <img src="/static/merid_logo.png" alt="MERID Logo" class="merid-logo">
+        <h1 class="merid-title">MERID Analytics</h1>
+        <nav class="merid-nav">
+            <a href="/institutional" class="nav-highlight">Control Center</a>
+            <a href="#dashboard">Dashboard</a>
+            <a href="#prices">Prices</a>
+            <a href="#agents">Agents</a>
+            <a href="#analytics">Analytics</a>
+            <a href="https://twitter.com/MERIDonX" target="_blank" rel="noopener">@MERIDonX</a>
+        </nav>
+    </header>
+
+    <!-- Main Container -->
+    <div class="merid-container">
+        <!-- Live Status Bar -->
+        <div class="merid-card fade-in">
+            <div class="live-header">
+                <h2 class="merid-card-title live-title">
+                    <span class="live-indicator">
+                        <span class="live-dot"></span>
+                        LIVE DATA
+                    </span>
+                </h2>
+                <div class="refresh-time" id="last-refresh">Last update: --</div>
+            </div>
+            <div class="grid-4 status-grid">
+                <div class="metric-item">
+                    <div class="metric-label">System Status</div>
+                    <div class="metric-value">
+                        <span class="status-indicator status-active"></span>
+                        <span id="system-status">OPERATIONAL</span>
+                    </div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-label">Active Agents</div>
+                    <div class="metric-value" id="active-agents">8</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-label">Divergence</div>
+                    <div class="metric-value" id="divergence-score">0.00%</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-label">Guardian State</div>
+                    <div class="metric-value" id="guardian-state">IDLE</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Real-Time Prices -->
+        <section id="prices">
+            <div class="merid-card fade-in">
+                <h2 class="merid-card-title">Real-Time Prices</h2>
+                <div class="price-grid" id="price-grid">
+                    <div class="price-card">
+                        <div class="price-symbol">BTC/USD</div>
+                        <div class="price-value" id="price-btc">$--</div>
+                        <div class="price-change positive" id="change-btc">+0.00%</div>
+                        <div class="price-exchange" id="exchange-btc">--</div>
+                    </div>
+                    <div class="price-card">
+                        <div class="price-symbol">ETH/USD</div>
+                        <div class="price-value" id="price-eth">$--</div>
+                        <div class="price-change positive" id="change-eth">+0.00%</div>
+                        <div class="price-exchange" id="exchange-eth">--</div>
+                    </div>
+                    <div class="price-card">
+                        <div class="price-symbol">SOL/USD</div>
+                        <div class="price-value" id="price-sol">$--</div>
+                        <div class="price-change positive" id="change-sol">+0.00%</div>
+                        <div class="price-exchange" id="exchange-sol">--</div>
+                    </div>
+                    <div class="price-card">
+                        <div class="price-symbol">AVAX/USD</div>
+                        <div class="price-value" id="price-avax">$--</div>
+                        <div class="price-change positive" id="change-avax">+0.00%</div>
+                        <div class="price-exchange" id="exchange-avax">--</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Analytics Section -->
+        <section id="analytics">
+            <div class="analytics-grid">
+                <!-- Charts -->
+                <div class="merid-card fade-in">
+                    <h2 class="merid-card-title">Price History</h2>
+                    <div class="chart-container">
+                        <canvas id="price-history-chart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Shadow MERID Status -->
+                <div class="merid-card fade-in">
+                    <h2 class="merid-card-title">Shadow MERID</h2>
+                    <div class="divergence-display">
+                        <div class="divergence-score nominal" id="divergence-display">0.00%</div>
+                        <div class="divergence-label">Divergence Score</div>
+                    </div>
+                    <div class="system-metrics shadow-metrics">
+                        <div class="system-metric">
+                            <div class="label">Shadow Equity</div>
+                            <div class="value" id="shadow-equity">$100,000</div>
+                        </div>
+                        <div class="system-metric">
+                            <div class="label">Shadow P&L</div>
+                            <div class="value" id="shadow-pnl">$0</div>
+                        </div>
+                        <div class="system-metric">
+                            <div class="label">Positions</div>
+                            <div class="value" id="shadow-positions">0</div>
+                        </div>
+                        <div class="system-metric">
+                            <div class="label">Alerts</div>
+                            <div class="value" id="alert-count">0</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Agents Section -->
+        <section id="agents">
+            <div class="analytics-grid">
+                <div class="merid-card fade-in">
+                    <h2 class="merid-card-title">Active Agents</h2>
+                    <div class="agent-list" id="agent-list">
+                        <p class="text-muted">Loading agents...</p>
+                    </div>
+                </div>
+
+                <div class="merid-card fade-in">
+                    <h2 class="merid-card-title">System Health</h2>
+                    <div class="system-metrics">
+                        <div class="system-metric">
+                            <div class="label">Risk Level</div>
+                            <div class="value" id="risk-level">LOW</div>
+                        </div>
+                        <div class="system-metric">
+                            <div class="label">Lockdown</div>
+                            <div class="value" id="lockdown-status">OFF</div>
+                        </div>
+                        <div class="system-metric">
+                            <div class="label">Violations (24h)</div>
+                            <div class="value" id="violations-count">0</div>
+                        </div>
+                        <div class="system-metric">
+                            <div class="label">Aave Health</div>
+                            <div class="value" id="aave-health">10.0</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- News Feed -->
+        <div class="merid-card slide-in">
+            <h2 class="merid-card-title">Intelligence Feed</h2>
+            <div class="news-feed" id="news-feed">
+                <p class="text-muted">Loading news...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="merid-footer">
+        <div class="social-links">
+            <a href="https://twitter.com/MERIDonX" target="_blank" rel="noopener">Twitter: @MERIDonX</a>
+            <a href="https://t.me/MaxExtractoor" target="_blank" rel="noopener">Telegram: t.me/MaxExtractoor</a>
+            <a href="mailto:merid_engine@outlook.com">Contact: merid_engine@outlook.com</a>
+        </div>
+        <p class="footer-copyright">
+            &copy; 2026 MERID - Maximum Extractable Revenue Intelligence & Distribution
+        </p>
+    </footer>
+
+    <script>
+        // Price history for chart
+        let priceHistory = {
+            labels: [],
+            btc: [],
+            eth: []
+        };
+        let priceChart = null;
+        const MAX_HISTORY = 30;
+
+        // Initialize price chart
+        function initChart() {
+            const ctx = document.getElementById('price-history-chart');
+            if (!ctx) return;
+            
+            priceChart = new Chart(ctx.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: priceHistory.labels,
+                    datasets: [
+                        {
+                            label: 'BTC',
+                            data: priceHistory.btc,
+                            borderColor: '#f7931a',
+                            backgroundColor: 'rgba(247, 147, 26, 0.1)',
+                            tension: 0.4,
+                            fill: true
+                        },
+                        {
+                            label: 'ETH',
+                            data: priceHistory.eth,
+                            borderColor: '#627eea',
+                            backgroundColor: 'rgba(98, 126, 234, 0.1)',
+                            tension: 0.4,
+                            fill: true
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { intersect: false, mode: 'index' },
+                    scales: {
+                        y: {
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: '#888' }
+                        },
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            ticks: { color: '#888', maxTicksLimit: 10 }
+                        }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#e0e0e0' } }
+                    }
+                }
+            });
+        }
+
+        // Fetch real-time data from API
+        async function fetchRealtimeData() {
+            try {
+                const response = await fetch('/api/v1/institutional/realtime/stream');
+                const data = await response.json();
+                
+                // Update timestamp
+                document.getElementById('last-refresh').textContent = 
+                    'Last update: ' + new Date().toLocaleTimeString();
+                
+                // Update prices
+                if (data.prices) {
+                    updatePrices(data.prices);
+                }
+                
+                // Update shadow MERID
+                if (data.shadow) {
+                    document.getElementById('shadow-equity').textContent = 
+                        '$' + data.shadow.equity.toLocaleString();
+                    document.getElementById('shadow-pnl').textContent = 
+                        '$' + data.shadow.pnl.toLocaleString();
+                    document.getElementById('shadow-positions').textContent = 
+                        data.shadow.positions;
+                }
+                
+                // Update divergence
+                if (data.divergence) {
+                    const score = (data.divergence.score * 100).toFixed(2) + '%';
+                    document.getElementById('divergence-score').textContent = score;
+                    document.getElementById('divergence-display').textContent = score;
+                    
+                    const displayEl = document.getElementById('divergence-display');
+                    displayEl.className = 'divergence-score ' + data.divergence.level;
+                }
+                
+                // Update guardian
+                if (data.guardian) {
+                    document.getElementById('guardian-state').textContent = 
+                        data.guardian.state.toUpperCase();
+                    document.getElementById('alert-count').textContent = 
+                        data.guardian.alerts;
+                }
+                
+                // Update system status
+                if (data.system) {
+                    document.getElementById('lockdown-status').textContent = 
+                        data.system.locked ? 'ON' : 'OFF';
+                }
+                
+            } catch (error) {
+                console.error('Failed to fetch realtime data:', error);
+            }
+        }
+
+        // Update price displays
+        function updatePrices(prices) {
+            const priceMap = {
+                'BTC/USDT': { el: 'btc', symbol: 'BTC' },
+                'ETH/USDT': { el: 'eth', symbol: 'ETH' },
+                'SOL/USDT': { el: 'sol', symbol: 'SOL' },
+                'AVAX/USDT': { el: 'avax', symbol: 'AVAX' }
+            };
+            
+            for (const [symbol, info] of Object.entries(priceMap)) {
+                const priceData = prices[symbol];
+                if (!priceData) continue;
+                
+                const priceEl = document.getElementById('price-' + info.el);
+                const changeEl = document.getElementById('change-' + info.el);
+                const exchangeEl = document.getElementById('exchange-' + info.el);
+                
+                if (priceEl) {
+                    priceEl.textContent = '$' + priceData.price.toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2
+                    });
+                }
+                
+                if (changeEl) {
+                    const change = priceData.change_24h || 0;
+                    changeEl.textContent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
+                    changeEl.className = 'price-change ' + (change >= 0 ? 'positive' : 'negative');
+                }
+                
+                if (exchangeEl) {
+                    exchangeEl.textContent = priceData.exchange || '--';
+                }
+            }
+            
+            // Update price history chart
+            if (priceChart && prices['BTC/USDT'] && prices['ETH/USDT']) {
+                const now = new Date().toLocaleTimeString();
+                priceHistory.labels.push(now);
+                priceHistory.btc.push(prices['BTC/USDT'].price);
+                priceHistory.eth.push(prices['ETH/USDT'].price);
+                
+                if (priceHistory.labels.length > MAX_HISTORY) {
+                    priceHistory.labels.shift();
+                    priceHistory.btc.shift();
+                    priceHistory.eth.shift();
+                }
+                
+                priceChart.data.labels = priceHistory.labels;
+                priceChart.data.datasets[0].data = priceHistory.btc;
+                priceChart.data.datasets[1].data = priceHistory.eth;
+                priceChart.update('none');
+            }
+        }
+
+        // Fetch agents list
+        async function fetchAgents() {
+            try {
+                const response = await fetch('/api/v1/system/agents');
+                const data = await response.json();
+                
+                const agentList = document.getElementById('agent-list');
+                if (!agentList || !data.agents) return;
+                
+                const agentEntries = Object.entries(data.agents);
+                agentList.innerHTML = agentEntries.map(([role, info]) => `
+                    <div class="agent-item">
+                        <span class="agent-name">${role}</span>
+                        <span class="agent-status ${info.running ? 'active' : 'idle'}">
+                            ${info.running ? 'ACTIVE' : 'IDLE'}
+                        </span>
+                    </div>
+                `).join('');
+                
+                document.getElementById('active-agents').textContent = agentEntries.length;
+                
+            } catch (error) {
+                console.error('Failed to fetch agents:', error);
+            }
+        }
+
+        // Fetch risk summary
+        async function fetchRiskSummary() {
+            try {
+                const response = await fetch('/api/v1/institutional/risk/summary');
+                const data = await response.json();
+                
+                document.getElementById('risk-level').textContent = 
+                    (data.risk_level || 'low').toUpperCase();
+                document.getElementById('violations-count').textContent = 
+                    data.violations_24h || 0;
+                    
+            } catch (error) {
+                console.error('Failed to fetch risk summary:', error);
+            }
+        }
+
+        // Fetch Aave status
+        async function fetchAaveStatus() {
+            try {
+                const response = await fetch('/api/v1/institutional/treasury/aave/status');
+                const data = await response.json();
+                
+                if (data.status) {
+                    document.getElementById('aave-health').textContent = 
+                        (data.status.health_factor || 10).toFixed(1);
+                }
+                
+            } catch (error) {
+                console.error('Failed to fetch Aave status:', error);
+            }
+        }
+
+        // Fetch intelligence feed
+        async function fetchNewsFeed() {
+            try {
+                // First try to start the intelligence layer
+                await fetch('/api/v1/institutional/intelligence/start', { method: 'POST' });
+                
+                // Then fetch the feed
+                const response = await fetch('/api/v1/institutional/intelligence/feed');
+                const data = await response.json();
+                
+                const newsFeed = document.getElementById('news-feed');
+                if (!newsFeed) return;
+                
+                // Display signals
+                if (data.signals && data.signals.length > 0) {
+                    newsFeed.innerHTML = data.signals.slice(0, 8).map(signal => {
+                        const sentimentClass = signal.sentiment_score > 0.2 ? 'bullish' : 
+                                              signal.sentiment_score < -0.2 ? 'bearish' : 'neutral';
+                        const strengthBadge = signal.strength === 'critical' ? '🔴' :
+                                             signal.strength === 'strong' ? '🟠' :
+                                             signal.strength === 'moderate' ? '🟡' : '🟢';
+                        return `
+                            <div class="news-item ${sentimentClass}">
+                                <div class="news-title">${strengthBadge} ${signal.headline}</div>
+                                <div class="news-source">
+                                    ${signal.source} • ${signal.type.toUpperCase()} • 
+                                    ${new Date(signal.timestamp * 1000).toLocaleTimeString()}
+                                    ${signal.symbols.length > 0 ? ' • ' + signal.symbols.join(', ') : ''}
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                    
+                    // Update sentiment display if exists
+                    if (data.sentiment) {
+                        const sentimentEl = document.getElementById('market-sentiment');
+                        if (sentimentEl) {
+                            sentimentEl.textContent = data.sentiment.label.toUpperCase();
+                            sentimentEl.className = 'value ' + data.sentiment.label;
+                        }
+                    }
+                } else {
+                    // Fallback to news feed
+                    const newsResponse = await fetch('/api/v1/institutional/news/feed');
+                    const newsData = await newsResponse.json();
+                    
+                    if (newsData.articles && newsData.articles.length > 0) {
+                        newsFeed.innerHTML = newsData.articles.slice(0, 5).map(article => `
+                            <div class="news-item">
+                                <div class="news-title">${article.title}</div>
+                                <div class="news-source">${article.source} • ${new Date(article.published_at * 1000).toLocaleString()}</div>
+                            </div>
+                        `).join('');
+                    } else {
+                        newsFeed.innerHTML = '<p class="text-muted">Initializing intelligence feed...</p>';
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Failed to fetch intelligence:', error);
+                document.getElementById('news-feed').innerHTML = 
+                    '<p class="text-muted">Intelligence feed loading...</p>';
+            }
+        }
+
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', () => {
+            initChart();
+            
+            // Initial fetch
+            fetchRealtimeData();
+            fetchAgents();
+            fetchRiskSummary();
+            fetchAaveStatus();
+            fetchNewsFeed();
+            
+            // Real-time updates every 2 seconds
+            setInterval(fetchRealtimeData, 2000);
+            
+            // Less frequent updates
+            setInterval(fetchAgents, 10000);
+            setInterval(fetchRiskSummary, 15000);
+            setInterval(fetchAaveStatus, 30000);
+            setInterval(fetchNewsFeed, 60000);
+        });
+    </script>
+</body>
+</html>

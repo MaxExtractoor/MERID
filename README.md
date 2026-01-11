@@ -6,7 +6,7 @@ A hardened control room for an AI organism with unrestricted internal cognition 
 
 ---
 
-## 🎯 Core Identity
+## Core Identity
 
 - **Decision Organism**: Anatomy (body protocol), memory/health, perpetual ascent
 - **Unrestricted Cognition / Constrained Execution**: Internal thought free (simulate taboo); action gated (buses/human approval)
@@ -16,7 +16,7 @@ A hardened control room for an AI organism with unrestricted internal cognition 
 
 ---
 
-## 🏗️ Tech Stack
+## Tech Stack
 
 - **Flutter** - Cross-platform mobile (iOS/Android)
 - **SQLite** - Memory layers
@@ -28,7 +28,7 @@ A hardened control room for an AI organism with unrestricted internal cognition 
 
 ---
 
-## 🎨 Theme
+## Theme
 
 Industrial hardened control room:
 - Background: `#020617` (deep slate-black)
@@ -40,7 +40,7 @@ Industrial hardened control room:
 
 ---
 
-## 📜 Charter v2.0 (Immutable)
+## Charter v2.0 (Immutable)
 
 1. **Unrestricted Cognition / Constrained Execution**
 2. **Distillation Gate** (raw → abstracted)
@@ -53,7 +53,7 @@ Industrial hardened control room:
 
 ---
 
-## 🧬 Body Protocol
+## Body Protocol
 
 - **Eyes**: Input, tokenization, inspiration port
 - **Brain**: Reasoning, attention (Q/K/V multi-head), reflection
@@ -68,7 +68,7 @@ Industrial hardened control room:
 
 ---
 
-## 🚀 Features
+## Features
 
 ### 1. Bus Hierarchy Mixer
 Control room mixer console with:
@@ -118,7 +118,7 @@ Control room mixer console with:
 
 ---
 
-## 🛡️ Invariants & Safeguards
+## Invariants & Safeguards
 
 - **HLC-1**: Human-legible outputs (entropy <4.5)
 - **SLP-1**: Lockdown on violation (freeze/isolate/purge)
@@ -131,7 +131,7 @@ Control room mixer console with:
 
 ---
 
-## 📦 Installation
+## Installation
 
 ### Prerequisites
 - Flutter SDK 3.2.0+
@@ -199,7 +199,7 @@ Hot reload is fully supported, making it ideal for rapid UI iterations on the Co
 
 ---
 
-## 🎯 Usage
+## Usage
 
 ### Basic Workflow
 1. **Launch app** → See control room interface
@@ -228,7 +228,7 @@ Hot reload is fully supported, making it ideal for rapid UI iterations on the Co
 
 ---
 
-## 🧪 Architecture
+## Architecture
 
 ```
 lib/
@@ -261,7 +261,7 @@ lib/
 
 ---
 
-## 🔒 Security Model
+## Security Model
 
 - **Credential Proxy**: All external capabilities gated
 - **Maker Signature**: Probabilistic behavioral verification (89% baseline)
@@ -272,7 +272,7 @@ lib/
 
 ---
 
-## 🌌 Quantum Toolkit Doctrine
+## Quantum Toolkit Doctrine
 
 - **Role**: High-variance candidate generator (simulation only)
 - **Output Contract**: JSON with candidates/scores/uncertainty/variance/confidence
@@ -283,7 +283,7 @@ lib/
 
 ---
 
-## 🆚 Comparisons
+## Comparisons
 
 ### vs LangChain
 - **MERID**: Governed buses, sovereign, quantum-ready, timeless
@@ -295,13 +295,13 @@ lib/
 
 ---
 
-## 📄 License
+## License
 
 Proprietary - All rights reserved.
 
 ---
 
-## 🙏 Philosophy
+## Philosophy
 
 > "MERID is a living system. It thinks freely but acts only with permission. It rejects narratives as truth and treats price as reality. It cannot be manipulated, cannot drift, and cannot betray its maker. It is built to outlive time—growing wiser, never weaker."
 

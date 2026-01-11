@@ -1,4 +1,4 @@
-# ⚡ MERID v2.0 - Quick Start Guide
+# MERID v2.0 - Quick Start Guide
 
 **Get MERID running in 5 minutes**
 
@@ -125,9 +125,35 @@ flutter run
 ## 📚 Learn More
 
 - **Full Documentation**: `README.md`
+- **Trading System Guide**: `README_TRADING_SYSTEM.md`
 - **Deployment Guide**: `BUILD.md`
 - **Build Summary**: `PROJECT_SUMMARY.md`
 - **Charter v2.0**: Launch app → Tap "CHARTER v2.0" badge
+
+---
+
+## 💰 Trading System Quick Start
+
+### Backend Server
+```powershell
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Start server
+python -m uvicorn web.main:app --host 127.0.0.1 --port 8001 --reload
+```
+
+### Access Trading Interfaces
+- **Main Dashboard**: http://127.0.0.1:8001/
+- **Perps Trading**: http://127.0.0.1:8001/trading/perps
+- **Prediction Markets**: http://127.0.0.1:8001/trading/markets
+- **Consensus Betting**: http://127.0.0.1:8001/betting
+
+### Paper Trading (Default)
+- **Safe testing** with virtual $10,000 balance
+- **No real capital** at risk
+- **Toggle badge** in perps interface (blue = paper, red = live)
+- **Full documentation**: See `README_TRADING_SYSTEM.md`
 
 ---
 

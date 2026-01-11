@@ -1,0 +1,84 @@
+# MERID Production Dependencies
+# Python 3.11.x required
+
+# Core Framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic[email]==2.12.5
+python-multipart==0.0.20
+
+# Web & HTTP
+httpx==0.28.1
+aiohttp==3.11.11
+requests==2.32.3
+
+# Database & Storage
+neo4j==5.27.0
+redis==5.2.1
+
+# Blockchain & Web3
+web3==7.7.0
+eth-account==0.13.7
+
+# Machine Learning & RL
+torch==2.5.1
+numpy==2.2.1
+stable-baselines3==2.4.0
+ray[rllib]==2.40.0
+gymnasium==1.0.0
+pettingzoo==1.24.3
+
+# Data Processing
+pandas==2.2.3
+scipy==1.15.1
+
+# Utilities
+python-dotenv==1.0.1
+tenacity==9.0.0
+pydantic-settings==2.7.1
+
+# Monitoring & Logging
+loguru==0.7.3
+
+# News & Feeds
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# Social Media
+tweepy==4.14.0
+
+# Crypto APIs
+ccxt==4.4.42
+
+# Task Scheduling (Optional)
+apache-airflow==2.10.4
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.2
+pytest-cov==6.0.0
+
+# Code Quality
+black==24.10.0
+flake8==7.1.1
+mypy==1.14.1
+
+# Security
+cryptography==44.0.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Email Validation
+email-validator==2.3.0
+dnspython==2.8.0
+
+# Serialization
+ormsgpack==1.12.1
+
+# Telegram & WebSocket
+python-telegram-bot==22.5
+websocket-client==1.9.0
+
+# System Monitoring
+psutil==7.2.1
