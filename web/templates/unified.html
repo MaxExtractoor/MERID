@@ -129,6 +129,12 @@
                 <a href="#compliance" class="sidebar-link" data-section="compliance">Compliance</a>
                 <a href="#wallet" class="sidebar-link" data-section="wallet">Wallet</a>
             </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">ADVANCED</div>
+                <a href="#treasury" class="sidebar-link" data-section="treasury">Treasury</a>
+                <a href="#sniping" class="sidebar-link" data-section="sniping">Sniping</a>
+                <a href="#recovery" class="sidebar-link" data-section="recovery">Recovery</a>
+            </div>
         </aside>
 
         <!-- Main Content Area -->
@@ -1501,6 +1507,158 @@
                             <div id="wc-sessions-list" class="sessions-list">
                                 <div class="empty-state">No active sessions</div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Treasury -->
+            <section id="treasury" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Treasury Automation</h1>
+                    <p class="section-subtitle">Yield strategies, drawdown governance, and auto-rebalancing</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="treasury-yield-sources">--</div>
+                        <div class="stat-label">Yield Sources</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="treasury-agents">--</div>
+                        <div class="stat-label">Strategy Agents</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="treasury-proposals">--</div>
+                        <div class="stat-label">Active Proposals</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="treasury-drawdown">--</div>
+                        <div class="stat-label">Drawdown</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Top Yield Sources</h2>
+                            <button class="btn btn-sm" onclick="refreshTreasury()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="yield-sources-list" class="yield-list">
+                                <div class="empty-state">Loading yield sources...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Drawdown Governor</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="drawdown-status" class="drawdown-display">
+                                <div class="empty-state">Loading drawdown status...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Sniping -->
+            <section id="sniping" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Memecoin Sniping</h1>
+                    <p class="section-subtitle">High-risk token detection with safety rails (ALERT-ONLY)</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="sniping-alerts">--</div>
+                        <div class="stat-label">Active Alerts</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="sniping-tokens">--</div>
+                        <div class="stat-label">Detected Tokens</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="sniping-rejected">--</div>
+                        <div class="stat-label">Auto-Rejected</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value safe" id="sniping-mode">ALERT_ONLY</div>
+                        <div class="stat-label">Mode</div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Snipe Alerts</h2>
+                        <button class="btn btn-sm" onclick="refreshSniping()">Refresh</button>
+                    </div>
+                    <div class="panel-body">
+                        <div id="sniping-alerts-list" class="alerts-list">
+                            <div class="empty-state">No active alerts</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Recovery -->
+            <section id="recovery" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Disaster Recovery</h1>
+                    <p class="section-subtitle">Failover, cold-start, and capital freeze management</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="recovery-state">--</div>
+                        <div class="stat-label">System State</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="recovery-frozen">--</div>
+                        <div class="stat-label">Capital Frozen</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="recovery-quarantined">--</div>
+                        <div class="stat-label">Quarantined Agents</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="recovery-points">--</div>
+                        <div class="stat-label">Recovery Points</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Partial Boot Status</h2>
+                            <button class="btn btn-sm" onclick="refreshRecovery()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="partial-boot-status" class="boot-status">
+                                <div class="empty-state">Loading boot status...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Shadow Promotion</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="shadow-status" class="shadow-display">
+                                <div class="empty-state">Loading shadow status...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Recent Anomalies</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="anomalies-list" class="anomalies-list">
+                            <div class="empty-state">No anomalies detected</div>
                         </div>
                     </div>
                 </div>

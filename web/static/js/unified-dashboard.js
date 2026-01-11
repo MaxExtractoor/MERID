@@ -2298,7 +2298,267 @@ refreshSection = function(section) {
         case 'wallet':
             refreshWallet();
             break;
+        case 'treasury':
+            refreshTreasury();
+            break;
+        case 'sniping':
+            refreshSniping();
+            break;
+        case 'recovery':
+            refreshRecovery();
+            break;
         default:
             originalRefreshSection(section);
     }
 };
+
+// Treasury Section
+async function refreshTreasury() {
+    try {
+        const statusRes = await fetch('/api/v1/treasury/status');
+        const status = await statusRes.json();
+        
+        // Update stats
+        const yieldEl = document.getElementById('treasury-yield-sources');
+        const agentsEl = document.getElementById('treasury-agents');
+        const proposalsEl = document.getElementById('treasury-proposals');
+        const drawdownEl = document.getElementById('treasury-drawdown');
+        
+        if (yieldEl) yieldEl.textContent = status.yield_sources || 0;
+        if (agentsEl) agentsEl.textContent = status.active_agents || 0;
+        if (proposalsEl) proposalsEl.textContent = status.active_proposals || 0;
+        if (drawdownEl) {
+            const dd = status.drawdown || {};
+            drawdownEl.textContent = `${(dd.current_drawdown_pct || 0).toFixed(2)}%`;
+            drawdownEl.className = dd.state === 'normal' ? 'stat-value' : 'stat-value warning';
+        }
+        
+        // Render top yield sources
+        const sourcesList = document.getElementById('yield-sources-list');
+        if (sourcesList && status.top_sources) {
+            sourcesList.innerHTML = status.top_sources.map(s => `
+                <div class="yield-source-item">
+                    <span class="source-name">${s.protocol} - ${s.asset}</span>
+                    <span class="source-apy">${s.current_apy.toFixed(2)}% APY</span>
+                    <span class="source-risk risk-${s.risk_tier}">${s.risk_tier.replace('tier_', 'T')}</span>
+                </div>
+            `).join('');
+        }
+        
+        // Render drawdown status
+        const drawdownStatus = document.getElementById('drawdown-status');
+        if (drawdownStatus && status.drawdown) {
+            const dd = status.drawdown;
+            drawdownStatus.innerHTML = `
+                <div class="drawdown-info">
+                    <div class="dd-state state-${dd.state}">${dd.state.toUpperCase()}</div>
+                    <div class="dd-metrics">
+                        <span>Peak: $${(dd.peak_value_usd || 0).toLocaleString()}</span>
+                        <span>Current: $${(dd.current_value_usd || 0).toLocaleString()}</span>
+                        <span>Drawdown: ${(dd.current_drawdown_pct || 0).toFixed(2)}%</span>
+                    </div>
+                    ${dd.paused ? '<div class="dd-paused">PAUSED</div>' : ''}
+                </div>
+            `;
+        }
+    } catch (e) {
+        console.error('Failed to refresh treasury:', e);
+    }
+}
+
+// Sniping Section
+async function refreshSniping() {
+    try {
+        const statusRes = await fetch('/api/v1/sniping/status');
+        const status = await statusRes.json();
+        
+        // Update stats
+        const alertsEl = document.getElementById('sniping-alerts');
+        const tokensEl = document.getElementById('sniping-tokens');
+        const rejectedEl = document.getElementById('sniping-rejected');
+        const modeEl = document.getElementById('sniping-mode');
+        
+        if (alertsEl) alertsEl.textContent = status.active_alerts || 0;
+        if (tokensEl) tokensEl.textContent = status.detected_tokens || 0;
+        if (rejectedEl) rejectedEl.textContent = status.rejected_tokens || 0;
+        if (modeEl) {
+            modeEl.textContent = status.mode || 'ALERT_ONLY';
+            modeEl.className = status.execution_enabled ? 'stat-value danger' : 'stat-value safe';
+        }
+        
+        // Fetch and render alerts
+        const alertsRes = await fetch('/api/v1/sniping/alerts?limit=10');
+        const alertsData = await alertsRes.json();
+        
+        const alertsList = document.getElementById('sniping-alerts-list');
+        if (alertsList && alertsData.alerts) {
+            alertsList.innerHTML = alertsData.alerts.length > 0 ? alertsData.alerts.map(a => `
+                <div class="snipe-alert alert-${a.risk_level}">
+                    <div class="alert-header">
+                        <span class="alert-symbol">${a.token_symbol}</span>
+                        <span class="alert-risk risk-${a.risk_level}">${a.risk_level.toUpperCase()}</span>
+                        <span class="alert-score">Score: ${a.opportunity_score.toFixed(0)}</span>
+                    </div>
+                    <div class="alert-body">
+                        <span class="alert-type">${a.alert_type}</span>
+                        <span class="alert-chain">${a.chain}</span>
+                    </div>
+                    <div class="alert-action">${a.recommended_action}</div>
+                </div>
+            `).join('') : '<div class="empty-state">No active alerts</div>';
+        }
+    } catch (e) {
+        console.error('Failed to refresh sniping:', e);
+    }
+}
+
+// Recovery Section
+async function refreshRecovery() {
+    try {
+        const statusRes = await fetch('/api/v1/recovery/status');
+        const status = await statusRes.json();
+        
+        // Update stats
+        const stateEl = document.getElementById('recovery-state');
+        const frozenEl = document.getElementById('recovery-frozen');
+        const quarantinedEl = document.getElementById('recovery-quarantined');
+        const pointsEl = document.getElementById('recovery-points');
+        
+        if (stateEl) {
+            stateEl.textContent = status.system_state || 'healthy';
+            stateEl.className = `stat-value state-${status.system_state}`;
+        }
+        if (frozenEl) {
+            const frozen = status.capital_freeze?.frozen || false;
+            frozenEl.textContent = frozen ? 'YES' : 'NO';
+            frozenEl.className = frozen ? 'stat-value danger' : 'stat-value safe';
+        }
+        if (quarantinedEl) quarantinedEl.textContent = status.agent_quarantine?.quarantined_count || 0;
+        if (pointsEl) pointsEl.textContent = status.recovery_points || 0;
+        
+        // Render partial boot status
+        const bootStatus = document.getElementById('partial-boot-status');
+        if (bootStatus && status.partial_boot) {
+            const pb = status.partial_boot;
+            bootStatus.innerHTML = `
+                <div class="boot-mode">Mode: ${pb.boot_mode}</div>
+                <div class="boot-components">
+                    <span>Failed: ${pb.failed_components?.length || 0}</span>
+                    <span>Bootable: ${pb.bootable_components?.length || 0}</span>
+                </div>
+            `;
+        }
+        
+        // Render shadow promotion status
+        const shadowStatus = document.getElementById('shadow-status');
+        if (shadowStatus && status.shadow_promotion) {
+            const sp = status.shadow_promotion;
+            shadowStatus.innerHTML = `
+                <div class="shadow-mode mode-${sp.mode}">${sp.mode.toUpperCase()}</div>
+                <div class="shadow-info">
+                    ${sp.is_shadow ? 'Running in shadow mode' : 'Running as PRIMARY'}
+                </div>
+            `;
+        }
+        
+        // Render anomalies
+        const anomaliesList = document.getElementById('anomalies-list');
+        if (anomaliesList && status.capital_freeze?.recent_anomalies) {
+            const anomalies = status.capital_freeze.recent_anomalies;
+            anomaliesList.innerHTML = anomalies.length > 0 ? anomalies.slice(0, 5).map(a => `
+                <div class="anomaly-item severity-${a.severity}">
+                    <span class="anomaly-type">${a.event_type}</span>
+                    <span class="anomaly-severity">${a.severity.toUpperCase()}</span>
+                    <span class="anomaly-action">${a.action_taken || 'none'}</span>
+                </div>
+            `).join('') : '<div class="empty-state">No anomalies detected</div>';
+        }
+    } catch (e) {
+        console.error('Failed to refresh recovery:', e);
+    }
+}
+
+// Enhanced streaming - increase polling frequency and add more data sources
+function startEnhancedStreaming() {
+    // Faster intelligence polling
+    setInterval(fetchIntelligence, 5000);  // Every 5 seconds instead of 15
+    
+    // Add prediction market streaming
+    setInterval(fetchPredictionMarkets, 10000);
+    
+    // Add arbitrage opportunities streaming
+    setInterval(fetchArbitrageOpportunities, 8000);
+    
+    // Add agent activity streaming
+    setInterval(fetchAgentActivity, 6000);
+}
+
+async function fetchPredictionMarkets() {
+    try {
+        const res = await fetch('/api/v1/prediction/markets');
+        const data = await res.json();
+        
+        const container = document.getElementById('prediction-markets-feed');
+        if (container && data.markets) {
+            const markets = data.markets.slice(0, 10);
+            container.innerHTML = markets.map(m => `
+                <div class="prediction-market">
+                    <div class="market-question">${m.question || m.title || 'Unknown'}</div>
+                    <div class="market-odds">
+                        <span class="odds-yes">${((m.yes_price || m.probability || 0) * 100).toFixed(1)}%</span>
+                        <span class="odds-volume">Vol: $${((m.volume || 0) / 1000).toFixed(1)}K</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+    } catch (e) {
+        // Silently fail - endpoint may not exist
+    }
+}
+
+async function fetchArbitrageOpportunities() {
+    try {
+        const res = await fetch('/api/v1/arbitrage/opportunities');
+        const data = await res.json();
+        
+        const container = document.getElementById('arbitrage-opportunities-feed');
+        if (container && data.opportunities) {
+            const opps = data.opportunities.slice(0, 5);
+            container.innerHTML = opps.length > 0 ? opps.map(o => `
+                <div class="arb-opportunity type-${o.type}">
+                    <div class="arb-pair">${o.symbol || 'Unknown'}</div>
+                    <div class="arb-spread">${(o.spread_bps || 0).toFixed(1)} bps</div>
+                    <div class="arb-profit">$${(o.expected_profit_usd || 0).toFixed(2)}</div>
+                </div>
+            `).join('') : '<div class="empty-state">No opportunities</div>';
+        }
+    } catch (e) {
+        // Silently fail
+    }
+}
+
+async function fetchAgentActivity() {
+    try {
+        const res = await fetch('/api/v1/agents/activity');
+        const data = await res.json();
+        
+        const container = document.getElementById('agent-activity-feed');
+        if (container && data.activities) {
+            const activities = data.activities.slice(0, 8);
+            container.innerHTML = activities.length > 0 ? activities.map(a => `
+                <div class="agent-activity">
+                    <span class="agent-name">${a.agent_id || 'Agent'}</span>
+                    <span class="agent-action">${a.action || a.type || 'idle'}</span>
+                    <span class="agent-time">${formatTime(a.timestamp)}</span>
+                </div>
+            `).join('') : '<div class="empty-state">No recent activity</div>';
+        }
+    } catch (e) {
+        // Silently fail
+    }
+}
+
+// Start enhanced streaming on load
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(startEnhancedStreaming, 2000);
+});

@@ -72,6 +72,11 @@ from web.api.cost_models import router as cost_models_router
 from web.api.time_exploit import router as time_exploit_router
 from web.api.sniping import router as sniping_router
 from web.api.recovery import router as recovery_router
+from web.api.treasury import router as treasury_router
+from web.api.agents import router as agents_router
+from web.api.governance import router as governance_router
+from web.api.ops import router as ops_router
+from web.api.archive import router as archive_router
 
 root_router = APIRouter()
 router = APIRouter(prefix="/api")
@@ -172,6 +177,11 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(time_exploit_router)
     application.include_router(sniping_router)
     application.include_router(recovery_router)
+    application.include_router(treasury_router)
+    application.include_router(agents_router)
+    application.include_router(governance_router)
+    application.include_router(ops_router)
+    application.include_router(archive_router)
     return application
 
 
