@@ -294,3 +294,58 @@ async def get_all_schemas() -> Dict[str, Any]:
             },
         }
     }
+
+
+# ============================================
+# JSON SCHEMA VALIDATION ENDPOINTS (Phase 14)
+# ============================================
+
+class ValidateRequest(BaseModel):
+    data: Dict[str, Any]
+
+
+@router.get("/json/manifest")
+async def get_json_schema_manifest() -> Dict[str, Any]:
+    """Get manifest of all canonical JSON schemas with checksums."""
+    from schemas.validator import compute_schema_manifest
+    return compute_schema_manifest()
+
+
+@router.get("/json/{schema_name}")
+async def get_json_schema(schema_name: str) -> Dict[str, Any]:
+    """Get a specific JSON schema by name."""
+    from schemas.validator import get_schema_registry
+    registry = get_schema_registry()
+    schema = registry.get_schema(schema_name)
+    if not schema:
+        raise HTTPException(status_code=404, detail=f"Schema not found: {schema_name}")
+    return {
+        "schema_name": schema_name,
+        "checksum": registry.get_checksum(schema_name),
+        "schema": schema,
+    }
+
+
+@router.post("/json/{schema_name}/validate")
+async def validate_against_schema(schema_name: str, request: ValidateRequest) -> Dict[str, Any]:
+    """Validate data against a canonical JSON schema."""
+    from schemas.validator import get_schema_registry
+    registry = get_schema_registry()
+    
+    if not registry.get_schema(schema_name):
+        raise HTTPException(status_code=404, detail=f"Schema not found: {schema_name}")
+    
+    is_valid, errors = registry.validate(schema_name, request.data)
+    return {
+        "schema_name": schema_name,
+        "valid": is_valid,
+        "errors": errors,
+        "error_count": len(errors),
+    }
+
+
+@router.get("/json/status")
+async def get_json_schema_status() -> Dict[str, Any]:
+    """Get status of the JSON schema registry."""
+    from schemas.validator import get_schema_registry
+    return get_schema_registry().get_status()

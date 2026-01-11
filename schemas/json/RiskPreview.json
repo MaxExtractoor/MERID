@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://merid.io/schemas/v1.0/RiskPreview.json",
+  "title": "RiskPreview",
+  "description": "Canonical schema for MERID risk previews - pre-execution risk assessment",
+  "version": "1.0.0",
+  "type": "object",
+  "required": ["preview_id", "intent_id", "timestamp", "portfolio_impact", "risk_metrics", "limits_check", "recommendation"],
+  "properties": {
+    "preview_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this risk preview"
+    },
+    "intent_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to the IntentEnvelope being assessed"
+    },
+    "timestamp": {
+      "type": "number",
+      "description": "Unix timestamp when preview was generated"
+    },
+    "portfolio_impact": {
+      "type": "object",
+      "required": ["current_exposure", "proposed_exposure", "delta"],
+      "properties": {
+        "current_exposure": {
+          "type": "object",
+          "properties": {
+            "total_usd": { "type": "number" },
+            "long_usd": { "type": "number" },
+            "short_usd": { "type": "number" },
+            "net_usd": { "type": "number" },
+            "leverage": { "type": "number" }
+          }
+        },
+        "proposed_exposure": {
+          "type": "object",
+          "properties": {
+            "total_usd": { "type": "number" },
+            "long_usd": { "type": "number" },
+            "short_usd": { "type": "number" },
+            "net_usd": { "type": "number" },
+            "leverage": { "type": "number" }
+          }
+        },
+        "delta": {
+          "type": "object",
+          "properties": {
+            "exposure_change_usd": { "type": "number" },
+            "exposure_change_pct": { "type": "number" },
+            "leverage_change": { "type": "number" }
+          }
+        },
+        "concentration": {
+          "type": "object",
+          "properties": {
+            "symbol_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+            "sector_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+            "exchange_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+          }
+        }
+      }
+    },
+    "risk_metrics": {
+      "type": "object",
+      "required": ["var_95", "max_loss", "correlation_risk"],
+      "properties": {
+        "var_95": {
+          "type": "number",
+          "description": "95% Value at Risk in USD"
+        },
+        "var_99": {
+          "type": "number",
+          "description": "99% Value at Risk in USD"
+        },
+        "cvar_95": {
+          "type": "number",
+          "description": "Conditional VaR (Expected Shortfall)"
+        },
+        "max_loss": {
+          "type": "number",
+          "description": "Maximum possible loss in USD"
+        },
+        "max_loss_pct": {
+          "type": "number",
+          "description": "Maximum loss as percentage of portfolio"
+        },
+        "correlation_risk": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "description": "Correlation with existing positions"
+        },
+        "beta": {
+          "type": "number",
+          "description": "Beta to market benchmark"
+        },
+        "volatility_contribution": {
+          "type": "number",
+          "description": "Contribution to portfolio volatility"
+        },
+        "liquidity_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Liquidity assessment (1 = highly liquid)"
+        },
+        "counterparty_risk": {
+          "type": "string",
+          "enum": ["none", "low", "medium", "high", "critical"]
+        }
+      }
+    },
+    "limits_check": {
+      "type": "object",
+      "required": ["all_passed", "checks"],
+      "properties": {
+        "all_passed": {
+          "type": "boolean",
+          "description": "Whether all risk limits are satisfied"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["limit_name", "passed", "current_value", "limit_value"],
+            "properties": {
+              "limit_name": { "type": "string" },
+              "limit_type": {
+                "type": "string",
+                "enum": ["hard", "soft", "warning"]
+              },
+              "passed": { "type": "boolean" },
+              "current_value": { "type": "number" },
+              "limit_value": { "type": "number" },
+              "utilization_pct": { "type": "number" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "stress_tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "scenario_name": { "type": "string" },
+          "price_shock_pct": { "type": "number" },
+          "portfolio_impact_usd": { "type": "number" },
+          "survives": { "type": "boolean" }
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": ["action", "risk_level"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["approve", "approve_with_conditions", "reduce_size", "reject", "manual_review"]
+        },
+        "risk_level": {
+          "type": "string",
+          "enum": ["minimal", "low", "moderate", "elevated", "high", "critical"]
+        },
+        "suggested_size_adjustment": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Suggested position size multiplier"
+        },
+        "conditions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "blocking_reasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}
