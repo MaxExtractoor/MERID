@@ -1,6 +1,10 @@
 // MERID Betting System
 
-let userId = 'user_' + Math.random().toString(36).substr(2, 9);
+let userId = localStorage.getItem('merid_user_id') || (() => {
+    const id = 'user_' + Date.now().toString(36) + '_' + crypto.randomUUID().slice(0, 8);
+    localStorage.setItem('merid_user_id', id);
+    return id;
+})();
 let selectedBlock = null;
 let selectedPrediction = null;
 let upcomingBlocks = [];
@@ -55,39 +59,34 @@ async function loadUpcomingBlocks() {
         const response = await fetch('/api/v1/betting/pools/active');
         const data = await response.json();
         
-        // Mock upcoming blocks
-        upcomingBlocks = [
-            {
-                block_index: 3,
-                total_pool: 1250.50,
-                total_bets: 15,
-                locked: false,
-                settled: false,
-                distribution: {
-                    'approved': 750.00,
-                    'rejected': 200.50,
-                    'high_confidence': 200.00,
-                    'low_confidence': 100.00
-                }
-            },
-            {
-                block_index: 4,
-                total_pool: 850.00,
-                total_bets: 10,
-                locked: false,
-                settled: false,
-                distribution: {
-                    'approved': 500.00,
-                    'rejected': 150.00,
-                    'high_confidence': 150.00,
-                    'low_confidence': 50.00
-                }
-            }
-        ];
+        // Use real API data
+        if (data.pools && Array.isArray(data.pools)) {
+            upcomingBlocks = data.pools.map(pool => ({
+                block_index: pool.block_index || pool.id || 0,
+                total_pool: pool.total_pool || pool.pool_size || 0,
+                total_bets: pool.total_bets || pool.bet_count || 0,
+                locked: pool.locked || pool.is_locked || false,
+                settled: pool.settled || pool.is_settled || false,
+                distribution: pool.distribution || {}
+            }));
+        } else if (Array.isArray(data)) {
+            upcomingBlocks = data.map(pool => ({
+                block_index: pool.block_index || pool.id || 0,
+                total_pool: pool.total_pool || pool.pool_size || 0,
+                total_bets: pool.total_bets || pool.bet_count || 0,
+                locked: pool.locked || pool.is_locked || false,
+                settled: pool.settled || pool.is_settled || false,
+                distribution: pool.distribution || {}
+            }));
+        } else {
+            upcomingBlocks = [];
+        }
         
         renderUpcomingBlocks(upcomingBlocks);
     } catch (error) {
         console.error('Failed to load blocks:', error);
+        upcomingBlocks = [];
+        renderUpcomingBlocks(upcomingBlocks);
     }
 }
 
@@ -318,8 +317,27 @@ async function loadMyBets() {
         document.getElementById('active-bets').textContent = data.total_bets || 0;
         document.getElementById('total-wagered').textContent = `$${(data.total_wagered || 0).toFixed(2)}`;
         
-        // Mock active bets
-        const bets = [];
+        // Use real API data for bets
+        let bets = [];
+        if (data.bets && Array.isArray(data.bets)) {
+            bets = data.bets.map(bet => ({
+                block_index: bet.block_index || bet.block_id || 0,
+                prediction: bet.prediction || bet.outcome || 'Unknown',
+                stake: bet.stake || bet.amount || 0,
+                odds: bet.odds || bet.multiplier || 1,
+                potential: bet.potential || (bet.stake * bet.odds) || 0,
+                status: bet.status || 'pending'
+            }));
+        } else if (data.active_bets && Array.isArray(data.active_bets)) {
+            bets = data.active_bets.map(bet => ({
+                block_index: bet.block_index || bet.block_id || 0,
+                prediction: bet.prediction || bet.outcome || 'Unknown',
+                stake: bet.stake || bet.amount || 0,
+                odds: bet.odds || bet.multiplier || 1,
+                potential: bet.potential || (bet.stake * bet.odds) || 0,
+                status: bet.status || 'pending'
+            }));
+        }
         
         const container = document.getElementById('my-bets-list');
         

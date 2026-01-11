@@ -5,6 +5,7 @@ This is the production agent architecture:
 - Subscribes to event bus channels
 - Runs continuous observe → analyze → vote loop
 - Emits outputs autonomously
+- Integrated with optimization layer for caching, profiling, and resource allocation
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import List, Optional, Dict, Any
 from abc import ABC, abstractmethod
 
 from core.streaming_bus import streaming_bus, EventChannel, StreamEvent, publish_agent_output
+from agents.optimization import get_agent_optimizer, CacheStrategy
 from utils.logger import get_logger
 
 
@@ -24,6 +26,11 @@ class StreamingAgent(ABC):
     
     Agents subscribe to event channels and process events continuously.
     Each agent runs as an independent async task.
+    
+    Integrated with optimization layer:
+    - Caching for repeated computations
+    - Profiling for performance tracking
+    - Trust-weighted resource allocation
     """
     
     def __init__(
@@ -42,6 +49,15 @@ class StreamingAgent(ABC):
         self.trust = 1.0
         self._task: Optional[asyncio.Task] = None
         self._queue: Optional[asyncio.Queue] = None
+        
+        # Optimization layer integration
+        self._optimizer = get_agent_optimizer()
+        self._cache = self._optimizer.get_cache(agent_id, max_size=500, strategy=CacheStrategy.LRU)
+        self._profiler = self._optimizer.get_profiler(agent_id)
+        self._budget = self._optimizer.get_budget(agent_id)
+        
+        # Set initial trust score
+        self._optimizer.set_trust(agent_id, self.trust)
         
         # Metrics
         self.events_processed = 0
@@ -86,38 +102,50 @@ class StreamingAgent(ABC):
         self.logger.info(f"{self.agent_id} stopped")
     
     async def _run_loop(self):
-        """Main agent loop: observe → analyze → vote."""
+        """Main agent loop: observe → analyze → vote with optimization."""
         self.logger.info(f"{self.agent_id} entering observe-analyze-vote loop")
         
         while self.running:
             try:
+                # Check compute budget
+                if self._budget.is_exhausted():
+                    self.logger.warning(f"{self.agent_id} compute budget exhausted, waiting for reset")
+                    await asyncio.sleep(5)
+                    self._optimizer.reset_budgets()
+                    continue
+                
                 # Observe: wait for event with timeout
                 try:
                     event = await asyncio.wait_for(self._queue.get(), timeout=30.0)
                 except asyncio.TimeoutError:
-                    # No events, just continue
                     continue
                 
-                # Track timing
-                start_time = time.time()
-                self.last_activity = start_time
+                # Track timing for profiling
+                start_time = time.perf_counter()
+                self.last_activity = time.time()
+                success = True
                 
-                # Analyze: process event with timeout
+                # Analyze: process event with timeout and budget tracking
                 try:
                     analysis = await asyncio.wait_for(self.analyze(event), timeout=10.0)
                 except asyncio.TimeoutError:
                     self.logger.warning(f"{self.agent_id} analysis timed out")
                     self.errors += 1
-                    continue
+                    success = False
+                    analysis = None
                 
                 if analysis:
-                    # Vote/Output: emit result
                     await self.emit_output(analysis)
                     self.outputs_emitted += 1
                 
-                # Update metrics
-                processing_time = time.time() - start_time
-                self.avg_processing_time = (self.avg_processing_time * self.events_processed + processing_time) / (self.events_processed + 1)
+                # Record profiling metrics
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                self._profiler.record_call(duration_ms, success=success)
+                self._budget.time_used_ms += duration_ms
+                self._budget.iterations_used += 1
+                
+                # Update internal metrics
+                self.avg_processing_time = (self.avg_processing_time * self.events_processed + duration_ms/1000) / (self.events_processed + 1)
                 self.events_processed += 1
                 
             except asyncio.CancelledError:
@@ -126,7 +154,8 @@ class StreamingAgent(ABC):
             except Exception as exc:
                 self.logger.error(f"{self.agent_id} error in loop: {exc}")
                 self.errors += 1
-                await asyncio.sleep(1)  # Back off on error
+                self._profiler.record_call(0, success=False)
+                await asyncio.sleep(1)
     
     @abstractmethod
     async def analyze(self, event: StreamEvent) -> Optional[Dict[str, Any]]:
@@ -151,8 +180,25 @@ class StreamingAgent(ABC):
         
         self.logger.debug(f"{self.agent_id} emitted output: {analysis.get('type')}")
     
+    def update_trust(self, new_trust: float) -> None:
+        """Update agent trust score and propagate to optimizer."""
+        self.trust = max(0.0, min(1.0, new_trust))
+        self._optimizer.set_trust(self.agent_id, self.trust)
+        self.logger.debug(f"{self.agent_id} trust updated to {self.trust:.2f}")
+    
+    def get_cached(self, key: str) -> Optional[Any]:
+        """Get value from agent's cache."""
+        return self._cache.get(key)
+    
+    def set_cached(self, key: str, value: Any, ttl: float = 300.0) -> None:
+        """Set value in agent's cache."""
+        self._cache.set(key, value, ttl=ttl)
+    
     def get_metrics(self) -> Dict[str, Any]:
-        """Get agent metrics."""
+        """Get agent metrics including optimization stats."""
+        profiler_stats = self._profiler.get_stats()
+        cache_stats = self._cache.get_stats()
+        
         return {
             "agent_id": self.agent_id,
             "running": self.running,
@@ -164,5 +210,14 @@ class StreamingAgent(ABC):
             "avg_processing_time_ms": round(self.avg_processing_time * 1000, 2),
             "last_activity": self.last_activity,
             "uptime_seconds": time.time() - self.last_activity if self.last_activity else 0,
-            "channels": [c.value for c in self.channels]
+            "channels": [c.value for c in self.channels],
+            "optimization": {
+                "cache_hit_rate": cache_stats.get("hit_rate", 0),
+                "cache_size": cache_stats.get("size", 0),
+                "profiler_avg_ms": profiler_stats.get("avg_time_ms", 0),
+                "profiler_p95_ms": profiler_stats.get("p95_time_ms", 0),
+                "success_rate": profiler_stats.get("success_rate", 1.0),
+                "budget_time_used_ms": self._budget.time_used_ms,
+                "budget_remaining_ms": self._budget.remaining_time_ms(),
+            }
         }

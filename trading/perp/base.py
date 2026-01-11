@@ -134,69 +134,19 @@ class PerpVenueAdapterBase(PerpVenueAdapter):
         return []
 
     # ------------------------------------------------------------------ #
-    # Deterministic mocks
+    # Fallback methods - return empty when no API key
     # ------------------------------------------------------------------ #
     def _mock_markets(self, limit: int) -> List[PerpMarketSnapshot]:
-        random.seed(f"{self.venue}-markets")
-        markets: List[PerpMarketSnapshot] = []
-        for idx in range(limit):
-            symbol = f"{self.venue.upper()}-MOCK-{idx}"
-            index_price = random.uniform(1000, 40000)
-            price = index_price * random.uniform(0.995, 1.005)
-            funding_rate = random.uniform(-0.0008, 0.0008)
-            markets.append(
-                PerpMarketSnapshot(
-                    venue=self.venue,
-                    symbol=symbol,
-                    price=price,
-                    index_price=index_price,
-                    open_interest=random.uniform(1e5, 5e6),
-                    funding_rate=funding_rate,
-                    volume_24h=random.uniform(5e6, 5e8),
-                    basis=price - index_price,
-                    metadata={"mock": True},
-                )
-            )
-        return markets
+        """Return empty list when no API key - no fake data."""
+        logger.debug("No API key for %s - market data unavailable", self.venue)
+        return []
 
     def _mock_funding(self, symbols: Optional[List[str]]) -> List[FundingRateSnapshot]:
-        random.seed(f"{self.venue}-funding")
-        symbols = symbols or [f"{self.venue.upper()}-MOCK-{idx}" for idx in range(5)]
-        now_ms = time.time() * 1000
-        snapshots: List[FundingRateSnapshot] = []
-        for symbol in symbols:
-            funding_rate = random.uniform(-0.0009, 0.0009)
-            settlement_ms = now_ms + random.uniform(30, 180) * 60 * 1000
-            apr = funding_rate * 24 * 365
-            snapshots.append(
-                FundingRateSnapshot(
-                    venue=self.venue,
-                    symbol=symbol,
-                    funding_rate=funding_rate,
-                    next_settlement_ms=settlement_ms,
-                    estimated_apr=apr,
-                    metadata={"mock": True},
-                )
-            )
-        return snapshots
+        """Return empty list when no API key - no fake data."""
+        logger.debug("No API key for %s - funding data unavailable", self.venue)
+        return []
 
     def _mock_whales(self, limit: int) -> List[WhaleSignal]:
-        random.seed(f"{self.venue}-whales")
-        signals: List[WhaleSignal] = []
-        for _ in range(limit):
-            symbol = f"{self.venue.upper()}-MOCK-{random.randint(1,5)}"
-            direction = random.choice(["buy", "sell"])
-            notional = random.uniform(1e5, 5e6)
-            timestamp_ms = time.time() * 1000 - random.uniform(0, 15) * 60 * 1000
-            signals.append(
-                WhaleSignal(
-                    venue=self.venue,
-                    symbol=symbol,
-                    direction=direction,
-                    notional=notional,
-                    timestamp_ms=timestamp_ms,
-                    source="mock",
-                    metadata={"mock": True},
-                )
-            )
-        return signals
+        """Return empty list when no API key - no fake data."""
+        logger.debug("No API key for %s - whale data unavailable", self.venue)
+        return []

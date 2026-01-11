@@ -139,47 +139,61 @@ class FundingRateScanner(ArbitrageScanner):
         return opportunities
     
     async def _fetch_funding_rate(self, exchange: str, symbol: str) -> Optional[FundingRateData]:
-        """Fetch funding rate from exchange."""
+        """Fetch real funding rate from exchange via CCXT."""
         try:
-            from data.live_price_feed import get_live_price_feed
+            import ccxt.async_support as ccxt_async
             
-            feed = get_live_price_feed()
-            price_data = feed.get_current_price(symbol)
-            
-            if not price_data:
+            exchange_class = getattr(ccxt_async, exchange, None)
+            if not exchange_class:
+                logger.debug(f"Exchange {exchange} not supported")
                 return None
             
-            base_price = price_data.price
+            ex = exchange_class({'enableRateLimit': True})
             
-            import random
-            
-            # Simulate funding rates
-            # In trending markets, funding can be extreme
-            funding_rate = random.uniform(-0.002, 0.003)  # -0.2% to +0.3%
-            
-            # Next funding time (every 8 hours: 00:00, 08:00, 16:00 UTC)
-            current_hour = time.gmtime().tm_hour
-            hours_to_next = 8 - (current_hour % 8)
-            if hours_to_next == 8:
-                hours_to_next = 0
-            next_funding = time.time() + (hours_to_next * 3600) - (time.gmtime().tm_min * 60)
-            
-            # Add some randomness to simulate different exchange schedules
-            next_funding += random.uniform(-1800, 1800)
-            
-            return FundingRateData(
-                exchange=exchange,
-                symbol=symbol,
-                current_rate=funding_rate,
-                predicted_rate=funding_rate * random.uniform(0.8, 1.2),
-                next_funding_time=next_funding,
-                mark_price=base_price * (1 + random.uniform(-0.001, 0.001)),
-                index_price=base_price,
-                open_interest=random.uniform(50000000, 300000000),
-                timestamp=time.time(),
-            )
+            try:
+                # Format symbol for perp market
+                perp_symbol = symbol.replace("/", "") + ":USDT"
+                
+                # Fetch funding rate
+                funding_info = await ex.fetch_funding_rate(perp_symbol)
+                
+                funding_rate = funding_info.get('fundingRate', 0.0) or 0.0
+                next_funding_ts = funding_info.get('fundingTimestamp', 0) or 0
+                if next_funding_ts > 1e12:  # milliseconds
+                    next_funding_ts = next_funding_ts / 1000
+                
+                # Fetch ticker for prices
+                ticker = await ex.fetch_ticker(perp_symbol)
+                mark_price = ticker.get('last', 0) or ticker.get('close', 0)
+                index_price = ticker.get('index', mark_price) or mark_price
+                
+                # Try to get open interest
+                open_interest = 0.0
+                try:
+                    oi_data = await ex.fetch_open_interest(perp_symbol)
+                    open_interest = oi_data.get('openInterestValue', 0) or 0
+                except Exception:
+                    open_interest = ticker.get('quoteVolume', 0) or 0
+                
+                # Predicted rate is typically similar to current
+                predicted_rate = funding_info.get('fundingRatePredicted', funding_rate) or funding_rate
+                
+                return FundingRateData(
+                    exchange=exchange,
+                    symbol=symbol,
+                    current_rate=funding_rate,
+                    predicted_rate=predicted_rate,
+                    next_funding_time=next_funding_ts if next_funding_ts > 0 else time.time() + 28800,
+                    mark_price=mark_price,
+                    index_price=index_price,
+                    open_interest=open_interest,
+                    timestamp=time.time(),
+                )
+            finally:
+                await ex.close()
+                
         except Exception as e:
-            logger.debug(f"Funding rate fetch error: {e}")
+            logger.debug(f"Funding rate fetch error for {exchange}/{symbol}: {e}")
             return None
     
     def _evaluate_single_exchange(self, rate: FundingRateData) -> Optional[ArbitrageOpportunity]:

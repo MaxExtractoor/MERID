@@ -140,34 +140,43 @@ class CrossCEXScanner(ArbitrageScanner):
             if not price_data:
                 return None
             
-            base_price = price_data.price
+            # Fetch real orderbook from CCXT for accurate bid/ask
+            import ccxt.async_support as ccxt_async
             
-            # Simulate exchange-specific spreads
-            spread_factors = {
-                "binance": 0.0001,
-                "coinbase": 0.0003,
-                "kraken": 0.0002,
-                "okx": 0.00015,
-                "bybit": 0.00012,
-            }
+            exchange_class = getattr(ccxt_async, exchange, None)
+            if not exchange_class:
+                # Fallback to price feed data
+                return ExchangePrice(
+                    exchange=exchange,
+                    symbol=symbol,
+                    bid=price_data.bid if hasattr(price_data, 'bid') else price_data.price * 0.9999,
+                    ask=price_data.ask if hasattr(price_data, 'ask') else price_data.price * 1.0001,
+                    bid_size=0,
+                    ask_size=0,
+                    timestamp=time.time(),
+                )
             
-            # Add some variance between exchanges
-            import random
-            variance = random.uniform(-0.0005, 0.0005)
-            exchange_price = base_price * (1 + variance)
-            
-            spread = spread_factors.get(exchange, 0.0002)
-            half_spread = exchange_price * spread / 2
-            
-            return ExchangePrice(
-                exchange=exchange,
-                symbol=symbol,
-                bid=exchange_price - half_spread,
-                ask=exchange_price + half_spread,
-                bid_size=random.uniform(1, 10),
-                ask_size=random.uniform(1, 10),
-                timestamp=time.time(),
-            )
+            ex = exchange_class({'enableRateLimit': True})
+            try:
+                orderbook = await ex.fetch_order_book(symbol, limit=5)
+                
+                bid = orderbook['bids'][0][0] if orderbook['bids'] else price_data.price * 0.9999
+                ask = orderbook['asks'][0][0] if orderbook['asks'] else price_data.price * 1.0001
+                bid_size = orderbook['bids'][0][1] if orderbook['bids'] else 0
+                ask_size = orderbook['asks'][0][1] if orderbook['asks'] else 0
+                
+                return ExchangePrice(
+                    exchange=exchange,
+                    symbol=symbol,
+                    bid=bid,
+                    ask=ask,
+                    bid_size=bid_size,
+                    ask_size=ask_size,
+                    timestamp=time.time(),
+                )
+            finally:
+                await ex.close()
+                
         except Exception as e:
             logger.debug(f"Price fetch error for {exchange}/{symbol}: {e}")
             return None

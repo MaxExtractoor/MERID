@@ -138,68 +138,102 @@ class PerpSpotScanner(ArbitrageScanner):
         return opportunities
     
     async def _fetch_perp_price(self, exchange: str, symbol: str) -> Optional[PerpPrice]:
-        """Fetch perpetual futures price."""
+        """Fetch perpetual futures price from CCXT."""
         try:
-            from data.live_price_feed import get_live_price_feed
+            import ccxt.async_support as ccxt_async
             
-            feed = get_live_price_feed()
-            price_data = feed.get_current_price(symbol)
-            
-            if not price_data:
+            # Get exchange instance
+            exchange_class = getattr(ccxt_async, exchange, None)
+            if not exchange_class:
+                logger.debug(f"Exchange {exchange} not supported")
                 return None
             
-            base_price = price_data.price
+            ex = exchange_class({'enableRateLimit': True})
             
-            import random
-            
-            # Simulate perp premium/discount
-            # In bull markets, perps often trade at premium
-            basis_bps = random.uniform(-20, 50)  # -0.2% to +0.5%
-            mark_price = base_price * (1 + basis_bps / 10000)
-            
-            # Simulate funding rate (-0.1% to +0.1% per 8h)
-            funding_rate = random.uniform(-0.001, 0.001)
-            
-            return PerpPrice(
-                exchange=exchange,
-                symbol=symbol,
-                mark_price=mark_price,
-                index_price=base_price,
-                funding_rate=funding_rate,
-                next_funding_time=time.time() + random.uniform(0, 28800),  # 0-8h
-                open_interest=random.uniform(100000000, 500000000),
-                timestamp=time.time(),
-            )
+            try:
+                # Fetch ticker for perp market
+                perp_symbol = symbol.replace("/", "") + ":USDT"  # e.g., BTCUSDT:USDT
+                
+                # Try to fetch funding rate
+                funding_rate = 0.0
+                next_funding_time = time.time() + 28800  # Default 8h
+                open_interest = 0.0
+                
+                try:
+                    funding_info = await ex.fetch_funding_rate(perp_symbol)
+                    funding_rate = funding_info.get('fundingRate', 0.0) or 0.0
+                    next_funding_time = funding_info.get('fundingTimestamp', time.time() + 28800) / 1000
+                except Exception:
+                    pass
+                
+                # Fetch ticker
+                ticker = await ex.fetch_ticker(perp_symbol)
+                
+                mark_price = ticker.get('last', 0) or ticker.get('close', 0)
+                index_price = ticker.get('index', mark_price) or mark_price
+                
+                # Try to get open interest
+                try:
+                    oi_data = await ex.fetch_open_interest(perp_symbol)
+                    open_interest = oi_data.get('openInterestValue', 0) or 0
+                except Exception:
+                    open_interest = ticker.get('quoteVolume', 0) or 0
+                
+                return PerpPrice(
+                    exchange=exchange,
+                    symbol=symbol,
+                    mark_price=mark_price,
+                    index_price=index_price,
+                    funding_rate=funding_rate,
+                    next_funding_time=next_funding_time,
+                    open_interest=open_interest,
+                    timestamp=time.time(),
+                )
+            finally:
+                await ex.close()
+                
         except Exception as e:
-            logger.debug(f"Perp price fetch error: {e}")
+            logger.debug(f"Perp price fetch error for {exchange}/{symbol}: {e}")
             return None
     
     async def _fetch_spot_price(self, exchange: str, symbol: str) -> Optional[SpotPrice]:
-        """Fetch spot price."""
+        """Fetch spot price from CCXT with real bid/ask."""
         try:
-            from data.live_price_feed import get_live_price_feed
+            import ccxt.async_support as ccxt_async
             
-            feed = get_live_price_feed()
-            price_data = feed.get_current_price(symbol)
-            
-            if not price_data:
+            # Get exchange instance
+            exchange_class = getattr(ccxt_async, exchange, None)
+            if not exchange_class:
+                logger.debug(f"Exchange {exchange} not supported")
                 return None
             
-            base_price = price_data.price
+            ex = exchange_class({'enableRateLimit': True})
             
-            import random
-            
-            spread = random.uniform(0.0001, 0.0003)
-            
-            return SpotPrice(
-                exchange=exchange,
-                symbol=symbol,
-                bid=base_price * (1 - spread),
-                ask=base_price * (1 + spread),
-                timestamp=time.time(),
-            )
+            try:
+                # Fetch order book for real bid/ask
+                orderbook = await ex.fetch_order_book(symbol, limit=5)
+                
+                bid = orderbook['bids'][0][0] if orderbook['bids'] else 0
+                ask = orderbook['asks'][0][0] if orderbook['asks'] else 0
+                
+                if bid <= 0 or ask <= 0:
+                    # Fallback to ticker
+                    ticker = await ex.fetch_ticker(symbol)
+                    bid = ticker.get('bid', 0) or ticker.get('last', 0)
+                    ask = ticker.get('ask', 0) or ticker.get('last', 0)
+                
+                return SpotPrice(
+                    exchange=exchange,
+                    symbol=symbol,
+                    bid=bid,
+                    ask=ask,
+                    timestamp=time.time(),
+                )
+            finally:
+                await ex.close()
+                
         except Exception as e:
-            logger.debug(f"Spot price fetch error: {e}")
+            logger.debug(f"Spot price fetch error for {exchange}/{symbol}: {e}")
             return None
     
     def _evaluate_basis_trade(

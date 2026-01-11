@@ -6,6 +6,7 @@ Continuous consensus processing with:
 - Risk agent VETO power
 - Skeptic re-round capability
 - 2/3 quorum requirement
+- Inter-system API integration for authority enforcement
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from collections import defaultdict
 import time
 
 from core.streaming_bus import get_event_bus, EventChannel, StreamEvent
+from core.intersystem_api import get_intersystem_api, MeridSystem, IntentStatus
 from utils.logger import get_logger
 
 logger = get_logger("core.consensus")
@@ -215,7 +217,7 @@ class ConsensusEngine:
                 self.trust_scores[agent_id] = trust
                 
     async def _resolve_consensus(self) -> Optional[ConsensusResult]:
-        """Resolve consensus from pending votes."""
+        """Resolve consensus from pending votes with inter-system authority checks."""
         if not self.pending_votes:
             return None
         
@@ -258,15 +260,32 @@ class ConsensusEngine:
         else:
             decision = "HOLD"
         
+        # Inter-system API authority check for execution decisions
+        vetoed = False
+        veto_reason = ""
+        if decision in ("EXECUTE_LONG", "EXECUTE_SHORT") and quorum_met:
+            try:
+                api = get_intersystem_api()
+                # Check if system is frozen
+                if api.is_frozen():
+                    vetoed = True
+                    veto_reason = "System is in emergency freeze state"
+                    decision = "NO_ACTION"
+                    logger.warning(f"Consensus vetoed: {veto_reason}")
+            except Exception as e:
+                logger.error(f"Inter-system API check failed: {e}")
+        
         result = ConsensusResult(
             decision=decision,
             signal=signal,
             confidence=confidence,
             votes=votes,
-            quorum_met=quorum_met
+            quorum_met=quorum_met,
+            vetoed=vetoed,
+            veto_reason=veto_reason
         )
         
-        logger.info(f"Consensus resolved: {decision} ({signal}) confidence={confidence:.2%} quorum={quorum_met}")
+        logger.info(f"Consensus resolved: {decision} ({signal}) confidence={confidence:.2%} quorum={quorum_met} vetoed={vetoed}")
         
         return result
         

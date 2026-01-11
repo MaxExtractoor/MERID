@@ -80,7 +80,7 @@ class PythOracle(BaseOracle):
     
     async def _fetch_price_impl(self, symbol: str) -> Optional[OraclePrice]:
         """
-        Fetch price from Pyth feed.
+        Fetch price from Pyth feed via live price feed.
         
         Args:
             symbol: Trading symbol (e.g., "BTC/USD")
@@ -92,12 +92,29 @@ class PythOracle(BaseOracle):
             self._logger.warning("No Pyth feed for %s", symbol)
             return None
         
-        base_price = self._simulated_prices.get(symbol, 100.0)
-        import random
-        noise = base_price * random.uniform(-0.0015, 0.0015)
-        price = base_price + noise
+        # Fetch real price from live price feed
+        try:
+            from data.live_price_feed import get_live_price_feed
+            feed = get_live_price_feed()
+            
+            # Convert symbol format (BTC/USD -> BTC/USDT)
+            base = symbol.split("/")[0]
+            price_data = feed.get_current_price(f"{base}/USDT")
+            
+            if price_data and price_data.price > 0:
+                price = price_data.price
+            else:
+                self._logger.debug("No live price for %s, using cached", symbol)
+                price = self._simulated_prices.get(symbol, 0)
+                if price <= 0:
+                    return None
+        except Exception as e:
+            self._logger.debug("Price fetch error: %s", e)
+            price = self._simulated_prices.get(symbol, 0)
+            if price <= 0:
+                return None
         
-        confidence_interval = base_price * 0.0005
+        confidence_interval = price * 0.0005
         
         return OraclePrice(
             oracle_id=self._oracle_id,

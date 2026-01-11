@@ -6,7 +6,11 @@ let currentOrderType = 'market';
 let currentLeverage = 1;
 let chart = null;
 let paperTradingMode = true; // Paper trading enabled by default
-let userId = 'user_' + Math.random().toString(36).substr(2, 9);
+let userId = localStorage.getItem('merid_user_id') || (() => {
+    const id = 'user_' + Date.now().toString(36) + '_' + crypto.randomUUID().slice(0, 8);
+    localStorage.setItem('merid_user_id', id);
+    return id;
+})();
 
 // WebSocket connections
 let priceWs = null;
@@ -60,9 +64,12 @@ function initializeChart() {
         wickUpColor: '#10b981',
     });
 
-    // Generate mock candlestick data
-    const data = generateMockCandlestickData();
-    candlestickSeries.setData(data);
+    // Fetch real candlestick data from API
+    fetchCandlestickData(currentSymbol).then(data => {
+        if (data.length > 0) {
+            candlestickSeries.setData(data);
+        }
+    });
 
     // Auto-resize
     window.addEventListener('resize', () => {
@@ -70,31 +77,27 @@ function initializeChart() {
     });
 }
 
-// Generate mock candlestick data
-function generateMockCandlestickData() {
-    const data = [];
-    let time = Math.floor(Date.now() / 1000) - 3600 * 24; // 24 hours ago
-    let price = 43000;
-
-    for (let i = 0; i < 100; i++) {
-        const open = price;
-        const close = price + (Math.random() - 0.5) * 200;
-        const high = Math.max(open, close) + Math.random() * 100;
-        const low = Math.min(open, close) - Math.random() * 100;
-
-        data.push({
-            time: time,
-            open: open,
-            high: high,
-            low: low,
-            close: close,
-        });
-
-        price = close;
-        time += 3600; // 1 hour intervals
+// Fetch real candlestick data from API
+async function fetchCandlestickData(symbol = 'BTC/USDT', timeframe = '1h', limit = 100) {
+    try {
+        const response = await fetch(`/api/v1/data/ohlcv?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}&limit=${limit}`);
+        const result = await response.json();
+        
+        if (result.data && result.data.length > 0) {
+            return result.data.map(candle => ({
+                time: candle.time,
+                open: candle.open,
+                high: candle.high,
+                low: candle.low,
+                close: candle.close,
+            }));
+        }
+    } catch (e) {
+        console.error('Failed to fetch OHLCV data:', e);
     }
-
-    return data;
+    
+    // Return empty array if fetch fails - chart will show no data
+    return [];
 }
 
 // Initialize WebSocket connections
@@ -243,7 +246,25 @@ function setupEventListeners() {
 // Update risk metrics
 function updateRiskMetrics() {
     const positionSize = parseFloat(document.getElementById('position-size').value) || 0;
-    const currentPrice = 43250.50; // Mock price
+    
+    // Get real price from lastPrices or fetch
+    const symbol = `${currentAsset}/USDT`;
+    const currentPrice = window.lastPrices?.[symbol] || window.lastPrices?.[currentAsset] || 0;
+    
+    if (currentPrice <= 0) {
+        // Fetch current price if not available
+        fetch(`/api/v1/prices/current?symbol=${symbol}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.price) {
+                    window.lastPrices = window.lastPrices || {};
+                    window.lastPrices[symbol] = data.price;
+                    updateRiskMetrics(); // Retry with fetched price
+                }
+            })
+            .catch(() => {});
+        return;
+    }
     
     // Entry price
     document.getElementById('entry-price').textContent = `$${currentPrice.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
@@ -254,8 +275,8 @@ function updateRiskMetrics() {
         : currentPrice * (1 + 0.9 / currentLeverage);
     document.getElementById('liq-price').textContent = `$${liqPrice.toLocaleString('en-US', {minimumFractionDigits: 2})}`;
     
-    // Slippage estimate
-    const slippageBps = positionSize > 1000 ? 5.0 : 2.3;
+    // Slippage estimate based on position size
+    const slippageBps = Math.min(10, 2 + (positionSize / 5000));
     document.getElementById('est-slippage').textContent = `${slippageBps.toFixed(1)} bps`;
     
     // Fees

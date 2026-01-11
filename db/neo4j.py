@@ -179,17 +179,18 @@ class Neo4jMemory:
                 """
                 MATCH (e:Energy)-[:BECAME]->(r:Reality)
                 OPTIONAL MATCH (a:Agent)-[v:VOTED]->(e)
+                WITH e, r, collect({
+                    agent: a.id,
+                    vote: v.vote,
+                    confidence: v.confidence
+                }) AS votes
                 RETURN
                     e.id AS energy_id,
                     e.payload AS payload,
                     e.timestamp AS timestamp,
                     r.consensus AS consensus,
                     r.approved AS approved,
-                    collect({
-                        agent: a.id,
-                        vote: v.vote,
-                        confidence: v.confidence
-                    }) AS votes
+                    votes
                 ORDER BY r.timestamp DESC
                 LIMIT $limit
                 """,

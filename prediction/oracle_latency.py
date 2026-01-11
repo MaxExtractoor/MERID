@@ -218,8 +218,9 @@ class OracleLatencyDetector:
         oracle_type = config.get("type", OracleType.CUSTOM)
         event_type = config.get("event_type", EventType.PRICE)
         
-        # Simulate latency based on oracle type
-        base_latency = {
+        # Use expected latency based on oracle type (no random variance)
+        # Real latency measurements come from actual oracle observations
+        expected_latency = {
             OracleType.CHAINLINK: 60.0,  # ~1 minute
             OracleType.PYTH: 1.0,        # ~1 second
             OracleType.UMA: 7200.0,      # ~2 hours (dispute period)
@@ -227,16 +228,13 @@ class OracleLatencyDetector:
             OracleType.CUSTOM: 300.0,
         }.get(oracle_type, 60.0)
         
-        # Add variance
-        latency = base_latency * random.uniform(0.5, 2.0)
-        
         measurement = LatencyMeasurement(
             oracle_id=oracle_id,
             event_id=f"event_{int(time.time())}",
-            real_world_time=time.time() - latency,
+            real_world_time=time.time() - expected_latency,
             oracle_update_time=time.time(),
-            latency_seconds=latency,
-            confidence=0.8,
+            latency_seconds=expected_latency,
+            confidence=0.5,  # Lower confidence for estimated values
         )
         
         self._record_measurement(oracle_id, measurement)

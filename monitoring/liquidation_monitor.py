@@ -71,27 +71,13 @@ class CoinGlassLiquidationMonitor:
         return events
 
     def _mock_events(self, symbols: Optional[List[str]]) -> List[LiquidationEvent]:
-        import random
+        """Return empty list when no API key - no fake data."""
         import time
-
-        random.seed("coinglass-mock")
-        symbols = symbols or ["BTC", "ETH", "SOL"]
-        events = []
-        now_ms = time.time() * 1000
-        for sym in symbols:
-            for venue in ("Binance", "Bybit", "OKX"):
-                events.append(
-                    LiquidationEvent(
-                        symbol=sym,
-                        venue=venue,
-                        side=random.choice(["long", "short"]),
-                        notional=random.uniform(5e5, 5e6),
-                        price=random.uniform(1000, 50000),
-                        timestamp_ms=now_ms - random.uniform(0, 6) * 60 * 60 * 1000,
-                        raw={"mock": True},
-                    )
-                )
-        return events
+        
+        # Return empty list - no fake liquidation data
+        # Real data requires CoinGlass API key
+        logger.debug("No CoinGlass API key configured - liquidation data unavailable")
+        return []
 
 
 class WhaleIntelMonitor:
@@ -125,26 +111,8 @@ class WhaleIntelMonitor:
         raise NotImplementedError
 
     def _mock_signals(self, limit: int) -> List[WhaleSignal]:
-        import random
-        import time
-
-        random.seed("whale-mock")
-        signals = []
-        for _ in range(limit):
-            venue = random.choice(["nansen", "arkham", "drift_guardian"])
-            symbol = random.choice(["BTC", "ETH", "ARB", "SOL"])
-            direction = random.choice(["buy", "sell"])
-            notional = random.uniform(2e5, 8e6)
-            timestamp_ms = time.time() * 1000 - random.uniform(0, 3) * 60 * 60 * 1000
-            signals.append(
-                WhaleSignal(
-                    venue=venue,
-                    symbol=f"{symbol}-PERP",
-                    direction=direction,
-                    notional=notional,
-                    timestamp_ms=timestamp_ms,
-                    source="mock",
-                    metadata={"mock": True},
-                )
-            )
-        return signals
+        """Return empty list when no API keys - no fake data."""
+        # Return empty list - no fake whale data
+        # Real data requires Nansen or Arkham API keys
+        logger.debug("No Nansen/Arkham API keys configured - whale data unavailable")
+        return []

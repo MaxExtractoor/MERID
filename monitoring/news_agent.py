@@ -92,27 +92,6 @@ class NewsSentinel:
             return self._mock_headlines(limit)
 
     def _mock_headlines(self, limit: int) -> List[NewsItem]:
-        """Fallback mock headlines for testing."""
-        items: List[NewsItem] = []
-        now_ms = time.time() * 1000
-        templates = [
-            ("CoinDesk", "Spot ETF Inflows Surge Again", "ETF desk notes strongest inflows week-over-week."),
-            ("CoinTelegraph", "Layer-2 Fees Spike", "Gas wars return as meme season reignites."),
-            ("Binance", "Maintenance Scheduled", "Perp engine maintenance planned for UTC night."),
-            ("CryptoCompare", "Estate Sells Assets", "Latest court filing indicates fresh OTC sale."),
-            ("CoinDesk", "Whale Wallet Reactivated", "Dormant ETH whale moved holdings after 5 years."),
-        ]
-        for idx in range(min(limit, len(templates))):
-            source, headline, summary = templates[idx]
-            importance = "high" if "ETF" in headline or "Maintenance" in headline else "medium"
-            items.append(
-                NewsItem(
-                    source=source,
-                    headline=headline,
-                    summary=summary,
-                    url=f"https://news.example.com/{idx}",
-                    importance=importance,
-                    timestamp_ms=now_ms - idx * 2 * 60 * 1000,
-                )
-            )
-        return items
+        """Return empty list when live feeds unavailable - no fake data."""
+        logger.debug("Live news feeds unavailable - returning empty list")
+        return []

@@ -79,7 +79,7 @@ class ChainlinkOracle(BaseOracle):
     
     async def _fetch_price_impl(self, symbol: str) -> Optional[OraclePrice]:
         """
-        Fetch price from Chainlink feed.
+        Fetch price from Chainlink feed via live price feed.
         
         Args:
             symbol: Trading symbol (e.g., "BTC/USD")
@@ -91,10 +91,27 @@ class ChainlinkOracle(BaseOracle):
             self._logger.warning("No Chainlink feed for %s", symbol)
             return None
         
-        base_price = self._simulated_prices.get(symbol, 100.0)
-        import random
-        noise = base_price * random.uniform(-0.001, 0.001)
-        price = base_price + noise
+        # Fetch real price from live price feed
+        try:
+            from data.live_price_feed import get_live_price_feed
+            feed = get_live_price_feed()
+            
+            # Convert symbol format (BTC/USD -> BTC/USDT)
+            base = symbol.split("/")[0]
+            price_data = feed.get_current_price(f"{base}/USDT")
+            
+            if price_data and price_data.price > 0:
+                price = price_data.price
+            else:
+                self._logger.debug("No live price for %s, using cached", symbol)
+                price = self._simulated_prices.get(symbol, 0)
+                if price <= 0:
+                    return None
+        except Exception as e:
+            self._logger.debug("Price fetch error: %s", e)
+            price = self._simulated_prices.get(symbol, 0)
+            if price <= 0:
+                return None
         
         return OraclePrice(
             oracle_id=self._oracle_id,

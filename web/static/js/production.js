@@ -399,11 +399,29 @@ function loadSectionData(sectionName) {
 
 // Load Blocks Explorer
 async function loadBlocksExplorer() {
-    // Placeholder for blocks explorer
     const grid = document.getElementById('blocks-list');
     if (!grid) return;
     
-    grid.innerHTML = '<p class="text-muted">Block explorer coming soon...</p>';
+    try {
+        const response = await fetch('/api/v1/mining/blocks?limit=20');
+        const data = await response.json();
+        
+        if (data.blocks && data.blocks.length > 0) {
+            grid.innerHTML = data.blocks.map(block => `
+                <div class="block-item">
+                    <div class="block-index">#${block.block_index || block.index || 0}</div>
+                    <div class="block-hash">${(block.hash || '').substring(0, 12)}...</div>
+                    <div class="block-score">${(block.score || 0).toFixed(1)}</div>
+                    <div class="block-time">${formatTimestamp(block.timestamp || Date.now()/1000)}</div>
+                </div>
+            `).join('');
+        } else {
+            grid.innerHTML = '<div class="empty-state">No blocks mined yet</div>';
+        }
+    } catch (error) {
+        console.error('Failed to load blocks:', error);
+        grid.innerHTML = '<div class="empty-state">Failed to load blocks</div>';
+    }
 }
 
 // Toggle Settings
@@ -414,12 +432,54 @@ function toggleSettings() {
 
 // Toggle Notifications
 function toggleNotifications() {
-    alert('Notifications panel coming soon!');
+    const panel = document.getElementById('notifications-panel');
+    if (panel) {
+        panel.classList.toggle('active');
+        if (panel.classList.contains('active')) {
+            loadNotifications();
+        }
+    }
+}
+
+// Load Notifications
+async function loadNotifications() {
+    try {
+        const response = await fetch('/api/v1/notifications/recent?limit=10');
+        const data = await response.json();
+        
+        const list = document.getElementById('notifications-list');
+        if (list && data.notifications) {
+            list.innerHTML = data.notifications.length > 0 
+                ? data.notifications.map(n => `
+                    <div class="notification-item ${n.read ? '' : 'unread'}">
+                        <span class="notification-icon">${n.type === 'alert' ? '⚠️' : n.type === 'success' ? '✅' : 'ℹ️'}</span>
+                        <span class="notification-message">${n.message || n.title}</span>
+                        <span class="notification-time">${formatRelativeTime(n.timestamp)}</span>
+                    </div>
+                `).join('')
+                : '<div class="empty-state">No notifications</div>';
+        }
+    } catch (e) {
+        console.debug('Notifications not available');
+    }
+}
+
+// Format relative time
+function formatRelativeTime(timestamp) {
+    const ts = timestamp < 1e12 ? timestamp * 1000 : timestamp;
+    const diff = Date.now() - ts;
+    if (diff < 60000) return 'just now';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    return `${Math.floor(diff / 86400000)}d ago`;
 }
 
 // Toggle User Menu
 function toggleUserMenu() {
-    alert('User menu coming soon!');
+    const menu = document.getElementById('user-menu');
+    if (menu) {
+        menu.classList.toggle('active');
+    }
 }
 
 // Auto Refresh

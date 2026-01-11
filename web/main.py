@@ -77,6 +77,7 @@ from web.api.agents import router as agents_router
 from web.api.governance import router as governance_router
 from web.api.ops import router as ops_router
 from web.api.archive import router as archive_router
+from web.api.trading_mode import router as trading_mode_router
 
 root_router = APIRouter()
 router = APIRouter(prefix="/api")
@@ -182,6 +183,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(governance_router)
     application.include_router(ops_router)
     application.include_router(archive_router)
+    application.include_router(trading_mode_router)
     return application
 
 
@@ -601,73 +603,99 @@ app = create_app()
 @app.on_event("startup")
 async def startup_event():
     """Initialize system on startup."""
-    from core.agent_orchestrator import get_agent_orchestrator
-    from core.consensus_engine import get_consensus_engine
     from utils.logger import get_logger
     import asyncio
     
     startup_logger = get_logger("web.main.startup")
-    startup_logger.info("Initializing MERID agent orchestrator...")
-    orchestrator = get_agent_orchestrator()
     
-    # Start orchestrator in background
-    asyncio.create_task(orchestrator.start())
+    try:
+        startup_logger.info("Initializing MERID agent orchestrator...")
+        from core.agent_orchestrator import get_agent_orchestrator
+        orchestrator = get_agent_orchestrator()
+        asyncio.create_task(orchestrator.start())
+    except Exception as e:
+        startup_logger.error(f"Failed to start orchestrator: {e}")
     
-    # Start consensus engine
-    startup_logger.info("Starting consensus engine...")
-    consensus = get_consensus_engine()
-    asyncio.create_task(consensus.start())
+    try:
+        startup_logger.info("Starting consensus engine...")
+        from core.consensus_engine import get_consensus_engine
+        consensus = get_consensus_engine()
+        asyncio.create_task(consensus.start())
+    except Exception as e:
+        startup_logger.error(f"Failed to start consensus: {e}")
     
-    # Start continuous simulation miner
-    startup_logger.info("Starting simulation miner...")
-    from simulation.continuous_miner import get_continuous_miner
-    miner = get_continuous_miner()
-    asyncio.create_task(miner.start())
+    try:
+        startup_logger.info("Starting simulation miner...")
+        from simulation.continuous_miner import get_continuous_miner
+        miner = get_continuous_miner()
+        asyncio.create_task(miner.start())
+    except Exception as e:
+        startup_logger.error(f"Failed to start miner: {e}")
     
-    # Start audit trail
-    startup_logger.info("Starting audit trail...")
-    from core.audit_trail import get_audit_trail
-    audit = get_audit_trail()
-    asyncio.create_task(audit.start())
+    try:
+        startup_logger.info("Starting audit trail...")
+        from core.audit_trail import get_audit_trail
+        audit = get_audit_trail()
+        asyncio.create_task(audit.start())
+    except Exception as e:
+        startup_logger.error(f"Failed to start audit: {e}")
     
-    # Start execution engine
-    startup_logger.info("Starting execution engine...")
-    from trading.execution import get_execution_engine
-    execution = get_execution_engine()
-    asyncio.create_task(execution.start())
+    try:
+        startup_logger.info("Starting execution engine...")
+        from trading.execution import get_execution_engine
+        from data.live_price_feed import get_live_price_feed
+        
+        execution = get_execution_engine()
+        asyncio.create_task(execution.start())
+        
+        # Wire execution engine to live price feed for real-time position updates
+        price_feed = get_live_price_feed()
+        def on_execution_price_update(price_data):
+            execution.update_price(price_data.symbol, price_data.price)
+        price_feed.subscribe(on_execution_price_update)
+        startup_logger.info("Execution engine wired to live price feed")
+    except Exception as e:
+        startup_logger.error(f"Failed to start execution: {e}")
     
-    # Start streaming agent mesh (8 mandatory agents)
-    startup_logger.info("Starting streaming agent mesh...")
-    from agents.agent_mesh import agent_mesh
-    asyncio.create_task(agent_mesh.initialize())
-    asyncio.create_task(agent_mesh.start())
+    try:
+        startup_logger.info("Starting streaming agent mesh...")
+        from agents.agent_mesh import agent_mesh
+        asyncio.create_task(agent_mesh.initialize())
+        asyncio.create_task(agent_mesh.start())
+    except Exception as e:
+        startup_logger.error(f"Failed to start agent mesh: {e}")
     
-    # Start prediction markets aggregator
-    startup_logger.info("Starting prediction markets aggregator...")
-    from monitoring.prediction_markets import get_prediction_aggregator
-    prediction_agg = get_prediction_aggregator()
-    asyncio.create_task(prediction_agg.start())
+    try:
+        startup_logger.info("Starting prediction markets aggregator...")
+        from monitoring.prediction_markets import get_prediction_aggregator
+        prediction_agg = get_prediction_aggregator()
+        asyncio.create_task(prediction_agg.start())
+    except Exception as e:
+        startup_logger.error(f"Failed to start prediction markets: {e}")
     
-    # Start alert manager and wire to price feed
-    startup_logger.info("Starting alert manager...")
-    from core.alerts import get_alert_manager
-    from data.live_price_feed import get_live_price_feed
-    alert_mgr = get_alert_manager()
-    asyncio.create_task(alert_mgr.start())
+    try:
+        startup_logger.info("Starting alert manager...")
+        from core.alerts import get_alert_manager
+        from data.live_price_feed import get_live_price_feed
+        alert_mgr = get_alert_manager()
+        asyncio.create_task(alert_mgr.start())
+        
+        price_feed = get_live_price_feed()
+        def on_price_update(price_data):
+            alert_mgr.update_price(price_data.symbol, price_data.price)
+        price_feed.subscribe(on_price_update)
+    except Exception as e:
+        startup_logger.error(f"Failed to start alerts: {e}")
     
-    # Wire alerts to live price feed
-    price_feed = get_live_price_feed()
-    def on_price_update(price_data):
-        alert_mgr.update_price(price_data.symbol, price_data.price)
-    price_feed.subscribe(on_price_update)
+    try:
+        startup_logger.info("Starting health monitor...")
+        from core.health import get_health_monitor
+        health_mon = get_health_monitor()
+        asyncio.create_task(health_mon.start())
+    except Exception as e:
+        startup_logger.error(f"Failed to start health monitor: {e}")
     
-    # Start health monitor
-    startup_logger.info("Starting health monitor...")
-    from core.health import get_health_monitor
-    health_mon = get_health_monitor()
-    asyncio.create_task(health_mon.start())
-    
-    startup_logger.info("MERID system started successfully")
+    startup_logger.info("MERID system startup complete")
 
 @app.on_event("shutdown")
 async def shutdown_event():

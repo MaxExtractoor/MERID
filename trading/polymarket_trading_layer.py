@@ -97,14 +97,9 @@ class ChainlinkOracle:
         return time.time()
 
     def _mock_price(self, slug: str) -> float:
-        random.seed(slug)
-        if "eth" in slug:
-            return random.uniform(3000, 4000)
-        if "btc" in slug:
-            return random.uniform(50000, 69000)
-        if "matic" in slug:
-            return random.uniform(0.4, 1.0)
-        return random.uniform(0.3, 0.7)
+        """Return 0 when no live price - no fake data."""
+        logger.debug("No live price for %s", slug)
+        return 0.0
 
 
 def feed_probability(feed_snapshot: Dict[str, Any]) -> float:
@@ -185,17 +180,6 @@ class PolymarketClient:
         return sorted(opportunities, key=lambda item: item["edge"], reverse=True)
 
     def _mock_markets(self, limit: int) -> List[Dict[str, Any]]:
-        random.seed(42)
-        markets = []
-        for idx in range(limit):
-            base_yes = random.uniform(0.2, 0.7)
-            markets.append(
-                {
-                    "slug": f"mock-market-{idx}",
-                    "question": f"Mock Market #{idx}",
-                    "volume": random.uniform(1000, 15000),
-                    "yesPrice": round(base_yes, 2),
-                    "noPrice": round(1 - base_yes - random.uniform(-0.05, 0.05), 2),
-                }
-            )
-        return markets
+        """Return empty list when API unavailable - no fake data."""
+        logger.debug("Polymarket API unavailable - returning empty list")
+        return []

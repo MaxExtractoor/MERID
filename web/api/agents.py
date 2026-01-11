@@ -1,12 +1,11 @@
 """
 Agent Activity API Endpoints
 
-Provides real-time agent activity data for streaming to the UI.
+Provides real-time agent activity data from the streaming agent mesh.
 """
 
 from __future__ import annotations
 
-import random
 import time
 from typing import Dict, Any, List, Optional
 
@@ -18,59 +17,63 @@ router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 logger = get_logger("web.api.agents")
 
 
-# In-memory activity log (would be from actual agent mesh in production)
+# In-memory activity log populated by real agent events
 _activity_log: List[Dict[str, Any]] = []
 _max_activities = 500
 
 
-def _generate_sample_activity() -> Dict[str, Any]:
-    """Generate sample agent activity for demonstration."""
-    agents = [
-        "market-analyst-01",
-        "news-analyst-01", 
-        "risk-agent-01",
-        "skeptic-agent-01",
-        "synthesizer-agent-01",
-        "strategy-agent-01",
-        "archivist-agent-01",
-        "meta-audit-agent-01",
-    ]
-    
-    actions = [
-        ("analyzed", "market_data", "Processed price update"),
-        ("detected", "signal", "Identified potential opportunity"),
-        ("voted", "consensus", "Cast vote on proposal"),
-        ("emitted", "output", "Generated analysis output"),
-        ("monitored", "risk", "Checked position limits"),
-        ("archived", "decision", "Logged consensus decision"),
-        ("validated", "intent", "Verified intent structure"),
-        ("audited", "trade", "Reviewed execution result"),
-    ]
-    
-    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "AVAX/USDT", "LINK/USDT"]
-    
-    agent = random.choice(agents)
-    action, action_type, description = random.choice(actions)
-    symbol = random.choice(symbols) if random.random() > 0.3 else None
-    
-    return {
-        "activity_id": f"act_{int(time.time() * 1000)}_{random.randint(1000, 9999)}",
-        "agent_id": agent,
-        "action": action,
-        "type": action_type,
-        "description": description,
-        "symbol": symbol,
-        "confidence": round(random.uniform(0.5, 0.95), 2),
-        "timestamp": time.time(),
-    }
-
-
 def log_activity(activity: Dict[str, Any]) -> None:
-    """Log an agent activity."""
+    """Log an agent activity from real agent events."""
     global _activity_log
     _activity_log.append(activity)
     if len(_activity_log) > _max_activities:
         _activity_log = _activity_log[-_max_activities:]
+
+
+def _get_real_agent_activities() -> List[Dict[str, Any]]:
+    """Get real activities from the streaming agent mesh."""
+    activities = []
+    try:
+        from agents.agent_mesh import agent_mesh
+        
+        for agent in agent_mesh.agents:
+            metrics = agent.get_metrics()
+            
+            # Create activity entries from real agent metrics
+            if metrics.get("events_processed", 0) > 0:
+                activities.append({
+                    "activity_id": f"act_{agent.agent_id}_{int(time.time() * 1000)}",
+                    "agent_id": agent.agent_id,
+                    "action": "processed",
+                    "type": "event",
+                    "description": f"Processed {metrics.get('events_processed', 0)} events",
+                    "symbol": None,
+                    "confidence": metrics.get("trust", 0.5),
+                    "timestamp": metrics.get("last_activity", time.time()),
+                    "metrics": {
+                        "events_processed": metrics.get("events_processed", 0),
+                        "outputs_emitted": metrics.get("outputs_emitted", 0),
+                        "errors": metrics.get("errors", 0),
+                        "avg_processing_time_ms": metrics.get("avg_processing_time_ms", 0),
+                    }
+                })
+            
+            if metrics.get("outputs_emitted", 0) > 0:
+                activities.append({
+                    "activity_id": f"out_{agent.agent_id}_{int(time.time() * 1000)}",
+                    "agent_id": agent.agent_id,
+                    "action": "emitted",
+                    "type": "output",
+                    "description": f"Emitted {metrics.get('outputs_emitted', 0)} outputs",
+                    "symbol": None,
+                    "confidence": metrics.get("trust", 0.5),
+                    "timestamp": metrics.get("last_activity", time.time()),
+                })
+                
+    except Exception as e:
+        logger.debug(f"Could not fetch agent activities: {e}")
+    
+    return activities
 
 
 @router.get("/status")
@@ -118,19 +121,20 @@ async def get_agents_status() -> Dict[str, Any]:
 
 @router.get("/activity")
 async def get_agent_activity(limit: int = 50) -> Dict[str, Any]:
-    """Get recent agent activity."""
-    # Generate some fresh activity if log is sparse
-    while len(_activity_log) < 20:
-        log_activity(_generate_sample_activity())
+    """Get recent agent activity from real agent mesh."""
+    # Get real activities from agent mesh
+    real_activities = _get_real_agent_activities()
     
-    # Add new activity occasionally
-    if random.random() > 0.5:
-        log_activity(_generate_sample_activity())
+    # Combine with logged activities
+    all_activities = _activity_log + real_activities
     
-    activities = _activity_log[-limit:]
+    # Sort by timestamp and return most recent
+    all_activities.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+    activities = all_activities[:limit]
+    
     return {
         "count": len(activities),
-        "activities": list(reversed(activities)),
+        "activities": activities,
     }
 
 

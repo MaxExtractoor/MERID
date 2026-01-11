@@ -351,6 +351,28 @@ class PortfolioManager:
                 }
         
         return allocation
+    
+    def get_value_history(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Get portfolio value history for charting."""
+        # Take a snapshot if we don't have recent data
+        if not self._snapshots or (time.time() - self._snapshots[-1].timestamp > 60):
+            self.take_snapshot()
+        
+        # Return recent snapshots
+        recent = self._snapshots[-limit:] if len(self._snapshots) > limit else self._snapshots
+        
+        return [
+            {
+                "timestamp": s.timestamp,
+                "total_value": s.total_value,
+                "equity": s.total_value,
+                "cash": s.cash,
+                "invested": s.invested,
+                "pnl": s.pnl,
+                "pnl_pct": s.pnl_pct,
+            }
+            for s in recent
+        ]
 
 
 # Singleton instance

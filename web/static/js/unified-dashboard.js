@@ -191,17 +191,12 @@ function initCharts() {
             }
         });
         
-        // Initialize with sample data
-        const now = Date.now();
-        const labels = [];
-        const data = [];
-        for (let i = 30; i >= 0; i--) {
-            labels.push(new Date(now - i * 60000).toLocaleTimeString());
-            data.push(100000 + Math.random() * 1000 - 500);
-        }
-        portfolioChart.data.labels = labels;
-        portfolioChart.data.datasets[0].data = data;
-        portfolioChart.update('none');
+        // Initialize with empty data - will be populated from API
+        portfolioChart.data.labels = [];
+        portfolioChart.data.datasets[0].data = [];
+        
+        // Fetch initial portfolio data
+        fetchPortfolioHistory();
     }
 
     // Agent Activity Chart
@@ -1875,7 +1870,10 @@ function escapeHtml(text) {
 
 function formatTime(timestamp) {
     if (!timestamp) return '';
-    const date = new Date(timestamp);
+    // Handle both seconds and milliseconds timestamps
+    // If timestamp is less than year 2000 in ms, it's likely in seconds
+    const ts = timestamp < 1000000000000 ? timestamp * 1000 : timestamp;
+    const date = new Date(ts);
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
@@ -2491,6 +2489,76 @@ function startEnhancedStreaming() {
     
     // Add agent activity streaming
     setInterval(fetchAgentActivity, 6000);
+    
+    // Add inter-system status streaming
+    setInterval(fetchInterSystemStatus, 15000);
+    
+    // Initial fetch
+    fetchInterSystemStatus();
+}
+
+// ============================================
+// INTER-SYSTEM API STATUS
+// ============================================
+
+async function fetchInterSystemStatus() {
+    try {
+        const response = await fetch('/api/v1/institutional/systems/status');
+        const data = await response.json();
+        
+        if (data.systems) {
+            renderSystemsStatus(data.systems);
+        }
+    } catch (e) {
+        console.debug('Inter-system status not available');
+    }
+}
+
+function renderSystemsStatus(systems) {
+    const container = document.getElementById('systems-status-grid');
+    if (!container) return;
+    
+    const systemIcons = {
+        'OPS': { icon: '⚙️', color: '#10b981', name: 'Operations' },
+        'GOV': { icon: '🏛️', color: '#6366f1', name: 'Governance' },
+        'FIN': { icon: '💰', color: '#f59e0b', name: 'Finance' },
+        'TREASURY': { icon: '🏦', color: '#14b8a6', name: 'Treasury' },
+        'ARCHIVE': { icon: '📚', color: '#8b5cf6', name: 'Archive' }
+    };
+    
+    container.innerHTML = Object.entries(systems).map(([key, system]) => {
+        const meta = systemIcons[key] || { icon: '📦', color: '#6b7280', name: key };
+        const status = system.status || 'unknown';
+        const health = system.health_score || 0;
+        const latency = system.latency_ms || 0;
+        
+        return `
+            <div class="system-card" style="--system-color: ${meta.color}">
+                <div class="system-header">
+                    <span class="system-icon">${meta.icon}</span>
+                    <span class="system-name">${meta.name}</span>
+                    <span class="system-status status-${status}">${status.toUpperCase()}</span>
+                </div>
+                <div class="system-metrics">
+                    <div class="metric">
+                        <span class="metric-label">Health</span>
+                        <span class="metric-value">${(health * 100).toFixed(0)}%</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Latency</span>
+                        <span class="metric-value">${latency.toFixed(0)}ms</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Requests</span>
+                        <span class="metric-value">${system.request_count || 0}</span>
+                    </div>
+                </div>
+                <div class="system-bar">
+                    <div class="system-bar-fill" style="width: ${health * 100}%"></div>
+                </div>
+            </div>
+        `;
+    }).join('');
 }
 
 async function fetchPredictionMarkets() {
@@ -2558,7 +2626,611 @@ async function fetchAgentActivity() {
     }
 }
 
+// Fetch portfolio history for chart
+async function fetchPortfolioHistory() {
+    try {
+        const response = await fetch('/api/v1/institutional/portfolio/history?limit=30');
+        const data = await response.json();
+        
+        if (portfolioChart && data.history && data.history.length > 0) {
+            const labels = data.history.map(h => new Date(h.timestamp * 1000).toLocaleTimeString());
+            const values = data.history.map(h => h.total_value || h.equity || 100000);
+            
+            portfolioChart.data.labels = labels;
+            portfolioChart.data.datasets[0].data = values;
+            portfolioChart.update('none');
+        }
+    } catch (e) {
+        console.debug('Portfolio history not available:', e);
+    }
+}
+
 // Start enhanced streaming on load
 document.addEventListener('DOMContentLoaded', () => {
     setTimeout(startEnhancedStreaming, 2000);
+});
+
+// ============================================
+// WEBSOCKET REAL-TIME STREAMING
+// ============================================
+
+let priceWebSocket = null;
+let agentWebSocket = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
+function initWebSockets() {
+    initPriceWebSocket();
+    initAgentWebSocket();
+}
+
+function initPriceWebSocket() {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws/prices`;
+    
+    try {
+        priceWebSocket = new WebSocket(wsUrl);
+        
+        priceWebSocket.onopen = () => {
+            console.log('Price WebSocket connected');
+            reconnectAttempts = 0;
+            updateConnectionStatus('connected');
+        };
+        
+        priceWebSocket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'price_update' && data.prices) {
+                    updatePrices(data.prices);
+                } else if (data.type === 'ticker') {
+                    handleTickerUpdate(data);
+                }
+            } catch (e) {
+                console.debug('WebSocket message parse error:', e);
+            }
+        };
+        
+        priceWebSocket.onclose = () => {
+            console.log('Price WebSocket disconnected');
+            updateConnectionStatus('disconnected');
+            scheduleReconnect(initPriceWebSocket);
+        };
+        
+        priceWebSocket.onerror = (error) => {
+            console.debug('Price WebSocket error:', error);
+        };
+    } catch (e) {
+        console.debug('WebSocket not available, using polling');
+    }
+}
+
+function initAgentWebSocket() {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws/agents`;
+    
+    try {
+        agentWebSocket = new WebSocket(wsUrl);
+        
+        agentWebSocket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'agent_update') {
+                    handleAgentUpdate(data);
+                } else if (data.type === 'consensus') {
+                    handleConsensusUpdate(data);
+                } else if (data.type === 'alert') {
+                    handleAlertUpdate(data);
+                }
+            } catch (e) {
+                console.debug('Agent WebSocket parse error:', e);
+            }
+        };
+        
+        agentWebSocket.onclose = () => {
+            scheduleReconnect(initAgentWebSocket);
+        };
+    } catch (e) {
+        console.debug('Agent WebSocket not available');
+    }
+}
+
+function scheduleReconnect(initFn) {
+    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+        setTimeout(initFn, delay);
+    }
+}
+
+function updateConnectionStatus(status) {
+    const statusEl = document.getElementById('ws-status');
+    if (statusEl) {
+        statusEl.className = `ws-status ${status}`;
+        statusEl.title = status === 'connected' ? 'Real-time connected' : 'Reconnecting...';
+    }
+}
+
+function handleTickerUpdate(data) {
+    const symbol = data.symbol;
+    if (!symbol) return;
+    
+    const price = data.price;
+    const change = data.change_24h;
+    
+    // Update price history
+    if (!priceHistory[symbol]) priceHistory[symbol] = [];
+    priceHistory[symbol].push({ price, time: Date.now() });
+    if (priceHistory[symbol].length > 100) priceHistory[symbol].shift();
+    
+    // Update display
+    const symbolKey = symbol.replace('/', '').toLowerCase().replace('usdt', '');
+    const priceEl = document.getElementById(`price-${symbolKey}`);
+    if (priceEl) {
+        const formatted = price >= 1000 
+            ? `$${price.toLocaleString(undefined, {maximumFractionDigits: 0})}`
+            : `$${price.toFixed(2)}`;
+        
+        // Animate price change
+        const oldPrice = lastPrices[symbol];
+        if (oldPrice && oldPrice !== price) {
+            priceEl.classList.add('flash');
+            setTimeout(() => priceEl.classList.remove('flash'), 300);
+        }
+        
+        priceEl.textContent = formatted;
+        priceEl.className = `price ${price > (oldPrice || price) ? 'up' : 'down'}`;
+        lastPrices[symbol] = price;
+    }
+    
+    // Update chart if selected
+    if (symbol === selectedSymbol) {
+        updateMainChart();
+    }
+}
+
+function handleAgentUpdate(data) {
+    // Update agent activity feed
+    const container = document.getElementById('agent-activity-feed');
+    if (container && data.agent_id) {
+        const activityHtml = `
+            <div class="agent-activity new">
+                <span class="agent-name">${data.agent_id}</span>
+                <span class="agent-action">${data.action || 'update'}</span>
+                <span class="agent-time">${formatTime(Date.now() / 1000)}</span>
+            </div>
+        `;
+        container.insertAdjacentHTML('afterbegin', activityHtml);
+        
+        // Keep only last 10 items
+        while (container.children.length > 10) {
+            container.removeChild(container.lastChild);
+        }
+    }
+}
+
+function handleConsensusUpdate(data) {
+    if (data.round_id) {
+        // Update consensus display
+        const roundEl = document.getElementById('current-round');
+        if (roundEl) roundEl.textContent = data.round_id.slice(0, 8);
+        
+        if (data.decision) {
+            const decisionEl = document.getElementById('consensus-decision');
+            if (decisionEl) decisionEl.textContent = data.decision.toUpperCase();
+        }
+    }
+}
+
+function handleAlertUpdate(data) {
+    // Show toast notification for alerts
+    if (data.severity === 'critical' || data.severity === 'high') {
+        showToast(data.message || 'New alert received', data.severity);
+    }
+    
+    // Refresh alerts panel
+    fetchIntelligence();
+}
+
+function showToast(message, severity = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${severity}`;
+    toast.innerHTML = `
+        <span class="toast-icon">${severity === 'critical' ? '⚠️' : severity === 'high' ? '🔔' : 'ℹ️'}</span>
+        <span class="toast-message">${escapeHtml(message)}</span>
+        <button class="toast-close" onclick="this.parentElement.remove()">×</button>
+    `;
+    
+    let container = document.getElementById('toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        document.body.appendChild(container);
+    }
+    
+    container.appendChild(toast);
+    
+    // Auto-remove after 5 seconds
+    setTimeout(() => toast.remove(), 5000);
+}
+
+// Initialize WebSockets after page load
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(initWebSockets, 1000);
+});
+
+// ============================================
+// FUTURE-PROOF UTILITIES
+// ============================================
+
+// Debounce function for performance
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
+// Throttle function for rate limiting
+function throttle(func, limit) {
+    let inThrottle;
+    return function(...args) {
+        if (!inThrottle) {
+            func.apply(this, args);
+            inThrottle = true;
+            setTimeout(() => inThrottle = false, limit);
+        }
+    };
+}
+
+// Format large numbers
+function formatNumber(num) {
+    if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+    if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+    if (num >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+    return num.toFixed(2);
+}
+
+// Format currency
+function formatCurrency(amount, decimals = 2) {
+    return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals
+    }).format(amount);
+}
+
+// Format percentage
+function formatPercent(value, decimals = 1) {
+    const sign = value >= 0 ? '+' : '';
+    return `${sign}${value.toFixed(decimals)}%`;
+}
+
+// Relative time formatting
+function formatRelativeTime(timestamp) {
+    const ts = timestamp < 1e12 ? timestamp * 1000 : timestamp;
+    const diff = Date.now() - ts;
+    
+    if (diff < 60000) return 'just now';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    return `${Math.floor(diff / 86400000)}d ago`;
+}
+
+// Local storage helpers with expiry
+function setStorageWithExpiry(key, value, ttlMs) {
+    const item = {
+        value: value,
+        expiry: Date.now() + ttlMs
+    };
+    localStorage.setItem(key, JSON.stringify(item));
+}
+
+function getStorageWithExpiry(key) {
+    const itemStr = localStorage.getItem(key);
+    if (!itemStr) return null;
+    
+    try {
+        const item = JSON.parse(itemStr);
+        if (Date.now() > item.expiry) {
+            localStorage.removeItem(key);
+            return null;
+        }
+        return item.value;
+    } catch {
+        return null;
+    }
+}
+
+// Export global lastPrices for other modules
+window.lastPrices = lastPrices;
+
+// ============================================
+// TRADING MODE CONTROLLER
+// ============================================
+
+let currentTradingMode = 'paper';
+
+async function fetchTradingModeStatus() {
+    try {
+        const response = await fetch('/api/v1/trading-mode/status');
+        const data = await response.json();
+        
+        currentTradingMode = data.mode || 'paper';
+        updateTradingModeUI(data);
+        
+        return data;
+    } catch (e) {
+        console.debug('Trading mode status not available');
+        return null;
+    }
+}
+
+function updateTradingModeUI(status) {
+    // Update mode indicator
+    const modeIndicator = document.getElementById('trading-mode-indicator');
+    if (modeIndicator) {
+        modeIndicator.textContent = status.mode.toUpperCase();
+        modeIndicator.className = `mode-badge mode-${status.mode}`;
+    }
+    
+    // Update mode selector
+    const modeSelector = document.getElementById('trading-mode-selector');
+    if (modeSelector) {
+        modeSelector.value = status.mode;
+    }
+    
+    // Update stats
+    const statsEl = document.getElementById('trading-mode-stats');
+    if (statsEl && status.daily_stats) {
+        statsEl.innerHTML = `
+            <div class="mode-stat">
+                <span class="stat-label">Trades Today</span>
+                <span class="stat-value">${status.daily_stats.trades || 0}</span>
+            </div>
+            <div class="mode-stat">
+                <span class="stat-label">Volume Today</span>
+                <span class="stat-value">$${(status.daily_stats.volume_usd || 0).toFixed(2)}</span>
+            </div>
+        `;
+    }
+}
+
+async function setTradingMode(mode) {
+    try {
+        const response = await fetch('/api/v1/trading-mode/mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode, reason: 'User changed via UI' })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showToast(`Trading mode changed to ${mode.toUpperCase()}`, 'info');
+            fetchTradingModeStatus();
+        } else {
+            showToast(data.detail || 'Failed to change mode', 'critical');
+        }
+    } catch (e) {
+        console.error('Failed to set trading mode:', e);
+        showToast('Failed to change trading mode', 'critical');
+    }
+}
+
+// ============================================
+// SPECTATOR FEATURE
+// ============================================
+
+let spectatorInterval = null;
+
+async function fetchSpectatorTrades(limit = 50) {
+    try {
+        const response = await fetch(`/api/v1/trading-mode/spectator/live?limit=${limit}`);
+        const data = await response.json();
+        
+        renderSpectatorTrades(data);
+        return data;
+    } catch (e) {
+        console.debug('Spectator trades not available');
+        return null;
+    }
+}
+
+function renderSpectatorTrades(data) {
+    const container = document.getElementById('spectator-trades-feed');
+    if (!container) return;
+    
+    const trades = data.trades || [];
+    
+    if (trades.length === 0) {
+        container.innerHTML = '<div class="empty-state">No trades recorded yet. Agents will appear here when they trade.</div>';
+        return;
+    }
+    
+    container.innerHTML = trades.map(trade => {
+        const isOpen = trade.status === 'open';
+        const pnlClass = trade.pnl > 0 ? 'positive' : trade.pnl < 0 ? 'negative' : '';
+        const actionClass = trade.action.includes('buy') || trade.action.includes('long') ? 'buy' : 'sell';
+        
+        return `
+            <div class="spectator-trade ${isOpen ? 'open' : 'closed'}">
+                <div class="trade-header">
+                    <span class="trade-agent">${trade.agent_id}</span>
+                    <span class="trade-action ${actionClass}">${trade.action.toUpperCase()}</span>
+                    <span class="trade-symbol">${trade.symbol}</span>
+                    <span class="trade-status ${trade.status}">${trade.status.toUpperCase()}</span>
+                </div>
+                <div class="trade-details">
+                    <div class="trade-detail">
+                        <span class="detail-label">Qty</span>
+                        <span class="detail-value">${trade.quantity.toFixed(4)}</span>
+                    </div>
+                    <div class="trade-detail">
+                        <span class="detail-label">Entry</span>
+                        <span class="detail-value">$${trade.entry_price.toFixed(2)}</span>
+                    </div>
+                    ${!isOpen ? `
+                        <div class="trade-detail">
+                            <span class="detail-label">Exit</span>
+                            <span class="detail-value">$${trade.exit_price.toFixed(2)}</span>
+                        </div>
+                        <div class="trade-detail">
+                            <span class="detail-label">P&L</span>
+                            <span class="detail-value ${pnlClass}">${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}</span>
+                        </div>
+                    ` : ''}
+                    <div class="trade-detail">
+                        <span class="detail-label">Confidence</span>
+                        <span class="detail-value">${(trade.confidence * 100).toFixed(0)}%</span>
+                    </div>
+                </div>
+                ${trade.reasoning ? `<div class="trade-reasoning">${trade.reasoning}</div>` : ''}
+                <div class="trade-meta">
+                    <span class="trade-strategy">${trade.strategy || 'Unknown'}</span>
+                    <span class="trade-time">${formatRelativeTime(trade.timestamp)}</span>
+                    <span class="trade-mode mode-${trade.mode}">${trade.mode.toUpperCase()}</span>
+                </div>
+            </div>
+        `;
+    }).join('');
+    
+    // Update summary
+    const summaryEl = document.getElementById('spectator-summary');
+    if (summaryEl && data.summary) {
+        const s = data.summary;
+        summaryEl.innerHTML = `
+            <div class="summary-stat">
+                <span class="stat-value">${s.total_trades}</span>
+                <span class="stat-label">Total Trades</span>
+            </div>
+            <div class="summary-stat">
+                <span class="stat-value">${s.open_trades}</span>
+                <span class="stat-label">Open</span>
+            </div>
+            <div class="summary-stat">
+                <span class="stat-value">${s.closed_trades}</span>
+                <span class="stat-label">Closed</span>
+            </div>
+            <div class="summary-stat ${s.total_pnl >= 0 ? 'positive' : 'negative'}">
+                <span class="stat-value">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</span>
+                <span class="stat-label">Total P&L</span>
+            </div>
+        `;
+    }
+    
+    // Update agent list
+    const agentsEl = document.getElementById('spectator-agents');
+    if (agentsEl && data.agents) {
+        agentsEl.innerHTML = data.agents.map(agent => `
+            <div class="spectator-agent">
+                <span class="agent-name">${agent.agent_id}</span>
+                <span class="agent-trades">${agent.trade_count} trades</span>
+                <span class="agent-open">${agent.open_positions} open</span>
+                <span class="agent-pnl ${agent.total_pnl >= 0 ? 'positive' : 'negative'}">
+                    ${agent.total_pnl >= 0 ? '+' : ''}$${agent.total_pnl.toFixed(2)}
+                </span>
+            </div>
+        `).join('');
+    }
+}
+
+async function fetchSpectatorStats() {
+    try {
+        const response = await fetch('/api/v1/trading-mode/spectator/stats');
+        const data = await response.json();
+        
+        renderSpectatorStats(data);
+        return data;
+    } catch (e) {
+        console.debug('Spectator stats not available');
+        return null;
+    }
+}
+
+function renderSpectatorStats(stats) {
+    const container = document.getElementById('spectator-stats');
+    if (!container) return;
+    
+    container.innerHTML = `
+        <div class="stats-grid-4">
+            <div class="stat-card">
+                <div class="stat-value">${stats.total_trades}</div>
+                <div class="stat-label">Total Trades</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">${stats.win_rate.toFixed(1)}%</div>
+                <div class="stat-label">Win Rate</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value ${stats.total_pnl >= 0 ? 'positive' : 'negative'}">
+                    ${stats.total_pnl >= 0 ? '+' : ''}$${stats.total_pnl.toFixed(2)}
+                </div>
+                <div class="stat-label">Total P&L</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">$${stats.avg_pnl.toFixed(2)}</div>
+                <div class="stat-label">Avg P&L</div>
+            </div>
+        </div>
+        
+        <div class="stats-breakdown">
+            <div class="breakdown-section">
+                <h4>By Symbol</h4>
+                ${Object.entries(stats.by_symbol || {}).map(([symbol, data]) => `
+                    <div class="breakdown-item">
+                        <span class="breakdown-name">${symbol}</span>
+                        <span class="breakdown-count">${data.count} trades</span>
+                        <span class="breakdown-pnl ${data.pnl >= 0 ? 'positive' : 'negative'}">
+                            ${data.pnl >= 0 ? '+' : ''}$${data.pnl.toFixed(2)}
+                        </span>
+                    </div>
+                `).join('')}
+            </div>
+            
+            <div class="breakdown-section">
+                <h4>By Strategy</h4>
+                ${Object.entries(stats.by_strategy || {}).map(([strategy, data]) => `
+                    <div class="breakdown-item">
+                        <span class="breakdown-name">${strategy}</span>
+                        <span class="breakdown-count">${data.count} trades</span>
+                        <span class="breakdown-pnl ${data.pnl >= 0 ? 'positive' : 'negative'}">
+                            ${data.pnl >= 0 ? '+' : ''}$${data.pnl.toFixed(2)}
+                        </span>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function startSpectatorMode() {
+    if (spectatorInterval) return;
+    
+    fetchSpectatorTrades();
+    fetchSpectatorStats();
+    
+    spectatorInterval = setInterval(() => {
+        fetchSpectatorTrades();
+    }, 3000);
+    
+    showToast('Spectator mode started', 'info');
+}
+
+function stopSpectatorMode() {
+    if (spectatorInterval) {
+        clearInterval(spectatorInterval);
+        spectatorInterval = null;
+    }
+}
+
+// Initialize trading mode on load
+document.addEventListener('DOMContentLoaded', () => {
+    fetchTradingModeStatus();
+    setInterval(fetchTradingModeStatus, 30000);
 });

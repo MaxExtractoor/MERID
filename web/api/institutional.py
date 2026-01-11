@@ -2215,6 +2215,25 @@ async def get_portfolio_holdings() -> Dict[str, Any]:
         return {"holdings": [], "error": str(e)}
 
 
+@router.get("/portfolio/history")
+async def get_portfolio_history(limit: int = 30) -> Dict[str, Any]:
+    """Get portfolio value history for charting."""
+    try:
+        from portfolio.manager import get_portfolio_manager
+        
+        manager = get_portfolio_manager()
+        history = manager.get_value_history(limit=limit)
+        
+        return {
+            "history": history,
+            "count": len(history),
+        }
+    except Exception as e:
+        logger.error(f"Portfolio history error: {e}")
+        # Return empty history on error
+        return {"history": [], "error": str(e)}
+
+
 @router.get("/portfolio/allocation")
 async def get_portfolio_allocation() -> Dict[str, Any]:
     """Get current vs target allocation."""

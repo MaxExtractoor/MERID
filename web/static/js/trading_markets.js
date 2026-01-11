@@ -47,52 +47,44 @@ async function loadMarkets() {
         const response = await fetch(`/api/v1/trading/markets/list?platform=${platform}&category=${category}`);
         const data = await response.json();
 
-        // Mock data for demonstration
-        markets = [
-            {
-                id: 'btc-50k-2024',
-                title: 'Will Bitcoin reach $50,000 by end of 2024?',
-                platform: 'polymarket',
-                category: 'crypto',
-                outcomes: [
-                    { name: 'Yes', odds: 0.65, volume: 125000 },
-                    { name: 'No', odds: 0.35, volume: 75000 }
+        // Use real API data
+        if (data.markets && Array.isArray(data.markets)) {
+            markets = data.markets.map(m => ({
+                id: m.id || m.slug || m.market_id,
+                title: m.title || m.question || m.name,
+                platform: m.platform || platform,
+                category: m.category || category,
+                outcomes: m.outcomes || [
+                    { name: 'Yes', odds: m.yes_price || m.yesPrice || 0.5, volume: m.yes_volume || 0 },
+                    { name: 'No', odds: m.no_price || m.noPrice || 0.5, volume: m.no_volume || 0 }
                 ],
-                description: 'This market resolves to YES if Bitcoin (BTC) trades at or above $50,000 on any major exchange before December 31, 2024 23:59:59 UTC.',
-                totalVolume: 200000,
-                endDate: '2024-12-31'
-            },
-            {
-                id: 'eth-etf-approval',
-                title: 'Will Ethereum ETF be approved in 2024?',
-                platform: 'polymarket',
-                category: 'crypto',
-                outcomes: [
-                    { name: 'Yes', odds: 0.72, volume: 180000 },
-                    { name: 'No', odds: 0.28, volume: 70000 }
+                description: m.description || m.summary || '',
+                totalVolume: m.volume || m.totalVolume || 0,
+                endDate: m.end_date || m.endDate || m.resolution_date || ''
+            }));
+        } else if (Array.isArray(data)) {
+            markets = data.map(m => ({
+                id: m.id || m.slug || m.market_id,
+                title: m.title || m.question || m.name,
+                platform: m.platform || platform,
+                category: m.category || category,
+                outcomes: m.outcomes || [
+                    { name: 'Yes', odds: m.yes_price || m.yesPrice || 0.5, volume: m.yes_volume || 0 },
+                    { name: 'No', odds: m.no_price || m.noPrice || 0.5, volume: m.no_volume || 0 }
                 ],
-                description: 'Resolves YES if SEC approves spot Ethereum ETF by end of 2024.',
-                totalVolume: 250000,
-                endDate: '2024-12-31'
-            },
-            {
-                id: 'sol-100-2024',
-                title: 'Solana to $100 in 2024?',
-                platform: 'manifold',
-                category: 'crypto',
-                outcomes: [
-                    { name: 'Yes', odds: 0.58, volume: 95000 },
-                    { name: 'No', odds: 0.42, volume: 65000 }
-                ],
-                description: 'Will SOL reach $100 before end of 2024?',
-                totalVolume: 160000,
-                endDate: '2024-12-31'
-            }
-        ];
+                description: m.description || m.summary || '',
+                totalVolume: m.volume || m.totalVolume || 0,
+                endDate: m.end_date || m.endDate || m.resolution_date || ''
+            }));
+        } else {
+            markets = [];
+        }
 
         renderMarkets(markets);
     } catch (error) {
         console.error('Failed to load markets:', error);
+        markets = [];
+        renderMarkets(markets);
     }
 }
 
@@ -317,33 +309,38 @@ async function scanArbitrage() {
         const response = await fetch('/api/v1/trading/arbitrage/scan?venues=polymarket,manifold,augur&assets=BTC,ETH,SOL');
         const data = await response.json();
 
-        // Mock arbitrage opportunities
-        arbitrageOpportunities = [
-            {
-                id: 'arb-btc-50k',
-                market: 'BTC $50k by 2024',
-                platformA: 'Polymarket',
-                platformB: 'Manifold',
-                oddsA: 0.65,
-                oddsB: 0.62,
-                spreadBps: 300,
-                netProfit: 45.20
-            },
-            {
-                id: 'arb-eth-etf',
-                market: 'ETH ETF Approval',
-                platformA: 'Polymarket',
-                platformB: 'Augur',
-                oddsA: 0.72,
-                oddsB: 0.69,
-                spreadBps: 280,
-                netProfit: 38.50
-            }
-        ];
+        // Use real API data
+        if (data.opportunities && Array.isArray(data.opportunities)) {
+            arbitrageOpportunities = data.opportunities.map(opp => ({
+                id: opp.id || opp.opportunity_id || `arb-${Date.now()}`,
+                market: opp.market || opp.question || opp.title || 'Unknown Market',
+                platformA: opp.platform_a || opp.platformA || opp.venue_a || 'Platform A',
+                platformB: opp.platform_b || opp.platformB || opp.venue_b || 'Platform B',
+                oddsA: opp.odds_a || opp.oddsA || opp.price_a || 0.5,
+                oddsB: opp.odds_b || opp.oddsB || opp.price_b || 0.5,
+                spreadBps: opp.spread_bps || opp.spreadBps || Math.abs((opp.odds_a - opp.odds_b) * 10000) || 0,
+                netProfit: opp.net_profit || opp.netProfit || opp.expected_profit || 0
+            }));
+        } else if (Array.isArray(data)) {
+            arbitrageOpportunities = data.map(opp => ({
+                id: opp.id || opp.opportunity_id || `arb-${Date.now()}`,
+                market: opp.market || opp.question || opp.title || 'Unknown Market',
+                platformA: opp.platform_a || opp.platformA || opp.venue_a || 'Platform A',
+                platformB: opp.platform_b || opp.platformB || opp.venue_b || 'Platform B',
+                oddsA: opp.odds_a || opp.oddsA || opp.price_a || 0.5,
+                oddsB: opp.odds_b || opp.oddsB || opp.price_b || 0.5,
+                spreadBps: opp.spread_bps || opp.spreadBps || 0,
+                netProfit: opp.net_profit || opp.netProfit || opp.expected_profit || 0
+            }));
+        } else {
+            arbitrageOpportunities = [];
+        }
 
         renderArbitrageOpportunities(arbitrageOpportunities);
     } catch (error) {
         console.error('Failed to scan arbitrage:', error);
+        arbitrageOpportunities = [];
+        renderArbitrageOpportunities(arbitrageOpportunities);
     }
 }
 
@@ -411,20 +408,30 @@ async function loadPositions() {
         const response = await fetch('/api/v1/trading/markets/positions');
         const data = await response.json();
         
-        // Mock positions
-        const positions = [
-            {
-                market: 'BTC $50k by 2024',
-                outcome: 'Yes',
-                stake: 100,
-                currentValue: 115,
-                odds: 0.65
-            }
-        ];
+        // Use real API data
+        let positions = [];
+        if (data.positions && Array.isArray(data.positions)) {
+            positions = data.positions.map(pos => ({
+                market: pos.market || pos.title || pos.question || 'Unknown',
+                outcome: pos.outcome || pos.side || 'Unknown',
+                stake: pos.stake || pos.cost || pos.amount || 0,
+                currentValue: pos.current_value || pos.currentValue || pos.value || 0,
+                odds: pos.odds || pos.price || 0.5
+            }));
+        } else if (Array.isArray(data)) {
+            positions = data.map(pos => ({
+                market: pos.market || pos.title || pos.question || 'Unknown',
+                outcome: pos.outcome || pos.side || 'Unknown',
+                stake: pos.stake || pos.cost || pos.amount || 0,
+                currentValue: pos.current_value || pos.currentValue || pos.value || 0,
+                odds: pos.odds || pos.price || 0.5
+            }));
+        }
 
         renderPositions(positions);
     } catch (error) {
         console.error('Failed to load positions:', error);
+        renderPositions([]);
     }
 }
 

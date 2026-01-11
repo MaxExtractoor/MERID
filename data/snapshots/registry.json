@@ -16,11 +16,32 @@
       "created_at": 1768133471.9921718,
       "created_at_iso": "2026-01-11T12:11:11.992172+00:00",
       "completed_at": 1768133472.0253882,
-      "duration_seconds": 0.03321647644042969,
+      "duration_seconds": 0.0,
+      "parent_snapshot_id": null,
+      "description": "",
+      "tags": []
+    },
+    {
+      "snapshot_id": "snap_f6daee8a67b5",
+      "snapshot_type": "full",
+      "status": "completed",
+      "components": [
+        "config",
+        "agents",
+        "consensus"
+      ],
+      "file_path": "data\\snapshots\\snap_f6daee8a67b5_20260111_152402.json.gz",
+      "size_bytes": 2727,
+      "compressed": true,
+      "checksum": "effc97cdb4dc66047ca869046bab3dc9291b728b10cb3de888317150998df675",
+      "created_at": 1768145042.1207685,
+      "created_at_iso": "2026-01-11T15:24:02.120769+00:00",
+      "completed_at": 1768145042.185104,
+      "duration_seconds": 0.06433534622192383,
       "parent_snapshot_id": null,
       "description": "Manual snapshot",
       "tags": []
     }
   ],
-  "updated_at": 1768133472.0389757
+  "updated_at": 1768145042.2877836
 }

@@ -137,55 +137,99 @@ class DEXCEXScanner(ArbitrageScanner):
             
             base_price = price_data.price
             
-            import random
-            
+            # Fetch real DEX prices via on-chain APIs
             for dex, config in self._dex_configs.items():
-                # DEX prices often have slight premium/discount
-                variance = random.uniform(-0.003, 0.003)
-                dex_price = base_price * (1 + variance)
-                
-                prices.append(DEXPrice(
-                    dex=dex,
-                    chain=config["chain"],
-                    symbol=symbol,
-                    price=dex_price,
-                    liquidity_usd=random.uniform(100000, 5000000),
-                    pool_address=f"0x{random.randbytes(20).hex()}",
-                    timestamp=time.time(),
-                ))
+                try:
+                    dex_price_data = await self._fetch_single_dex_price(dex, config, symbol, base_price)
+                    if dex_price_data:
+                        prices.append(dex_price_data)
+                except Exception as dex_err:
+                    logger.debug(f"DEX {dex} price fetch failed: {dex_err}")
+                    
         except Exception as e:
             logger.debug(f"DEX price fetch error: {e}")
         
         return prices
     
+    async def _fetch_single_dex_price(
+        self, dex: str, config: Dict, symbol: str, fallback_price: float
+    ) -> Optional[DEXPrice]:
+        """Fetch price from a single DEX via API."""
+        try:
+            import httpx
+            
+            # Use DeFiLlama or similar aggregator for DEX prices
+            # This provides real on-chain liquidity data
+            base_token = symbol.split("/")[0]
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Try DeFiLlama price API
+                resp = await client.get(
+                    f"https://coins.llama.fi/prices/current/{config['chain']}:{base_token}"
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    coins = data.get("coins", {})
+                    key = f"{config['chain']}:{base_token}"
+                    if key in coins:
+                        price_info = coins[key]
+                        return DEXPrice(
+                            dex=dex,
+                            chain=config["chain"],
+                            symbol=symbol,
+                            price=price_info.get("price", fallback_price),
+                            liquidity_usd=price_info.get("liquidity", 0) or 0,
+                            pool_address=config.get("router", ""),
+                            timestamp=time.time(),
+                        )
+            
+            # Fallback: use base price with no liquidity info
+            return DEXPrice(
+                dex=dex,
+                chain=config["chain"],
+                symbol=symbol,
+                price=fallback_price,
+                liquidity_usd=0,
+                pool_address=config.get("router", ""),
+                timestamp=time.time(),
+            )
+        except Exception as e:
+            logger.debug(f"Single DEX price fetch error for {dex}: {e}")
+            return None
+    
     async def _fetch_cex_prices(self, symbol: str) -> List[CEXPrice]:
-        """Fetch prices from CEXs."""
+        """Fetch real prices from CEXs via CCXT."""
         prices = []
         
         try:
-            from data.live_price_feed import get_live_price_feed
-            
-            feed = get_live_price_feed()
-            price_data = feed.get_current_price(symbol)
-            
-            if not price_data:
-                return prices
-            
-            base_price = price_data.price
-            
-            import random
+            import ccxt.async_support as ccxt_async
             
             for cex in self._cex_fees.keys():
-                spread = random.uniform(0.0001, 0.0003)
-                mid = base_price * (1 + random.uniform(-0.001, 0.001))
-                
-                prices.append(CEXPrice(
-                    exchange=cex,
-                    symbol=symbol,
-                    bid=mid * (1 - spread),
-                    ask=mid * (1 + spread),
-                    timestamp=time.time(),
-                ))
+                try:
+                    exchange_class = getattr(ccxt_async, cex, None)
+                    if not exchange_class:
+                        continue
+                    
+                    ex = exchange_class({'enableRateLimit': True})
+                    try:
+                        orderbook = await ex.fetch_order_book(symbol, limit=5)
+                        
+                        bid = orderbook['bids'][0][0] if orderbook['bids'] else 0
+                        ask = orderbook['asks'][0][0] if orderbook['asks'] else 0
+                        
+                        if bid > 0 and ask > 0:
+                            prices.append(CEXPrice(
+                                exchange=cex,
+                                symbol=symbol,
+                                bid=bid,
+                                ask=ask,
+                                timestamp=time.time(),
+                            ))
+                    finally:
+                        await ex.close()
+                except Exception as cex_err:
+                    logger.debug(f"CEX {cex} price fetch failed: {cex_err}")
+                    
         except Exception as e:
             logger.debug(f"CEX price fetch error: {e}")
         

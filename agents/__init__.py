@@ -2,6 +2,14 @@
 MERID Agent Layer - Institutional-Grade Multi-Agent System
 
 Core agents for consensus, analysis, risk management, and execution.
+
+Layer 1-3 of Master Build Directive - AGENT INFRASTRUCTURE
+
+Components:
+- Core Agents: Analysts, Skeptic, Risk, Synthesizer
+- Meta Agents: Archivist, Strategy, Meta-Audit
+- Optimization: Caching, Profiling, Resource Allocation
+- Social Agents: Twitter, Telegram, News Monitor
 """
 
 from agents.interface import AgentInterface, AgentState, VoteDecision
@@ -19,6 +27,19 @@ from agents.registry import load_agents
 from agents.twitter_agent import TwitterAgent
 from agents.telegram_agent import TelegramAgent
 from agents.news_monitor_agent import NewsMonitorAgent
+from agents.optimization import (
+    AgentOptimizer,
+    get_agent_optimizer,
+    OptimizedCache,
+    CacheStrategy,
+    AgentProfiler,
+    BatchOptimizer,
+    ResourceAllocator,
+    ComputeBudget,
+    cached,
+    profiled,
+    budget_limited,
+)
 
 
 def get_all_agents():
@@ -41,24 +62,42 @@ def get_core_agents():
 
 
 __all__ = [
+    # Core Interfaces
     "AgentInterface",
     "AgentState",
     "VoteDecision",
     "BaseAgent",
+    # Analyst Agents
     "AnalystGemma",
     "AnalystLlama",
+    # Governance Agents
     "Skeptic",
     "RiskAgent",
     "Synthesizer",
+    # Meta Agents
     "Archivist",
     "StrategyAgent",
     "MetaAuditAgent",
     "ReflectionLayer",
     "Reflection",
-    "load_agents",
+    # Social Agents
     "TwitterAgent",
     "TelegramAgent",
     "NewsMonitorAgent",
+    # Registry
+    "load_agents",
     "get_all_agents",
     "get_core_agents",
+    # Optimization
+    "AgentOptimizer",
+    "get_agent_optimizer",
+    "OptimizedCache",
+    "CacheStrategy",
+    "AgentProfiler",
+    "BatchOptimizer",
+    "ResourceAllocator",
+    "ComputeBudget",
+    "cached",
+    "profiled",
+    "budget_limited",
 ]

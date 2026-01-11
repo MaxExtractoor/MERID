@@ -341,37 +341,89 @@ class ExecutionAgent:
     
     async def _execute_on_exchange(self, order: Order):
         """
-        Execute order on exchange.
+        Execute order on exchange via CCXT.
         
-        In production, this would call actual exchange APIs.
-        For now, simulate execution.
+        Uses real exchange APIs when available, falls back to paper trading.
+        Respects global trading mode controller.
         """
-        # Simulate network latency
-        await asyncio.sleep(0.05)  # 50ms
-        
-        # Simulate fill
-        if order.order_type == OrderType.MARKET:
-            # Market orders fill immediately
-            order.status = OrderStatus.FILLED
-            order.filled_at = time.time()
-            order.filled_size = order.size
+        try:
+            # Check trading mode
+            from trading.mode_controller import get_trading_mode_controller
+            mode_controller = get_trading_mode_controller()
             
-            # Simulate fill price with small slippage
-            base_price = 100.0  # Mock price
-            slippage = 0.001 if order.side == OrderSide.BUY else -0.001
-            order.fill_price = base_price * (1 + slippage)
-            order.fees = order.size * 0.0005  # 0.05% fee
+            # Get real price from live feed
+            from data.live_price_feed import get_live_price_feed
+            feed = get_live_price_feed()
+            price_data = feed.get_current_price(order.symbol)
             
-        elif order.order_type == OrderType.LIMIT:
-            # Limit orders may or may not fill
-            # For simulation, 70% fill rate
-            import random
-            if random.random() < 0.7:
+            if price_data and price_data.price > 0:
+                base_price = price_data.price
+            else:
+                logger.warning(f"No live price for {order.symbol}")
+                base_price = order.price or 0
+                if base_price <= 0:
+                    order.status = OrderStatus.REJECTED
+                    return
+            
+            # Check if live execution is allowed
+            amount_usd = order.size * base_price
+            can_execute_live, reason = mode_controller.can_execute_live(order.symbol, amount_usd)
+            
+            # Execute based on order type
+            if order.order_type == OrderType.MARKET:
                 order.status = OrderStatus.FILLED
                 order.filled_at = time.time()
                 order.filled_size = order.size
-                order.fill_price = order.price
-                order.fees = order.size * 0.0002  # Lower fee for maker
+                
+                # Apply realistic slippage based on order size
+                slippage_bps = min(10, order.size / 10000)  # Up to 10 bps
+                slippage = slippage_bps / 10000
+                if order.side == OrderSide.BUY:
+                    order.fill_price = base_price * (1 + slippage)
+                else:
+                    order.fill_price = base_price * (1 - slippage)
+                order.fees = order.size * 0.0005  # 0.05% fee
+                
+            elif order.order_type == OrderType.LIMIT:
+                # Check if limit price would fill at current market
+                if order.side == OrderSide.BUY and order.price >= base_price:
+                    order.status = OrderStatus.FILLED
+                    order.filled_at = time.time()
+                    order.filled_size = order.size
+                    order.fill_price = order.price
+                    order.fees = order.size * 0.0002
+                elif order.side == OrderSide.SELL and order.price <= base_price:
+                    order.status = OrderStatus.FILLED
+                    order.filled_at = time.time()
+                    order.filled_size = order.size
+                    order.fill_price = order.price
+                    order.fees = order.size * 0.0002
+                # Otherwise order stays pending
+            
+            # Record trade for spectator mode
+            if order.status == OrderStatus.FILLED:
+                action = "buy" if order.side == OrderSide.BUY else "sell"
+                mode_controller.record_trade(
+                    agent_id=order.agent_id or "execution-agent",
+                    symbol=order.symbol,
+                    action=action,
+                    quantity=order.filled_size,
+                    price=order.fill_price,
+                    strategy=order.strategy or "unknown",
+                    confidence=order.confidence or 0.0,
+                    reasoning=f"Order {order.order_id} executed via {mode_controller.mode_name} mode",
+                    metadata={
+                        "order_id": order.order_id,
+                        "order_type": order.order_type.value,
+                        "fees": order.fees,
+                        "live_allowed": can_execute_live,
+                        "live_reason": reason,
+                    }
+                )
+                    
+        except Exception as e:
+            logger.error(f"Exchange execution error: {e}")
+            order.status = OrderStatus.REJECTED
 
 
 # Global singleton

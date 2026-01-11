@@ -556,16 +556,16 @@ function initCharts() {
         });
     }
     
-    // Latency Chart
+    // Latency Chart - initialized empty, populated from API
     const latencyCtx = document.getElementById('latency-chart');
     if (latencyCtx) {
         state.charts.latency = new Chart(latencyCtx.getContext('2d'), {
             type: 'line',
             data: {
-                labels: Array.from({length: 20}, (_, i) => `${i * 5}s`),
+                labels: [],
                 datasets: [{
                     label: 'Latency (ms)',
-                    data: Array.from({length: 20}, () => Math.random() * 50 + 10),
+                    data: [],
                     borderColor: 'rgba(0, 212, 170, 1)',
                     backgroundColor: 'rgba(0, 212, 170, 0.1)',
                     fill: true,

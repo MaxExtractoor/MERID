@@ -232,20 +232,10 @@ class ResolutionTracker:
                         event.status = ResolutionStatus.RESOLVING
                 
                 elif event.status == ResolutionStatus.RESOLVING:
-                    # Simulate resolution after some delay
-                    import random
-                    if time.time() > event.scheduled_resolution + random.uniform(60, 3600):
-                        event.status = ResolutionStatus.RESOLVED
-                        event.actual_resolution = time.time()
-                        event.outcome = random.choice(["YES", "NO"])
-                        event.yes_price_at_resolution = 1.0 if event.outcome == "YES" else 0.0
-                        
-                        # Move to history
-                        self._history.append(event)
-                        del self._events[event_id]
-                        
-                        if len(self._history) > self._max_history:
-                            self._history = self._history[-self._max_history:]
+                    # In production, this would poll the actual platform API
+                    # Events stay in RESOLVING state until real resolution data arrives
+                    # No fake random outcomes - real data required
+                    pass
                 
                 event.last_updated = time.time()
                 

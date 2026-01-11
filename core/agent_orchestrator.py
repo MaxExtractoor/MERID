@@ -286,12 +286,11 @@ class AgentOrchestrator:
         votes_for = 0
         votes_against = 0
         
-        # Collect votes from each agent (simplified voting logic)
+        # Collect votes from each agent with real evaluation logic
         for role, agent in self.agents.items():
             try:
-                # Each agent evaluates the proposal
-                # Real implementation would have agent-specific evaluation logic
-                confidence = 0.75  # Simplified
+                # Get agent-specific confidence based on proposal type and market data
+                confidence, reasoning = await self._evaluate_agent_vote(role, agent, proposal)
                 vote = confidence > 0.5
                 
                 decision = AgentDecision(
@@ -299,7 +298,7 @@ class AgentOrchestrator:
                     decision_type="consensus_vote",
                     data={"proposal": proposal, "vote": vote},
                     confidence=confidence,
-                    reasoning=[f"{role.value} agent evaluated proposal"],
+                    reasoning=reasoning,
                     timestamp=datetime.now()
                 )
                 
@@ -380,6 +379,117 @@ class AgentOrchestrator:
     def get_consensus_history(self, limit: int = 10) -> List[ConsensusResult]:
         """Get recent consensus results."""
         return self.consensus_history[-limit:]
+    
+    async def _evaluate_agent_vote(
+        self, 
+        role: AgentRole, 
+        agent: Any, 
+        proposal: Dict[str, Any]
+    ) -> tuple:
+        """
+        Evaluate agent vote based on role-specific logic and market data.
+        
+        Returns:
+            Tuple of (confidence: float, reasoning: List[str])
+        """
+        reasoning = []
+        confidence = 0.5  # Base confidence
+        
+        # Get current market data for context
+        prices = self.price_feed.get_all_prices()
+        proposal_type = proposal.get("type", "unknown")
+        symbol = proposal.get("symbol", "BTC/USDT")
+        
+        if role == AgentRole.PRICE_FEED:
+            # Price feed evaluates based on data freshness
+            if prices:
+                confidence = 0.8
+                reasoning.append("Price data is fresh and available")
+            else:
+                confidence = 0.3
+                reasoning.append("No price data available")
+                
+        elif role == AgentRole.ARBITRAGE:
+            # Arbitrage agent evaluates spread opportunities
+            if prices and symbol in prices:
+                price_data = prices[symbol]
+                spread = (price_data.ask - price_data.bid) / price_data.bid * 10000
+                if spread > 30:
+                    confidence = 0.85
+                    reasoning.append(f"Favorable spread detected: {spread:.1f} bps")
+                else:
+                    confidence = 0.4
+                    reasoning.append(f"Spread too tight: {spread:.1f} bps")
+            else:
+                confidence = 0.3
+                reasoning.append("No price data for evaluation")
+                
+        elif role == AgentRole.EXECUTION:
+            # Execution agent evaluates order feasibility
+            amount = proposal.get("amount", 0)
+            if amount > 0 and amount < 10000:
+                confidence = 0.75
+                reasoning.append(f"Order size ${amount} within limits")
+            elif amount >= 10000:
+                confidence = 0.5
+                reasoning.append(f"Large order ${amount} requires caution")
+            else:
+                confidence = 0.3
+                reasoning.append("Invalid order amount")
+                
+        elif role == AgentRole.SLIPPAGE:
+            # Slippage agent evaluates market depth
+            if prices and symbol in prices:
+                volume = prices[symbol].volume_24h
+                if volume > 1000000:
+                    confidence = 0.8
+                    reasoning.append(f"High liquidity: ${volume/1e6:.1f}M volume")
+                else:
+                    confidence = 0.5
+                    reasoning.append(f"Low liquidity: ${volume/1e3:.1f}K volume")
+            else:
+                confidence = 0.4
+                reasoning.append("Cannot assess liquidity")
+                
+        elif role == AgentRole.NEWS_MONITOR:
+            # News agent evaluates sentiment
+            if hasattr(agent, 'get_recent_sentiment'):
+                sentiment = agent.get_recent_sentiment()
+                if sentiment > 0.6:
+                    confidence = 0.75
+                    reasoning.append(f"Positive news sentiment: {sentiment:.2f}")
+                elif sentiment < 0.4:
+                    confidence = 0.35
+                    reasoning.append(f"Negative news sentiment: {sentiment:.2f}")
+                else:
+                    confidence = 0.55
+                    reasoning.append(f"Neutral news sentiment: {sentiment:.2f}")
+            else:
+                confidence = 0.5
+                reasoning.append("News sentiment unavailable")
+                
+        elif role == AgentRole.TWITTER:
+            # Twitter agent evaluates social sentiment
+            if hasattr(agent, 'enabled') and agent.enabled:
+                confidence = 0.6
+                reasoning.append("Social monitoring active")
+            else:
+                confidence = 0.5
+                reasoning.append("Social monitoring disabled")
+                
+        elif role == AgentRole.TELEGRAM:
+            # Telegram agent provides community feedback
+            if hasattr(agent, 'enabled') and agent.enabled:
+                confidence = 0.6
+                reasoning.append("Community channel active")
+            else:
+                confidence = 0.5
+                reasoning.append("Community channel disabled")
+        
+        # Add proposal type to reasoning
+        reasoning.append(f"{role.value} evaluated {proposal_type} proposal")
+        
+        return (confidence, reasoning)
 
 
 # Global singleton

@@ -77,8 +77,8 @@ class CoinDeskFeed:
                 # Determine importance based on keywords
                 importance = self._assess_importance(title, description, categories)
                 
-                # Convert pub_date to timestamp (simplified)
-                timestamp = time.time()  # Fallback to current time
+                # Parse pub_date to timestamp
+                timestamp = self._parse_pub_date(pub_date)
                 
                 articles.append(NewsArticle(
                     source="CoinDesk",
@@ -96,6 +96,36 @@ class CoinDeskFeed:
         except Exception as exc:
             logger.error("CoinDesk feed error: %s", exc)
             return []
+    
+    def _parse_pub_date(self, pub_date: str) -> float:
+        """Parse RSS pubDate to Unix timestamp."""
+        if not pub_date:
+            return time.time()
+        
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(pub_date)
+            return dt.timestamp()
+        except Exception:
+            pass
+        
+        # Try common date formats
+        formats = [
+            "%a, %d %b %Y %H:%M:%S %z",
+            "%a, %d %b %Y %H:%M:%S %Z",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%SZ",
+        ]
+        
+        from datetime import datetime
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(pub_date.strip(), fmt)
+                return dt.timestamp()
+            except ValueError:
+                continue
+        
+        return time.time()
     
     def _assess_importance(self, title: str, description: str, categories: List[str]) -> str:
         """Assess article importance based on content."""
@@ -134,12 +164,13 @@ class CoinTelegraphFeed:
                 title = item.findtext("title", "")
                 link = item.findtext("link", "")
                 description = item.findtext("description", "")
+                pub_date = item.findtext("pubDate", "")
                 
                 # Extract categories
                 categories = [cat.text for cat in item.findall("category") if cat.text]
                 
                 importance = self._assess_importance(title, description)
-                timestamp = time.time()
+                timestamp = self._parse_pub_date(pub_date)
                 
                 articles.append(NewsArticle(
                     source="CoinTelegraph",
@@ -157,6 +188,35 @@ class CoinTelegraphFeed:
         except Exception as exc:
             logger.error("CoinTelegraph feed error: %s", exc)
             return []
+    
+    def _parse_pub_date(self, pub_date: str) -> float:
+        """Parse RSS pubDate to Unix timestamp."""
+        if not pub_date:
+            return time.time()
+        
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(pub_date)
+            return dt.timestamp()
+        except Exception:
+            pass
+        
+        from datetime import datetime
+        formats = [
+            "%a, %d %b %Y %H:%M:%S %z",
+            "%a, %d %b %Y %H:%M:%S %Z",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%SZ",
+        ]
+        
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(pub_date.strip(), fmt)
+                return dt.timestamp()
+            except ValueError:
+                continue
+        
+        return time.time()
     
     def _assess_importance(self, title: str, description: str) -> str:
         """Assess article importance."""

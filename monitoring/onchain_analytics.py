@@ -116,16 +116,17 @@ class OnchainAnalyticsMonitor:
         return None
 
     def _mock_snapshot(self) -> OnchainSnapshot:
-        import random
-
-        random.seed("onchain-mock")
+        """Return neutral snapshot when no API key - no fake data."""
+        # Return neutral values - no random fake data
+        # Real data requires Santiment API key
+        logger.debug("No Santiment API key configured - onchain data unavailable")
         return OnchainSnapshot(
             timestamp_ms=time.time() * 1000,
-            nupl=random.uniform(0.4, 0.85),
-            mvrv=random.uniform(1.2, 4.0),
-            exchange_netflow=random.uniform(-5000, 5000),
-            sentiment_score=random.uniform(-0.4, 0.6),
-            whale_tx_count=random.randint(5, 30),
-            dev_activity=random.randint(50, 120),
-            metadata={"mock": True},
+            nupl=0.0,
+            mvrv=0.0,
+            exchange_netflow=0.0,
+            sentiment_score=0.0,
+            whale_tx_count=0,
+            dev_activity=0,
+            metadata={"unavailable": True, "reason": "No API key configured"},
         )

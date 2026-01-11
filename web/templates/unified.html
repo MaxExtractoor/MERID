@@ -22,6 +22,7 @@
         </div>
         <div class="nav-status">
             <div class="status-item" id="global-status">
+                <span class="ws-status disconnected" id="ws-status" title="WebSocket status"></span>
                 <span class="status-dot status-operational"></span>
                 <span class="status-text">OPERATIONAL</span>
             </div>
@@ -134,6 +135,7 @@
                 <a href="#treasury" class="sidebar-link" data-section="treasury">Treasury</a>
                 <a href="#sniping" class="sidebar-link" data-section="sniping">Sniping</a>
                 <a href="#recovery" class="sidebar-link" data-section="recovery">Recovery</a>
+                <a href="#spectator" class="sidebar-link" data-section="spectator">Spectator</a>
             </div>
         </aside>
 
@@ -1659,6 +1661,62 @@
                     <div class="panel-body">
                         <div id="anomalies-list" class="anomalies-list">
                             <div class="empty-state">No anomalies detected</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Spectator -->
+            <section id="spectator" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Spectator Mode</h1>
+                    <p class="section-subtitle">Watch agents perform paper trades in real-time</p>
+                </div>
+
+                <!-- Trading Mode Panel -->
+                <div class="trading-mode-panel">
+                    <div class="trading-mode-header">
+                        <h3>Trading Mode</h3>
+                        <span class="mode-badge mode-paper" id="trading-mode-indicator">PAPER</span>
+                    </div>
+                    <div class="mode-selector">
+                        <button class="mode-btn mode-paper active" onclick="setTradingMode('paper')">Paper</button>
+                        <button class="mode-btn mode-hybrid" onclick="setTradingMode('hybrid')">Hybrid</button>
+                        <button class="mode-btn mode-live" onclick="setTradingMode('live')">Live</button>
+                        <button class="mode-btn mode-autonomous" onclick="setTradingMode('autonomous')">Autonomous</button>
+                    </div>
+                    <div id="trading-mode-stats"></div>
+                    <div class="mode-warning" id="live-warning" style="display: none;">
+                        <span class="mode-warning-icon">⚠️</span>
+                        <span>Live mode will execute real trades on connected exchanges. Use with caution.</span>
+                    </div>
+                </div>
+
+                <!-- Spectator Panel -->
+                <div class="spectator-panel">
+                    <div class="spectator-header">
+                        <h3><span class="spectator-live-dot"></span> Live Agent Trades</h3>
+                        <div>
+                            <button class="btn btn-sm" onclick="startSpectatorMode()">Start Watching</button>
+                            <button class="btn btn-sm btn-secondary" onclick="stopSpectatorMode()">Stop</button>
+                        </div>
+                    </div>
+                    <div id="spectator-summary"></div>
+                    <div id="spectator-trades-feed">
+                        <div class="empty-state">Click "Start Watching" to begin spectating agent trades</div>
+                    </div>
+                    <div id="spectator-agents"></div>
+                </div>
+
+                <!-- Spectator Stats -->
+                <div class="panel" style="margin-top: 20px;">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Trading Statistics</h2>
+                        <button class="btn btn-sm" onclick="fetchSpectatorStats()">Refresh</button>
+                    </div>
+                    <div class="panel-body">
+                        <div id="spectator-stats">
+                            <div class="empty-state">No trading statistics available yet</div>
                         </div>
                     </div>
                 </div>
