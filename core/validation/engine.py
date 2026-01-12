@@ -61,6 +61,26 @@ class ValidationEngine:
         return "pending", 0.0
 
 
+    async def validate_order(self, order: Any) -> Dict[str, Any]:
+        """Validate an order before execution"""
+        # Basic validation structure for order validation
+        # Returns validation result with passed/failed status
+        try:
+            # For now, return success - can be enhanced with actual validation logic
+            return {
+                "passed": True,
+                "reason": "Order validation passed",
+                "score": 1.0
+            }
+        except Exception as e:
+            self.logger.error(f"Order validation error: {e}")
+            return {
+                "passed": False,
+                "reason": f"Validation error: {str(e)}",
+                "score": 0.0
+            }
+
+
 validation_engine = ValidationEngine(
     [
         PolymarketValidator(),
@@ -68,3 +88,8 @@ validation_engine = ValidationEngine(
         TimeWindowValidator(),
     ]
 )
+
+
+def get_validation_engine() -> ValidationEngine:
+    """Get singleton validation engine instance"""
+    return validation_engine

@@ -628,4 +628,4 @@ This is **fund-grade internal documentation** for implementation without reinter
 
 ---
 
-*End of Document*
+## End of Document

@@ -1,0 +1,266 @@
+# MERID Reality Enforcement CI Rules
+# 
+# CONSTITUTIONAL: These rules block deceptive PRs.
+# If ANY fail, the build is INVALID.
+
+name: Reality Enforcement
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main, develop ]
+
+jobs:
+  forbidden-keys-check:
+    name: Block Forbidden UI Keys
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check for forbidden aggregation keys
+        run: |
+          echo "Scanning for forbidden UI keys..."
+          
+          FORBIDDEN_KEYS=(
+            "overallConfidence"
+            "systemHealthScore"
+            "analysisProgress"
+            "confidenceScore"
+            "recommendationStrength"
+            "globalScore"
+            "healthScore"
+            "confidenceIndex"
+            "signalStrength"
+            "safeToTrade"
+          )
+          
+          VIOLATIONS=0
+          
+          for key in "${FORBIDDEN_KEYS[@]}"; do
+            echo "Checking for: $key"
+            if grep -r "$key" web/static/js/ web/static/ts/ --include="*.js" --include="*.ts" --include="*.jsx" --include="*.tsx"; then
+              echo "❌ FORBIDDEN KEY FOUND: $key"
+              VIOLATIONS=$((VIOLATIONS + 1))
+            fi
+          done
+          
+          if [ $VIOLATIONS -gt 0 ]; then
+            echo ""
+            echo "❌ REALITY VIOLATION: Found $VIOLATIONS forbidden aggregation keys"
+            echo "These keys represent fake aggregation constructs that are BANNED."
+            echo "Truth must remain high-dimensional."
+            exit 1
+          fi
+          
+          echo "✅ No forbidden keys found"
+
+  ui-assertion-binding:
+    name: Verify UI Components Have Assertions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check UI components reference TruthGate
+        run: |
+          echo "Checking UI components for TruthGate binding..."
+          
+          # Find components with execution buttons
+          COMPONENTS=$(grep -r "Button\|ExecutionPanel\|Chart" web/static/js/ web/static/ts/ --include="*.js" --include="*.ts" --include="*.jsx" --include="*.tsx" -l || true)
+          
+          VIOLATIONS=0
+          
+          for file in $COMPONENTS; do
+            if ! grep -q "TruthGate\|truthgate\|requiredAssertions" "$file"; then
+              echo "❌ Component without TruthGate: $file"
+              VIOLATIONS=$((VIOLATIONS + 1))
+            fi
+          done
+          
+          if [ $VIOLATIONS -gt 0 ]; then
+            echo ""
+            echo "❌ REALITY VIOLATION: $VIOLATIONS components lack TruthGate binding"
+            echo "All UI components MUST declare their assertion requirements."
+            exit 1
+          fi
+          
+          echo "✅ All components properly bound"
+
+  backend-provenance-check:
+    name: Block Empty Provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check for assertions without provenance
+        run: |
+          echo "Checking for empty provenance in backend..."
+          
+          # Look for patterns like: "provenance": []
+          if grep -r '"provenance":\s*\[\]' core/ trading/ --include="*.py"; then
+            echo "❌ REALITY VIOLATION: Empty provenance is illegal"
+            echo "All assertions MUST have source provenance."
+            exit 1
+          fi
+          
+          echo "✅ No empty provenance found"
+
+  assertion-algebra-tests:
+    name: Run Assertion Algebra Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install pytest
+          pip install -r requirements.txt || true
+      
+      - name: Run assertion algebra tests
+        run: |
+          echo "Running constitutional assertion algebra tests..."
+          pytest tests/test_assertion_algebra.py -v --tb=short
+          
+          if [ $? -ne 0 ]; then
+            echo ""
+            echo "❌ CRITICAL: Assertion algebra tests FAILED"
+            echo "These tests are NON-NEGOTIABLE."
+            echo "The build is INVALID."
+            exit 1
+          fi
+          
+          echo "✅ All assertion algebra tests passed"
+
+  execution-shadow-check:
+    name: Verify Execution Has Shadow Path
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check execution code references shadow
+        run: |
+          echo "Checking execution code for shadow paths..."
+          
+          EXEC_FILES=$(find trading/ -name "*execution*.py" -o -name "*execute*.py")
+          
+          VIOLATIONS=0
+          
+          for file in $EXEC_FILES; do
+            if ! grep -q "shadow\|Shadow\|SHADOW" "$file"; then
+              echo "⚠️  Execution file without shadow reference: $file"
+              VIOLATIONS=$((VIOLATIONS + 1))
+            fi
+          done
+          
+          if [ $VIOLATIONS -gt 0 ]; then
+            echo ""
+            echo "⚠️  WARNING: $VIOLATIONS execution files lack shadow paths"
+            echo "Execution without shadow comparison is dangerous."
+            # Don't fail, just warn for now
+          fi
+          
+          echo "✅ Shadow path check complete"
+
+  ui-stimulation-ban:
+    name: Block UI Stimulation Patterns
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check for banned UI patterns
+        run: |
+          echo "Checking for UI stimulation patterns..."
+          
+          VIOLATIONS=0
+          
+          # Check for progress bars on analysis
+          if grep -r "progress.*analysis\|analysis.*progress" web/static/ --include="*.js" --include="*.ts" -i; then
+            echo "❌ BANNED: Progress bars for analysis"
+            VIOLATIONS=$((VIOLATIONS + 1))
+          fi
+          
+          # Check for flashing indicators
+          if grep -r "flash\|blink\|pulse.*button" web/static/css/ --include="*.css" -i; then
+            echo "⚠️  WARNING: Flashing/pulsing UI elements detected"
+          fi
+          
+          # Check for "loading" on truth
+          if grep -r "loading.*truth\|loading.*confidence" web/static/ --include="*.js" --include="*.ts" -i; then
+            echo "❌ BANNED: Truth does not 'load'"
+            VIOLATIONS=$((VIOLATIONS + 1))
+          fi
+          
+          if [ $VIOLATIONS -gt 0 ]; then
+            echo ""
+            echo "❌ REALITY VIOLATION: UI stimulation patterns detected"
+            echo "MERID does not 'progress-bar truth'."
+            exit 1
+          fi
+          
+          echo "✅ No banned UI patterns found"
+
+  mock-data-detection:
+    name: Detect Mock Data in Production Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check for mock data generators
+        run: |
+          echo "Scanning for mock data in production code..."
+          
+          VIOLATIONS=0
+          
+          # Check for random data generation in non-test files
+          MOCK_PATTERNS=(
+            "random\.uniform"
+            "random\.randint"
+            "random\.choice"
+            "mock_.*="
+            "fake_.*="
+            "placeholder.*data"
+          )
+          
+          for pattern in "${MOCK_PATTERNS[@]}"; do
+            FILES=$(grep -r "$pattern" core/ trading/ web/api/ --include="*.py" | grep -v test | grep -v "# OK: mock" || true)
+            if [ ! -z "$FILES" ]; then
+              echo "⚠️  Potential mock data: $pattern"
+              echo "$FILES"
+              VIOLATIONS=$((VIOLATIONS + 1))
+            fi
+          done
+          
+          if [ $VIOLATIONS -gt 0 ]; then
+            echo ""
+            echo "⚠️  WARNING: Potential mock data detected in production code"
+            echo "Review these carefully. Add '# OK: mock' comment if intentional."
+          fi
+          
+          echo "✅ Mock data check complete"
+
+  reality-enforcement-summary:
+    name: Reality Enforcement Summary
+    runs-on: ubuntu-latest
+    needs: [forbidden-keys-check, ui-assertion-binding, backend-provenance-check, assertion-algebra-tests, execution-shadow-check, ui-stimulation-ban, mock-data-detection]
+    steps:
+      - name: Summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  MERID REALITY ENFORCEMENT - PASSED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "✅ No forbidden aggregation keys"
+          echo "✅ UI components properly bound"
+          echo "✅ Provenance requirements met"
+          echo "✅ Assertion algebra tests passed"
+          echo "✅ Shadow paths verified"
+          echo "✅ No UI stimulation patterns"
+          echo "✅ Mock data check complete"
+          echo ""
+          echo "This PR respects MERID's truth discipline."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

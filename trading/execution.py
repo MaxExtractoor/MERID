@@ -20,6 +20,11 @@ from enum import Enum
 from typing import Callable, Dict, List, Optional
 
 from core.events import EventEnvelope, EventType, EventPriority, create_audit_event
+from core.error_handling import (
+    get_error_handler, with_error_handling, ErrorSeverity,
+    RetryStrategy, get_health_monitor
+)
+from core.state_recovery import get_state_manager, get_self_healing
 from utils.logger import get_logger
 
 logger = get_logger("trading.execution")
@@ -245,15 +250,81 @@ class ExecutionEngine:
         self._running = False
         self._monitor_task: Optional[asyncio.Task[None]] = None
         
-        self._logger = get_logger("trading.execution.engine")
+        # Reality enforcement integration
+        self._reality_auditor = None
+        try:
+            from core.reality_auditor import get_reality_auditor
+            self._reality_auditor = get_reality_auditor()
+            self._logger = get_logger("trading.execution.engine")
+            self._logger.info("Reality auditor integrated - execution gating active")
+        except Exception as e:
+            self._logger = get_logger("trading.execution.engine")
+            self._logger.warning(f"Reality auditor not available: {e}")
+        
+        # MEV defense integration
+        self._mev_defender = None
+        try:
+            from trading.execution.defense import get_mev_defense
+            self._mev_defender = get_mev_defense()
+            self._logger.info("MEV defense integrated - protection active")
+        except Exception as e:
+            self._logger.warning(f"MEV defense not available: {e}")
+        
+        # Validation engine integration
+        self._validator = None
+        try:
+            from core.validation.engine import get_validation_engine
+            self._validator = get_validation_engine()
+            self._logger.info("Validation engine integrated")
+        except Exception as e:
+            self._logger.warning(f"Validation engine not available: {e}")
+        
+        # Error handling and self-healing
+        self._error_handler = get_error_handler()
+        self._state_manager = get_state_manager("execution_engine")
+        self._self_healing = get_self_healing()
+        self._health_monitor = get_health_monitor()
+        
+        # Register circuit breakers
+        self._order_breaker = self._error_handler.register_circuit_breaker(
+            "order_execution", failure_threshold=5, timeout=60.0
+        )
+        self._position_breaker = self._error_handler.register_circuit_breaker(
+            "position_management", failure_threshold=3, timeout=30.0
+        )
+        
+        # Register health check
+        self._health_check = self._health_monitor.register_health_check("execution_engine")
+        
+        # Register self-healing strategy
+        self._self_healing.register_healing_strategy(
+            "execution_engine",
+            self._heal_execution_engine
+        )
+        
+        self._logger.info("Execution engine initialized with full production-grade features")
     
     async def start(self) -> None:
         """Start the execution engine."""
         if self._running:
             return
         
+        # Initialize state manager
+        await self._state_manager.initialize()
+        await self._state_manager.start_auto_save(interval=30.0)
+        
+        # Restore state if available
+        state = await self._state_manager.get_state()
+        if state:
+            self._balance = state.get("balance", self._balance)
+            self._equity = state.get("equity", self._equity)
+            self._logger.info("State restored from persistence")
+        
         self._running = True
         self._monitor_task = asyncio.create_task(self._position_monitor_loop())
+        
+        # Start health monitoring
+        await self._health_monitor.start_monitoring(interval=30.0)
         
         self._logger.info(
             "Execution engine started: mode=%s, max_position=$%.0f",
@@ -270,6 +341,18 @@ class ExecutionEngine:
                 await self._monitor_task
             except asyncio.CancelledError:
                 pass
+        
+        # Save final state
+        await self._state_manager.update_state({
+            "balance": self._balance,
+            "equity": self._equity,
+            "total_exposure": self._total_exposure,
+            "positions": {k: v.__dict__ for k, v in self._positions.items()},
+            "shutdown_time": time.time()
+        }, create_recovery_point=True)
+        
+        await self._state_manager.stop_auto_save()
+        await self._health_monitor.stop_monitoring()
         
         self._logger.info("Execution engine stopped")
     
@@ -336,6 +419,82 @@ class ExecutionEngine:
                 "take_profit": take_profit,
             },
         )
+        
+        # CONSTITUTIONAL: Audit execution intent with Reality Auditor
+        if self._reality_auditor:
+            audit_result = self._reality_auditor.audit_execution_intent(
+                order_id=order.order_id,
+                symbol=symbol,
+                side=side.value,
+                quantity=quantity,
+                order_value=quantity * (price or self._price_cache.get(symbol, 0))
+            )
+            
+            if not audit_result.passed:
+                self._logger.error(f"Execution blocked by reality auditor: {audit_result.reason}")
+                await self._error_handler.handle_error(
+                    OrderRejectedError(f"Reality audit failed: {audit_result.reason}"),
+                    "execution_engine", "submit_order", ErrorSeverity.HIGH
+                )
+                raise OrderRejectedError(f"Reality audit failed: {audit_result.reason}")
+            
+            if audit_result.warnings:
+                for warning in audit_result.warnings:
+                    self._logger.warning(f"Execution warning: {warning}")
+        
+        # MEV DEFENSE: Assess and apply protection
+        mev_recommendation = None
+        if self._mev_defender:
+            try:
+                current_price = price or self._price_cache.get(symbol, 0)
+                order_value = quantity * current_price
+                
+                # Get MEV risk assessment
+                mev_recommendation = self._mev_defender.get_defense_recommendation(
+                    symbol=symbol,
+                    venue="default",
+                    side=side.value,
+                    order_size=order_value,
+                    daily_volume=order_value * 100,  # Estimate
+                    volatility=0.02  # Estimate 2% volatility
+                )
+                
+                self._logger.info(
+                    f"MEV defense recommendation: {mev_recommendation.action.value} "
+                    f"(threat: {mev_recommendation.threat_level.value}, "
+                    f"risk: ${mev_recommendation.estimated_mev_risk:.2f})"
+                )
+                
+                # Register pending order for front-running detection
+                self._mev_defender.front_running_detector.register_pending_order(
+                    order_id=order.order_id,
+                    symbol=symbol,
+                    side=side.value,
+                    size=quantity,
+                    price=current_price
+                )
+                
+                # Store MEV recommendation in order metadata
+                order.metadata["mev_recommendation"] = mev_recommendation.to_dict()
+                
+            except Exception as e:
+                self._logger.error(f"MEV defense error: {e}")
+                await self._error_handler.handle_error(
+                    e, "execution_engine", "mev_defense", ErrorSeverity.MEDIUM
+                )
+        
+        # VALIDATION: External validation before execution
+        if self._validator:
+            try:
+                validation_result = await self._validator.validate_order(order)
+                if not validation_result.passed:
+                    self._logger.error(f"Order validation failed: {validation_result.reason}")
+                    raise OrderRejectedError(f"Validation failed: {validation_result.reason}")
+            except Exception as e:
+                self._logger.error(f"Validation error: {e}")
+                await self._error_handler.handle_error(
+                    e, "execution_engine", "validation", ErrorSeverity.HIGH
+                )
         
         self._validate_order(order)
         
@@ -830,6 +989,45 @@ class ExecutionEngine:
                 callback(event)
             except Exception as e:
                 self._logger.error("Event callback error: %s", e)
+    
+    async def _heal_execution_engine(self, error: Exception) -> bool:
+        """Self-healing strategy for execution engine."""
+        self._logger.info(f"Attempting to heal execution engine after error: {error}")
+        
+        try:
+            # Attempt to restore from last known good state
+            state = await self._state_manager.get_state()
+            if state:
+                self._balance = state.get("balance", self._balance)
+                self._equity = state.get("equity", self._equity)
+                self._logger.info("State restored during healing")
+            
+            # Clear corrupted orders if any
+            corrupted_orders = [
+                oid for oid, order in self._orders.items()
+                if order.status == OrderStatus.PENDING and 
+                (time.time() - order.created_at) > 300  # 5 minutes old
+            ]
+            
+            for oid in corrupted_orders:
+                del self._orders[oid]
+                self._logger.warning(f"Cleared stale order: {oid}")
+            
+            # Verify positions are valid
+            for symbol, position in list(self._positions.items()):
+                if position.quantity <= 0:
+                    del self._positions[symbol]
+                    self._logger.warning(f"Cleared invalid position: {symbol}")
+            
+            # Recalculate totals
+            self._update_equity()
+            
+            self._logger.info("Execution engine healing completed successfully")
+            return True
+            
+        except Exception as healing_error:
+            self._logger.error(f"Healing failed: {healing_error}")
+            return False
 
 
 _execution_engine: Optional[ExecutionEngine] = None

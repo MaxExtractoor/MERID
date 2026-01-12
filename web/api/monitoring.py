@@ -31,6 +31,7 @@ logger = get_logger("web.api.monitoring")
 class RecordMetricRequest(BaseModel):
     name: str
     value: float
+    metric_type: str = "gauge"
     labels: Dict[str, str] = {}
 
 

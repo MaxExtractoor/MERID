@@ -89,105 +89,82 @@ class ExecutionAgent:
     - One-click execution
     - Smart order routing
     - Execution speed optimization
-    - Real-time fill tracking
     """
     
-    def __init__(
-        self,
-        default_venue: str = "hyperliquid",
-        max_execution_time_ms: float = 500.0
-    ):
-        self.default_venue = default_venue
-        self.max_execution_time_ms = max_execution_time_ms
-        
-        self.pending_orders: Dict[str, Order] = {}
+    def __init__(self):
+        self.pending_orders: List[Order] = []
+        self.active_orders: List[Order] = []
         self.execution_history: List[TradeExecution] = []
-        self.recent_trades: List[Dict] = []
+        self.max_slippage_bps = 50  # 0.5%
+        self.execution_timeout = 30  # seconds
         
-        self.total_orders = 0
-        self.total_filled = 0
-        self.avg_execution_time_ms = 0.0
-        self.avg_slippage_bps = 0.0
+        # Advanced risk management parameters
+        self.max_position_size_usd = 100000  # Maximum position size
+        self.max_daily_trades = 100  # Maximum trades per day
+        self.max_daily_loss_usd = 10000  # Maximum daily loss
+        self.min_order_size_usd = 10  # Minimum order size
         
-        self.performance_stats = {
-            "total_orders": 0,
-            "successful_orders": 0,
-            "failed_orders": 0,
-            "total_volume_usd": 0.0,
-            "avg_execution_time_ms": 0.0
-        }
+        # Tracking
+        self.daily_trade_count = 0
+        self.daily_pnl = 0.0
+        self.last_reset_date = time.time()
+        self.failed_execution_count = 0
+        self.consecutive_failures = 0
         
-        logger.info(
-            "ExecutionAgent initialized: venue=%s, max_execution_time=%.1fms",
-            default_venue, max_execution_time_ms
-        )
+        logger.info("ExecutionAgent initialized with advanced risk management")
     
-    async def execute_one_click_trade(
-        self,
-        asset: str,
-        side: OrderSide,
-        size_usd: float,
-        venue: Optional[str] = None
-    ) -> Order:
+    async def execute_order(self, order: Order) -> Order:
         """
-        Execute one-click market order with lightning speed.
+        Execute a trading order with advanced risk checks.
         
-        Optimized for minimal latency.
+        Args:
+            order: Order to execute
+            
+        Returns:
+            Updated order with execution details
         """
-        venue = venue or self.default_venue
-        order_id = f"order_{int(time.time() * 1000000)}"
-        
-        order = Order(
-            order_id=order_id,
-            venue=venue,
-            asset=asset,
-            side=side,
-            order_type=OrderType.MARKET,
-            size=size_usd
-        )
-        
-        self.pending_orders[order_id] = order
-        self.total_orders += 1
-        
-        logger.info(
-            "One-click trade initiated: %s %s %.2f USD on %s",
-            side.value, asset, size_usd, venue
-        )
-        
-        # Execute with minimal latency
-        start_time = time.time()
-        
         try:
-            # Submit order
+            # Reset daily counters if needed
+            self._check_daily_reset()
+            
+            # Pre-execution risk checks
+            risk_check = self._validate_order_risk(order)
+            if not risk_check["passed"]:
+                logger.warning(f"Order failed risk check: {risk_check['reason']}")
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = risk_check["reason"]
+                return order
+            
             order.status = OrderStatus.SUBMITTED
             order.submitted_at = time.time()
             
-            # Simulate exchange execution (in production, call actual exchange API)
+            self.active_orders.append(order)
+            
+            # Execute on exchange
             await self._execute_on_exchange(order)
             
             # Track execution
-            execution_time = (time.time() - start_time) * 1000
-            
             if order.status == OrderStatus.FILLED:
-                self.total_filled += 1
+                self._track_execution(order)
+                self.daily_trade_count += 1
+                self.consecutive_failures = 0
+            else:
+                self.failed_execution_count += 1
+                self.consecutive_failures += 1
                 
-                # Update metrics
-                self._update_execution_metrics(order, execution_time)
-                
-                logger.info(
-                    "Order filled: %s, price=%.4f, time=%.1fms",
-                    order_id, order.fill_price, execution_time
-                )
+                # Circuit breaker for consecutive failures
+                if self.consecutive_failures >= 5:
+                    logger.error(f"Circuit breaker triggered: {self.consecutive_failures} consecutive failures")
             
             return order
             
-        except Exception as exc:
+        except Exception as e:
+            logger.error(f"Order execution failed: {e}")
             order.status = OrderStatus.REJECTED
-            logger.error("Order execution failed: %s - %s", order_id, exc)
-            raise
-        finally:
-            if order_id in self.pending_orders:
-                del self.pending_orders[order_id]
+            order.rejection_reason = f"Execution error: {str(e)}"
+            self.failed_execution_count += 1
+            self.consecutive_failures += 1
+            return order
     
     async def execute_limit_order(
         self,
@@ -287,9 +264,104 @@ class ExecutionAgent:
         """Get current order status."""
         return self.pending_orders.get(order_id)
     
-    def get_performance_stats(self) -> Dict:
-        """Get execution performance statistics."""
-        return self.performance_stats.copy()
+    def _check_daily_reset(self):
+        """Reset daily counters if new day."""
+        current_time = time.time()
+        time_since_reset = current_time - self.last_reset_date
+        
+        # Reset after 24 hours
+        if time_since_reset > 86400:
+            logger.info(f"Resetting daily counters. Previous: trades={self.daily_trade_count}, pnl=${self.daily_pnl:.2f}")
+            self.daily_trade_count = 0
+            self.daily_pnl = 0.0
+            self.last_reset_date = current_time
+    
+    def _validate_order_risk(self, order: Order) -> Dict:
+        """Validate order against risk parameters."""
+        # Check minimum order size
+        order_value = order.size * (order.price or 0)
+        if order_value < self.min_order_size_usd:
+            return {
+                "passed": False,
+                "reason": f"Order size ${order_value:.2f} below minimum ${self.min_order_size_usd}"
+            }
+        
+        # Check maximum position size
+        if order_value > self.max_position_size_usd:
+            return {
+                "passed": False,
+                "reason": f"Order size ${order_value:.2f} exceeds maximum ${self.max_position_size_usd}"
+            }
+        
+        # Check daily trade limit
+        if self.daily_trade_count >= self.max_daily_trades:
+            return {
+                "passed": False,
+                "reason": f"Daily trade limit reached: {self.daily_trade_count}/{self.max_daily_trades}"
+            }
+        
+        # Check daily loss limit
+        if self.daily_pnl < -self.max_daily_loss_usd:
+            return {
+                "passed": False,
+                "reason": f"Daily loss limit reached: ${self.daily_pnl:.2f}"
+            }
+        
+        # Check consecutive failure circuit breaker
+        if self.consecutive_failures >= 5:
+            return {
+                "passed": False,
+                "reason": f"Circuit breaker active: {self.consecutive_failures} consecutive failures"
+            }
+        
+        return {"passed": True, "reason": "All risk checks passed"}
+    
+    def get_execution_stats(self) -> Dict:
+        """Get comprehensive execution statistics."""
+        if not self.execution_history:
+            return {
+                "total_executions": 0,
+                "avg_execution_time_ms": 0,
+                "avg_slippage_bps": 0,
+                "daily_trade_count": self.daily_trade_count,
+                "daily_pnl": self.daily_pnl,
+                "failed_executions": self.failed_execution_count,
+                "consecutive_failures": self.consecutive_failures,
+                "success_rate": 0.0,
+                "risk_status": self._get_risk_status()
+            }
+        
+        total = len(self.execution_history)
+        avg_time = sum(e.execution_time_ms for e in self.execution_history) / total
+        avg_slippage = sum(e.slippage_bps for e in self.execution_history) / total
+        
+        total_attempts = total + self.failed_execution_count
+        success_rate = (total / total_attempts * 100) if total_attempts > 0 else 0
+        
+        return {
+            "total_executions": total,
+            "avg_execution_time_ms": avg_time,
+            "avg_slippage_bps": avg_slippage,
+            "daily_trade_count": self.daily_trade_count,
+            "daily_pnl": self.daily_pnl,
+            "failed_executions": self.failed_execution_count,
+            "consecutive_failures": self.consecutive_failures,
+            "success_rate": success_rate,
+            "risk_status": self._get_risk_status()
+        }
+    
+    def _get_risk_status(self) -> str:
+        """Get current risk status."""
+        if self.consecutive_failures >= 5:
+            return "CIRCUIT_BREAKER_ACTIVE"
+        elif self.daily_pnl < -self.max_daily_loss_usd:
+            return "DAILY_LOSS_LIMIT_REACHED"
+        elif self.daily_trade_count >= self.max_daily_trades:
+            return "DAILY_TRADE_LIMIT_REACHED"
+        elif self.consecutive_failures >= 3:
+            return "WARNING_HIGH_FAILURE_RATE"
+        else:
+            return "OPERATIONAL"
     
     def get_recent_trades(self, limit: int = 10) -> List[Dict]:
         """Get recent executed trades."""
@@ -344,14 +416,14 @@ class ExecutionAgent:
         Execute order on exchange via CCXT.
         
         Uses real exchange APIs when available, falls back to paper trading.
-        Respects global trading mode controller.
+        Respects global trading mode controller and Reality Enforcement System.
         """
         try:
-            # Check trading mode
-            from trading.mode_controller import get_trading_mode_controller
-            mode_controller = get_trading_mode_controller()
+            # Reality Enforcement: Audit execution intent BEFORE proceeding
+            from core.reality_auditor import get_reality_auditor
+            auditor = get_reality_auditor()
             
-            # Get real price from live feed
+            # Calculate order value
             from data.live_price_feed import get_live_price_feed
             feed = get_live_price_feed()
             price_data = feed.get_current_price(order.symbol)
@@ -359,14 +431,42 @@ class ExecutionAgent:
             if price_data and price_data.price > 0:
                 base_price = price_data.price
             else:
-                logger.warning(f"No live price for {order.symbol}")
                 base_price = order.price or 0
-                if base_price <= 0:
-                    order.status = OrderStatus.REJECTED
-                    return
             
-            # Check if live execution is allowed
             amount_usd = order.size * base_price
+            
+            # Audit execution intent with Reality Auditor
+            # This checks if we have valid assertions for execution
+            audit_result = auditor.audit_execution_intent(
+                intent_id=order.order_id,
+                required_assertions=[],  # Will be populated by system
+                symbol=order.symbol,
+                amount_usd=amount_usd,
+            )
+            
+            if not audit_result.passed:
+                logger.warning(
+                    f"Execution blocked by Reality Auditor: {audit_result.reason}"
+                )
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = f"Reality check failed: {audit_result.reason}"
+                return
+            
+            # Log any warnings from reality audit
+            if audit_result.warnings:
+                for warning in audit_result.warnings:
+                    logger.warning(f"Reality audit warning: {warning}")
+            
+            # Check trading mode
+            from trading.mode_controller import get_trading_mode_controller
+            mode_controller = get_trading_mode_controller()
+            
+            # Verify price data (already fetched above for reality audit)
+            if base_price <= 0:
+                logger.warning(f"No valid price for {order.symbol}")
+                order.status = OrderStatus.REJECTED
+                order.rejection_reason = "No valid price data"
+                return
             can_execute_live, reason = mode_controller.can_execute_live(order.symbol, amount_usd)
             
             # Execute based on order type

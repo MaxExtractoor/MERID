@@ -1053,11 +1053,214 @@
     color: #666;
 }
 
-/* Loading & Error States */
-.loading {
-    text-align: center;
-    padding: 20px;
-    color: #888;
+/* Reality Status Panel */
+.reality-status-panel {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  border: 2px solid #0f3460;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 30px;
+  box-shadow: 0 4px 20px rgba(15, 52, 96, 0.3);
+}
+
+.reality-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.reality-header h3 {
+  margin: 0;
+  font-size: 1.2rem;
+  color: #e0e0e0;
+  font-weight: 600;
+}
+
+.reality-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 15px;
+  margin-bottom: 15px;
+}
+
+.reality-metric {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.reality-metric .label {
+  font-size: 0.75rem;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.reality-metric .value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: #e0e0e0;
+}
+
+.blind-spot-badge {
+  padding: 4px 12px;
+  background: rgba(255, 71, 87, 0.15);
+  border: 1px solid rgba(255, 71, 87, 0.3);
+  border-radius: 12px;
+  font-size: 0.75rem;
+  color: #ff4757;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  display: inline-block;
+  margin: 4px;
+}
+
+/* Blindness Mode Overlay */
+.blindness-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #0a0000;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.5s ease-in;
+}
+
+.blindness-container {
+  max-width: 1200px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.blindness-panel {
+  background: rgba(139, 0, 0, 0.1);
+  border: 2px solid #8b0000;
+  border-radius: 12px;
+  padding: 30px;
+  margin-bottom: 20px;
+  box-shadow: 0 0 30px rgba(139, 0, 0, 0.5);
+}
+
+.blindness-panel h2 {
+  color: #ff4757;
+  font-size: 2rem;
+  margin: 0 0 20px 0;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+.blindness-panel h3 {
+  color: #ff6b6b;
+  font-size: 1.5rem;
+  margin: 0 0 15px 0;
+  border-bottom: 1px solid rgba(255, 107, 107, 0.3);
+  padding-bottom: 10px;
+}
+
+.failure-reason {
+  background: rgba(255, 0, 0, 0.1);
+  border-left: 4px solid #ff0000;
+  padding: 15px;
+  margin: 15px 0;
+  color: #ffcccc;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.blindness-note {
+  color: #ff9999;
+  font-style: italic;
+  margin-top: 15px;
+  text-align: center;
+  font-size: 0.95rem;
+}
+
+#blind-spots-detail {
+  list-style: none;
+  padding: 0;
+  margin: 15px 0;
+}
+
+#blind-spots-detail li {
+  background: rgba(255, 71, 87, 0.1);
+  border-left: 3px solid #ff4757;
+  padding: 12px 15px;
+  margin: 8px 0;
+  color: #ffcccc;
+  font-size: 1rem;
+}
+
+#recovery-requirements li::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  margin-right: 12px;
+  display: inline-block;
+}
+
+.requirement-pending {
+  background: rgba(255, 71, 87, 0.1);
+  color: #ff9999;
+  border-left: 3px solid #ff4757;
+}
+
+.requirement-pending::before {
+  background: #ff4757;
+}
+
+.requirement-complete {
+  background: rgba(46, 213, 115, 0.1);
+  color: #99ffcc;
+  border-left: 3px solid #2ed573;
+}
+
+.requirement-complete::before {
+  background: #2ed573;
+}
+
+body.blindness-mode .chart,
+body.blindness-mode .execution-panel,
+body.blindness-mode .recommendation,
+body.blindness-mode .stats-grid,
+body.blindness-mode .charts-grid,
+body.blindness-mode .intelligence-feed,
+body.blindness-mode .arbitrage-panel,
+body.blindness-mode .agent-activity {
+  display: none !important;
+}
+
+body.blindness-mode {
+  background: #0a0000;
+}
+
+body.blindness-mode .main-content {
+  filter: blur(5px);
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+/* Utility Classes */
+.hidden {
+    display: none !important;
+}
+
+.spectator-stats-panel {
+    margin-top: 20px;
 }
 
 .error-state {

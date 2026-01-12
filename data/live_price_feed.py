@@ -42,7 +42,7 @@ class LivePriceFeed:
     
     def __init__(self, symbols: List[str] = None):
         """
-        Initialize live price feed.
+        Initialize live price feed with enhanced error recovery.
         
         Args:
             symbols: List of symbols to track (e.g., ['BTC/USDT', 'ETH/USDT'])
@@ -55,40 +55,42 @@ class LivePriceFeed:
         self.running = False
         self.update_interval = 1.0  # Update every 1 second
         
+        # Error recovery parameters
+        self.max_retries = 3
+        self.retry_delay = 2.0  # seconds
+        self.exchange_failures: Dict[str, int] = {}
+        self.last_successful_fetch: Dict[str, float] = {}
+        self.circuit_breaker_threshold = 10  # failures before circuit break
+        self.circuit_breaker_reset_time = 300  # 5 minutes
+        
         # Initialize exchanges
         self._initialize_exchanges()
         
-        logger.info(f"Live price feed initialized for {len(self.symbols)} symbols")
+        logger.info(f"Live price feed initialized for {len(self.symbols)} symbols with error recovery")
     
     def _initialize_exchanges(self):
-        """Initialize exchange connections."""
-        try:
-            # Kraken - primary source (no geo-restrictions)
-            self.exchanges['kraken'] = ccxt.kraken({
-                'enableRateLimit': True
-            })
-            logger.info("Kraken exchange initialized (primary)")
-        except Exception as exc:
-            logger.error(f"Failed to initialize Kraken: {exc}")
+        """Initialize exchange connections with retry logic."""
+        exchanges_config = [
+            ('kraken', {'enableRateLimit': True}, 'primary'),
+            ('coinbase', {'enableRateLimit': True}, 'backup'),
+            ('binance', {'enableRateLimit': True, 'options': {'defaultType': 'future'}}, 'tertiary')
+        ]
         
-        try:
-            # Coinbase - backup source (no geo-restrictions)
-            self.exchanges['coinbase'] = ccxt.coinbase({
-                'enableRateLimit': True
-            })
-            logger.info("Coinbase exchange initialized (backup)")
-        except Exception as exc:
-            logger.warning(f"Failed to initialize Coinbase: {exc}")
-        
-        try:
-            # Binance - tertiary source (may be geo-restricted)
-            self.exchanges['binance'] = ccxt.binance({
-                'enableRateLimit': True,
-                'options': {'defaultType': 'future'}
-            })
-            logger.info("Binance exchange initialized (tertiary)")
-        except Exception as exc:
-            logger.warning(f"Failed to initialize Binance: {exc}")
+        for exchange_name, config, priority in exchanges_config:
+            for attempt in range(self.max_retries):
+                try:
+                    exchange_class = getattr(ccxt, exchange_name)
+                    self.exchanges[exchange_name] = exchange_class(config)
+                    self.exchange_failures[exchange_name] = 0
+                    logger.info(f"{exchange_name.capitalize()} exchange initialized ({priority})")
+                    break
+                except Exception as exc:
+                    if attempt < self.max_retries - 1:
+                        logger.warning(f"Failed to initialize {exchange_name} (attempt {attempt + 1}/{self.max_retries}): {exc}")
+                        time.sleep(self.retry_delay)
+                    else:
+                        logger.error(f"Failed to initialize {exchange_name} after {self.max_retries} attempts: {exc}")
+                        self.exchange_failures[exchange_name] = self.circuit_breaker_threshold
     
     async def start_streaming(self):
         """Start streaming price updates."""
@@ -109,41 +111,43 @@ class LivePriceFeed:
         logger.info("Price streaming stopped")
     
     async def fetch_and_broadcast_prices(self):
-        """Fetch latest prices and broadcast to subscribers."""
-        # Exchange priority order: Kraken -> Coinbase -> Binance
+        """Fetch latest prices and broadcast to subscribers with error recovery."""
+        for symbol in self.symbols:
+            await self._fetch_price_with_retry(symbol)
+    
+    async def _fetch_price_with_retry(self, symbol: str):
+        """Fetch price with retry logic and circuit breaker."""
         exchange_priority = ['kraken', 'coinbase', 'binance']
         
-        for symbol in self.symbols:
-            fetched = False
+        fetched = False
+        for exchange_name in exchange_priority:
+            if exchange_name not in self.exchanges:
+                continue
             
-            for exchange_name in exchange_priority:
-                if fetched:
-                    break
-                    
-                if exchange_name not in self.exchanges:
-                    continue
-                    
-                exchange = self.exchanges[exchange_name]
-                
+            # Check circuit breaker
+            if self._is_circuit_breaker_active(exchange_name):
+                logger.debug(f"Circuit breaker active for {exchange_name}, skipping")
+                continue
+            
+            # Try to fetch with retries
+            for attempt in range(self.max_retries):
                 try:
-                    # Map symbol for Kraken (uses different format)
+                    exchange = self.exchanges[exchange_name]
+                    
+                    # Adjust symbol format for different exchanges
                     fetch_symbol = symbol
-                    if exchange_name == 'kraken':
-                        fetch_symbol = symbol.replace('/USDT', '/USD')
-                    elif exchange_name == 'coinbase':
+                    if exchange_name in ['kraken', 'coinbase']:
                         fetch_symbol = symbol.replace('/USDT', '/USD')
                     
-                    # Fetch ticker data
                     ticker = exchange.fetch_ticker(fetch_symbol)
                     
-                    # Create price data
                     price_data = PriceData(
                         symbol=symbol,
-                        price=ticker['last'] or 0.0,
-                        bid=ticker['bid'] or 0.0,
-                        ask=ticker['ask'] or 0.0,
-                        volume_24h=ticker.get('quoteVolume') or 0.0,
-                        change_24h_pct=ticker.get('percentage') or 0.0,
+                        price=ticker['last'],
+                        bid=ticker['bid'] or ticker['last'],
+                        ask=ticker['ask'] or ticker['last'],
+                        volume_24h=ticker['quoteVolume'] or 0,
+                        change_24h_pct=ticker['percentage'] or 0,
                         timestamp=datetime.now(),
                         exchange=exchange_name
                     )
@@ -151,17 +155,40 @@ class LivePriceFeed:
                     # Update cache
                     self.price_cache[symbol] = price_data
                     
+                    # Register price assertion with Reality Registry
+                    self._register_price_assertion(price_data, exchange_name)
+                    
                     # Broadcast to subscribers
                     await self._broadcast_update(price_data)
                     
+                    # Reset failure count on success
+                    self.exchange_failures[exchange_name] = 0
+                    self.last_successful_fetch[exchange_name] = time.time()
+                    
                     fetched = True
+                    break
                     
                 except Exception as exc:
-                    logger.debug(f"Failed to fetch {symbol} from {exchange_name}: {exc}")
-                    continue
+                    self.exchange_failures[exchange_name] = self.exchange_failures.get(exchange_name, 0) + 1
+                    
+                    if attempt < self.max_retries - 1:
+                        logger.debug(f"Failed to fetch {symbol} from {exchange_name} (attempt {attempt + 1}/{self.max_retries}): {exc}")
+                        await asyncio.sleep(self.retry_delay)
+                    else:
+                        logger.warning(f"Failed to fetch {symbol} from {exchange_name} after {self.max_retries} attempts: {exc}")
             
-            if not fetched:
-                logger.warning(f"Failed to fetch {symbol} from all exchanges")
+            if fetched:
+                break
+        
+        if not fetched:
+            logger.warning(f"Failed to fetch {symbol} from all exchanges")
+            # Use cached data if available
+            if symbol in self.price_cache:
+                cached_age = (datetime.now() - self.price_cache[symbol].timestamp).total_seconds()
+                if cached_age < 60:  # Use cache if less than 60 seconds old
+                    logger.info(f"Using cached price for {symbol} (age: {cached_age:.1f}s)")
+                else:
+                    logger.error(f"Cached price for {symbol} too old ({cached_age:.1f}s)")
     
     async def _broadcast_update(self, price_data: PriceData):
         """Broadcast price update to all subscribers."""
@@ -236,15 +263,92 @@ class LivePriceFeed:
         logger.error(f"Failed to fetch OHLCV for {symbol} from all exchanges")
         return []
     
+    def _register_price_assertion(self, price_data: PriceData, exchange_name: str):
+        """Register price data as assertion in Reality Registry."""
+        try:
+            from core.reality_registry import (
+                get_reality_registry,
+                AssertionDomain,
+                AssertionProvenance,
+            )
+            import time
+            
+            registry = get_reality_registry()
+            
+            # Calculate confidence based on bid-ask spread
+            spread_pct = abs(price_data.ask - price_data.bid) / price_data.price * 100
+            confidence = max(0.7, min(0.95, 1.0 - (spread_pct / 10)))  # Lower confidence for wide spreads
+            
+            # Provenance score based on exchange reliability
+            exchange_scores = {
+                'kraken': 0.95,
+                'coinbase': 0.93,
+                'binance': 0.90,
+            }
+            provenance_score = exchange_scores.get(exchange_name, 0.80)
+            
+            # Register assertion
+            registry.register_assertion(
+                domain=AssertionDomain.MARKET,
+                description=f"{price_data.symbol} price: ${price_data.price:.2f} from {exchange_name}",
+                confidence=confidence,
+                provenance_score=provenance_score,
+                regime_compatibility=1.0,
+                decay_rate=0.1,  # Price data decays quickly
+                validity_window=60,  # Valid for 60 seconds
+                sources=[AssertionProvenance(
+                    source_id=f"live-price-{exchange_name}",
+                    module_id="data.live_price_feed",
+                    evidence_hash=f"price:{price_data.symbol}:{price_data.timestamp.timestamp()}",
+                    weight=1.0,
+                    timestamp=time.time(),
+                )],
+            )
+            
+        except Exception as e:
+            logger.debug(f"Failed to register price assertion: {e}")
+    
+    def _is_circuit_breaker_active(self, exchange_name: str) -> bool:
+        """Check if circuit breaker is active for an exchange."""
+        failures = self.exchange_failures.get(exchange_name, 0)
+        
+        if failures < self.circuit_breaker_threshold:
+            return False
+        
+        # Check if enough time has passed to reset
+        last_success = self.last_successful_fetch.get(exchange_name, 0)
+        time_since_success = time.time() - last_success
+        
+        if time_since_success > self.circuit_breaker_reset_time:
+            logger.info(f"Resetting circuit breaker for {exchange_name}")
+            self.exchange_failures[exchange_name] = 0
+            return False
+        
+        return True
+    
     def get_stats(self) -> Dict:
-        """Get price feed statistics."""
+        """Get comprehensive price feed statistics."""
+        exchange_health = {}
+        for exchange_name in self.exchanges.keys():
+            failures = self.exchange_failures.get(exchange_name, 0)
+            circuit_breaker = self._is_circuit_breaker_active(exchange_name)
+            last_success = self.last_successful_fetch.get(exchange_name, 0)
+            
+            exchange_health[exchange_name] = {
+                "failures": failures,
+                "circuit_breaker_active": circuit_breaker,
+                "last_successful_fetch": last_success,
+                "time_since_success": time.time() - last_success if last_success > 0 else None
+            }
+        
         return {
             "running": self.running,
             "symbols_tracked": len(self.symbols),
             "exchanges_connected": len(self.exchanges),
             "subscribers": len(self.subscribers),
             "cached_prices": len(self.price_cache),
-            "update_interval": self.update_interval
+            "update_interval": self.update_interval,
+            "exchange_health": exchange_health
         }
 
 

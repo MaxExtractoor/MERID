@@ -14,6 +14,9 @@ from core.time_authority import current_time
 from tools import web_search
 from utils.logger import get_logger
 from agents.reflection_layer import reflection_layer
+from agents.explainability import (
+    get_explainability_tracker, create_reasoning_builder, DecisionType
+)
 
 _OLLAMA_URL = f"{OLLAMA_BASE_URL.rstrip('/')}{OLLAMA_GENERATE_ENDPOINT}"
 
@@ -71,6 +74,42 @@ class BaseAgent:
             "trust": self.trust,
             "research": research_findings,
         }
+        
+        # CONSTITUTIONAL: Record explainable decision reasoning
+        try:
+            reasoning_builder = create_reasoning_builder(
+                agent_id=self.agent_id,
+                decision_type=DecisionType.VOTE
+            )
+            
+            reasoning_builder.set_decision(
+                decision=parsed["vote"],
+                confidence=parsed["confidence"]
+            ).set_primary_reason(
+                parsed["reasoning"]
+            )
+            
+            # Add research findings as data sources
+            for finding in research_findings:
+                reasoning_builder.add_data_source(finding.get("source", "unknown"))
+            
+            # Add market context from energy
+            reasoning_builder.set_market_context({
+                "energy_id": energy["energy_id"],
+                "source": energy.get("source", "unknown"),
+                "payload": str(energy.get("payload", ""))[:200]
+            })
+            
+            # Build and record reasoning
+            decision_reasoning = reasoning_builder.build()
+            explainability_tracker = get_explainability_tracker()
+            explainability_tracker.record_decision(decision_reasoning)
+            
+            # Add reasoning to result
+            result["explainable_reasoning"] = decision_reasoning.to_dict()
+            
+        except Exception as e:
+            self.logger.error(f"Failed to record explainable reasoning: {e}")
         
         # Record decision for reflection and learning
         reflection_layer.record_decision(

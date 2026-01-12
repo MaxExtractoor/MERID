@@ -2640,17 +2640,6 @@ async function fetchPortfolioHistory() {
             portfolioChart.data.datasets[0].data = values;
             portfolioChart.update('none');
         }
-    } catch (e) {
-        console.debug('Portfolio history not available:', e);
-    }
-}
-
-// Start enhanced streaming on load
-document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(startEnhancedStreaming, 2000);
-});
-
-// ============================================
 // WEBSOCKET REAL-TIME STREAMING
 // ============================================
 
@@ -2852,6 +2841,112 @@ function showToast(message, severity = 'info') {
     // Auto-remove after 5 seconds
     setTimeout(() => toast.remove(), 5000);
 }
+
+// ============================================
+// REALITY ENFORCEMENT FUNCTIONS
+// ============================================
+
+async function updateRealityStatus() {
+  try {
+    const response = await fetch('/api/v1/reality/status');
+    const data = await response.json();
+    
+    const state = data.system_state;
+    
+    // Update mode badge
+    const modeBadge = document.getElementById('reality-mode');
+    if (modeBadge) {
+      modeBadge.textContent = state.mode;
+      modeBadge.className = `mode-badge mode-${state.mode.toLowerCase()}`;
+    }
+    
+    // Update metrics
+    const validPct = document.getElementById('valid-pct');
+    if (validPct) validPct.textContent = `${state.registry_status.valid_pct.toFixed(1)}%`;
+    
+    const regimeEntropy = document.getElementById('regime-entropy');
+    if (regimeEntropy) regimeEntropy.textContent = state.regime_entropy.toFixed(3);
+    
+    const activeConflicts = document.getElementById('active-conflicts');
+    if (activeConflicts) activeConflicts.textContent = state.registry_status.active_conflicts;
+    
+    const blindSpotsCount = document.getElementById('blind-spots-count');
+    if (blindSpotsCount) blindSpotsCount.textContent = state.registry_status.blind_spots.length;
+    
+    // Display blind spots
+    const blindSpotsList = document.getElementById('blind-spots-list');
+    if (blindSpotsList && state.registry_status.blind_spots.length > 0) {
+      blindSpotsList.innerHTML = state.registry_status.blind_spots
+        .map(spot => `<span class="blind-spot-badge">${spot}</span>`)
+        .join('');
+    } else if (blindSpotsList) {
+      blindSpotsList.innerHTML = '';
+    }
+    
+    // Handle blindness mode
+    if (state.is_blind) {
+      enterBlindnessMode(state.blind_reason, state.registry_status.blind_spots);
+    } else {
+      exitBlindnessMode();
+    }
+    
+    // Check self-deception metrics
+    const deception = data.deception_metrics;
+    if (deception.warning) {
+      console.warn('⚠️ Self-deception warning:', deception);
+    }
+    
+  } catch (error) {
+    console.error('Error updating reality status:', error);
+  }
+}
+
+function enterBlindnessMode(reason, blindSpots) {
+  console.warn('🔴 ENTERING BLINDNESS MODE:', reason);
+  
+  document.body.classList.add('blindness-mode');
+  
+  const overlay = document.getElementById('blindness-overlay');
+  if (overlay) overlay.style.display = 'flex';
+  
+  const reasonEl = document.getElementById('blindness-reason');
+  if (reasonEl) reasonEl.textContent = reason;
+  
+  const blindSpotsDetail = document.getElementById('blind-spots-detail');
+  if (blindSpotsDetail && blindSpots) {
+    blindSpotsDetail.innerHTML = blindSpots
+      .map(spot => `<li>${spot} - No valid assertions</li>`)
+      .join('');
+  }
+  
+  document.querySelectorAll('.btn-execute, .btn-trade, .btn-action').forEach(btn => {
+    btn.disabled = true;
+    btn.title = 'Execution blocked - System in blindness mode';
+  });
+}
+
+function exitBlindnessMode() {
+  document.body.classList.remove('blindness-mode');
+  
+  const overlay = document.getElementById('blindness-overlay');
+  if (overlay) overlay.style.display = 'none';
+  
+  document.querySelectorAll('.btn-execute, .btn-trade, .btn-action').forEach(btn => {
+    btn.disabled = false;
+    btn.title = '';
+  });
+}
+
+window.exitBlindnessMode = function() {
+  if (confirm('⚠️ WARNING: Forcing exit from blindness mode is UNSAFE.\n\nMERID cannot make reliable decisions without valid assertions.\n\nAre you absolutely sure?')) {
+    exitBlindnessMode();
+    console.warn('⚠️ FORCED EXIT FROM BLINDNESS MODE - UNSAFE OPERATION');
+  }
+};
+
+// Start reality status polling
+setInterval(updateRealityStatus, 5000);
+updateRealityStatus();
 
 // Initialize WebSockets after page load
 document.addEventListener('DOMContentLoaded', () => {

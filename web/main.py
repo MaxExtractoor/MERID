@@ -78,6 +78,8 @@ from web.api.governance import router as governance_router
 from web.api.ops import router as ops_router
 from web.api.archive import router as archive_router
 from web.api.trading_mode import router as trading_mode_router
+from web.api.reality import router as reality_router
+from web.api.explainability import router as explainability_router
 
 root_router = APIRouter()
 router = APIRouter(prefix="/api")
@@ -184,6 +186,8 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(ops_router)
     application.include_router(archive_router)
     application.include_router(trading_mode_router)
+    application.include_router(reality_router)
+    application.include_router(explainability_router)
     return application
 
 
@@ -597,158 +601,8 @@ async def settle_uma_assertion(assertion_id: str):
 
 
 # Create app instance after all routes are defined
+# NOTE: Startup/shutdown now handled by main.py lifespan manager
 app = create_app()
-
-# Initialize and start agent orchestrator on startup
-@app.on_event("startup")
-async def startup_event():
-    """Initialize system on startup."""
-    from utils.logger import get_logger
-    import asyncio
-    
-    startup_logger = get_logger("web.main.startup")
-    
-    try:
-        startup_logger.info("Initializing MERID agent orchestrator...")
-        from core.agent_orchestrator import get_agent_orchestrator
-        orchestrator = get_agent_orchestrator()
-        asyncio.create_task(orchestrator.start())
-    except Exception as e:
-        startup_logger.error(f"Failed to start orchestrator: {e}")
-    
-    try:
-        startup_logger.info("Starting consensus engine...")
-        from core.consensus_engine import get_consensus_engine
-        consensus = get_consensus_engine()
-        asyncio.create_task(consensus.start())
-    except Exception as e:
-        startup_logger.error(f"Failed to start consensus: {e}")
-    
-    try:
-        startup_logger.info("Starting simulation miner...")
-        from simulation.continuous_miner import get_continuous_miner
-        miner = get_continuous_miner()
-        asyncio.create_task(miner.start())
-    except Exception as e:
-        startup_logger.error(f"Failed to start miner: {e}")
-    
-    try:
-        startup_logger.info("Starting audit trail...")
-        from core.audit_trail import get_audit_trail
-        audit = get_audit_trail()
-        asyncio.create_task(audit.start())
-    except Exception as e:
-        startup_logger.error(f"Failed to start audit: {e}")
-    
-    try:
-        startup_logger.info("Starting execution engine...")
-        from trading.execution import get_execution_engine
-        from data.live_price_feed import get_live_price_feed
-        
-        execution = get_execution_engine()
-        asyncio.create_task(execution.start())
-        
-        # Wire execution engine to live price feed for real-time position updates
-        price_feed = get_live_price_feed()
-        def on_execution_price_update(price_data):
-            execution.update_price(price_data.symbol, price_data.price)
-        price_feed.subscribe(on_execution_price_update)
-        startup_logger.info("Execution engine wired to live price feed")
-    except Exception as e:
-        startup_logger.error(f"Failed to start execution: {e}")
-    
-    try:
-        startup_logger.info("Starting streaming agent mesh...")
-        from agents.agent_mesh import agent_mesh
-        asyncio.create_task(agent_mesh.initialize())
-        asyncio.create_task(agent_mesh.start())
-    except Exception as e:
-        startup_logger.error(f"Failed to start agent mesh: {e}")
-    
-    try:
-        startup_logger.info("Starting prediction markets aggregator...")
-        from monitoring.prediction_markets import get_prediction_aggregator
-        prediction_agg = get_prediction_aggregator()
-        asyncio.create_task(prediction_agg.start())
-    except Exception as e:
-        startup_logger.error(f"Failed to start prediction markets: {e}")
-    
-    try:
-        startup_logger.info("Starting alert manager...")
-        from core.alerts import get_alert_manager
-        from data.live_price_feed import get_live_price_feed
-        alert_mgr = get_alert_manager()
-        asyncio.create_task(alert_mgr.start())
-        
-        price_feed = get_live_price_feed()
-        def on_price_update(price_data):
-            alert_mgr.update_price(price_data.symbol, price_data.price)
-        price_feed.subscribe(on_price_update)
-    except Exception as e:
-        startup_logger.error(f"Failed to start alerts: {e}")
-    
-    try:
-        startup_logger.info("Starting health monitor...")
-        from core.health import get_health_monitor
-        health_mon = get_health_monitor()
-        asyncio.create_task(health_mon.start())
-    except Exception as e:
-        startup_logger.error(f"Failed to start health monitor: {e}")
-    
-    startup_logger.info("MERID system startup complete")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown."""
-    from core.agent_orchestrator import get_agent_orchestrator
-    from core.consensus_engine import get_consensus_engine
-    from simulation.continuous_miner import get_continuous_miner
-    from core.audit_trail import get_audit_trail
-    from trading.execution import get_execution_engine
-    from agents.agent_mesh import agent_mesh
-    from monitoring.prediction_markets import get_prediction_aggregator
-    from core.alerts import get_alert_manager
-    from core.health import get_health_monitor
-    from utils.logger import get_logger
-    
-    shutdown_logger = get_logger("web.main.shutdown")
-    shutdown_logger.info("Shutting down MERID system...")
-    
-    # Stop health monitor
-    health_mon = get_health_monitor()
-    await health_mon.stop()
-    
-    # Stop alert manager
-    alert_mgr = get_alert_manager()
-    await alert_mgr.stop()
-    
-    # Stop prediction markets
-    prediction_agg = get_prediction_aggregator()
-    await prediction_agg.stop()
-    
-    # Stop streaming agent mesh
-    await agent_mesh.stop()
-    
-    # Stop execution engine
-    execution = get_execution_engine()
-    await execution.stop()
-    
-    # Stop audit trail (to capture final events)
-    audit = get_audit_trail()
-    await audit.stop()
-    
-    # Stop simulation miner
-    miner = get_continuous_miner()
-    await miner.stop()
-    
-    # Stop consensus engine
-    consensus = get_consensus_engine()
-    await consensus.stop()
-    
-    # Stop orchestrator
-    orchestrator = get_agent_orchestrator()
-    orchestrator.stop()
-    shutdown_logger.info("MERID system stopped")
 
 if __name__ == "__main__":
     import uvicorn

@@ -148,6 +148,33 @@
                     <p class="section-subtitle">Real-time market data and system intelligence</p>
                 </div>
 
+                <!-- Reality Status Panel -->
+                <div class="reality-status-panel">
+                    <div class="reality-header">
+                        <h3>Reality Status</h3>
+                        <div id="reality-mode" class="mode-badge mode-operational">OPERATIONAL</div>
+                    </div>
+                    <div class="reality-metrics">
+                        <div class="reality-metric">
+                            <span class="label">Valid Assertions</span>
+                            <span id="valid-pct" class="value">--</span>
+                        </div>
+                        <div class="reality-metric">
+                            <span class="label">Regime Entropy</span>
+                            <span id="regime-entropy" class="value">--</span>
+                        </div>
+                        <div class="reality-metric">
+                            <span class="label">Active Conflicts</span>
+                            <span id="active-conflicts" class="value">--</span>
+                        </div>
+                        <div class="reality-metric">
+                            <span class="label">Blind Spots</span>
+                            <span id="blind-spots-count" class="value">--</span>
+                        </div>
+                    </div>
+                    <div id="blind-spots-list" class="blind-spots-list"></div>
+                </div>
+
                 <!-- Stats Grid -->
                 <div class="stats-grid">
                     <div class="stat-card">
@@ -1686,7 +1713,7 @@
                         <button class="mode-btn mode-autonomous" onclick="setTradingMode('autonomous')">Autonomous</button>
                     </div>
                     <div id="trading-mode-stats"></div>
-                    <div class="mode-warning" id="live-warning" style="display: none;">
+                    <div class="mode-warning hidden" id="live-warning">
                         <span class="mode-warning-icon">⚠️</span>
                         <span>Live mode will execute real trades on connected exchanges. Use with caution.</span>
                     </div>
@@ -1709,7 +1736,7 @@
                 </div>
 
                 <!-- Spectator Stats -->
-                <div class="panel" style="margin-top: 20px;">
+                <div class="panel spectator-stats-panel">
                     <div class="panel-header">
                         <h2 class="panel-title">Trading Statistics</h2>
                         <button class="btn btn-sm" onclick="fetchSpectatorStats()">Refresh</button>
@@ -1722,6 +1749,38 @@
                 </div>
             </section>
         </main>
+    </div>
+
+    <!-- Blindness Mode Panels (Hidden by default) -->
+    <div id="blindness-overlay" class="blindness-overlay hidden">
+        <div class="blindness-container">
+            <!-- Reality Failure Panel -->
+            <div id="reality-failure-panel" class="blindness-panel">
+                <h2>⚠️ REALITY UNSTABLE</h2>
+                <div class="failure-reason" id="blindness-reason">System entering blindness mode...</div>
+                <div class="failed-assertions" id="failed-assertions-list"></div>
+                <div class="last-known-safe-state" id="last-safe-state"></div>
+            </div>
+
+            <!-- What We Don't Know Panel -->
+            <div id="unknown-panel" class="blindness-panel">
+                <h3>Current Blind Spots</h3>
+                <ul id="blind-spots-detail"></ul>
+                <p class="blindness-note">MERID cannot make decisions without these assertions.</p>
+            </div>
+
+            <!-- Recovery Checklist -->
+            <div id="recovery-checklist" class="blindness-panel">
+                <h3>Recovery Requirements</h3>
+                <ul id="recovery-requirements">
+                    <li class="requirement-pending">Market data feed restored</li>
+                    <li class="requirement-pending">Regime classification stable</li>
+                    <li class="requirement-pending">Execution path verified</li>
+                    <li class="requirement-pending">Treasury state confirmed</li>
+                </ul>
+                <button class="btn btn-danger" onclick="exitBlindnessMode()">Force Exit (Unsafe)</button>
+            </div>
+        </div>
     </div>
 
     <!-- Lockdown Modal -->
@@ -1742,6 +1801,8 @@
         </div>
     </div>
 
+    <script src="/static/js/reality-status.js"></script>
+    <script src="/static/js/test-ui.js"></script>
     <script src="/static/js/unified-dashboard.js"></script>
     <script src="/static/js/professional-ui.js"></script>
 </body>
