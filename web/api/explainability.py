@@ -10,6 +10,7 @@ from agents.explainability import get_explainability_tracker
 from core.consensus_logging import get_consensus_logger
 from core.trust_transparency import get_trust_manager
 from core.error_handling import get_error_handler, get_health_monitor
+from core.signal_provenance import get_provenance_tracker
 from utils.logger import get_logger
 
 logger = get_logger("web.api.explainability")
@@ -324,4 +325,58 @@ async def get_mev_events(
         }
     except Exception as e:
         logger.error(f"Error fetching MEV events: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# SIGNAL SYNTHESIS PROVENANCE
+# ============================================================================
+
+@router.get("/signals/syntheses")
+async def get_signal_syntheses(
+    limit: int = Query(50, ge=1, le=200)
+) -> Dict[str, Any]:
+    """Get recent signal syntheses with full provenance"""
+    try:
+        provenance_tracker = get_provenance_tracker()
+        syntheses = provenance_tracker.get_recent_syntheses(limit)
+        
+        return {
+            "total": len(syntheses),
+            "syntheses": [s.to_dict() for s in syntheses]
+        }
+    except Exception as e:
+        logger.error(f"Error fetching signal syntheses: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/syntheses/{synthesis_id}")
+async def get_synthesis_detail(synthesis_id: str) -> Dict[str, Any]:
+    """Get detailed provenance for a specific synthesis"""
+    try:
+        provenance_tracker = get_provenance_tracker()
+        synthesis = provenance_tracker.get_synthesis(synthesis_id)
+        
+        if not synthesis:
+            raise HTTPException(status_code=404, detail="Synthesis not found")
+        
+        return {
+            "synthesis": synthesis.to_dict(),
+            "human_readable": synthesis.to_human_readable()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching synthesis detail: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signals/stats")
+async def get_signal_synthesis_stats() -> Dict[str, Any]:
+    """Get signal synthesis statistics"""
+    try:
+        provenance_tracker = get_provenance_tracker()
+        return provenance_tracker.get_synthesis_stats()
+    except Exception as e:
+        logger.error(f"Error fetching synthesis stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))

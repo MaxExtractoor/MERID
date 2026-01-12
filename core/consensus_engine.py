@@ -19,6 +19,9 @@ import time
 
 from core.streaming_bus import get_event_bus, EventChannel, StreamEvent
 from core.intersystem_api import get_intersystem_api, MeridSystem, IntentStatus
+from core.consensus_logging import (
+    get_consensus_logger, VoteType, ConsensusOutcome
+)
 from utils.logger import get_logger
 
 logger = get_logger("core.consensus")
@@ -83,6 +86,10 @@ class ConsensusEngine:
         # State
         self.last_consensus_time = 0.0
         self.consensus_interval = 10.0  # Resolve consensus every N seconds
+        
+        # CONSTITUTIONAL: Consensus transparency logging
+        self.consensus_logger = get_consensus_logger()
+        self.current_round_id: Optional[str] = None
         
     async def start(self):
         """Start the consensus engine."""
@@ -183,13 +190,29 @@ class ConsensusEngine:
         
         confidence = data.get("confidence", 0.5)
         
-        return Vote(
+        vote = Vote(
             agent_id=event.source,
             proposal=event.event_type,
             signal=signal.lower(),
             confidence=confidence,
             trust=self.trust_scores[event.source]
         )
+        
+        # CONSTITUTIONAL: Log vote in consensus transparency system
+        if self.current_round_id:
+            vote_type = VoteType.APPROVE if signal.lower() in ["bullish", "buy"] else VoteType.REJECT
+            reasoning = data.get("reasoning", f"{signal} signal with {confidence:.1%} confidence")
+            
+            self.consensus_logger.record_vote(
+                round_id=self.current_round_id,
+                agent_id=event.source,
+                vote=vote_type,
+                reasoning=reasoning,
+                confidence=confidence,
+                trust_weight=self.trust_scores[event.source]
+            )
+        
+        return vote
         
     def _handle_veto(self, event: StreamEvent):
         """Handle risk agent veto."""
@@ -220,6 +243,17 @@ class ConsensusEngine:
         """Resolve consensus from pending votes with inter-system authority checks."""
         if not self.pending_votes:
             return None
+        
+        # CONSTITUTIONAL: Start consensus round logging
+        proposal = {
+            "type": "market_consensus",
+            "votes_count": len(self.pending_votes),
+            "timestamp": time.time()
+        }
+        self.current_round_id = self.consensus_logger.start_round(
+            proposal=proposal,
+            quorum_required=self.min_votes
+        )
         
         votes = list(self.pending_votes.values())
         self.pending_votes.clear()
@@ -284,6 +318,22 @@ class ConsensusEngine:
             vetoed=vetoed,
             veto_reason=veto_reason
         )
+        
+        # CONSTITUTIONAL: Complete consensus round logging
+        if self.current_round_id:
+            outcome = ConsensusOutcome.PASSED if quorum_met and not vetoed else ConsensusOutcome.FAILED
+            if vetoed:
+                outcome = ConsensusOutcome.FAILED
+            elif not quorum_met:
+                outcome = ConsensusOutcome.NO_QUORUM
+            
+            self.consensus_logger.complete_round(
+                round_id=self.current_round_id,
+                outcome=outcome,
+                final_confidence=confidence,
+                final_action=decision
+            )
+            self.current_round_id = None
         
         logger.info(f"Consensus resolved: {decision} ({signal}) confidence={confidence:.2%} quorum={quorum_met} vetoed={vetoed}")
         
