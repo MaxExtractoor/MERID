@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 # Stage 2 Agents: async reasoning pipeline, research tools, and structured outputs.
 
@@ -13,7 +13,7 @@ from core.settings import MAX_TOOL_RESULTS, OLLAMA_BASE_URL, OLLAMA_GENERATE_END
 from core.time_authority import current_time
 from tools import web_search
 from utils.logger import get_logger
-from agents.reflection_layer import reflection_layer
+from agents.reflection.integration import get_reflection_system
 from agents.explainability import (
     get_explainability_tracker, create_reasoning_builder, DecisionType
 )
@@ -55,7 +55,12 @@ class BaseAgent:
         extra_context = await self._additional_context(energy, research_findings)
         
         # Add reflection context for self-learning
-        reflection_context = reflection_layer.get_agent_context(self.agent_id)
+        reflection_system = get_reflection_system()
+        reflection_context = reflection_system.get_agent_context(
+            self.agent_id,
+            include_metrics=True,
+            include_insights=True
+        )
         if reflection_context:
             extra_context = f"{extra_context}\n\nReflection Context:\n{reflection_context}"
         
@@ -112,12 +117,16 @@ class BaseAgent:
             self.logger.error(f"Failed to record explainable reasoning: {e}")
         
         # Record decision for reflection and learning
-        reflection_layer.record_decision(
+        reflection_system.record_decision(
             agent_id=self.agent_id,
             energy_id=energy["energy_id"],
             decision=parsed["vote"],
             confidence=parsed["confidence"],
-            reasoning=parsed["reasoning"]
+            reasoning=parsed["reasoning"],
+            market_context={
+                "source": energy.get("source"),
+                "payload": str(energy.get("payload", ""))[:200]
+            }
         )
 
         await event_stream.publish(

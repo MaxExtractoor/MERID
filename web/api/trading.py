@@ -605,3 +605,105 @@ async def get_market_positions(platform: str = "polymarket", user_id: str = "def
         "total_positions": len(positions),
         "total_value": 0.0
     }
+
+
+# Dashboard Integration Endpoints
+
+@router.get("/execution/status")
+async def get_execution_status():
+    """Get execution engine status for dashboard."""
+    agent = get_execution_agent()
+    return {
+        "status": "ready",
+        "open_orders": len(agent.pending_orders) if hasattr(agent, 'pending_orders') else 0,
+        "filled_today": getattr(agent, 'filled_today', 0),
+        "avg_latency_ms": getattr(agent, 'avg_latency_ms', 0),
+        "success_rate": getattr(agent, 'success_rate', 1.0)
+    }
+
+
+@router.get("/portfolio/summary")
+async def get_portfolio_summary():
+    """Get portfolio summary for dashboard."""
+    from trading.paper_trading import get_paper_engine
+    
+    paper_engine = get_paper_engine()
+    
+    total_value = 100000.0  # Base capital
+    unrealized_pnl = 0.0
+    positions = []
+    
+    for user_id, portfolio in paper_engine.portfolios.items():
+        for pos_key, position in portfolio.positions.items():
+            pnl = paper_engine._calculate_position_pnl(position)
+            unrealized_pnl += pnl
+            positions.append({
+                "asset": position.asset,
+                "side": position.side,
+                "size": position.size_usd,
+                "pnl": pnl
+            })
+    
+    return {
+        "total_value": total_value + unrealized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+        "positions": positions,
+        "position_count": len(positions)
+    }
+
+
+@router.get("/backtest/results")
+async def get_backtest_results():
+    """Get backtest results for dashboard."""
+    # Return empty results - backtests are run on demand
+    return {
+        "results": [],
+        "count": 0,
+        "message": "No backtest results available. Run a backtest to see results."
+    }
+
+
+@router.get("/paper/status")
+async def get_paper_trading_status():
+    """Get paper trading status for dashboard."""
+    from trading.paper_trading import get_paper_engine
+    
+    paper_engine = get_paper_engine()
+    
+    trades_today = 0
+    volume_today = 0.0
+    pnl_today = 0.0
+    
+    for user_id, portfolio in paper_engine.portfolios.items():
+        trades_today += len(portfolio.trade_history)
+        for trade in portfolio.trade_history:
+            volume_today += trade.get('size_usd', 0)
+            pnl_today += trade.get('pnl', 0)
+    
+    return {
+        "trades_today": trades_today,
+        "volume_today": volume_today,
+        "pnl_today": pnl_today,
+        "active_positions": sum(len(p.positions) for p in paper_engine.portfolios.values())
+    }
+
+
+@router.get("/mode/set")
+async def set_trading_mode(mode: str = "paper"):
+    """Set trading mode (paper/hybrid/live)."""
+    valid_modes = ["paper", "hybrid", "live"]
+    if mode not in valid_modes:
+        raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of: {valid_modes}")
+    
+    # For now, only paper mode is supported
+    if mode != "paper":
+        return {
+            "status": "warning",
+            "mode": "paper",
+            "message": f"{mode} mode not yet enabled. Defaulting to paper mode."
+        }
+    
+    return {
+        "status": "success",
+        "mode": mode
+    }

@@ -1,4 +1,4 @@
-﻿from agents.analyst_gemma import AnalystGemma
+from agents.analyst_gemma import AnalystGemma
 from agents.analyst_llama import AnalystLlama
 from agents.skeptic import Skeptic
 from agents.risk import RiskAgent

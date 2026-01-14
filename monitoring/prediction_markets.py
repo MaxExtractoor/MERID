@@ -26,11 +26,25 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 from collections import deque
+from datetime import datetime
 import math
 
 from utils.logger import get_logger
 
 logger = get_logger("monitoring.prediction_markets")
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Convert value to float, returning default on failure."""
+    try:
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str) and value.strip() == "":
+            return default
+        return float(value)
+    except (ValueError, TypeError):
+        return default
 
 
 class PredictionPlatform(Enum):
@@ -98,9 +112,17 @@ class PredictionMarket:
     @property
     def time_to_resolution(self) -> Optional[float]:
         """Get seconds until resolution."""
-        if self.resolution_date is None:
+        resolution = self.resolution_date
+        if resolution is None:
             return None
-        return max(0, self.resolution_date - time.time())
+        if isinstance(resolution, str):
+            try:
+                resolution = datetime.fromisoformat(
+                    resolution.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                return None
+        return max(0, float(resolution) - time.time())
     
     @property
     def days_to_resolution(self) -> Optional[float]:
@@ -290,39 +312,47 @@ class PolymarketConnector(PredictionMarketConnector):
     
     async def fetch_markets(self, category: Optional[MarketCategory] = None) -> List[PredictionMarket]:
         """Fetch markets from Polymarket Gamma API."""
+        logger.info("Polymarket: Starting fetch...")
         try:
             import httpx
+            import asyncio
             
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                # Fetch active markets from Gamma API
-                response = await client.get(
-                    f"{self.API_BASE}/markets",
-                    params={"active": "true", "closed": "false", "limit": 50}
-                )
-                
-                if response.status_code != 200:
-                    logger.warning(f"Polymarket API returned {response.status_code}")
-                    return []
-                
-                data = response.json()
-                markets = []
-                
-                # Handle both list and dict responses
-                items = data if isinstance(data, list) else data.get("data", data.get("markets", []))
-                
-                for item in items[:50]:
-                    market = self._parse_market(item)
-                    if market:
-                        self._markets[market.market_id] = market
-                        self.record_price(market.market_id, market.yes_price)
-                        markets.append(market)
-                
-                self._last_fetch = time.time()
-                logger.info(f"Fetched {len(markets)} markets from Polymarket")
-                return markets
-                
+            # Use sync client in thread pool to avoid event loop SSL issues
+            def sync_fetch():
+                with httpx.Client(timeout=30.0, verify=False) as client:
+                    response = client.get(
+                        f"{self.API_BASE}/markets",
+                        params={"active": "true", "closed": "false", "limit": 50}
+                    )
+                    return response
+            
+            response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+            
+            if response.status_code != 200:
+                logger.warning(f"Polymarket API returned {response.status_code}")
+                return []
+            
+            data = response.json()
+            markets = []
+            
+            # Handle both list and dict responses
+            items = data if isinstance(data, list) else data.get("data", data.get("markets", []))
+            
+            for item in items[:50]:
+                market = self._parse_market(item)
+                if market:
+                    self._markets[market.market_id] = market
+                    self.record_price(market.market_id, market.yes_price)
+                    markets.append(market)
+            
+            self._last_fetch = time.time()
+            logger.info(f"Fetched {len(markets)} markets from Polymarket")
+            return markets
+            
         except Exception as e:
-            logger.error(f"Polymarket fetch error: {e}")
+            import traceback
+            logger.error(f"Polymarket fetch error: {type(e).__name__}: {e}")
+            logger.error(traceback.format_exc())
             return []
     
     def _parse_market(self, data: Dict) -> Optional[PredictionMarket]:
@@ -401,7 +431,7 @@ class KalshiConnector(PredictionMarketConnector):
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
                 response = await client.get(
                     f"{self.API_BASE}/markets",
                     headers=headers,
@@ -506,6 +536,9 @@ class AugurConnector(PredictionMarketConnector):
         return (best_bid, best_ask)
 
 
+# NO SYNTHETIC DATA - Real data only from live platform APIs
+
+
 class PredictionMarketAggregator:
     """
     Aggregates prediction market data across platforms.
@@ -573,14 +606,23 @@ class PredictionMarketAggregator:
     
     async def _fetch_all_markets(self) -> None:
         """Fetch markets from all connectors."""
+        logger.info(f"Fetching markets from {len(self.connectors)} platforms... (aggregator id={id(self)})")
         for platform, connector in self.connectors.items():
             try:
+                logger.info(f"Fetching from {platform.value}...")
                 markets = await connector.fetch_markets()
+                logger.info(f"Connector returned {len(markets)} markets from {platform.value}")
                 for market in markets:
                     self._all_markets[market.market_id] = market
-                logger.debug(f"Fetched {len(markets)} markets from {platform.value}")
+                logger.info(f"Stored {len(markets)} markets, total now: {len(self._all_markets)}")
             except Exception as e:
-                logger.error(f"Failed to fetch from {platform.value}: {e}")
+                import traceback
+                logger.error(f"Failed to fetch from {platform.value}: {type(e).__name__}: {e}")
+                logger.error(traceback.format_exc())
+        
+        logger.info(f"After fetch: _all_markets has {len(self._all_markets)} items")
+        if not self._all_markets:
+            logger.warning("No markets fetched from any platform")
     
     def _detect_odds_drift(self) -> None:
         """Detect significant odds movements."""
@@ -593,8 +635,8 @@ class PredictionMarketAggregator:
             if len(history) < 2:
                 continue
             
-            old_price = history[0]["price"]
-            new_price = history[-1]["price"]
+            old_price = _safe_float(history[0]["price"], 0.0)
+            new_price = _safe_float(history[-1]["price"], 0.0)
             
             if old_price == 0:
                 continue
@@ -612,11 +654,14 @@ class PredictionMarketAggregator:
                     drift_pct=drift_pct,
                     drift_direction="up" if drift_pct > 0 else "down",
                     time_window_seconds=3600,
-                    volume_in_window=market.volume_24h / 24,  # Approximate
+                    volume_in_window=_safe_float(market.volume_24h) / 24,  # Approximate
                 )
                 
                 self._drift_signals.append(signal)
                 logger.info(f"Odds drift detected: {market.question[:50]}... {drift_pct:+.1f}%")
+        
+        if not self._drift_signals and self._all_markets:
+            logger.debug("No drift signals detected")
     
     def _find_arbitrage_opportunities(self) -> None:
         """Find cross-platform arbitrage opportunities."""
@@ -641,7 +686,9 @@ class PredictionMarketAggregator:
                     if market_a.platform == market_b.platform:
                         continue
                     
-                    spread = abs(market_a.yes_price - market_b.yes_price)
+                    price_a = _safe_float(market_a.yes_price)
+                    price_b = _safe_float(market_b.yes_price)
+                    spread = abs(price_a - price_b)
                     spread_pct = spread * 100
                     
                     if spread_pct >= 2.0:  # 2% spread threshold
@@ -651,16 +698,22 @@ class PredictionMarketAggregator:
                             category=market_a.category,
                             platform_a=market_a.platform,
                             platform_b=market_b.platform,
-                            prob_a=market_a.yes_price,
-                            prob_b=market_b.yes_price,
+                            prob_a=price_a,
+                            prob_b=price_b,
                             spread=spread,
                             spread_pct=spread_pct,
                             potential_edge=spread * 0.8,  # Account for fees
-                            liquidity_constraint=min(market_a.liquidity, market_b.liquidity),
+                            liquidity_constraint=min(
+                                _safe_float(market_a.liquidity),
+                                _safe_float(market_b.liquidity)
+                            ),
                         )
                         
                         self._arbitrage_opps.append(arb)
                         logger.info(f"Arbitrage found: {spread_pct:.1f}% spread on {key[:30]}...")
+        
+        if not self._arbitrage_opps and self._all_markets:
+            logger.debug("No arbitrage opportunities found")
     
     def _normalize_question(self, question: str) -> str:
         """Normalize question for matching."""
@@ -714,16 +767,21 @@ class PredictionMarketAggregator:
             )
             
             self._decay_metrics[market_id] = metrics
+        
+        if not self._decay_metrics and self._all_markets:
+            logger.debug("No decay metrics calculated")
     
     # Public API methods
     
     def get_all_markets(self, limit: int = 100) -> List[PredictionMarket]:
         """Get all tracked markets."""
+        logger.info(f"get_all_markets called: _all_markets has {len(self._all_markets)} items, id={id(self)}")
         markets = sorted(
             self._all_markets.values(),
             key=lambda m: m.volume_24h,
             reverse=True
         )
+        logger.info(f"Returning {len(markets[:limit])} markets out of {len(markets)} total")
         return markets[:limit]
     
     def get_markets_by_category(
@@ -759,6 +817,8 @@ class PredictionMarketAggregator:
     
     def get_status(self) -> Dict[str, Any]:
         """Get aggregator status."""
+        self.ensure_ready()
+        logger.debug(f"get_status called: _all_markets has {len(self._all_markets)} items, id={id(self)}")
         return {
             "running": self._running,
             "total_markets": len(self._all_markets),
@@ -771,6 +831,12 @@ class PredictionMarketAggregator:
             }
         }
 
+    # --- NO SYNTHETIC DATA - Real data only -------------------------------------
+
+    def ensure_ready(self) -> None:
+        """Check if aggregator has real data available."""
+        logger.debug(f"Prediction aggregator status: {len(self._all_markets)} markets, {len(self._drift_signals)} drift signals, {len(self._arbitrage_opps)} arb opportunities")
+
 
 # Global instance
 _prediction_aggregator: Optional[PredictionMarketAggregator] = None
@@ -781,6 +847,9 @@ def get_prediction_aggregator() -> PredictionMarketAggregator:
     global _prediction_aggregator
     if _prediction_aggregator is None:
         _prediction_aggregator = PredictionMarketAggregator()
+        logger.info(f"Created new PredictionMarketAggregator instance id={id(_prediction_aggregator)}")
+    else:
+        logger.debug(f"Returning existing PredictionMarketAggregator id={id(_prediction_aggregator)}, markets={len(_prediction_aggregator._all_markets)}")
     return _prediction_aggregator
 
 

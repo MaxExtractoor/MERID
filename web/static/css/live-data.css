@@ -1,0 +1,166 @@
+/* Live Data Styling */
+
+/* News Feed */
+.news-item {
+    padding: 12px;
+    border-bottom: 1px solid rgba(139, 148, 158, 0.1);
+    transition: background-color 0.2s;
+}
+
+.news-item:hover {
+    background-color: rgba(0, 255, 136, 0.05);
+}
+
+.news-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.news-source {
+    font-size: 11px;
+    font-weight: 600;
+    color: #00ff88;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.news-time {
+    font-size: 10px;
+    color: #8b949e;
+}
+
+.news-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e6edf3;
+    margin-bottom: 4px;
+    line-height: 1.4;
+}
+
+.news-description {
+    font-size: 12px;
+    color: #8b949e;
+    line-height: 1.5;
+}
+
+/* Prediction Markets */
+.prediction-item {
+    padding: 12px;
+    border-bottom: 1px solid rgba(139, 148, 158, 0.1);
+    margin-bottom: 8px;
+}
+
+.prediction-question {
+    font-size: 13px;
+    font-weight: 500;
+    color: #e6edf3;
+    margin-bottom: 10px;
+    line-height: 1.4;
+}
+
+.prediction-odds {
+    margin-bottom: 8px;
+}
+
+.odds-bar {
+    display: flex;
+    height: 32px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: rgba(139, 148, 158, 0.1);
+}
+
+.odds-yes,
+.odds-no {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    transition: width 0.3s ease;
+}
+
+.odds-yes {
+    background: linear-gradient(90deg, #00ff88 0%, #00cc6a 100%);
+    color: #0d1117;
+}
+
+.odds-no {
+    background: linear-gradient(90deg, #ff4444 0%, #cc0000 100%);
+    color: #ffffff;
+}
+
+.prediction-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #8b949e;
+}
+
+/* Chart Container */
+.chart-body {
+    position: relative;
+    height: 300px;
+    padding: 10px;
+}
+
+.chart-body.large {
+    height: 400px;
+}
+
+.chart-body canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* Loading States */
+.empty-state {
+    padding: 40px 20px;
+    text-align: center;
+    color: #8b949e;
+    font-size: 13px;
+}
+
+/* Price Updates Animation */
+@keyframes priceUpdate {
+    0% {
+        background-color: rgba(0, 255, 136, 0.2);
+    }
+    100% {
+        background-color: transparent;
+    }
+}
+
+.price.updating {
+    animation: priceUpdate 0.5s ease-out;
+}
+
+/* Feed Scrolling */
+#news-feed,
+#predictions-feed {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+#news-feed::-webkit-scrollbar,
+#predictions-feed::-webkit-scrollbar {
+    width: 6px;
+}
+
+#news-feed::-webkit-scrollbar-track,
+#predictions-feed::-webkit-scrollbar-track {
+    background: rgba(139, 148, 158, 0.1);
+}
+
+#news-feed::-webkit-scrollbar-thumb,
+#predictions-feed::-webkit-scrollbar-thumb {
+    background: rgba(0, 255, 136, 0.3);
+    border-radius: 3px;
+}
+
+#news-feed::-webkit-scrollbar-thumb:hover,
+#predictions-feed::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 255, 136, 0.5);
+}

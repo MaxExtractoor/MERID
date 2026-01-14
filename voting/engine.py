@@ -1,4 +1,4 @@
-﻿def blind_vote(responses_with_agents, threshold=0.75):
+def blind_vote(responses_with_agents, threshold=0.75):
     weighted_total = 0.0
     weight_total = 0.0
     summaries = []

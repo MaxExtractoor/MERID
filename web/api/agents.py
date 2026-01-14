@@ -78,44 +78,39 @@ def _get_real_agent_activities() -> List[Dict[str, Any]]:
 
 @router.get("/status")
 async def get_agents_status() -> Dict[str, Any]:
-    """Get status of all agents."""
+    """Get status of all agents from the real orchestrator."""
     try:
-        from agents.agent_mesh import get_agent_mesh
-        mesh = get_agent_mesh()
+        from core.orchestrator import get_core
+        core = get_core()
         
         agents = []
-        for agent_id, agent in mesh._agents.items():
+        for agent in core.agents:
             agents.append({
-                "agent_id": agent_id,
+                "agent_id": agent.agent_id,
+                "name": getattr(agent, "name", agent.agent_id),
                 "role": getattr(agent, "role", "unknown"),
-                "status": "running" if agent._running else "stopped",
-                "events_processed": getattr(agent, "_events_processed", 0),
-                "outputs_emitted": getattr(agent, "_outputs_emitted", 0),
+                "model": getattr(agent, "model_name", "unknown"),
+                "status": "running",
                 "trust_score": getattr(agent, "trust_score", 0.5),
             })
         
         return {
             "total_agents": len(agents),
-            "running": sum(1 for a in agents if a["status"] == "running"),
-            "stopped": sum(1 for a in agents if a["status"] == "stopped"),
+            "running": len(agents),
+            "stopped": 0,
             "agents": agents,
+            "mesh_status": "ACTIVE"
         }
     except Exception as e:
-        # Return sample data if mesh not available
+        # Return error state - no fake data
+        logger.error(f"Failed to get agent status: {e}")
         return {
-            "total_agents": 8,
-            "running": 8,
+            "total_agents": 0,
+            "running": 0,
             "stopped": 0,
-            "agents": [
-                {"agent_id": "market-analyst-01", "role": "analyst", "status": "running", "trust_score": 0.75},
-                {"agent_id": "news-analyst-01", "role": "analyst", "status": "running", "trust_score": 0.72},
-                {"agent_id": "risk-agent-01", "role": "guardian", "status": "running", "trust_score": 0.80},
-                {"agent_id": "skeptic-agent-01", "role": "skeptic", "status": "running", "trust_score": 0.68},
-                {"agent_id": "synthesizer-agent-01", "role": "synthesizer", "status": "running", "trust_score": 0.77},
-                {"agent_id": "strategy-agent-01", "role": "strategist", "status": "running", "trust_score": 0.73},
-                {"agent_id": "archivist-agent-01", "role": "archivist", "status": "running", "trust_score": 0.85},
-                {"agent_id": "meta-audit-agent-01", "role": "auditor", "status": "running", "trust_score": 0.82},
-            ],
+            "agents": [],
+            "error": str(e),
+            "mesh_status": "OFFLINE"
         }
 
 
@@ -173,14 +168,9 @@ async def get_agent_metrics() -> Dict[str, Any]:
 
 @router.post("/simulate-activity")
 async def simulate_activity(count: int = 10) -> Dict[str, Any]:
-    """Generate simulated agent activity for testing."""
-    generated = []
-    for _ in range(min(count, 50)):
-        activity = _generate_sample_activity()
-        log_activity(activity)
-        generated.append(activity)
-    
+    """DISABLED - No simulated activity. Use real agent mesh only."""
     return {
-        "generated": len(generated),
-        "activities": generated,
+        "error": "Simulation disabled - use real agent mesh",
+        "generated": 0,
+        "activities": [],
     }

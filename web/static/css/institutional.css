@@ -407,26 +407,38 @@ body {
 
 .content-section {
     display: none;
+    padding: 2rem;
+    min-height: 500px;
 }
 
 .content-section.active {
-    display: block;
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    background: var(--bg-primary) !important;
+    color: var(--text-primary) !important;
 }
 
 .section-header {
     margin-bottom: var(--spacing-xl);
+    visibility: visible !important;
+    opacity: 1 !important;
 }
 
 .section-title {
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text-primary);
+    font-size: 24px !important;
+    font-weight: 700 !important;
+    color: var(--text-primary) !important;
     margin-bottom: var(--spacing-xs);
+    visibility: visible !important;
+    opacity: 1 !important;
 }
 
 .section-subtitle {
-    font-size: 14px;
-    color: var(--text-muted);
+    font-size: 14px !important;
+    color: var(--text-muted) !important;
+    visibility: visible !important;
+    opacity: 1 !important;
 }
 
 /* ============================================

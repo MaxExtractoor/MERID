@@ -91,7 +91,9 @@ class ExecutionAgent:
     - Execution speed optimization
     """
     
-    def __init__(self):
+    def __init__(self, default_venue: str = "hyperliquid", max_execution_time_ms: float = 500.0):
+        self.default_venue = default_venue
+        self.max_execution_time_ms = max_execution_time_ms
         self.pending_orders: List[Order] = []
         self.active_orders: List[Order] = []
         self.execution_history: List[TradeExecution] = []

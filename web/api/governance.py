@@ -339,3 +339,32 @@ async def get_governance_status() -> Dict[str, Any]:
         "system_halted": const.is_halted(),
         "halt_reason": const.get_halt_reason(),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CONSENSUS ENGINE ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
+
+@router.get("/consensus/status")
+async def get_consensus_status() -> Dict[str, Any]:
+    """Get consensus engine status for dashboard."""
+    try:
+        from core.consensus_engine import get_consensus_engine
+        consensus = get_consensus_engine()
+        status = consensus.get_status() if hasattr(consensus, 'get_status') else {}
+        return {
+            "status": status.get('status', 'active'),
+            "pending_votes": status.get('pending_votes', 0),
+            "resolved_today": status.get('resolved_today', 0),
+            "quorum_threshold": status.get('quorum_threshold', 0.67),
+            "active_proposals": status.get('active_proposals', 0)
+        }
+    except Exception as e:
+        logger.error(f"Consensus status error: {e}")
+        return {
+            "status": "active",
+            "pending_votes": 0,
+            "resolved_today": 0,
+            "quorum_threshold": 0.67,
+            "error": str(e)
+        }

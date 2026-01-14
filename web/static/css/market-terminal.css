@@ -1,0 +1,360 @@
+/* Market Terminal - Bloomberg-style interface */
+
+/* Terminal Table */
+.terminal-table {
+    background: #0d1117;
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.table-header {
+    display: grid;
+    grid-template-columns: 100px 150px 120px 120px 140px 140px 120px;
+    background: #161b22;
+    border-bottom: 2px solid rgba(0, 255, 136, 0.3);
+    padding: 12px 16px;
+    font-weight: 700;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #8b949e;
+}
+
+.th {
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+    transition: color 0.2s;
+}
+
+.th:hover {
+    color: #00ff88;
+}
+
+.table-body {
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.table-body::-webkit-scrollbar {
+    width: 8px;
+}
+
+.table-body::-webkit-scrollbar-track {
+    background: #0d1117;
+}
+
+.table-body::-webkit-scrollbar-thumb {
+    background: rgba(0, 255, 136, 0.3);
+    border-radius: 4px;
+}
+
+.table-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 255, 136, 0.5);
+}
+
+.table-row {
+    display: grid;
+    grid-template-columns: 100px 150px 120px 120px 140px 140px 120px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(139, 148, 158, 0.1);
+    cursor: pointer;
+    transition: background-color 0.2s;
+    font-size: 13px;
+}
+
+.table-row:hover {
+    background: rgba(0, 255, 136, 0.05);
+}
+
+.table-row.selected {
+    background: rgba(0, 255, 136, 0.1);
+    border-left: 3px solid #00ff88;
+}
+
+.td {
+    display: flex;
+    align-items: center;
+    color: #e6edf3;
+}
+
+.td.symbol {
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: #00ff88;
+}
+
+.td.name {
+    color: #8b949e;
+    font-size: 12px;
+}
+
+.td.price {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+}
+
+.td.change {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+}
+
+.td.change.positive {
+    color: #00ff88;
+}
+
+.td.change.negative {
+    color: #ff4444;
+}
+
+.td.volume,
+.td.market-cap {
+    font-family: 'JetBrains Mono', monospace;
+    color: #8b949e;
+}
+
+.category-badge {
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.category-badge.Layer1 {
+    background: rgba(0, 122, 255, 0.2);
+    color: #0a84ff;
+}
+
+.category-badge.Layer2 {
+    background: rgba(94, 92, 230, 0.2);
+    color: #5e5ce6;
+}
+
+.category-badge.DeFi {
+    background: rgba(255, 159, 10, 0.2);
+    color: #ff9f0a;
+}
+
+.category-badge.Meme {
+    background: rgba(255, 55, 95, 0.2);
+    color: #ff375f;
+}
+
+.category-badge.Gaming,
+.category-badge.Metaverse {
+    background: rgba(191, 90, 242, 0.2);
+    color: #bf5af2;
+}
+
+.category-badge.AI,
+.category-badge.Data {
+    background: rgba(100, 210, 255, 0.2);
+    color: #64d2ff;
+}
+
+.category-badge.Privacy {
+    background: rgba(172, 142, 104, 0.2);
+    color: #ac8e68;
+}
+
+.category-badge.Storage,
+.category-badge.Indexing,
+.category-badge.Computing {
+    background: rgba(90, 200, 250, 0.2);
+    color: #5ac8fa;
+}
+
+/* Market Filters */
+#market-filters {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 16px;
+    background: #161b22;
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 4px;
+    margin-bottom: 16px;
+}
+
+.filter-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.filter-group label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.filter-group select {
+    background: #0d1117;
+    border: 1px solid rgba(139, 148, 158, 0.3);
+    border-radius: 4px;
+    padding: 6px 12px;
+    color: #e6edf3;
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+}
+
+.filter-group select:hover {
+    border-color: #00ff88;
+}
+
+.filter-group select:focus {
+    outline: none;
+    border-color: #00ff88;
+}
+
+.filter-stats {
+    margin-left: auto;
+    display: flex;
+    gap: 24px;
+}
+
+.filter-stats .stat {
+    font-size: 12px;
+    color: #8b949e;
+}
+
+.filter-stats .stat strong {
+    color: #e6edf3;
+    font-weight: 700;
+}
+
+/* Market Overview */
+#market-overview {
+    margin-bottom: 24px;
+}
+
+.overview-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.overview-card {
+    background: #161b22;
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 4px;
+    padding: 16px;
+}
+
+.card-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #8b949e;
+    margin-bottom: 8px;
+}
+
+.card-value {
+    font-size: 24px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: #e6edf3;
+}
+
+.card-value.positive {
+    color: #00ff88;
+}
+
+.card-value.negative {
+    color: #ff4444;
+}
+
+/* Movers */
+.movers-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+}
+
+.movers-section {
+    background: #161b22;
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 4px;
+    padding: 16px;
+}
+
+.movers-section h3 {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #8b949e;
+    margin-bottom: 12px;
+}
+
+.movers-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.mover-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px;
+    background: #0d1117;
+    border-radius: 3px;
+}
+
+.mover-symbol {
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: #e6edf3;
+}
+
+.mover-change {
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+}
+
+.mover-change.positive {
+    color: #00ff88;
+}
+
+.mover-change.negative {
+    color: #ff4444;
+}
+
+/* Responsive */
+@media (max-width: 1400px) {
+    .table-header,
+    .table-row {
+        grid-template-columns: 80px 120px 100px 100px 120px 120px 100px;
+        font-size: 12px;
+    }
+    
+    .overview-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .table-header,
+    .table-row {
+        grid-template-columns: 1fr;
+    }
+    
+    .td {
+        padding: 4px 0;
+    }
+    
+    .overview-grid,
+    .movers-grid {
+        grid-template-columns: 1fr;
+    }
+}

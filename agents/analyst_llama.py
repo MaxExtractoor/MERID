@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+from typing import Any, Dict, List
 
 from agents.base_agent import BaseAgent
 
@@ -18,7 +20,7 @@ class AnalystLlama(BaseAgent):
     ) -> None:
         super().__init__(agent_id, model_name, ROLE_PROMPT, tool_budget=3)
 
-    def _custom_queries(self, energy):
+    def _custom_queries(self, energy: Dict[str, Any]) -> List[str]:
         payload = str(energy.get("payload", ""))
         return [
             f"macro implications {payload[:120]} crypto",
@@ -26,11 +28,3 @@ class AnalystLlama(BaseAgent):
             "regulatory news bitcoin etf approval timeline",
             "btc eth correlation with gold and usd",
         ]
-
-    async def process(self, energy, phase="reasoning"):
-        # Real research first
-        search_results = self.research(f"{energy['payload']} site:coindesk.com OR site:theblock.co OR site:bloomberg.com")
-        context = f"Web research results:\\n{search_results}"
-        
-        prompt = self._build_prompt(energy, phase) + f"\\nResearch Context:\\n{context}"
-        # ... rest of ollama call

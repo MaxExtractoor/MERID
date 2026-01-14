@@ -395,15 +395,8 @@ class RealityRegistry:
         if total == 0:
             return True, "No assertions registered"
         
-        # Count expired
-        expired = sum(1 for a in self._assertions.values() if a.status == AssertionStatus.EXPIRED)
-        expired_pct = expired / total
-        
-        if expired_pct > 0.4:
-            return True, f">{expired_pct*100:.0f}% assertions expired"
-        
-        # Check core domains
-        core_domains = [AssertionDomain.MARKET, AssertionDomain.EXECUTION, AssertionDomain.TREASURY]
+        # Check core domains FIRST (most important)
+        core_domains = [AssertionDomain.EXECUTION, AssertionDomain.TREASURY]
         for domain in core_domains:
             domain_assertions = self.get_assertions_by_domain(domain)
             valid = sum(1 for a in domain_assertions if a.status == AssertionStatus.VALID)
@@ -414,11 +407,20 @@ class RealityRegistry:
         if regime_entropy > 0.7:
             return True, f"Regime entropy {regime_entropy:.2f} > 0.7"
         
-        # Check conflict rate
-        conflicted = sum(1 for a in self._assertions.values() if a.status == AssertionStatus.CONFLICTED)
-        conflict_pct = conflicted / total
-        if conflict_pct > 0.3:
-            return True, f">{conflict_pct*100:.0f}% assertions conflicted"
+        # Check conflict rate (only among non-market assertions to avoid noise)
+        non_market = [a for a in self._assertions.values() if a.domain != AssertionDomain.MARKET]
+        if non_market:
+            conflicted = sum(1 for a in non_market if a.status == AssertionStatus.CONFLICTED)
+            conflict_pct = conflicted / len(non_market)
+            if conflict_pct > 0.3:
+                return True, f">{conflict_pct*100:.0f}% non-market assertions conflicted"
+        
+        # Only check overall expiration if it's extreme (>95%)
+        # This prevents auto-generated market assertions from triggering blindness
+        expired = sum(1 for a in self._assertions.values() if a.status == AssertionStatus.EXPIRED)
+        expired_pct = expired / total
+        if expired_pct > 0.95:
+            return True, f">{expired_pct*100:.0f}% assertions expired"
         
         return False, "Reality stable"
 

@@ -1,4 +1,4 @@
-﻿from core.env import capabilities
+from core.env import capabilities
 from twitter_api import TwitterAPI  # Assume pip install twitter-api-v2
 from core.energy import create_energy
 from queue import PriorityQueue

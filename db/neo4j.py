@@ -1,4 +1,4 @@
-﻿from neo4j import GraphDatabase
+from neo4j import GraphDatabase
 from core.env import capabilities
 import uuid
 from datetime import datetime

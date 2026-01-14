@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -80,6 +80,11 @@ from web.api.archive import router as archive_router
 from web.api.trading_mode import router as trading_mode_router
 from web.api.reality import router as reality_router
 from web.api.explainability import router as explainability_router
+from web.api.live_data import router as live_data_router
+from web.api.dashboard_data import router as dashboard_data_router
+from web.api.intelligence import router as intelligence_router
+from web.api.predictions import router as predictions_router
+from web.api.dashboard_ws import router as dashboard_ws_router
 
 root_router = APIRouter()
 router = APIRouter(prefix="/api")
@@ -121,6 +126,18 @@ def create_app(lifespan=None) -> FastAPI:
     
     # Mount static files
     application.mount("/static", StaticFiles(directory="web/static"), name="static")
+    
+    # Initialize Neo4j Graph Service
+    try:
+        from core.graph_service import initialize_graph_service
+        neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+        neo4j_password = os.getenv("NEO4J_PASSWORD", "")
+        if neo4j_password:
+            initialize_graph_service(neo4j_uri, neo4j_user, neo4j_password)
+            get_logger("web.main").info(f"Neo4j GraphService initialized: {neo4j_uri}")
+    except Exception as e:
+        get_logger("web.main").warning(f"Neo4j initialization skipped: {e}")
     
     templates = Jinja2Templates(directory="web/templates")
     simulation_chain = build_simulation_chain(
@@ -188,6 +205,11 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(trading_mode_router)
     application.include_router(reality_router)
     application.include_router(explainability_router)
+    application.include_router(live_data_router)
+    application.include_router(dashboard_data_router)
+    application.include_router(intelligence_router)
+    application.include_router(predictions_router)
+    application.include_router(dashboard_ws_router)
     return application
 
 
@@ -297,7 +319,7 @@ async def live_monitor(request: Request):
 async def dashboard(request: Request):
     """Unified control center - combines dashboard and institutional views."""
     templates = _templates()
-    return templates.TemplateResponse("unified.html", {"request": request})
+    return templates.TemplateResponse("unified_standalone.html", {"request": request})
 
 @root_router.get("/dashboard/legacy")
 async def dashboard_legacy():

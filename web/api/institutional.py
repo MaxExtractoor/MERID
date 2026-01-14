@@ -975,14 +975,23 @@ async def get_realtime_stream() -> Dict[str, Any]:
 
 @router.get("/predictions/markets")
 async def get_prediction_markets(
+    request: Request,
     category: Optional[str] = None,
     limit: int = 50
 ) -> Dict[str, Any]:
     """Get prediction markets from all platforms."""
     try:
-        from monitoring.prediction_markets import get_prediction_aggregator, MarketCategory
+        from monitoring.prediction_markets import MarketCategory
         
-        aggregator = get_prediction_aggregator()
+        # Get aggregator from app state (persists across module reloads)
+        aggregator = getattr(request.app.state, 'prediction_aggregator', None)
+        
+        if not aggregator:
+            logger.warning("Prediction aggregator not found in app.state, falling back to singleton")
+            from monitoring.prediction_markets import get_prediction_aggregator
+            aggregator = get_prediction_aggregator()
+        
+        logger.info(f"API using aggregator id={id(aggregator)}, markets={len(aggregator._all_markets)}")
         
         if category:
             try:
@@ -999,44 +1008,82 @@ async def get_prediction_markets(
             "status": aggregator.get_status(),
         }
     except Exception as e:
-        logger.error(f"Prediction markets error: {e}")
+        import traceback
+        logger.error(f"Prediction markets error: {type(e).__name__}: {e}")
+        logger.error(traceback.format_exc())
         return {"markets": [], "error": str(e)}
 
 
 @router.get("/predictions/drift")
-async def get_odds_drift_signals(limit: int = 20) -> Dict[str, Any]:
+async def get_odds_drift_signals(request: Request, limit: int = 20) -> Dict[str, Any]:
     """Get recent odds drift signals."""
     try:
-        from monitoring.prediction_markets import get_prediction_aggregator
+        # Get aggregator from app state
+        aggregator = getattr(request.app.state, 'prediction_aggregator', None)
         
-        aggregator = get_prediction_aggregator()
+        if not aggregator:
+            from monitoring.prediction_markets import get_prediction_aggregator
+            aggregator = get_prediction_aggregator()
         signals = aggregator.get_drift_signals(limit)
+        
+        # Return mock data if aggregator is still warming up
+        if not signals:
+            return {
+                "signals": [],
+                "count": 0,
+                "status": "warming_up",
+                "message": "Prediction market aggregator is fetching data"
+            }
         
         return {
             "signals": [s.to_dict() for s in signals],
             "count": len(signals),
+            "status": "active"
         }
     except Exception as e:
         logger.error(f"Drift signals error: {e}")
-        return {"signals": [], "error": str(e)}
+        return {
+            "signals": [],
+            "count": 0,
+            "status": "error",
+            "error": str(e)
+        }
 
 
 @router.get("/predictions/arbitrage")
-async def get_arbitrage_opportunities(limit: int = 10) -> Dict[str, Any]:
+async def get_arbitrage_opportunities(request: Request, limit: int = 10) -> Dict[str, Any]:
     """Get cross-platform arbitrage opportunities."""
     try:
-        from monitoring.prediction_markets import get_prediction_aggregator
+        # Get aggregator from app state
+        aggregator = getattr(request.app.state, 'prediction_aggregator', None)
         
-        aggregator = get_prediction_aggregator()
+        if not aggregator:
+            from monitoring.prediction_markets import get_prediction_aggregator
+            aggregator = get_prediction_aggregator()
         opportunities = aggregator.get_arbitrage_opportunities(limit)
+        
+        # Return mock data if aggregator is still warming up
+        if not opportunities:
+            return {
+                "opportunities": [],
+                "count": 0,
+                "status": "warming_up",
+                "message": "Prediction market aggregator is fetching data"
+            }
         
         return {
             "opportunities": [o.to_dict() for o in opportunities],
             "count": len(opportunities),
+            "status": "active"
         }
     except Exception as e:
         logger.error(f"Arbitrage error: {e}")
-        return {"opportunities": [], "error": str(e)}
+        return {
+            "opportunities": [],
+            "count": 0,
+            "status": "error",
+            "error": str(e)
+        }
 
 
 @router.get("/predictions/decay/{market_id}")
@@ -1066,6 +1113,15 @@ async def get_urgent_markets() -> Dict[str, Any]:
         aggregator = get_prediction_aggregator()
         urgent = aggregator.get_high_urgency_markets()
         
+        # Return mock data if aggregator is still warming up
+        if not urgent:
+            return {
+                "markets": [],
+                "count": 0,
+                "status": "warming_up",
+                "message": "Prediction market aggregator is fetching data"
+            }
+        
         return {
             "markets": [
                 {
@@ -1075,10 +1131,16 @@ async def get_urgent_markets() -> Dict[str, Any]:
                 for m, d in urgent
             ],
             "count": len(urgent),
+            "status": "active"
         }
     except Exception as e:
         logger.error(f"Urgent markets error: {e}")
-        return {"markets": [], "error": str(e)}
+        return {
+            "markets": [],
+            "count": 0,
+            "status": "error",
+            "error": str(e)
+        }
 
 
 @router.post("/predictions/start")
@@ -1829,6 +1891,79 @@ async def get_equity_curve(points: int = 100) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Equity curve error: {e}")
         return {"curve": [], "error": str(e)}
+
+
+@router.get("/portfolio/positions")
+async def get_portfolio_positions() -> Dict[str, Any]:
+    """Get current open positions."""
+    try:
+        from trading.execution import get_optimal_executor
+        
+        executor = get_optimal_executor()
+        positions = []
+        
+        # Get positions from executor if available
+        if hasattr(executor, 'get_positions'):
+            positions = executor.get_positions()
+        
+        return {
+            "positions": positions,
+            "count": len(positions),
+            "status": "success"
+        }
+    except Exception as e:
+        logger.error(f"Portfolio positions error: {e}")
+        return {
+            "positions": [],
+            "count": 0,
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@router.get("/audit/trail")
+async def get_audit_trail(limit: int = 100) -> Dict[str, Any]:
+    """Get audit trail events."""
+    try:
+        from core.audit_trail import get_audit_trail
+        
+        audit = get_audit_trail()
+        events = []
+        
+        # Get recent events from audit trail
+        if hasattr(audit, 'get_recent_events'):
+            events = audit.get_recent_events(limit)
+        elif hasattr(audit, '_events'):
+            events = list(audit._events)[-limit:]
+        
+        # Format events for dashboard
+        formatted_events = []
+        for event in events:
+            if isinstance(event, dict):
+                formatted_events.append(event)
+            elif hasattr(event, 'to_dict'):
+                formatted_events.append(event.to_dict())
+            else:
+                formatted_events.append({
+                    "type": getattr(event, 'type', 'UNKNOWN'),
+                    "message": str(event),
+                    "timestamp": getattr(event, 'timestamp', None),
+                    "payload": {}
+                })
+        
+        return {
+            "events": formatted_events,
+            "count": len(formatted_events),
+            "status": "success"
+        }
+    except Exception as e:
+        logger.error(f"Audit trail error: {e}")
+        return {
+            "events": [],
+            "count": 0,
+            "status": "error",
+            "error": str(e)
+        }
 
 
 @router.get("/analytics/agents")

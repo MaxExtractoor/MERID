@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 # Stage 2 Core: resilient orchestrator, singleton lifecycle, and blind consensus routing.
 

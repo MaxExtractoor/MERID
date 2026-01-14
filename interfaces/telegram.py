@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import httpx
 from core.env import capabilities
 from utils.logger import get_logger

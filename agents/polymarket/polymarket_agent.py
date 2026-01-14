@@ -1,4 +1,4 @@
-﻿"""
+"""
 Polymarket Agent - Production-ready arbitrage scanner.
 
 Scans Polymarket CLOB API for BTC binary options mispricing opportunities.

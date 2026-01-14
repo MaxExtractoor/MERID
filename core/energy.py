@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from core.time_authority import current_time
 
 def create_energy(source, payload):

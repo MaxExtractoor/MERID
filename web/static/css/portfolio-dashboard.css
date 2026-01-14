@@ -1,0 +1,160 @@
+/* Portfolio Dashboard - Position Tracking & Analytics */
+
+/* Portfolio Stats Grid */
+.portfolio-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.portfolio-stats-grid .stat-card {
+    background: #161b22;
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 4px;
+    padding: 20px;
+}
+
+.portfolio-stats-grid .stat-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #8b949e;
+    margin-bottom: 8px;
+}
+
+.portfolio-stats-grid .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: #e6edf3;
+}
+
+/* Portfolio Table */
+.portfolio-table {
+    width: 100%;
+    background: #161b22;
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 24px;
+}
+
+.portfolio-table thead {
+    background: #0d1117;
+    border-bottom: 2px solid rgba(0, 255, 136, 0.3);
+}
+
+.portfolio-table th {
+    padding: 12px 16px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #8b949e;
+}
+
+.portfolio-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(139, 148, 158, 0.1);
+    font-size: 13px;
+    color: #e6edf3;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.portfolio-table tbody tr:hover {
+    background: rgba(0, 255, 136, 0.05);
+}
+
+.portfolio-table .symbol {
+    font-weight: 700;
+    color: #00ff88;
+}
+
+.portfolio-table .side {
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.portfolio-table .side.long {
+    color: #00ff88;
+}
+
+.portfolio-table .side.short {
+    color: #ff4444;
+}
+
+/* Allocation Chart */
+#allocation-chart-container {
+    background: #161b22;
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 4px;
+    padding: 20px;
+    margin-bottom: 24px;
+    height: 350px;
+}
+
+#allocation-chart {
+    max-height: 300px;
+}
+
+/* Performance Metrics */
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.metric-card {
+    background: #161b22;
+    border: 1px solid rgba(139, 148, 158, 0.2);
+    border-radius: 4px;
+    padding: 20px;
+    text-align: center;
+}
+
+.metric-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #8b949e;
+    margin-bottom: 8px;
+}
+
+.metric-value {
+    font-size: 24px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    color: #e6edf3;
+    margin-bottom: 4px;
+}
+
+.metric-detail {
+    font-size: 12px;
+    color: #8b949e;
+}
+
+/* Responsive */
+@media (max-width: 1400px) {
+    .portfolio-stats-grid,
+    .metrics-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .portfolio-stats-grid,
+    .metrics-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .portfolio-table {
+        font-size: 11px;
+    }
+    
+    .portfolio-table th,
+    .portfolio-table td {
+        padding: 8px;
+    }
+}

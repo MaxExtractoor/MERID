@@ -1,4 +1,4 @@
-﻿from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent
 
 role = "You are an optimistic synthesizer. Find opportunities, confluence, catalysts. Balance the skeptic."
 

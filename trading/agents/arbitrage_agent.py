@@ -289,6 +289,100 @@ class ArbitrageAgent:
             "execution_history_count": len(self.execution_history)
         }
 
+    # Helper methods
+    async def _fetch_prices_across_venues(
+        self,
+        asset: str,
+        venues: List[str]
+    ) -> Dict[str, float]:
+        """Fetch current prices across venues using CCXT."""
+        prices: Dict[str, float] = {}
+        try:
+            import ccxt.async_support as ccxt
+            for venue in venues:
+                try:
+                    exchange_class = getattr(ccxt, venue.lower(), None)
+                    if exchange_class:
+                        exchange = exchange_class()
+                        ticker = await exchange.fetch_ticker(f"{asset}/USDT")
+                        prices[venue] = ticker["last"]
+                        await exchange.close()
+                except Exception as exc:  # pragma: no cover - network failures
+                    logger.warning("Failed to fetch price from %s: %s", venue, exc)
+        except ImportError:
+            logger.warning("CCXT not available, using cached prices")
+            prices = {venue: 100.0 for venue in venues}
+
+        # Backfill missing venues using cached market data
+        if len(prices) < len(venues):
+            try:
+                from data.live_price_feed import live_price_feed
+
+                feed = live_price_feed()
+                for venue in venues:
+                    if venue not in prices:
+                        price = feed.get_price(asset)
+                        if price:
+                            prices[venue] = price.price
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.warning("Fallback price feed unavailable: %s", exc)
+        return prices
+
+    async def _fetch_funding_rates(
+        self,
+        asset: str,
+        venues: List[str]
+    ) -> Dict[str, float]:
+        """Fetch funding rates across perp venues using CCXT."""
+        rates: Dict[str, float] = {}
+        try:
+            import ccxt.async_support as ccxt
+            for venue in venues:
+                try:
+                    exchange_class = getattr(ccxt, venue.lower(), None)
+                    if exchange_class and hasattr(exchange_class, "fetch_funding_rate"):
+                        exchange = exchange_class()
+                        funding = await exchange.fetch_funding_rate(f"{asset}/USDT:USDT")
+                        rates[venue] = funding.get("fundingRate", 0.0)
+                        await exchange.close()
+                except Exception as exc:
+                    logger.debug("Funding rate not available for %s: %s", venue, exc)
+                    rates[venue] = 0.0
+        except ImportError:
+            logger.warning("CCXT not available, using default rates")
+            rates = {venue: 0.0001 for venue in venues}
+        return rates
+
+    def _estimate_slippage(
+        self,
+        asset: str,
+        venue_a: str,
+        venue_b: str
+    ) -> float:
+        """Estimate slippage cost in USD."""
+        # Conservative estimate: 0.05% slippage
+        return self.max_position_size_usd * 0.0005
+
+    def _estimate_gas_cost(
+        self,
+        venue_a: str,
+        venue_b: str
+    ) -> float:
+        """Estimate gas/transaction costs."""
+        if "dex" in venue_a.lower() or "dex" in venue_b.lower():
+            return 20.0  # Higher for DEX
+        return 5.0  # Lower for CEX
+
+    def _calculate_confidence(
+        self,
+        spread_bps: float,
+        slippage: float
+    ) -> float:
+        """Calculate confidence score for opportunity."""
+        spread_score = min(spread_bps / 50.0, 1.0)  # Normalize to 50 bps
+        slippage_score = 1.0 - min(slippage / 100.0, 1.0)
+        return spread_score * 0.7 + slippage_score * 0.3
+
 
 # Global singleton
 _arbitrage_agent: Optional[ArbitrageAgent] = None
@@ -300,88 +394,3 @@ def get_arbitrage_agent() -> ArbitrageAgent:
     if _arbitrage_agent is None:
         _arbitrage_agent = ArbitrageAgent()
     return _arbitrage_agent
-    
-    # Helper methods
-    
-    async def _fetch_prices_across_venues(
-        self,
-        asset: str,
-        venues: List[str]
-    ) -> Dict[str, float]:
-        """Fetch current prices across venues using CCXT."""
-        prices = {}
-        try:
-            import ccxt.async_support as ccxt
-            for venue in venues:
-                try:
-                    exchange_class = getattr(ccxt, venue.lower(), None)
-                    if exchange_class:
-                        exchange = exchange_class()
-                        ticker = await exchange.fetch_ticker(f"{asset}/USDT")
-                        prices[venue] = ticker['last']
-                        await exchange.close()
-                except Exception as e:
-                    logger.warning("Failed to fetch price from %s: %s", venue, e)
-        except ImportError:
-            logger.warning("CCXT not available, using cached prices")
-            prices = {v: 100.0 for v in venues}
-        return prices
-    
-    async def _fetch_funding_rates(
-        self,
-        asset: str,
-        venues: List[str]
-    ) -> Dict[str, float]:
-        """Fetch funding rates across perp venues using CCXT."""
-        rates = {}
-        try:
-            import ccxt.async_support as ccxt
-            for venue in venues:
-                try:
-                    exchange_class = getattr(ccxt, venue.lower(), None)
-                    if exchange_class and hasattr(exchange_class, 'fetch_funding_rate'):
-                        exchange = exchange_class()
-                        funding = await exchange.fetch_funding_rate(f"{asset}/USDT:USDT")
-                        rates[venue] = funding.get('fundingRate', 0.0)
-                        await exchange.close()
-                except Exception as e:
-                    logger.debug("Funding rate not available for %s: %s", venue, e)
-                    rates[venue] = 0.0
-        except ImportError:
-            logger.warning("CCXT not available, using default rates")
-            rates = {v: 0.0001 for v in venues}
-        return rates
-    
-    def _estimate_slippage(
-        self,
-        asset: str,
-        venue_a: str,
-        venue_b: str
-    ) -> float:
-        """Estimate slippage cost in USD."""
-        # Conservative estimate: 0.05% slippage
-        return self.max_position_size_usd * 0.0005
-    
-    def _estimate_gas_cost(
-        self,
-        venue_a: str,
-        venue_b: str
-    ) -> float:
-        """Estimate gas/transaction costs."""
-        # Rough estimates
-        if "dex" in venue_a.lower() or "dex" in venue_b.lower():
-            return 20.0  # Higher for DEX
-        return 5.0  # Lower for CEX
-    
-    def _calculate_confidence(
-        self,
-        spread_bps: float,
-        slippage: float
-    ) -> float:
-        """Calculate confidence score for opportunity."""
-        # Higher spread = higher confidence
-        # Lower slippage = higher confidence
-        spread_score = min(spread_bps / 50.0, 1.0)  # Normalize to 50 bps
-        slippage_score = 1.0 - min(slippage / 100.0, 1.0)
-        
-        return (spread_score * 0.7 + slippage_score * 0.3)

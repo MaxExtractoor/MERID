@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID - Unified Control Center</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root { --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --green: #238636; --red: #f85149; --blue: #58a6ff; --yellow: #d29922; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+        .top-nav { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+        .nav-brand { display: flex; align-items: center; gap: 12px; }
+        .brand-logo { width: 36px; height: 36px; background: linear-gradient(135deg, var(--green), #2ea043); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; }
+        .brand-name { font-size: 20px; font-weight: 700; }
+        .brand-sub { font-size: 11px; color: var(--muted); display: block; }
+        .nav-status { display: flex; gap: 20px; align-items: center; }
+        .status-badge { padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; background: rgba(35,134,54,0.2); color: var(--green); }
+        .nav-btn { padding: 8px 16px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg3); color: var(--text); cursor: pointer; font-size: 12px; }
+        .prices-bar { display: flex; gap: 12px; padding: 12px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); overflow-x: auto; }
+        .price-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; min-width: 130px; }
+        .price-symbol { font-size: 11px; color: var(--muted); }
+        .price-value { font-size: 16px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+        .price-change { font-size: 11px; font-weight: 600; }
+        .up { color: var(--green); } .down { color: var(--red); }
+        .main-layout { display: flex; min-height: calc(100vh - 110px); }
+        .sidebar { width: 200px; background: var(--bg2); border-right: 1px solid var(--border); padding: 12px 0; flex-shrink: 0; }
+        .sidebar-title { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; padding: 8px 16px; }
+        .sidebar-link { display: block; padding: 10px 16px; color: var(--muted); text-decoration: none; font-size: 13px; cursor: pointer; border-left: 3px solid transparent; }
+        .sidebar-link:hover { background: var(--bg3); color: var(--text); }
+        .sidebar-link.active { background: rgba(35,134,54,0.1); color: var(--green); border-left-color: var(--green); }
+        .main-content { flex: 1; padding: 24px; overflow-y: auto; }
+        .content-section { display: none; }
+        .content-section.active { display: block !important; }
+        .section-header { margin-bottom: 24px; }
+        .section-title { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
+        .section-subtitle { font-size: 13px; color: var(--muted); }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px; text-align: center; }
+        .stat-value { font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+        .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-top: 4px; }
+        .panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 20px; }
+        .panel-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+        .panel-title { font-size: 14px; font-weight: 600; }
+        .panel-body { padding: 18px; }
+        .cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+        .card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+        .progress-bar { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+        .progress-fill { height: 100%; background: var(--green); }
+        .feed { max-height: 400px; overflow-y: auto; }
+        .feed-item { padding: 12px 0; border-bottom: 1px solid var(--border); }
+        .feed-item:last-child { border-bottom: none; }
+        .two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+        @media (max-width: 1000px) { .two-col { grid-template-columns: 1fr; } }
+        .systems-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+        @media (max-width: 900px) { .systems-grid { grid-template-columns: repeat(2, 1fr); } }
+        .system-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+        .system-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+        .system-icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; color: #fff; }
+        .system-icon.i { background: var(--blue); } .system-icon.t { background: var(--green); } .system-icon.tr { background: var(--yellow); } .system-icon.g { background: #a371f7; }
+        .system-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .metric { text-align: center; padding: 10px; background: var(--bg3); border-radius: 6px; }
+        .metric-label { font-size: 10px; color: var(--muted); }
+        .metric-value { font-size: 16px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+        .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+        .agent-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+        .btn { padding: 10px 18px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; }
+        .btn-primary { background: var(--green); color: #fff; }
+        .btn-block { width: 100%; margin-bottom: 10px; }
+        .empty-state { text-align: center; padding: 30px; color: var(--muted); }
+        .charts-row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+        @media (max-width: 1100px) { .charts-row { grid-template-columns: 1fr; } }
+        .chart-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; }
+        .chart-header { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+        .chart-body { padding: 16px; height: 200px; }
+        .reality-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+        .reality-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+        .mode-badge { padding: 4px 12px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+        .mode-badge.operational { background: rgba(35,134,54,0.2); color: var(--green); }
+        .reality-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+        .reality-metric { text-align: center; }
+        .reality-metric .label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+        .reality-metric .value { font-size: 18px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+        .spectator-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+        .mode-selector { display: flex; gap: 10px; margin-bottom: 20px; }
+        .mode-btn { padding: 12px 24px; border: 1px solid var(--border); background: var(--bg3); color: var(--muted); border-radius: 8px; cursor: pointer; }
+        .mode-btn.active { border-color: var(--green); color: var(--green); background: rgba(35,134,54,0.1); }
+        /* Utility classes to replace inline styles */
+        .text-sm { font-size: 12px; }
+        .text-xs { font-size: 10px; }
+        .text-muted { color: var(--muted); }
+        .text-green { color: var(--green); }
+        .text-yellow { color: var(--yellow); }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .font-semibold { font-weight: 600; }
+        .font-bold { font-weight: 700; }
+        .text-center { text-align: center; }
+        .flex { display: flex; }
+        .flex-wrap { flex-wrap: wrap; }
+        .gap-8 { gap: 8px; }
+        .min-w-120 { min-width: 120px; }
+        .max-h-600 { max-height: 600px; }
+        .max-h-250 { max-height: 250px; }
+        .max-h-200 { max-height: 200px; }
+        .h-250 { height: 250px; }
+        .mb-16 { margin-bottom: 16px; }
+        .div-score { font-size: 42px; font-weight: 700; color: var(--green); }
+        .panel-subtitle { font-size: 10px; color: var(--muted); }
+        .reality-title { font-size: 14px; font-weight: 600; }
+        .chart-title { font-weight: 600; }
+        .btn-running { background: var(--green); color: #fff; border: none; }
+        .risk-cell { padding: 16px; border-radius: 6px; text-align: center; }
+        .risk-cell-low { background: rgba(35,134,54,0.3); }
+        .risk-cell-med { background: rgba(210,153,34,0.3); }
+        .risk-cell-high { background: rgba(248,81,73,0.3); }
+        .risk-label { font-size: 11px; color: var(--muted); }
+        .risk-value { font-size: 18px; font-weight: 700; }
+        .risk-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    </style>
+</head>
+<body>
+    <nav class="top-nav">
+        <div class="nav-brand">
+            <div class="brand-logo">M</div>
+            <div><span class="brand-name">MERID</span><span class="brand-sub">Unified Control Center</span></div>
+        </div>
+        <div class="nav-status">
+            <span class="status-badge" id="global-status">● OPERATIONAL</span>
+            <span class="text-sm text-muted">UTC: <span id="utc-time" class="font-mono">--:--:--</span></span>
+        </div>
+        <div><button class="nav-btn" id="refresh-btn">↻ Refresh</button></div>
+    </nav>
+    <div class="prices-bar" id="prices-bar"><div class="empty-state">Loading prices...</div></div>
+    <div class="main-layout">
+        <aside class="sidebar">
+            <div class="sidebar-title">Overview</div>
+            <a class="sidebar-link active" data-section="dashboard">Dashboard</a>
+            <a class="sidebar-link" data-section="intelligence">Intelligence</a>
+            <a class="sidebar-link" data-section="predictions">Predictions</a>
+            <div class="sidebar-title">Systems</div>
+            <a class="sidebar-link" data-section="systems">Four Systems</a>
+            <a class="sidebar-link" data-section="agents">Agents</a>
+            <a class="sidebar-link" data-section="consensus">Consensus</a>
+            <a class="sidebar-link" data-section="simulation">Simulation</a>
+            <div class="sidebar-title">Monitoring</div>
+            <a class="sidebar-link" data-section="shadow">Shadow MERID</a>
+            <a class="sidebar-link" data-section="risk">Risk</a>
+            <a class="sidebar-link" data-section="audit">Audit Trail</a>
+            <a class="sidebar-link" data-section="execution">Execution</a>
+            <a class="sidebar-link" data-section="analytics">Analytics</a>
+            <div class="sidebar-title">Tools</div>
+            <a class="sidebar-link" data-section="arbitrage">Arbitrage</a>
+            <a class="sidebar-link" data-section="portfolio">Portfolio</a>
+            <a class="sidebar-link" data-section="backtest">Backtest</a>
+            <a class="sidebar-link" data-section="spectator">Spectator</a>
+        </aside>
+        <main class="main-content">
+            <!-- DASHBOARD -->
+            <section id="dashboard" class="content-section active">
+                <div class="section-header"><h1 class="section-title">Market Terminal</h1><p class="section-subtitle">Real-time data for 50+ cryptocurrencies</p></div>
+                <div class="reality-panel">
+                    <div class="reality-header"><h3 class="reality-title">Reality Status</h3><span class="mode-badge operational" id="reality-mode">OPERATIONAL</span></div>
+                    <div class="reality-metrics">
+                        <div class="reality-metric"><span class="label">Valid Assertions</span><span class="value" id="valid-pct">100%</span></div>
+                        <div class="reality-metric"><span class="label">Regime Entropy</span><span class="value" id="regime-entropy">0.12</span></div>
+                        <div class="reality-metric"><span class="label">Conflicts</span><span class="value" id="conflicts">0</span></div>
+                        <div class="reality-metric"><span class="label">Blind Spots</span><span class="value" id="blind-spots">0</span></div>
+                    </div>
+                </div>
+                <div class="stats-grid" id="dashboard-stats"></div>
+                <div class="charts-row">
+                    <div class="chart-card"><div class="chart-header"><span class="chart-title">BTC/USDT</span></div><div class="chart-body"><canvas id="price-chart"></canvas></div></div>
+                    <div class="chart-card"><div class="chart-header"><span class="chart-title">Portfolio</span></div><div class="chart-body"><canvas id="portfolio-chart"></canvas></div></div>
+                    <div class="chart-card"><div class="chart-header"><span class="chart-title">Activity</span></div><div class="chart-body"><canvas id="activity-chart"></canvas></div></div>
+                </div>
+                <div class="two-col">
+                    <div class="panel"><div class="panel-header"><span class="panel-title">Intelligence Feed</span></div><div class="panel-body"><div id="intel-feed" class="feed"><div class="empty-state">Loading...</div></div></div></div>
+                    <div class="panel"><div class="panel-header"><span class="panel-title">Divergence</span></div><div class="panel-body text-center"><div id="div-score" class="div-score">0.0%</div><div class="text-sm text-muted">NOMINAL</div></div></div>
+                </div>
+            </section>
+            <!-- INTELLIGENCE -->
+            <section id="intelligence" class="content-section">
+                <div class="section-header">
+                    <div>
+                        <h1 class="section-title">Intelligence Command Center</h1>
+                        <p class="section-subtitle">8 institutional-grade sources • Real-time sentiment analysis • DeFi metrics</p>
+                    </div>
+                    <div class="flex gap-8">
+                        <button class="nav-btn" onclick="window.dispatchEvent(new CustomEvent('refresh-intel'))">↻ Refresh</button>
+                        <select id="intel-filter" class="nav-btn min-w-120">
+                            <option value="all">All Categories</option>
+                            <option value="market">Market</option>
+                            <option value="defi">DeFi</option>
+                            <option value="regulation">Regulation</option>
+                            <option value="technology">Technology</option>
+                            <option value="adoption">Adoption</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="stats-grid" id="intel-stats"></div>
+                <div class="two-col">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <span class="panel-title">📰 Live News Feed</span>
+                            <span class="panel-subtitle">Sources: CoinDesk, CoinTelegraph, Decrypt, TheBlock, CryptoPanic, CoinGecko</span>
+                        </div>
+                        <div class="panel-body"><div id="news-feed" class="feed max-h-600"><div class="empty-state">Loading intelligence...</div></div></div>
+                    </div>
+                    <div>
+                        <div class="panel">
+                            <div class="panel-header"><span class="panel-title">📊 DeFi Protocols</span></div>
+                            <div class="panel-body"><div id="defi-protocols" class="feed max-h-250"><div class="empty-state">Loading DeFi data...</div></div></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-header"><span class="panel-title">🔥 Trending</span></div>
+                            <div class="panel-body"><div id="trending-coins" class="flex flex-wrap gap-8"><div class="empty-state">Loading...</div></div></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            <!-- PREDICTIONS -->
+            <section id="predictions" class="content-section">
+                <div class="section-header">
+                    <div>
+                        <h1 class="section-title">Prediction Markets Intelligence</h1>
+                        <p class="section-subtitle">Cross-platform aggregation • Polymarket • Kalshi • Augur • Metaculus</p>
+                    </div>
+                    <div class="flex gap-8">
+                        <select id="pred-category" class="nav-btn">
+                            <option value="all">All Categories</option>
+                            <option value="crypto">Crypto</option>
+                            <option value="politics">Politics</option>
+                            <option value="economics">Economics</option>
+                            <option value="technology">Technology</option>
+                        </select>
+                        <select id="pred-platform" class="nav-btn">
+                            <option value="all">All Platforms</option>
+                            <option value="polymarket">Polymarket</option>
+                            <option value="kalshi">Kalshi</option>
+                            <option value="augur">Augur</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="stats-grid" id="pred-stats"></div>
+                <div class="panel">
+                    <div class="panel-header">
+                        <span class="panel-title">🎯 Active Markets</span>
+                        <span class="panel-subtitle">Sorted by volume</span>
+                    </div>
+                    <div class="panel-body"><div id="markets-grid" class="cards-grid"><div class="empty-state">Loading markets...</div></div></div>
+                </div>
+                <div class="two-col">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <span class="panel-title">📈 Odds Drift Signals</span>
+                            <span class="text-xs text-yellow">Significant probability movements</span>
+                        </div>
+                        <div class="panel-body"><div id="drift-feed" class="feed"><div class="empty-state">Monitoring for drift...</div></div></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <span class="panel-title">💰 Arbitrage Opportunities</span>
+                            <span class="text-xs text-green">Cross-platform spreads</span>
+                        </div>
+                        <div class="panel-body"><div id="arb-feed" class="feed"><div class="empty-state">Scanning for arbitrage...</div></div></div>
+                    </div>
+                </div>
+            </section>
+            <!-- SYSTEMS -->
+            <section id="systems" class="content-section">
+                <div class="section-header"><h1 class="section-title">Four-System Architecture</h1></div>
+                <div class="systems-grid">
+                    <div class="system-card"><div class="system-header"><div class="system-icon i">I</div><div><div class="text-sm font-semibold">INTELLIGENCE</div><div class="text-xs text-muted">Analysis</div></div></div><div class="system-metrics"><div class="metric"><span class="metric-label">Health</span><span class="metric-value" id="intel-health">98%</span></div><div class="metric"><span class="metric-label">Intents</span><span class="metric-value" id="intel-intents">12</span></div></div></div>
+                    <div class="system-card"><div class="system-header"><div class="system-icon t">T</div><div><div class="text-sm font-semibold">TRADING</div><div class="text-xs text-muted">Positions</div></div></div><div class="system-metrics"><div class="metric"><span class="metric-label">Health</span><span class="metric-value" id="trade-health">96%</span></div><div class="metric"><span class="metric-label">Intents</span><span class="metric-value" id="trade-intents">5</span></div></div></div>
+                    <div class="system-card"><div class="system-header"><div class="system-icon tr">$</div><div><div class="text-sm font-semibold">TREASURY</div><div class="text-xs text-muted">Capital</div></div></div><div class="system-metrics"><div class="metric"><span class="metric-label">Health</span><span class="metric-value" id="treasury-health">100%</span></div><div class="metric"><span class="metric-label">Intents</span><span class="metric-value" id="treasury-intents">2</span></div></div></div>
+                    <div class="system-card"><div class="system-header"><div class="system-icon g">G</div><div><div class="text-sm font-semibold">GOVERNANCE</div><div class="text-xs text-muted">Control</div></div></div><div class="system-metrics"><div class="metric"><span class="metric-label">Health</span><span class="metric-value" id="gov-health">100%</span></div><div class="metric"><span class="metric-label">Intents</span><span class="metric-value" id="gov-intents">1</span></div></div></div>
+                </div>
+            </section>
+            <!-- AGENTS -->
+            <section id="agents" class="content-section">
+                <div class="section-header">
+                    <div>
+                        <h1 class="section-title">Autonomous Agent Swarm</h1>
+                        <p class="section-subtitle">Multi-agent AI system • Distributed consensus • Real-time coordination</p>
+                    </div>
+                    <div class="flex gap-8">
+                        <button class="nav-btn btn-running">● All Running</button>
+                    </div>
+                </div>
+                <div class="stats-grid" id="agent-stats"></div>
+                <div class="panel">
+                    <div class="panel-header">
+                        <span class="panel-title">🤖 Agent Registry</span>
+                        <span class="panel-subtitle">Ollama-powered local inference</span>
+                    </div>
+                    <div class="panel-body"><div id="agent-grid" class="agent-grid"><div class="empty-state">Loading agents...</div></div></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header"><span class="panel-title">📊 Agent Activity Log</span></div>
+                    <div class="panel-body"><div id="agent-activity" class="feed max-h-200"><div class="empty-state">Monitoring agent activity...</div></div></div>
+                </div>
+            </section>
+            <!-- CONSENSUS -->
+            <section id="consensus" class="content-section">
+                <div class="section-header"><h1 class="section-title">Consensus Engine</h1></div>
+                <div class="stats-grid" id="consensus-stats"></div>
+                <div class="panel"><div class="panel-header"><span class="panel-title">Pending Votes</span></div><div class="panel-body"><div id="votes-feed" class="feed"><div class="empty-state">No pending votes</div></div></div></div>
+            </section>
+            <!-- SIMULATION -->
+            <section id="simulation" class="content-section">
+                <div class="section-header"><h1 class="section-title">Simulation Mining</h1></div>
+                <div class="stats-grid" id="sim-stats"></div>
+            </section>
+            <!-- SHADOW -->
+            <section id="shadow" class="content-section">
+                <div class="section-header"><h1 class="section-title">Shadow MERID</h1></div>
+                <div class="stats-grid" id="shadow-stats"></div>
+            </section>
+            <!-- RISK -->
+            <section id="risk" class="content-section">
+                <div class="section-header">
+                    <div>
+                        <h1 class="section-title">Risk Management Console</h1>
+                        <p class="section-subtitle">Real-time risk monitoring • Position limits • Exposure analysis</p>
+                    </div>
+                </div>
+                <div class="stats-grid" id="risk-stats"></div>
+                <div class="two-col">
+                    <div class="panel">
+                        <div class="panel-header"><span class="panel-title">⚠️ Risk Heatmap</span></div>
+                        <div class="panel-body">
+                            <div id="risk-heatmap" class="risk-grid">
+                                <div class="risk-cell risk-cell-low"><div class="risk-label">Market</div><div class="risk-value text-green">LOW</div></div>
+                                <div class="risk-cell risk-cell-low"><div class="risk-label">Liquidity</div><div class="risk-value text-green">LOW</div></div>
+                                <div class="risk-cell risk-cell-med"><div class="risk-label">Volatility</div><div class="risk-value text-yellow">MED</div></div>
+                                <div class="risk-cell risk-cell-low"><div class="risk-label">Counterparty</div><div class="risk-value text-green">LOW</div></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header"><span class="panel-title">📋 Risk Events</span></div>
+                        <div class="panel-body"><div id="risk-events" class="feed max-h-200"><div class="empty-state">No risk events</div></div></div>
+                    </div>
+                </div>
+            </section>
+            <!-- AUDIT -->
+            <section id="audit" class="content-section">
+                <div class="section-header"><h1 class="section-title">Audit Trail</h1></div>
+                <div class="panel"><div class="panel-header"><span class="panel-title">Events</span></div><div class="panel-body"><div id="audit-feed" class="feed"><div class="empty-state">No events</div></div></div></div>
+            </section>
+            <!-- EXECUTION -->
+            <section id="execution" class="content-section">
+                <div class="section-header"><h1 class="section-title">Execution Engine</h1></div>
+                <div class="stats-grid" id="exec-stats"></div>
+            </section>
+            <!-- ANALYTICS -->
+            <section id="analytics" class="content-section">
+                <div class="section-header"><h1 class="section-title">Analytics</h1></div>
+                <div class="stats-grid" id="analytics-stats"></div>
+            </section>
+            <!-- ARBITRAGE -->
+            <section id="arbitrage" class="content-section">
+                <div class="section-header"><h1 class="section-title">Arbitrage Scanner</h1></div>
+                <div class="stats-grid" id="arb-stats"></div>
+                <div class="panel"><div class="panel-header"><span class="panel-title">Opportunities</span></div><div class="panel-body"><div id="arb-opportunities" class="feed"><div class="empty-state">No opportunities</div></div></div></div>
+            </section>
+            <!-- PORTFOLIO -->
+            <section id="portfolio" class="content-section">
+                <div class="section-header">
+                    <div>
+                        <h1 class="section-title">Portfolio Management</h1>
+                        <p class="section-subtitle">Position tracking • P&L analysis • Allocation optimization</p>
+                    </div>
+                </div>
+                <div class="stats-grid" id="portfolio-stats"></div>
+                <div class="two-col">
+                    <div class="panel">
+                        <div class="panel-header"><span class="panel-title">📊 Asset Allocation</span></div>
+                        <div class="panel-body h-250"><canvas id="allocation-chart"></canvas></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header"><span class="panel-title">📈 Performance</span></div>
+                        <div class="panel-body h-250"><canvas id="performance-chart"></canvas></div>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header"><span class="panel-title">💼 Open Positions</span></div>
+                    <div class="panel-body"><div id="positions-table"><div class="empty-state">No open positions</div></div></div>
+                </div>
+            </section>
+            <!-- BACKTEST -->
+            <section id="backtest" class="content-section">
+                <div class="section-header"><h1 class="section-title">Backtest</h1></div>
+                <div class="panel"><div class="panel-header"><span class="panel-title">Results</span></div><div class="panel-body"><div id="backtest-results"><div class="empty-state">No results</div></div></div></div>
+            </section>
+            <!-- SPECTATOR -->
+            <section id="spectator" class="content-section">
+                <div class="section-header"><h1 class="section-title">Spectator Mode</h1><p class="section-subtitle">Watch agents trade in real-time</p></div>
+                <div class="spectator-panel">
+                    <h3 class="mb-16 reality-title">Trading Mode</h3>
+                    <div class="mode-selector">
+                        <button class="mode-btn active" data-mode="paper">Paper</button>
+                        <button class="mode-btn" data-mode="hybrid">Hybrid</button>
+                        <button class="mode-btn" data-mode="live">Live</button>
+                    </div>
+                    <div id="spectator-summary" class="stats-grid"></div>
+                </div>
+                <div class="panel"><div class="panel-header"><span class="panel-title">Live Trades</span></div><div class="panel-body"><div id="spectator-trades" class="feed"><div class="empty-state">Select a mode to start</div></div></div></div>
+            </section>
+        </main>
+    </div>
+    <script src="/static/js/unified-standalone.js"></script>
+</body>
+</html>

@@ -1,5 +1,18 @@
 /* Unified Dashboard Enhanced Styles */
 
+/* Market Heading */
+.market-heading {
+    color: #e6edf3;
+}
+
+/* Price Grid */
+.price-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-top: 20px;
+}
+
 /* Live Prices Bar */
 .live-prices-bar {
     display: flex;

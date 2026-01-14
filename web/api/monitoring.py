@@ -312,3 +312,52 @@ async def get_monitoring_dashboard() -> Dict[str, Any]:
             "ws_connections": get_metrics_collector().get_value("ws_connections"),
         },
     }
+
+
+# ============================================
+# AUDIT ENDPOINTS
+# ============================================
+
+@router.get("/audit/recent")
+async def get_recent_audit_events(limit: int = 20) -> Dict[str, Any]:
+    """Get recent audit events for dashboard."""
+    try:
+        from core.audit_trail import get_audit_trail
+        audit = get_audit_trail()
+        events = audit.get_recent_entries(limit) if hasattr(audit, 'get_recent_entries') else []
+        return {
+            "events": events,
+            "count": len(events)
+        }
+    except Exception as e:
+        logger.error(f"Audit fetch error: {e}")
+        return {"events": [], "count": 0, "error": str(e)}
+
+
+# ============================================
+# ANALYTICS ENDPOINTS
+# ============================================
+
+@router.get("/analytics/summary")
+async def get_analytics_summary() -> Dict[str, Any]:
+    """Get analytics summary for dashboard."""
+    try:
+        perf = get_performance_tracker()
+        stats = perf.get_status() if hasattr(perf, 'get_status') else {}
+        
+        return {
+            "win_rate": stats.get('win_rate', 0),
+            "total_trades": stats.get('total_trades', 0),
+            "total_pnl": stats.get('total_pnl', 0),
+            "sharpe_ratio": stats.get('sharpe_ratio', 0),
+            "max_drawdown": stats.get('max_drawdown', 0),
+            "avg_trade_duration": stats.get('avg_trade_duration', 0)
+        }
+    except Exception as e:
+        logger.error(f"Analytics fetch error: {e}")
+        return {
+            "win_rate": 0,
+            "total_trades": 0,
+            "total_pnl": 0,
+            "error": str(e)
+        }

@@ -1,4 +1,4 @@
-﻿"""
+"""
 MERID Main Entry Point - Production Streaming System
 
 Boots:
@@ -22,6 +22,7 @@ import uvicorn
 
 from web.main import create_app
 from utils.logger import get_logger
+from web.api import test_page
 
 logger = get_logger("main")
 
@@ -43,12 +44,14 @@ async def lifespan(app: FastAPI):
     from core.consensus_engine import get_consensus_engine
     from simulation.continuous_miner import get_continuous_miner
     from core.audit_trail import get_audit_trail
-    from trading.execution import get_execution_engine
+    from trading.execution import get_optimal_executor
     from data.live_price_feed import get_live_price_feed
     from agents.agent_mesh import agent_mesh
     from monitoring.prediction_markets import get_prediction_aggregator
     from core.alerts import get_alert_manager
     from core.health import get_health_monitor
+    from web.api.intelligence import aggregate_news
+    from web.api.live_data import fetch_live_prices as fetch_api_prices
     
     # Start agent orchestrator
     try:
@@ -85,7 +88,7 @@ async def lifespan(app: FastAPI):
     # Start execution engine
     try:
         logger.info("Starting execution engine...")
-        execution = get_execution_engine()
+        execution = get_optimal_executor()
         asyncio.create_task(execution.start())
         
         # Wire execution engine to live price feed
@@ -110,8 +113,33 @@ async def lifespan(app: FastAPI):
         logger.info("Starting prediction markets aggregator...")
         prediction_agg = get_prediction_aggregator()
         asyncio.create_task(prediction_agg.start())
+        # Store in app state for API access
+        app.state.prediction_aggregator = prediction_agg
+        logger.info(f"Prediction aggregator stored in app.state (id={id(prediction_agg)})")
     except Exception as e:
         logger.error(f"Failed to start prediction markets: {e}")
+    
+    # Start live price feed streaming
+    try:
+        logger.info("Starting live price feed...")
+        price_feed = get_live_price_feed()
+        asyncio.create_task(price_feed.start_streaming())
+    except Exception as e:
+        logger.error(f"Failed to start price feed: {e}")
+    
+    # Start intelligence news aggregation
+    try:
+        logger.info("Starting intelligence news aggregation...")
+        asyncio.create_task(aggregate_news())
+    except Exception as e:
+        logger.error(f"Failed to start intelligence: {e}")
+    
+    # Start API live data fetching
+    try:
+        logger.info("Starting API live data feed...")
+        asyncio.create_task(fetch_api_prices())
+    except Exception as e:
+        logger.error(f"Failed to start API live data: {e}")
     
     # Start alert manager
     try:
@@ -161,11 +189,16 @@ async def lifespan(app: FastAPI):
     except: pass
     
     try:
+        price_feed = get_live_price_feed()
+        price_feed.stop_streaming()
+    except: pass
+    
+    try:
         await agent_mesh.stop()
     except: pass
     
     try:
-        execution = get_execution_engine()
+        execution = get_optimal_executor()
         await execution.stop()
     except: pass
     
@@ -194,6 +227,9 @@ async def lifespan(app: FastAPI):
 
 # Create app with lifespan
 app = create_app(lifespan=lifespan)
+
+# Add test page router
+app.include_router(test_page.router, tags=["test"])
 
 
 if __name__ == "__main__":

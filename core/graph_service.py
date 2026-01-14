@@ -25,53 +25,64 @@ logger = logging.getLogger(__name__)
 
 
 # Initialization Cypher for setting default properties on existing nodes
-INIT_CYPHER = """
-// Wallets
-MATCH (w:Wallet)
-SET w.tier = coalesce(w.tier, 'HOT'),
-    w.time_lock_hours = coalesce(w.time_lock_hours, 0);
-
-// Positions
-MATCH (pos:Position)
-SET pos.net_size_usd    = coalesce(pos.net_size_usd, 0.0),
-    pos.avg_entry_price = coalesce(pos.avg_entry_price, 0.0),
-    pos.pnl_percent     = coalesce(pos.pnl_percent, 0.0),
-    pos.updated_at      = coalesce(pos.updated_at, datetime());
-
-// Incidents
-MATCH (inc:Incident)
-SET inc.status     = coalesce(inc.status, 'OPEN'),
-    inc.severity   = coalesce(inc.severity, 'MEDIUM'),
-    inc.created_at = coalesce(inc.created_at, datetime()),
-    inc.category   = coalesce(inc.category, 'GENERAL');
-
-// Threats
-MATCH (t:Threat)
-SET t.severity = coalesce(t.severity, 'MEDIUM'),
-    t.category = coalesce(t.category, 'GENERAL');
-
-// Proposals
-MATCH (p:TradeProposal)
-SET p.state      = coalesce(p.state, 'CREATED'),
-    p.created_at = coalesce(p.created_at, datetime());
-
-// Orders
-MATCH (o:Order)
-SET o.status     = coalesce(o.status, 'PENDING'),
-    o.created_at = coalesce(o.created_at, datetime());
-
-// Agents
-MATCH (ag:Agent)
-SET ag.created_at = coalesce(ag.created_at, datetime());
-
-// Venues
-MATCH (v:Venue)
-SET v.created_at = coalesce(v.created_at, datetime());
-
-// Assets
-MATCH (a:Asset)
-SET a.created_at = coalesce(a.created_at, datetime());
-"""
+# Split into separate statements for Neo4j compatibility
+INIT_CYPHER_STATEMENTS = [
+    # Wallets
+    """
+    MATCH (w:Wallet)
+    SET w.tier = coalesce(w.tier, 'HOT'),
+        w.time_lock_hours = coalesce(w.time_lock_hours, 0)
+    """,
+    # Positions
+    """
+    MATCH (pos:Position)
+    SET pos.net_size_usd    = coalesce(pos.net_size_usd, 0.0),
+        pos.avg_entry_price = coalesce(pos.avg_entry_price, 0.0),
+        pos.pnl_percent     = coalesce(pos.pnl_percent, 0.0),
+        pos.updated_at      = coalesce(pos.updated_at, datetime())
+    """,
+    # Incidents
+    """
+    MATCH (inc:Incident)
+    SET inc.status     = coalesce(inc.status, 'OPEN'),
+        inc.severity   = coalesce(inc.severity, 'MEDIUM'),
+        inc.created_at = coalesce(inc.created_at, datetime()),
+        inc.category   = coalesce(inc.category, 'GENERAL')
+    """,
+    # Threats
+    """
+    MATCH (t:Threat)
+    SET t.severity = coalesce(t.severity, 'MEDIUM'),
+        t.category = coalesce(t.category, 'GENERAL')
+    """,
+    # Proposals
+    """
+    MATCH (p:TradeProposal)
+    SET p.state      = coalesce(p.state, 'CREATED'),
+        p.created_at = coalesce(p.created_at, datetime())
+    """,
+    # Orders
+    """
+    MATCH (o:Order)
+    SET o.status     = coalesce(o.status, 'PENDING'),
+        o.created_at = coalesce(o.created_at, datetime())
+    """,
+    # Agents
+    """
+    MATCH (ag:Agent)
+    SET ag.created_at = coalesce(ag.created_at, datetime())
+    """,
+    # Venues
+    """
+    MATCH (v:Venue)
+    SET v.created_at = coalesce(v.created_at, datetime())
+    """,
+    # Assets
+    """
+    MATCH (a:Asset)
+    SET a.created_at = coalesce(a.created_at, datetime())
+    """
+]
 
 
 class GraphService:
@@ -204,7 +215,8 @@ class GraphService:
         """
         try:
             with self.driver.session(database=self.database) as session:
-                session.execute_write(lambda tx: tx.run(INIT_CYPHER))
+                for statement in INIT_CYPHER_STATEMENTS:
+                    session.execute_write(lambda tx, stmt=statement: tx.run(stmt))
             logger.info("Graph initialization complete: default properties set on all nodes")
         except Exception as e:
             logger.error(f"Graph initialization failed: {e}")

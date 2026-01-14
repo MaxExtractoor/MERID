@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import tweepy
 import time
 from queue import PriorityQueue
