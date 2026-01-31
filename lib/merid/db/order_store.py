@@ -43,3 +43,11 @@ def update_order(order_id: str, updates: Dict) -> Optional[Dict]:
 def clear_store() -> None:
     _ORDERS.clear()
     _IDEMPOTENCY_INDEX.clear()
+
+
+def count_open_orders() -> int:
+    """Return the number of open (non-filled, non-cancelled) orders.
+
+    This is a helper used by pre-trade checks to enforce max_open_orders.
+    """
+    return sum(1 for o in _ORDERS.values() if o.get("status") not in ("filled", "cancelled"))

@@ -12,14 +12,14 @@ def setup_function():
 
 def test_place_order_records_audit():
     o = {"symbol": "BTCUSD", "side": "buy", "quantity": 1, "price": 50000}
-    r = place_order(o, idempotency_key="k-audit", actor="admin")
+    r = place_order(o, idempotency_key="k-audit", actor="admin", account={"balance": 100_000, "max_notional_pct": 0.5})
     audits = list_audit()
     assert any(a["action"] == "order.place" and a["actor"] == "admin" for a in audits)
 
 
 def test_place_order_failure_records_audit():
     try:
-        place_order({"symbol": "X", "side": "buy", "quantity": -5}, actor="bob")
+        place_order({"symbol": "X", "side": "buy", "quantity": -5}, actor="bob", account={"balance": 100_000})
     except ExecutionError:
         pass
     audits = list_audit()
@@ -28,7 +28,7 @@ def test_place_order_failure_records_audit():
 
 def test_cancel_modify_record_audits():
     o = {"symbol": "X", "side": "sell", "quantity": 1, "price": 10}
-    r = place_order(o, actor="ops")
+    r = place_order(o, actor="ops", account={"balance": 100_000})
     with pytest.raises(ExecutionError):
         cancel_order(r["id"], actor="ops")
     with pytest.raises(ExecutionError):
