@@ -4,12 +4,15 @@ import {
   Search, 
   TrendingUp, 
   Shield, 
-  Cpu, 
-  FileText, 
-  Settings 
+  Settings,
+  Bot,
+  BarChart3,
+  Database,
+  Terminal,
+  HeartPulse
 } from 'lucide-react';
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "api" | "research" | "logs" | "settings";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics";
 
 interface SidebarProps {
   current: View;
@@ -18,21 +21,23 @@ interface SidebarProps {
 }
 
 const navigation = [
-  { name: 'Overview', href: 'overview', icon: LayoutDashboard },
-  { name: 'Live Trading', href: 'trading', icon: Activity },
-  { name: 'Research', href: 'research', icon: Search },
-  { name: 'Prediction Markets', href: 'predictions', icon: TrendingUp },
+  { name: 'Overview', href: 'overview', icon: LayoutDashboard, color: 'text-blue-400' },
+  { name: 'Live Trading', href: 'trading', icon: Activity, color: 'text-green-400' },
+  { name: 'Research', href: 'research', icon: Search, color: 'text-purple-400' },
+  { name: 'Prediction Markets', href: 'predictions', icon: TrendingUp, color: 'text-orange-400' },
 ];
 
 const management = [
-  { name: 'Risk & Health', href: 'risk', icon: Shield },
-  { name: 'Bots/Agents', href: 'agents', icon: Cpu },
-  { name: 'API Dashboard', href: 'api', icon: FileText },
+  { name: 'Risk & Health', href: 'risk', icon: Shield, color: 'text-red-400' },
+  { name: 'Bots/Agents', href: 'agents', icon: Bot, color: 'text-cyan-400' },
+  { name: 'API Dashboard', href: 'api', icon: Database, color: 'text-indigo-400' },
+  { name: 'Analytics', href: 'analytics', icon: BarChart3, color: 'text-pink-400' },
+  { name: 'Settings', href: 'settings', icon: Settings, color: 'text-gray-400' },
 ];
 
 const system = [
-  { name: 'Logs', href: 'logs', icon: FileText },
-  { name: 'Settings', href: 'settings', icon: Settings },
+  { name: 'System Health', href: 'health', icon: HeartPulse, color: 'text-emerald-400' },
+  { name: 'Logs', href: 'logs', icon: Terminal, color: 'text-gray-400' },
 ];
 
 export default function Sidebar({ current, onChange, className }: SidebarProps) {
@@ -66,11 +71,11 @@ export default function Sidebar({ current, onChange, className }: SidebarProps) 
                     w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-lg transition-colors
                     ${isActive 
                       ? 'bg-blue-600 text-white' 
-                      : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                      : `${item.color} hover:bg-slate-800 hover:text-white`
                     }
                   `}
                 >
-                  <Icon className="w-4 h-4" />
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-white' : item.color}`} />
                   {item.name}
                 </button>
               );
@@ -96,11 +101,11 @@ export default function Sidebar({ current, onChange, className }: SidebarProps) 
                     w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-lg transition-colors
                     ${isActive 
                       ? 'bg-blue-600 text-white' 
-                      : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                      : `${item.color} hover:bg-slate-800 hover:text-white`
                     }
                   `}
                 >
-                  <Icon className="w-4 h-4" />
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-white' : item.color}`} />
                   {item.name}
                 </button>
               );
@@ -126,11 +131,11 @@ export default function Sidebar({ current, onChange, className }: SidebarProps) 
                     w-full flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-lg transition-colors
                     ${isActive 
                       ? 'bg-blue-600 text-white' 
-                      : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                      : `${item.color} hover:bg-slate-800 hover:text-white`
                     }
                   `}
                 >
-                  <Icon className="w-4 h-4" />
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-white' : item.color}`} />
                   {item.name}
                 </button>
               );

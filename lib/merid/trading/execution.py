@@ -25,6 +25,7 @@ def place_order(
     actor: Optional[str] = None,
     portfolio_id: Optional[str] = None,
     projected_loss: float = 0.0,
+    adapter: Optional["ExchangeAdapter"] = None,
 ) -> Dict:
     """Place an order after risk checks and circuit-breaker validation.
 
@@ -90,8 +91,25 @@ def place_order(
     }
     save_order(record)
 
-    # Simulate immediate acceptance and fill (replace with real adapter later)
-    record = update_order(order_id, {"status": "filled", "filled_at": None, "fill_qty": order.get("quantity")})
+    # Use the provided adapter or fall back to environment/default adapter
+    if adapter is None:
+        from trading.exchange import get_default_adapter
+
+        adapter = get_default_adapter()
+
+    try:
+        result = adapter.send_order(order, idempotency_key=idempotency_key)
+        # Update record based on adapter response
+        updates = {"status": result.get("status", "pending")}
+        if "filled_at" in result:
+            updates["filled_at"] = result["filled_at"]
+        if "fill_qty" in result:
+            updates["fill_qty"] = result["fill_qty"]
+        record = update_order(order_id, updates)
+    except Exception as exc:  # pragma: no cover - adapter errors bubble as ExecutionError
+        append_audit(actor, "order.place.failed", {"reason": str(exc)})
+        CircuitBreaker.record_error()
+        raise ExecutionError("Execution error while sending to adapter") from exc
 
     append_audit(actor, "order.place", {"id": order_id, "status": record.get("status"), "idempotency_key": idempotency_key})
 

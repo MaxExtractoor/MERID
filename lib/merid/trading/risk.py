@@ -60,36 +60,125 @@ def pre_trade_check(
     return True, "ok"
 
 
-class CircuitBreaker:
-    """Simple circuit breaker that can be tripped programmatically.
+class _InMemoryCircuitBreaker:
+    """In-process, class-level circuit breaker used for tests and single-process runs."""
 
-    This class stores state in class-level attributes for simplicity. In a
-    distributed setting, this should be backed by a shared store (Redis).
+    def __init__(self, threshold: int = 5):
+        self._tripped = False
+        self._error_count = 0
+        self._threshold = threshold
+
+    def is_tripped(self) -> bool:
+        return self._tripped
+
+    def trip(self) -> None:
+        self._tripped = True
+
+    def reset(self) -> None:
+        self._tripped = False
+        self._error_count = 0
+
+    def record_error(self) -> None:
+        self._error_count += 1
+        if self._error_count >= self._threshold:
+            self._tripped = True
+
+    def status(self) -> dict:
+        return {"tripped": self._tripped, "errors": self._error_count, "threshold": self._threshold}
+
+
+class _RedisCircuitBreaker:
+    """Redis-backed circuit breaker for distributed deployments.
+
+    Uses Redis keys (pfx:merid:circuit:tripped, pfx:merid:circuit:errors) to
+    coordinate state across processes and hosts.
     """
 
-    _tripped = False
-    _error_count = 0
-    _threshold = 5
+    def __init__(self, redis_client=None, prefix: str = "merid:circuit", threshold: int = 5):
+        try:
+            if redis_client is None:
+                from redis import Redis
+
+                redis_client = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+            self.client = redis_client
+        except Exception:
+            # If Redis is not available, fall back to in-memory behavior
+            self.client = None
+        self.prefix = prefix
+        self._threshold = int(os.getenv("MERID_CIRCUIT_THRESHOLD", threshold))
+
+    def _k(self, name: str) -> str:
+        return f"{self.prefix}:{name}"
+
+    def is_tripped(self) -> bool:
+        if not self.client:
+            return False
+        return self.client.get(self._k("tripped")) == b"1"
+
+    def trip(self) -> None:
+        if not self.client:
+            return None
+        self.client.set(self._k("tripped"), "1")
+
+    def reset(self) -> None:
+        if not self.client:
+            return None
+        self.client.set(self._k("tripped"), "0")
+        self.client.set(self._k("errors"), 0)
+
+    def record_error(self) -> None:
+        if not self.client:
+            return None
+        errors = self.client.incr(self._k("errors"))
+        if int(errors) >= self._threshold:
+            self.client.set(self._k("tripped"), "1")
+
+    def status(self) -> dict:
+        if not self.client:
+            return {"tripped": False, "errors": 0, "threshold": self._threshold}
+        errors = int(self.client.get(self._k("errors")) or 0)
+        tripped = self.client.get(self._k("tripped")) == b"1"
+        return {"tripped": tripped, "errors": errors, "threshold": self._threshold}
+
+
+# Backend selector: pick redis if MERID_CIRCUITBACKEND=redis, else in-memory.
+
+_backend = None
+
+
+def _get_backend():
+    global _backend
+    if _backend is not None:
+        return _backend
+    import os
+
+    backend = os.getenv("MERID_CIRCUITBACKEND", "memory").lower()
+    if backend == "redis":
+        _backend = _RedisCircuitBreaker()
+    else:
+        _backend = _InMemoryCircuitBreaker()
+    return _backend
+
+
+class CircuitBreaker:
+    """Facade that delegates to a selected backend implementation."""
 
     @classmethod
     def is_tripped(cls) -> bool:
-        return cls._tripped
+        return _get_backend().is_tripped()
 
     @classmethod
     def trip(cls) -> None:
-        cls._tripped = True
+        return _get_backend().trip()
 
     @classmethod
     def reset(cls) -> None:
-        cls._tripped = False
-        cls._error_count = 0
+        return _get_backend().reset()
 
     @classmethod
     def record_error(cls) -> None:
-        cls._error_count += 1
-        if cls._error_count >= cls._threshold:
-            cls._tripped = True
+        return _get_backend().record_error()
 
     @classmethod
     def status(cls) -> dict:
-        return {"tripped": cls._tripped, "errors": cls._error_count, "threshold": cls._threshold}
+        return _get_backend().status()

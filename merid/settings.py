@@ -157,6 +157,18 @@ class Settings(BaseSettings):
         return self.MERID_ENV.lower() in ("production", "prod")
     
     @property
+    def allow_websocket_dev_mode(self) -> bool:
+        """
+        Check if WebSocket dev mode (anonymous connections) is allowed.
+        
+        SAFETY: This is always False in production, regardless of MERID_DEV_ALLOW_WS.
+        """
+        if self.is_production:
+            # NEVER allow dev mode WebSocket bypass in production
+            return False
+        return self.MERID_DEV_ALLOW_WS
+    
+    @property
     def is_testing(self) -> bool:
         """Check if running in testing mode."""
         return self.MERID_ENV.lower() in ("testing", "test")

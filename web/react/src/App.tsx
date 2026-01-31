@@ -6,13 +6,14 @@ import Trading from "./views/Trading";
 import Agents from "./views/Agents";
 import Predictions from "./views/Predictions";
 import Risk from "./views/Risk";
+import Health from "./views/Health";
 import ApiDashboard from "./views/ApiDashboard";
 import Research from "./views/Research";
 import Logs from "./views/Logs";
 import Settings from "./views/Settings";
 import { ThemeProvider } from "./theme";
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "api" | "research" | "logs" | "settings";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics";
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
@@ -20,7 +21,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
-      <div className="flex h-screen bg-slate-950 text-slate-100">
+      <div className="flex h-screen">
         {/* Sidebar - hidden on mobile, shown on desktop */}
         <Sidebar 
           current={view} 
@@ -39,7 +40,7 @@ export default function App() {
               setView(v);
               setSidebarOpen(false);
             }}
-            className="fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 md:hidden"
+            className="fixed inset-y-0 left-0 z-50 w-64 md:hidden"
           />
         )}
 
@@ -53,8 +54,10 @@ export default function App() {
             {view === "agents" && <Agents />}
             {view === "predictions" && <Predictions />}
             {view === "risk" && <Risk />}
+            {view === "health" && <Health />}
             {view === "api" && <ApiDashboard />}
             {view === "research" && <Research />}
+            {view === "analytics" && <Logs />}
             {view === "logs" && <Logs />}
             {view === "settings" && <Settings />}
           </main>
