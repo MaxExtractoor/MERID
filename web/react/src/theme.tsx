@@ -3,8 +3,8 @@ import React from "react";
 type Theme = "light" | "dark";
 const ThemeContext = React.createContext<{
   theme: Theme;
-  toggle: () => void;
-}>({ theme: "dark", toggle: () => {} });
+  toggleTheme: () => void;
+}>({ theme: "dark", toggleTheme: () => {} });
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [theme, setTheme] = React.useState<Theme>(() => {
@@ -19,7 +19,7 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   return (
     <ThemeContext.Provider
-      value={{ theme, toggle: () => setTheme(t => (t === "dark" ? "light" : "dark")) }}
+      value={{ theme, toggleTheme: () => setTheme(t => (t === "dark" ? "light" : "dark")) }}
     >
       {children}
     </ThemeContext.Provider>

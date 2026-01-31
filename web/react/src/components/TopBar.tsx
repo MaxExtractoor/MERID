@@ -1,5 +1,5 @@
 import { Bell, Search, Menu, Sun, Moon, Settings } from "lucide-react";
-import { useTheme } from '../hooks/useTheme';
+import { useTheme } from '../theme';
 
 interface TopBarProps {
   onMenuClick: () => void;
