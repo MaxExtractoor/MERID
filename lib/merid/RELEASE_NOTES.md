@@ -1,6 +1,7 @@
 MERID v0.1.0 (2026-01-31)
 
 Highlights
+
 - Core orchestrator with SSE streaming
 - Trading & Risk engine with circuit breaker and pre-trade checks
 - Admin lockdown + token auth

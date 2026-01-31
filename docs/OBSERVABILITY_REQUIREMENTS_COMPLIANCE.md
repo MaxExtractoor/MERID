@@ -14,10 +14,10 @@
 | 2. Privacy-Aware Telemetry | OBS-02 | Privacy-aware telemetry with data classification | COMPLETE | core/telemetry_manager.py |
 | 3. Logs, Metrics & Traces | OBS-01 | Central telemetry stack with logs/metrics/traces | COMPLETE | core/telemetry_manager.py, observability/observability_stack.py |
 | 4. Analytics & Dashboards | OBS-14 | Observability dashboards wiring | COMPLETE | web/main.py (`/observability`, `/api/v1/observability/*`), web/templates/observability.html, web/static/js/observability_dashboard.js |
-| 5. Neo4j & Open-Source |  |  |  |  |
+| 5. Neo4j & Open-Source | | | | |
 | 6. Debugging Infrastructure | OBS-12 | Root-cause analysis console (backtest + replay) | COMPLETE | backtesting/replay.py, run_backtest.py |
-| 7. Polling & Autonomous Updates |  |  |  |  |
-| 8. Integration with Existing |  |  |  |  |
+| 7. Polling & Autonomous Updates | | | | |
+| 8. Integration with Existing | | | | |
 
 ---
 

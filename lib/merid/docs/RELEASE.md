@@ -3,10 +3,12 @@
 This document describes how to create a release for MERID.
 
 Prerequisites
+
 - You have write access to the repository and can create tags and releases.
 - CI secrets are configured (if you plan to publish Docker images or notify external services).
 
 Steps
+
 1. Run tests locally and ensure everything passes.
 
    ```bash
@@ -49,8 +51,9 @@ If you want to sign images, add a Base64-encoded private key to the repository s
 
 To use a different registry (Docker Hub, ECR, etc.), replace the login and the `docker/build-push-action` credentials with the appropriate secrets (e.g., `DOCKER_USERNAME` / `DOCKER_PASSWORD`).
 
-7. Announce the release to stakeholders and update any deployment manifests or infra pipelines.
+1. Announce the release to stakeholders and update any deployment manifests or infra pipelines.
 
 Notes
+
 - For safer releases, consider creating a release branch (e.g., `release/v0.1`) and running an integration test matrix before tagging.
 - If you want automated CHANGELOG generation, consider using tools like `git-cliff` or `towncrier` in the pipeline.
