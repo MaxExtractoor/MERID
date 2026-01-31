@@ -27,6 +27,7 @@ from agents.registry import load_agents
 from agents.twitter_agent import TwitterAgent
 from agents.telegram_agent import TelegramAgent
 from agents.news_monitor_agent import NewsMonitorAgent
+from agents.fast_prediction_arbitrage_analyst import register_fast_agent
 from agents.optimization import (
     AgentOptimizer,
     get_agent_optimizer,
@@ -101,3 +102,9 @@ __all__ = [
     "profiled",
     "budget_limited",
 ]
+
+# Register the fast agent for experiments
+try:
+    register_fast_agent()
+except Exception as e:
+    print(f"Warning: Could not register fast agent: {e}")

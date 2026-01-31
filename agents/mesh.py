@@ -443,3 +443,79 @@ def get_agent_mesh() -> AgentMesh:
     if _agent_mesh is None:
         _agent_mesh = AgentMesh()
     return _agent_mesh
+
+
+# FastAPI router for agent mesh endpoints
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+router = APIRouter(prefix="/api/v1/mesh", tags=["agent_mesh"])
+
+
+class RegisterAgentRequest(BaseModel):
+    agent_id: str
+    agent_type: str
+    capabilities: List[str] = []
+
+
+class SendMessageRequest(BaseModel):
+    from_agent: str
+    to_agent: Optional[str]
+    message_type: str
+    payload: Dict[str, Any]
+
+
+@router.post("/register")
+async def register_agent(request: RegisterAgentRequest):
+    """Register an agent with the mesh."""
+    mesh = get_agent_mesh()
+    mesh.register_agent(request.agent_id)
+    logger.info(f"Agent {request.agent_id} registered via API")
+    return {"status": "registered", "agent_id": request.agent_id}
+
+
+@router.post("/unregister")
+async def unregister_agent(agent_id: str):
+    """Unregister an agent from the mesh."""
+    mesh = get_agent_mesh()
+    mesh.unregister_agent(agent_id)
+    logger.info(f"Agent {agent_id} unregistered via API")
+    return {"status": "unregistered", "agent_id": agent_id}
+
+
+@router.post("/message")
+async def send_message(request: SendMessageRequest):
+    """Send a message through the mesh."""
+    mesh = get_agent_mesh()
+    try:
+        message_type = MessageType(request.message_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid message type: {request.message_type}")
+    
+    if request.to_agent:
+        mesh.send_signal(request.from_agent, request.to_agent, request.payload)
+    else:
+        mesh.broadcast(request.from_agent, request.payload)
+    
+    return {"status": "sent", "from": request.from_agent, "to": request.to_agent or "broadcast"}
+
+
+@router.get("/status")
+async def mesh_status():
+    """Get agent mesh status."""
+    mesh = get_agent_mesh()
+    return {
+        "active_agents": len(mesh._agents),
+        "total_messages": mesh._message_count,
+        "agents": list(mesh._agents)
+    }
+
+
+@router.get("/agents")
+async def list_agents():
+    """List all registered agents."""
+    mesh = get_agent_mesh()
+    return {
+        "agents": list(mesh._agents),
+        "count": len(mesh._agents)
+    }

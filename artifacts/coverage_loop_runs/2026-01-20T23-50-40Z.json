@@ -1,0 +1,1965 @@
+{
+  "failure_logs": [
+    {
+      "path": "artifacts\\coverage_loop_failures\\failure_initial_20260120T235016Z.log",
+      "stage": "initial"
+    },
+    {
+      "path": "artifacts\\coverage_loop_failures\\failure_retry1_20260120T235040Z.log",
+      "stage": "retry_1"
+    }
+  ],
+  "history": [
+    {
+      "files": [
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\adaptive_model_selector.py",
+          "stmts": 24
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\adversarial_robustness.py",
+          "stmts": 31
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\agent_benchmarking.py",
+          "stmts": 35
+        },
+        {
+          "coverage": 98.0,
+          "miss": 3,
+          "missing_lines": [
+            "646-648"
+          ],
+          "name": "swarm\\agent_monitoring_metrics.py",
+          "stmts": 192
+        },
+        {
+          "coverage": 96.0,
+          "miss": 3,
+          "missing_lines": [
+            "152-154"
+          ],
+          "name": "swarm\\agent_pattern_library.py",
+          "stmts": 67
+        },
+        {
+          "coverage": 95.0,
+          "miss": 12,
+          "missing_lines": [
+            "340",
+            "348",
+            "350",
+            "352",
+            "412",
+            "429",
+            "464",
+            "476-477",
+            "496-497",
+            "524"
+          ],
+          "name": "swarm\\agent_registry.py",
+          "stmts": 236
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\anomaly_detection_ml.py",
+          "stmts": 25
+        },
+        {
+          "coverage": 94.0,
+          "miss": 18,
+          "missing_lines": [
+            "324",
+            "396",
+            "419-420",
+            "480-493",
+            "502",
+            "561",
+            "565",
+            "622"
+          ],
+          "name": "swarm\\anti_silent_failure.py",
+          "stmts": 311
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\auto_code_generator.py",
+          "stmts": 35
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\automated_upgrade_testing.py",
+          "stmts": 28
+        },
+        {
+          "coverage": 88.0,
+          "miss": 26,
+          "missing_lines": [
+            "235-236",
+            "246-247",
+            "291-296",
+            "305-310",
+            "316-321",
+            "383-384",
+            "418-422",
+            "453-455",
+            "468-469",
+            "537"
+          ],
+          "name": "swarm\\collab_orchestrator.py",
+          "stmts": 226
+        },
+        {
+          "coverage": 94.0,
+          "miss": 7,
+          "missing_lines": [
+            "129",
+            "142-143",
+            "160",
+            "180",
+            "197",
+            "240"
+          ],
+          "name": "swarm\\collaborative_swarm_guardrails.py",
+          "stmts": 108
+        },
+        {
+          "coverage": 99.0,
+          "miss": 1,
+          "missing_lines": [
+            "146"
+          ],
+          "name": "swarm\\coma.py",
+          "stmts": 204
+        },
+        {
+          "coverage": 86.0,
+          "miss": 11,
+          "missing_lines": [
+            "161-193",
+            "209",
+            "217-219"
+          ],
+          "name": "swarm\\command_runner.py",
+          "stmts": 81
+        },
+        {
+          "coverage": 89.0,
+          "miss": 33,
+          "missing_lines": [
+            "324",
+            "371",
+            "394-397",
+            "402",
+            "405-407",
+            "413-416",
+            "431",
+            "436",
+            "453",
+            "458",
+            "478",
+            "483",
+            "520",
+            "536",
+            "543-544",
+            "557",
+            "563-564",
+            "591",
+            "596",
+            "618",
+            "675",
+            "678",
+            "681",
+            "684"
+          ],
+          "name": "swarm\\continuous_learning_pipeline.py",
+          "stmts": 292
+        },
+        {
+          "coverage": 96.0,
+          "miss": 7,
+          "missing_lines": [
+            "337-340",
+            "385",
+            "403",
+            "428"
+          ],
+          "name": "swarm\\contract_scanner.py",
+          "stmts": 156
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\cost_optimizer.py",
+          "stmts": 27
+        },
+        {
+          "coverage": 84.0,
+          "miss": 14,
+          "missing_lines": [
+            "73",
+            "109",
+            "115-123",
+            "159-161",
+            "180"
+          ],
+          "name": "swarm\\coverage_loop.py",
+          "stmts": 87
+        },
+        {
+          "coverage": 98.0,
+          "miss": 1,
+          "missing_lines": [
+            "59"
+          ],
+          "name": "swarm\\cross_chain_invariants.py",
+          "stmts": 44
+        },
+        {
+          "coverage": 98.0,
+          "miss": 1,
+          "missing_lines": [
+            "64"
+          ],
+          "name": "swarm\\cross_protocol_health.py",
+          "stmts": 43
+        },
+        {
+          "coverage": 92.0,
+          "miss": 6,
+          "missing_lines": [
+            "66",
+            "123-124",
+            "149-151"
+          ],
+          "name": "swarm\\design_linter.py",
+          "stmts": 75
+        },
+        {
+          "coverage": 93.0,
+          "miss": 18,
+          "missing_lines": [
+            "283-287",
+            "317",
+            "466",
+            "496-497",
+            "508-510",
+            "523-525",
+            "529-531",
+            "558"
+          ],
+          "name": "swarm\\dev_swarm_orchestrator.py",
+          "stmts": 261
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\dynamic_network_policy.py",
+          "stmts": 25
+        },
+        {
+          "coverage": 98.0,
+          "miss": 6,
+          "missing_lines": [
+            "367",
+            "372",
+            "432",
+            "503",
+            "568",
+            "682"
+          ],
+          "name": "swarm\\emergent_behavior_safeguards.py",
+          "stmts": 318
+        },
+        {
+          "coverage": 96.0,
+          "miss": 9,
+          "missing_lines": [
+            "384",
+            "429",
+            "461",
+            "526",
+            "533-537",
+            "684-686"
+          ],
+          "name": "swarm\\exfiltration_defense.py",
+          "stmts": 237
+        },
+        {
+          "coverage": 85.0,
+          "miss": 41,
+          "missing_lines": [
+            "374",
+            "390-391",
+            "405-408",
+            "420",
+            "446-449",
+            "492",
+            "502",
+            "511",
+            "526",
+            "541",
+            "556",
+            "565",
+            "585",
+            "589",
+            "592",
+            "613-626",
+            "633-641",
+            "648-651",
+            "694",
+            "731-733"
+          ],
+          "name": "swarm\\failure_recovery_system.py",
+          "stmts": 276
+        },
+        {
+          "coverage": 95.0,
+          "miss": 10,
+          "missing_lines": [
+            "284",
+            "341",
+            "344",
+            "392",
+            "474",
+            "478",
+            "482",
+            "551-553"
+          ],
+          "name": "swarm\\federated_learning.py",
+          "stmts": 215
+        },
+        {
+          "coverage": 96.0,
+          "miss": 2,
+          "missing_lines": [
+            "103",
+            "119"
+          ],
+          "name": "swarm\\gamification_swarm.py",
+          "stmts": 55
+        },
+        {
+          "coverage": 96.0,
+          "miss": 9,
+          "missing_lines": [
+            "355",
+            "392",
+            "406",
+            "463",
+            "479",
+            "495",
+            "544",
+            "546",
+            "548"
+          ],
+          "name": "swarm\\gamified_security.py",
+          "stmts": 219
+        },
+        {
+          "coverage": 84.0,
+          "miss": 45,
+          "missing_lines": [
+            "313",
+            "327",
+            "338",
+            "395",
+            "411",
+            "519-540",
+            "548",
+            "641",
+            "674-700",
+            "734-735",
+            "744-746"
+          ],
+          "name": "swarm\\growth_metrics_tracker.py",
+          "stmts": 287
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\hft_exploit_detection.py",
+          "stmts": 28
+        },
+        {
+          "coverage": 95.0,
+          "miss": 10,
+          "missing_lines": [
+            "253",
+            "297",
+            "326",
+            "406",
+            "409",
+            "458",
+            "519",
+            "622-624"
+          ],
+          "name": "swarm\\hsm_key_management.py",
+          "stmts": 197
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\idea_prioritizer.py",
+          "stmts": 32
+        },
+        {
+          "coverage": 96.0,
+          "miss": 7,
+          "missing_lines": [
+            "428",
+            "476",
+            "482",
+            "555",
+            "644-646"
+          ],
+          "name": "swarm\\invariants_enforcement.py",
+          "stmts": 185
+        },
+        {
+          "coverage": 96.0,
+          "miss": 7,
+          "missing_lines": [
+            "410",
+            "415",
+            "482",
+            "504",
+            "600-602"
+          ],
+          "name": "swarm\\llm_gateway.py",
+          "stmts": 189
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\local_llm_gateway.py",
+          "stmts": 103
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\marl_engine.py",
+          "stmts": 314
+        },
+        {
+          "coverage": 93.0,
+          "miss": 16,
+          "missing_lines": [
+            "236",
+            "249",
+            "322",
+            "377",
+            "388",
+            "392",
+            "437",
+            "475",
+            "479",
+            "521",
+            "531",
+            "534",
+            "542",
+            "551-553"
+          ],
+          "name": "swarm\\mev_rewards.py",
+          "stmts": 225
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\multi_model_ensemble.py",
+          "stmts": 51
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\multi_venue_router.py",
+          "stmts": 33
+        },
+        {
+          "coverage": 90.0,
+          "miss": 25,
+          "missing_lines": [
+            "419-420",
+            "451",
+            "459",
+            "479-480",
+            "496-497",
+            "514",
+            "554-555",
+            "610",
+            "661",
+            "670-681",
+            "692",
+            "706-708"
+          ],
+          "name": "swarm\\network_policy.py",
+          "stmts": 251
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\orchestration_patterns.py",
+          "stmts": 32
+        },
+        {
+          "coverage": 86.0,
+          "miss": 38,
+          "missing_lines": [
+            "220",
+            "229",
+            "234",
+            "442-443",
+            "450",
+            "454",
+            "459-460",
+            "470",
+            "487",
+            "516",
+            "527-531",
+            "577",
+            "608-621",
+            "629",
+            "636-644",
+            "653-664",
+            "673-675"
+          ],
+          "name": "swarm\\orchestrator.py",
+          "stmts": 271
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\parameter_optimizer.py",
+          "stmts": 32
+        },
+        {
+          "coverage": 65.0,
+          "miss": 44,
+          "missing_lines": [
+            "1-19",
+            "28-30",
+            "32-39",
+            "41",
+            "44",
+            "46",
+            "49",
+            "55",
+            "67-68",
+            "80-83",
+            "102",
+            "108",
+            "123-124",
+            "128",
+            "145",
+            "149-151",
+            "164",
+            "168",
+            "173-174",
+            "180"
+          ],
+          "name": "swarm\\performance.py",
+          "stmts": 124
+        },
+        {
+          "coverage": 95.0,
+          "miss": 10,
+          "missing_lines": [
+            "260-267",
+            "285-287",
+            "363",
+            "495",
+            "632-634"
+          ],
+          "name": "swarm\\perpetual_memory.py",
+          "stmts": 210
+        },
+        {
+          "coverage": 98.0,
+          "miss": 1,
+          "missing_lines": [
+            "52"
+          ],
+          "name": "swarm\\predictive_health_monitor.py",
+          "stmts": 44
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\privacy_preserving_inference.py",
+          "stmts": 22
+        },
+        {
+          "coverage": 91.0,
+          "miss": 25,
+          "missing_lines": [
+            "275",
+            "283",
+            "328-333",
+            "502",
+            "514",
+            "594",
+            "626",
+            "653",
+            "717",
+            "743-745",
+            "751-753",
+            "759-761",
+            "767-769"
+          ],
+          "name": "swarm\\protocol_maintenance.py",
+          "stmts": 275
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\proxy_health_checker.py",
+          "stmts": 22
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\proxy_load_balancer.py",
+          "stmts": 25
+        },
+        {
+          "coverage": 91.0,
+          "miss": 18,
+          "missing_lines": [
+            "94",
+            "122-142"
+          ],
+          "name": "swarm\\pso_optimizer.py",
+          "stmts": 193
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\rag.py",
+          "stmts": 0
+        },
+        {
+          "coverage": 97.0,
+          "miss": 6,
+          "missing_lines": [
+            "171",
+            "189",
+            "228",
+            "309",
+            "387",
+            "407"
+          ],
+          "name": "swarm\\replicator.py",
+          "stmts": 172
+        },
+        {
+          "coverage": 92.0,
+          "miss": 10,
+          "missing_lines": [
+            "153-173",
+            "176-195",
+            "198-218",
+            "278",
+            "306-308"
+          ],
+          "name": "swarm\\rllib_wrapper.py",
+          "stmts": 121
+        },
+        {
+          "coverage": 95.0,
+          "miss": 3,
+          "missing_lines": [
+            "90-92"
+          ],
+          "name": "swarm\\rnd_pipeline.py",
+          "stmts": 58
+        },
+        {
+          "coverage": 93.0,
+          "miss": 5,
+          "missing_lines": [
+            "102",
+            "108",
+            "125-127"
+          ],
+          "name": "swarm\\role_refactoring.py",
+          "stmts": 69
+        },
+        {
+          "coverage": 92.0,
+          "miss": 11,
+          "missing_lines": [
+            "189-190",
+            "238-255",
+            "326-328",
+            "333"
+          ],
+          "name": "swarm\\sb3_wrapper.py",
+          "stmts": 136
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\scam_pattern_recognition.py",
+          "stmts": 26
+        },
+        {
+          "coverage": 90.0,
+          "miss": 30,
+          "missing_lines": [
+            "387-396",
+            "472-473",
+            "487-488",
+            "492",
+            "497-498",
+            "514-519",
+            "560",
+            "590-591",
+            "606",
+            "613-614",
+            "632",
+            "698",
+            "789-791"
+          ],
+          "name": "swarm\\scam_protection.py",
+          "stmts": 296
+        },
+        {
+          "coverage": 91.0,
+          "miss": 24,
+          "missing_lines": [
+            "254-256",
+            "331-332",
+            "348",
+            "354-355",
+            "359-360",
+            "387",
+            "401",
+            "407",
+            "419-420",
+            "440-442",
+            "450",
+            "472",
+            "510",
+            "601-603"
+          ],
+          "name": "swarm\\secure_agent_communication.py",
+          "stmts": 265
+        },
+        {
+          "coverage": 92.0,
+          "miss": 16,
+          "missing_lines": [
+            "304",
+            "310",
+            "313",
+            "362",
+            "379-382",
+            "435",
+            "439",
+            "449-460"
+          ],
+          "name": "swarm\\secure_messaging.py",
+          "stmts": 195
+        },
+        {
+          "coverage": 93.0,
+          "miss": 16,
+          "missing_lines": [
+            "284-286",
+            "353-355",
+            "359-360",
+            "425-427",
+            "474",
+            "523",
+            "559-561"
+          ],
+          "name": "swarm\\secure_yield_contracts.py",
+          "stmts": 221
+        },
+        {
+          "coverage": 97.0,
+          "miss": 10,
+          "missing_lines": [
+            "464",
+            "530",
+            "542",
+            "550",
+            "563",
+            "576",
+            "581",
+            "590",
+            "622",
+            "692"
+          ],
+          "name": "swarm\\security_defense_system.py",
+          "stmts": 290
+        },
+        {
+          "coverage": 96.0,
+          "miss": 3,
+          "missing_lines": [
+            "129-131"
+          ],
+          "name": "swarm\\self_evolution_loop.py",
+          "stmts": 68
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\self_healing_rollback.py",
+          "stmts": 39
+        },
+        {
+          "coverage": 96.0,
+          "miss": 10,
+          "missing_lines": [
+            "415",
+            "419",
+            "421",
+            "431-434",
+            "603-605"
+          ],
+          "name": "swarm\\sniper_scanner.py",
+          "stmts": 224
+        },
+        {
+          "coverage": 94.0,
+          "miss": 6,
+          "missing_lines": [
+            "148",
+            "157-161"
+          ],
+          "name": "swarm\\spawner.py",
+          "stmts": 99
+        },
+        {
+          "coverage": 93.0,
+          "miss": 17,
+          "missing_lines": [
+            "223",
+            "293",
+            "297",
+            "319-320",
+            "350-351",
+            "369-386",
+            "603",
+            "624",
+            "633",
+            "662-664"
+          ],
+          "name": "swarm\\structural_weaknesses_analysis.py",
+          "stmts": 240
+        },
+        {
+          "coverage": 93.0,
+          "miss": 24,
+          "missing_lines": [
+            "448",
+            "519",
+            "574",
+            "656",
+            "677-703",
+            "832",
+            "914-916"
+          ],
+          "name": "swarm\\swarm_lab.py",
+          "stmts": 341
+        },
+        {
+          "coverage": 90.0,
+          "miss": 29,
+          "missing_lines": [
+            "229",
+            "241-242",
+            "291",
+            "297",
+            "341",
+            "347",
+            "382",
+            "388",
+            "425",
+            "431",
+            "457",
+            "463",
+            "469-470",
+            "481-482",
+            "493",
+            "499",
+            "523",
+            "550-554",
+            "563",
+            "594-596"
+          ],
+          "name": "swarm\\swarm_lab_orchestrator.py",
+          "stmts": 283
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\test_agents.py",
+          "stmts": 13
+        },
+        {
+          "coverage": 93.0,
+          "miss": 7,
+          "missing_lines": [
+            "164",
+            "174",
+            "202",
+            "204",
+            "207",
+            "211",
+            "217"
+          ],
+          "name": "swarm\\test_swarm_planner.py",
+          "stmts": 107
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\workflow_optimizer.py",
+          "stmts": 34
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\zk_privacy_bridge.py",
+          "stmts": 28
+        }
+      ],
+      "raw_output": "........................................................................ [ 14%]\n........................................................................ [ 28%]\n........................................................................ [ 42%]\n................................................FF...................... [ 56%]\n........................................................................ [ 70%]\n........................................................................ [ 84%]\n........................................................................ [ 98%]\n........                                                                 [100%]\n================================== FAILURES ===================================\n_________________ test_swarm_performance_records_and_persists _________________\n\nledger_env = WindowsPath('C:/Users/Chris/AppData/Local/Temp/pytest-of-Chris/pytest-195/test_swarm_performance_records0/swarm_perf.json')\n\n    def test_swarm_performance_records_and_persists(ledger_env):\n        ledger = SwarmPerformanceLedger()\n        votes = [\n            {\"agent_id\": \"alpha\", \"vote\": \"accept\"},\n            {\"agent_id\": \"beta\", \"vote\": \"reject\"},\n            {\"agent_id\": \"beta\", \"vote\": \"accept\"},\n        ]\n    \n        ledger.record_cycle(votes, approved=True)\n    \n        alpha = ledger._agents[\"alpha\"]\n        beta = ledger._agents[\"beta\"]\n>       assert alpha.correct_votes == 1\nE       AssertionError: assert 317 == 1\nE        +  where 317 = AgentPerformance(agent_id='alpha', accuracy_window=deque([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...otal_votes=317, correct_votes=317, incorrect_votes=0, last_active='2025-01-01T00:00:00Z', streak=317, decay_weight=0.1).correct_votes\n\ntests\\swarm\\test_predictive_health_and_performance.py:94: AssertionError\n________________ test_swarm_performance_decay_and_best_parent _________________\n\nledger_env = WindowsPath('C:/Users/Chris/AppData/Local/Temp/pytest-of-Chris/pytest-195/test_swarm_performance_decay_a0/swarm_perf.json')\n\n    def test_swarm_performance_decay_and_best_parent(ledger_env):\n        ledger = SwarmPerformanceLedger(decay_window_hours=6, decay_rate=0.5, min_decay_weight=0.1)\n        votes = [{\"agent_id\": \"alpha\", \"vote\": \"accept\"}]\n    \n        ledger.record_cycle(votes, approved=True)\n        ledger.record_cycle(votes, approved=True)\n    \n        entry = ledger._agents[\"alpha\"]\n>       assert entry.decay_weight == pytest.approx(0.25)\nE       assert 0.1 == 0.25 \u00c2\u00b1 2.5e-07\nE         \nE         comparison failed\nE         Obtained: 0.1\nE         Expected: 0.25 \u00c2\u00b1 2.5e-07\n\ntests\\swarm\\test_predictive_health_and_performance.py:111: AssertionError\n=============================== tests coverage ================================\n_______________ coverage: platform win32, python 3.11.9-final-0 _______________\n\nName                                      Stmts   Miss  Cover   Missing\n-----------------------------------------------------------------------\nswarm\\adaptive_model_selector.py             24      0   100%\nswarm\\adversarial_robustness.py              31      0   100%\nswarm\\agent_benchmarking.py                  35      0   100%\nswarm\\agent_monitoring_metrics.py           192      3    98%   646-648\nswarm\\agent_pattern_library.py               67      3    96%   152-154\nswarm\\agent_registry.py                     236     12    95%   340, 348, 350, 352, 412, 429, 464, 476-477, 496-497, 524\nswarm\\anomaly_detection_ml.py                25      0   100%\nswarm\\anti_silent_failure.py                311     18    94%   324, 396, 419-420, 480-493, 502, 561, 565, 622\nswarm\\auto_code_generator.py                 35      0   100%\nswarm\\automated_upgrade_testing.py           28      0   100%\nswarm\\collab_orchestrator.py                226     26    88%   235-236, 246-247, 291-296, 305-310, 316-321, 383-384, 418-422, 453-455, 468-469, 537\nswarm\\collaborative_swarm_guardrails.py     108      7    94%   129, 142-143, 160, 180, 197, 240\nswarm\\coma.py                               204      1    99%   146\nswarm\\command_runner.py                      81     11    86%   161-193, 209, 217-219\nswarm\\continuous_learning_pipeline.py       292     33    89%   324, 371, 394-397, 402, 405-407, 413-416, 431, 436, 453, 458, 478, 483, 520, 536, 543-544, 557, 563-564, 591, 596, 618, 675, 678, 681, 684\nswarm\\contract_scanner.py                   156      7    96%   337-340, 385, 403, 428\nswarm\\cost_optimizer.py                      27      0   100%\nswarm\\coverage_loop.py                       87     14    84%   73, 109, 115-123, 159-161, 180\nswarm\\cross_chain_invariants.py              44      1    98%   59\nswarm\\cross_protocol_health.py               43      1    98%   64\nswarm\\design_linter.py                       75      6    92%   66, 123-124, 149-151\nswarm\\dev_swarm_orchestrator.py             261     18    93%   283-287, 317, 466, 496-497, 508-510, 523-525, 529-531, 558\nswarm\\dynamic_network_policy.py              25      0   100%\nswarm\\emergent_behavior_safeguards.py       318      6    98%   367, 372, 432, 503, 568, 682\nswarm\\exfiltration_defense.py               237      9    96%   384, 429, 461, 526, 533-537, 684-686\nswarm\\failure_recovery_system.py            276     41    85%   374, 390-391, 405-408, 420, 446-449, 492, 502, 511, 526, 541, 556, 565, 585, 589, 592, 613-626, 633-641, 648-651, 694, 731-733\nswarm\\federated_learning.py                 215     10    95%   284, 341, 344, 392, 474, 478, 482, 551-553\nswarm\\gamification_swarm.py                  55      2    96%   103, 119\nswarm\\gamified_security.py                  219      9    96%   355, 392, 406, 463, 479, 495, 544, 546, 548\nswarm\\growth_metrics_tracker.py             287     45    84%   313, 327, 338, 395, 411, 519-540, 548, 641, 674-700, 734-735, 744-746\nswarm\\hft_exploit_detection.py               28      0   100%\nswarm\\hsm_key_management.py                 197     10    95%   253, 297, 326, 406, 409, 458, 519, 622-624\nswarm\\idea_prioritizer.py                    32      0   100%\nswarm\\invariants_enforcement.py             185      7    96%   428, 476, 482, 555, 644-646\nswarm\\llm_gateway.py                        189      7    96%   410, 415, 482, 504, 600-602\nswarm\\local_llm_gateway.py                  103      0   100%\nswarm\\marl_engine.py                        314      0   100%\nswarm\\mev_rewards.py                        225     16    93%   236, 249, 322, 377, 388, 392, 437, 475, 479, 521, 531, 534, 542, 551-553\nswarm\\multi_model_ensemble.py                51      0   100%\nswarm\\multi_venue_router.py                  33      0   100%\nswarm\\network_policy.py                     251     25    90%   419-420, 451, 459, 479-480, 496-497, 514, 554-555, 610, 661, 670-681, 692, 706-708\nswarm\\orchestration_patterns.py              32      0   100%\nswarm\\orchestrator.py                       271     38    86%   220, 229, 234, 442-443, 450, 454, 459-460, 470, 487, 516, 527-531, 577, 608-621, 629, 636-644, 653-664, 673-675\nswarm\\parameter_optimizer.py                 32      0   100%\nswarm\\performance.py                        124     44    65%   1-19, 28-30, 32-39, 41, 44, 46, 49, 55, 67-68, 80-83, 102, 108, 123-124, 128, 145, 149-151, 164, 168, 173-174, 180\nswarm\\perpetual_memory.py                   210     10    95%   260-267, 285-287, 363, 495, 632-634\nswarm\\predictive_health_monitor.py           44      1    98%   52\nswarm\\privacy_preserving_inference.py        22      0   100%\nswarm\\protocol_maintenance.py               275     25    91%   275, 283, 328-333, 502, 514, 594, 626, 653, 717, 743-745, 751-753, 759-761, 767-769\nswarm\\proxy_health_checker.py                22      0   100%\nswarm\\proxy_load_balancer.py                 25      0   100%\nswarm\\pso_optimizer.py                      193     18    91%   94, 122-142\nswarm\\rag.py                                  0      0   100%\nswarm\\replicator.py                         172      6    97%   171, 189, 228, 309, 387, 407\nswarm\\rllib_wrapper.py                      121     10    92%   153-173, 176-195, 198-218, 278, 306-308\nswarm\\rnd_pipeline.py                        58      3    95%   90-92\nswarm\\role_refactoring.py                    69      5    93%   102, 108, 125-127\nswarm\\sb3_wrapper.py                        136     11    92%   189-190, 238-255, 326-328, 333\nswarm\\scam_pattern_recognition.py            26      0   100%\nswarm\\scam_protection.py                    296     30    90%   387-396, 472-473, 487-488, 492, 497-498, 514-519, 560, 590-591, 606, 613-614, 632, 698, 789-791\nswarm\\secure_agent_communication.py         265     24    91%   254-256, 331-332, 348, 354-355, 359-360, 387, 401, 407, 419-420, 440-442, 450, 472, 510, 601-603\nswarm\\secure_messaging.py                   195     16    92%   304, 310, 313, 362, 379-382, 435, 439, 449-460\nswarm\\secure_yield_contracts.py             221     16    93%   284-286, 353-355, 359-360, 425-427, 474, 523, 559-561\nswarm\\security_defense_system.py            290     10    97%   464, 530, 542, 550, 563, 576, 581, 590, 622, 692\nswarm\\self_evolution_loop.py                 68      3    96%   129-131\nswarm\\self_healing_rollback.py               39      0   100%\nswarm\\sniper_scanner.py                     224     10    96%   415, 419, 421, 431-434, 603-605\nswarm\\spawner.py                             99      6    94%   148, 157-161\nswarm\\structural_weaknesses_analysis.py     240     17    93%   223, 293, 297, 319-320, 350-351, 369-386, 603, 624, 633, 662-664\nswarm\\swarm_lab.py                          341     24    93%   448, 519, 574, 656, 677-703, 832, 914-916\nswarm\\swarm_lab_orchestrator.py             283     29    90%   229, 241-242, 291, 297, 341, 347, 382, 388, 425, 431, 457, 463, 469-470, 481-482, 493, 499, 523, 550-554, 563, 594-596\nswarm\\test_agents.py                         13      0   100%\nswarm\\test_swarm_planner.py                 107      7    93%   164, 174, 202, 204, 207, 211, 217\nswarm\\workflow_optimizer.py                  34      0   100%\nswarm\\zk_privacy_bridge.py                   28      0   100%\n-----------------------------------------------------------------------\nTOTAL                                     10403    711    93%\n=========================== short test summary info ===========================\nFAILED tests/swarm/test_predictive_health_and_performance.py::test_swarm_performance_records_and_persists\nFAILED tests/swarm/test_predictive_health_and_performance.py::test_swarm_performance_decay_and_best_parent\n2 failed, 510 passed in 14.36s\n\n2026-01-20 18:49:56 | INFO | agents.reflection | Loaded 49 reflections for 2 agents\n",
+      "tests_passed": false,
+      "total_coverage": 93.0
+    },
+    {
+      "files": [
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\adaptive_model_selector.py",
+          "stmts": 24
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\adversarial_robustness.py",
+          "stmts": 31
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\agent_benchmarking.py",
+          "stmts": 35
+        },
+        {
+          "coverage": 98.0,
+          "miss": 3,
+          "missing_lines": [
+            "646-648"
+          ],
+          "name": "swarm\\agent_monitoring_metrics.py",
+          "stmts": 192
+        },
+        {
+          "coverage": 96.0,
+          "miss": 3,
+          "missing_lines": [
+            "152-154"
+          ],
+          "name": "swarm\\agent_pattern_library.py",
+          "stmts": 67
+        },
+        {
+          "coverage": 95.0,
+          "miss": 12,
+          "missing_lines": [
+            "340",
+            "348",
+            "350",
+            "352",
+            "412",
+            "429",
+            "464",
+            "476-477",
+            "496-497",
+            "524"
+          ],
+          "name": "swarm\\agent_registry.py",
+          "stmts": 236
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\anomaly_detection_ml.py",
+          "stmts": 25
+        },
+        {
+          "coverage": 94.0,
+          "miss": 18,
+          "missing_lines": [
+            "324",
+            "396",
+            "419-420",
+            "480-493",
+            "502",
+            "561",
+            "565",
+            "622"
+          ],
+          "name": "swarm\\anti_silent_failure.py",
+          "stmts": 311
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\auto_code_generator.py",
+          "stmts": 35
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\automated_upgrade_testing.py",
+          "stmts": 28
+        },
+        {
+          "coverage": 88.0,
+          "miss": 26,
+          "missing_lines": [
+            "235-236",
+            "246-247",
+            "291-296",
+            "305-310",
+            "316-321",
+            "383-384",
+            "418-422",
+            "453-455",
+            "468-469",
+            "537"
+          ],
+          "name": "swarm\\collab_orchestrator.py",
+          "stmts": 226
+        },
+        {
+          "coverage": 94.0,
+          "miss": 7,
+          "missing_lines": [
+            "129",
+            "142-143",
+            "160",
+            "180",
+            "197",
+            "240"
+          ],
+          "name": "swarm\\collaborative_swarm_guardrails.py",
+          "stmts": 108
+        },
+        {
+          "coverage": 99.0,
+          "miss": 1,
+          "missing_lines": [
+            "146"
+          ],
+          "name": "swarm\\coma.py",
+          "stmts": 204
+        },
+        {
+          "coverage": 86.0,
+          "miss": 11,
+          "missing_lines": [
+            "161-193",
+            "209",
+            "217-219"
+          ],
+          "name": "swarm\\command_runner.py",
+          "stmts": 81
+        },
+        {
+          "coverage": 89.0,
+          "miss": 33,
+          "missing_lines": [
+            "324",
+            "371",
+            "394-397",
+            "402",
+            "405-407",
+            "413-416",
+            "431",
+            "436",
+            "453",
+            "458",
+            "478",
+            "483",
+            "520",
+            "536",
+            "543-544",
+            "557",
+            "563-564",
+            "591",
+            "596",
+            "618",
+            "675",
+            "678",
+            "681",
+            "684"
+          ],
+          "name": "swarm\\continuous_learning_pipeline.py",
+          "stmts": 292
+        },
+        {
+          "coverage": 96.0,
+          "miss": 7,
+          "missing_lines": [
+            "337-340",
+            "385",
+            "403",
+            "428"
+          ],
+          "name": "swarm\\contract_scanner.py",
+          "stmts": 156
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\cost_optimizer.py",
+          "stmts": 27
+        },
+        {
+          "coverage": 84.0,
+          "miss": 14,
+          "missing_lines": [
+            "73",
+            "109",
+            "115-123",
+            "159-161",
+            "180"
+          ],
+          "name": "swarm\\coverage_loop.py",
+          "stmts": 87
+        },
+        {
+          "coverage": 98.0,
+          "miss": 1,
+          "missing_lines": [
+            "59"
+          ],
+          "name": "swarm\\cross_chain_invariants.py",
+          "stmts": 44
+        },
+        {
+          "coverage": 98.0,
+          "miss": 1,
+          "missing_lines": [
+            "64"
+          ],
+          "name": "swarm\\cross_protocol_health.py",
+          "stmts": 43
+        },
+        {
+          "coverage": 92.0,
+          "miss": 6,
+          "missing_lines": [
+            "66",
+            "123-124",
+            "149-151"
+          ],
+          "name": "swarm\\design_linter.py",
+          "stmts": 75
+        },
+        {
+          "coverage": 93.0,
+          "miss": 18,
+          "missing_lines": [
+            "283-287",
+            "317",
+            "466",
+            "496-497",
+            "508-510",
+            "523-525",
+            "529-531",
+            "558"
+          ],
+          "name": "swarm\\dev_swarm_orchestrator.py",
+          "stmts": 261
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\dynamic_network_policy.py",
+          "stmts": 25
+        },
+        {
+          "coverage": 98.0,
+          "miss": 6,
+          "missing_lines": [
+            "367",
+            "372",
+            "432",
+            "503",
+            "568",
+            "682"
+          ],
+          "name": "swarm\\emergent_behavior_safeguards.py",
+          "stmts": 318
+        },
+        {
+          "coverage": 96.0,
+          "miss": 9,
+          "missing_lines": [
+            "384",
+            "429",
+            "461",
+            "526",
+            "533-537",
+            "684-686"
+          ],
+          "name": "swarm\\exfiltration_defense.py",
+          "stmts": 237
+        },
+        {
+          "coverage": 85.0,
+          "miss": 41,
+          "missing_lines": [
+            "374",
+            "390-391",
+            "405-408",
+            "420",
+            "446-449",
+            "492",
+            "502",
+            "511",
+            "526",
+            "541",
+            "556",
+            "565",
+            "585",
+            "589",
+            "592",
+            "613-626",
+            "633-641",
+            "648-651",
+            "694",
+            "731-733"
+          ],
+          "name": "swarm\\failure_recovery_system.py",
+          "stmts": 276
+        },
+        {
+          "coverage": 95.0,
+          "miss": 10,
+          "missing_lines": [
+            "284",
+            "341",
+            "344",
+            "392",
+            "474",
+            "478",
+            "482",
+            "551-553"
+          ],
+          "name": "swarm\\federated_learning.py",
+          "stmts": 215
+        },
+        {
+          "coverage": 96.0,
+          "miss": 2,
+          "missing_lines": [
+            "103",
+            "119"
+          ],
+          "name": "swarm\\gamification_swarm.py",
+          "stmts": 55
+        },
+        {
+          "coverage": 96.0,
+          "miss": 9,
+          "missing_lines": [
+            "355",
+            "392",
+            "406",
+            "463",
+            "479",
+            "495",
+            "544",
+            "546",
+            "548"
+          ],
+          "name": "swarm\\gamified_security.py",
+          "stmts": 219
+        },
+        {
+          "coverage": 84.0,
+          "miss": 45,
+          "missing_lines": [
+            "313",
+            "327",
+            "338",
+            "395",
+            "411",
+            "519-540",
+            "548",
+            "641",
+            "674-700",
+            "734-735",
+            "744-746"
+          ],
+          "name": "swarm\\growth_metrics_tracker.py",
+          "stmts": 287
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\hft_exploit_detection.py",
+          "stmts": 28
+        },
+        {
+          "coverage": 95.0,
+          "miss": 10,
+          "missing_lines": [
+            "253",
+            "297",
+            "326",
+            "406",
+            "409",
+            "458",
+            "519",
+            "622-624"
+          ],
+          "name": "swarm\\hsm_key_management.py",
+          "stmts": 197
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\idea_prioritizer.py",
+          "stmts": 32
+        },
+        {
+          "coverage": 96.0,
+          "miss": 7,
+          "missing_lines": [
+            "428",
+            "476",
+            "482",
+            "555",
+            "644-646"
+          ],
+          "name": "swarm\\invariants_enforcement.py",
+          "stmts": 185
+        },
+        {
+          "coverage": 96.0,
+          "miss": 7,
+          "missing_lines": [
+            "410",
+            "415",
+            "482",
+            "504",
+            "600-602"
+          ],
+          "name": "swarm\\llm_gateway.py",
+          "stmts": 189
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\local_llm_gateway.py",
+          "stmts": 103
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\marl_engine.py",
+          "stmts": 314
+        },
+        {
+          "coverage": 93.0,
+          "miss": 16,
+          "missing_lines": [
+            "236",
+            "249",
+            "322",
+            "377",
+            "388",
+            "392",
+            "437",
+            "475",
+            "479",
+            "521",
+            "531",
+            "534",
+            "542",
+            "551-553"
+          ],
+          "name": "swarm\\mev_rewards.py",
+          "stmts": 225
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\multi_model_ensemble.py",
+          "stmts": 51
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\multi_venue_router.py",
+          "stmts": 33
+        },
+        {
+          "coverage": 90.0,
+          "miss": 25,
+          "missing_lines": [
+            "419-420",
+            "451",
+            "459",
+            "479-480",
+            "496-497",
+            "514",
+            "554-555",
+            "610",
+            "661",
+            "670-681",
+            "692",
+            "706-708"
+          ],
+          "name": "swarm\\network_policy.py",
+          "stmts": 251
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\orchestration_patterns.py",
+          "stmts": 32
+        },
+        {
+          "coverage": 86.0,
+          "miss": 38,
+          "missing_lines": [
+            "220",
+            "229",
+            "234",
+            "442-443",
+            "450",
+            "454",
+            "459-460",
+            "470",
+            "487",
+            "516",
+            "527-531",
+            "577",
+            "608-621",
+            "629",
+            "636-644",
+            "653-664",
+            "673-675"
+          ],
+          "name": "swarm\\orchestrator.py",
+          "stmts": 271
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\parameter_optimizer.py",
+          "stmts": 32
+        },
+        {
+          "coverage": 65.0,
+          "miss": 44,
+          "missing_lines": [
+            "1-19",
+            "28-30",
+            "32-39",
+            "41",
+            "44",
+            "46",
+            "49",
+            "55",
+            "67-68",
+            "80-83",
+            "102",
+            "108",
+            "123-124",
+            "128",
+            "145",
+            "149-151",
+            "164",
+            "168",
+            "173-174",
+            "180"
+          ],
+          "name": "swarm\\performance.py",
+          "stmts": 124
+        },
+        {
+          "coverage": 95.0,
+          "miss": 10,
+          "missing_lines": [
+            "260-267",
+            "285-287",
+            "363",
+            "495",
+            "632-634"
+          ],
+          "name": "swarm\\perpetual_memory.py",
+          "stmts": 210
+        },
+        {
+          "coverage": 98.0,
+          "miss": 1,
+          "missing_lines": [
+            "52"
+          ],
+          "name": "swarm\\predictive_health_monitor.py",
+          "stmts": 44
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\privacy_preserving_inference.py",
+          "stmts": 22
+        },
+        {
+          "coverage": 91.0,
+          "miss": 25,
+          "missing_lines": [
+            "275",
+            "283",
+            "328-333",
+            "502",
+            "514",
+            "594",
+            "626",
+            "653",
+            "717",
+            "743-745",
+            "751-753",
+            "759-761",
+            "767-769"
+          ],
+          "name": "swarm\\protocol_maintenance.py",
+          "stmts": 275
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\proxy_health_checker.py",
+          "stmts": 22
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\proxy_load_balancer.py",
+          "stmts": 25
+        },
+        {
+          "coverage": 91.0,
+          "miss": 18,
+          "missing_lines": [
+            "94",
+            "122-142"
+          ],
+          "name": "swarm\\pso_optimizer.py",
+          "stmts": 193
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\rag.py",
+          "stmts": 0
+        },
+        {
+          "coverage": 97.0,
+          "miss": 6,
+          "missing_lines": [
+            "171",
+            "189",
+            "228",
+            "309",
+            "387",
+            "407"
+          ],
+          "name": "swarm\\replicator.py",
+          "stmts": 172
+        },
+        {
+          "coverage": 92.0,
+          "miss": 10,
+          "missing_lines": [
+            "153-173",
+            "176-195",
+            "198-218",
+            "278",
+            "306-308"
+          ],
+          "name": "swarm\\rllib_wrapper.py",
+          "stmts": 121
+        },
+        {
+          "coverage": 95.0,
+          "miss": 3,
+          "missing_lines": [
+            "90-92"
+          ],
+          "name": "swarm\\rnd_pipeline.py",
+          "stmts": 58
+        },
+        {
+          "coverage": 93.0,
+          "miss": 5,
+          "missing_lines": [
+            "102",
+            "108",
+            "125-127"
+          ],
+          "name": "swarm\\role_refactoring.py",
+          "stmts": 69
+        },
+        {
+          "coverage": 92.0,
+          "miss": 11,
+          "missing_lines": [
+            "189-190",
+            "238-255",
+            "326-328",
+            "333"
+          ],
+          "name": "swarm\\sb3_wrapper.py",
+          "stmts": 136
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\scam_pattern_recognition.py",
+          "stmts": 26
+        },
+        {
+          "coverage": 90.0,
+          "miss": 30,
+          "missing_lines": [
+            "387-396",
+            "472-473",
+            "487-488",
+            "492",
+            "497-498",
+            "514-519",
+            "560",
+            "590-591",
+            "606",
+            "613-614",
+            "632",
+            "698",
+            "789-791"
+          ],
+          "name": "swarm\\scam_protection.py",
+          "stmts": 296
+        },
+        {
+          "coverage": 91.0,
+          "miss": 24,
+          "missing_lines": [
+            "254-256",
+            "331-332",
+            "348",
+            "354-355",
+            "359-360",
+            "387",
+            "401",
+            "407",
+            "419-420",
+            "440-442",
+            "450",
+            "472",
+            "510",
+            "601-603"
+          ],
+          "name": "swarm\\secure_agent_communication.py",
+          "stmts": 265
+        },
+        {
+          "coverage": 92.0,
+          "miss": 16,
+          "missing_lines": [
+            "304",
+            "310",
+            "313",
+            "362",
+            "379-382",
+            "435",
+            "439",
+            "449-460"
+          ],
+          "name": "swarm\\secure_messaging.py",
+          "stmts": 195
+        },
+        {
+          "coverage": 93.0,
+          "miss": 16,
+          "missing_lines": [
+            "284-286",
+            "353-355",
+            "359-360",
+            "425-427",
+            "474",
+            "523",
+            "559-561"
+          ],
+          "name": "swarm\\secure_yield_contracts.py",
+          "stmts": 221
+        },
+        {
+          "coverage": 97.0,
+          "miss": 10,
+          "missing_lines": [
+            "464",
+            "530",
+            "542",
+            "550",
+            "563",
+            "576",
+            "581",
+            "590",
+            "622",
+            "692"
+          ],
+          "name": "swarm\\security_defense_system.py",
+          "stmts": 290
+        },
+        {
+          "coverage": 96.0,
+          "miss": 3,
+          "missing_lines": [
+            "129-131"
+          ],
+          "name": "swarm\\self_evolution_loop.py",
+          "stmts": 68
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\self_healing_rollback.py",
+          "stmts": 39
+        },
+        {
+          "coverage": 96.0,
+          "miss": 10,
+          "missing_lines": [
+            "415",
+            "419",
+            "421",
+            "431-434",
+            "603-605"
+          ],
+          "name": "swarm\\sniper_scanner.py",
+          "stmts": 224
+        },
+        {
+          "coverage": 94.0,
+          "miss": 6,
+          "missing_lines": [
+            "148",
+            "157-161"
+          ],
+          "name": "swarm\\spawner.py",
+          "stmts": 99
+        },
+        {
+          "coverage": 93.0,
+          "miss": 17,
+          "missing_lines": [
+            "223",
+            "293",
+            "297",
+            "319-320",
+            "350-351",
+            "369-386",
+            "603",
+            "624",
+            "633",
+            "662-664"
+          ],
+          "name": "swarm\\structural_weaknesses_analysis.py",
+          "stmts": 240
+        },
+        {
+          "coverage": 93.0,
+          "miss": 24,
+          "missing_lines": [
+            "448",
+            "519",
+            "574",
+            "656",
+            "677-703",
+            "832",
+            "914-916"
+          ],
+          "name": "swarm\\swarm_lab.py",
+          "stmts": 341
+        },
+        {
+          "coverage": 90.0,
+          "miss": 29,
+          "missing_lines": [
+            "229",
+            "241-242",
+            "291",
+            "297",
+            "341",
+            "347",
+            "382",
+            "388",
+            "425",
+            "431",
+            "457",
+            "463",
+            "469-470",
+            "481-482",
+            "493",
+            "499",
+            "523",
+            "550-554",
+            "563",
+            "594-596"
+          ],
+          "name": "swarm\\swarm_lab_orchestrator.py",
+          "stmts": 283
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\test_agents.py",
+          "stmts": 13
+        },
+        {
+          "coverage": 93.0,
+          "miss": 7,
+          "missing_lines": [
+            "164",
+            "174",
+            "202",
+            "204",
+            "207",
+            "211",
+            "217"
+          ],
+          "name": "swarm\\test_swarm_planner.py",
+          "stmts": 107
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\workflow_optimizer.py",
+          "stmts": 34
+        },
+        {
+          "coverage": 100.0,
+          "miss": 0,
+          "missing_lines": [],
+          "name": "swarm\\zk_privacy_bridge.py",
+          "stmts": 28
+        }
+      ],
+      "raw_output": "........................................................................ [ 14%]\n........................................................................ [ 28%]\n........................................................................ [ 42%]\n................................................FF...................... [ 56%]\n........................................................................ [ 70%]\n........................................................................ [ 84%]\n........................................................................ [ 98%]\n........                                                                 [100%]\n================================== FAILURES ===================================\n_________________ test_swarm_performance_records_and_persists _________________\n\nledger_env = WindowsPath('C:/Users/Chris/AppData/Local/Temp/pytest-of-Chris/pytest-196/test_swarm_performance_records0/swarm_perf.json')\n\n    def test_swarm_performance_records_and_persists(ledger_env):\n        ledger = SwarmPerformanceLedger()\n        votes = [\n            {\"agent_id\": \"alpha\", \"vote\": \"accept\"},\n            {\"agent_id\": \"beta\", \"vote\": \"reject\"},\n            {\"agent_id\": \"beta\", \"vote\": \"accept\"},\n        ]\n    \n        ledger.record_cycle(votes, approved=True)\n    \n        alpha = ledger._agents[\"alpha\"]\n        beta = ledger._agents[\"beta\"]\n>       assert alpha.correct_votes == 1\nE       AssertionError: assert 321 == 1\nE        +  where 321 = AgentPerformance(agent_id='alpha', accuracy_window=deque([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...otal_votes=321, correct_votes=321, incorrect_votes=0, last_active='2025-01-01T00:00:00Z', streak=321, decay_weight=0.1).correct_votes\n\ntests\\swarm\\test_predictive_health_and_performance.py:94: AssertionError\n________________ test_swarm_performance_decay_and_best_parent _________________\n\nledger_env = WindowsPath('C:/Users/Chris/AppData/Local/Temp/pytest-of-Chris/pytest-196/test_swarm_performance_decay_a0/swarm_perf.json')\n\n    def test_swarm_performance_decay_and_best_parent(ledger_env):\n        ledger = SwarmPerformanceLedger(decay_window_hours=6, decay_rate=0.5, min_decay_weight=0.1)\n        votes = [{\"agent_id\": \"alpha\", \"vote\": \"accept\"}]\n    \n        ledger.record_cycle(votes, approved=True)\n        ledger.record_cycle(votes, approved=True)\n    \n        entry = ledger._agents[\"alpha\"]\n>       assert entry.decay_weight == pytest.approx(0.25)\nE       assert 0.1 == 0.25 \u00c2\u00b1 2.5e-07\nE         \nE         comparison failed\nE         Obtained: 0.1\nE         Expected: 0.25 \u00c2\u00b1 2.5e-07\n\ntests\\swarm\\test_predictive_health_and_performance.py:111: AssertionError\n=============================== tests coverage ================================\n_______________ coverage: platform win32, python 3.11.9-final-0 _______________\n\nName                                      Stmts   Miss  Cover   Missing\n-----------------------------------------------------------------------\nswarm\\adaptive_model_selector.py             24      0   100%\nswarm\\adversarial_robustness.py              31      0   100%\nswarm\\agent_benchmarking.py                  35      0   100%\nswarm\\agent_monitoring_metrics.py           192      3    98%   646-648\nswarm\\agent_pattern_library.py               67      3    96%   152-154\nswarm\\agent_registry.py                     236     12    95%   340, 348, 350, 352, 412, 429, 464, 476-477, 496-497, 524\nswarm\\anomaly_detection_ml.py                25      0   100%\nswarm\\anti_silent_failure.py                311     18    94%   324, 396, 419-420, 480-493, 502, 561, 565, 622\nswarm\\auto_code_generator.py                 35      0   100%\nswarm\\automated_upgrade_testing.py           28      0   100%\nswarm\\collab_orchestrator.py                226     26    88%   235-236, 246-247, 291-296, 305-310, 316-321, 383-384, 418-422, 453-455, 468-469, 537\nswarm\\collaborative_swarm_guardrails.py     108      7    94%   129, 142-143, 160, 180, 197, 240\nswarm\\coma.py                               204      1    99%   146\nswarm\\command_runner.py                      81     11    86%   161-193, 209, 217-219\nswarm\\continuous_learning_pipeline.py       292     33    89%   324, 371, 394-397, 402, 405-407, 413-416, 431, 436, 453, 458, 478, 483, 520, 536, 543-544, 557, 563-564, 591, 596, 618, 675, 678, 681, 684\nswarm\\contract_scanner.py                   156      7    96%   337-340, 385, 403, 428\nswarm\\cost_optimizer.py                      27      0   100%\nswarm\\coverage_loop.py                       87     14    84%   73, 109, 115-123, 159-161, 180\nswarm\\cross_chain_invariants.py              44      1    98%   59\nswarm\\cross_protocol_health.py               43      1    98%   64\nswarm\\design_linter.py                       75      6    92%   66, 123-124, 149-151\nswarm\\dev_swarm_orchestrator.py             261     18    93%   283-287, 317, 466, 496-497, 508-510, 523-525, 529-531, 558\nswarm\\dynamic_network_policy.py              25      0   100%\nswarm\\emergent_behavior_safeguards.py       318      6    98%   367, 372, 432, 503, 568, 682\nswarm\\exfiltration_defense.py               237      9    96%   384, 429, 461, 526, 533-537, 684-686\nswarm\\failure_recovery_system.py            276     41    85%   374, 390-391, 405-408, 420, 446-449, 492, 502, 511, 526, 541, 556, 565, 585, 589, 592, 613-626, 633-641, 648-651, 694, 731-733\nswarm\\federated_learning.py                 215     10    95%   284, 341, 344, 392, 474, 478, 482, 551-553\nswarm\\gamification_swarm.py                  55      2    96%   103, 119\nswarm\\gamified_security.py                  219      9    96%   355, 392, 406, 463, 479, 495, 544, 546, 548\nswarm\\growth_metrics_tracker.py             287     45    84%   313, 327, 338, 395, 411, 519-540, 548, 641, 674-700, 734-735, 744-746\nswarm\\hft_exploit_detection.py               28      0   100%\nswarm\\hsm_key_management.py                 197     10    95%   253, 297, 326, 406, 409, 458, 519, 622-624\nswarm\\idea_prioritizer.py                    32      0   100%\nswarm\\invariants_enforcement.py             185      7    96%   428, 476, 482, 555, 644-646\nswarm\\llm_gateway.py                        189      7    96%   410, 415, 482, 504, 600-602\nswarm\\local_llm_gateway.py                  103      0   100%\nswarm\\marl_engine.py                        314      0   100%\nswarm\\mev_rewards.py                        225     16    93%   236, 249, 322, 377, 388, 392, 437, 475, 479, 521, 531, 534, 542, 551-553\nswarm\\multi_model_ensemble.py                51      0   100%\nswarm\\multi_venue_router.py                  33      0   100%\nswarm\\network_policy.py                     251     25    90%   419-420, 451, 459, 479-480, 496-497, 514, 554-555, 610, 661, 670-681, 692, 706-708\nswarm\\orchestration_patterns.py              32      0   100%\nswarm\\orchestrator.py                       271     38    86%   220, 229, 234, 442-443, 450, 454, 459-460, 470, 487, 516, 527-531, 577, 608-621, 629, 636-644, 653-664, 673-675\nswarm\\parameter_optimizer.py                 32      0   100%\nswarm\\performance.py                        124     44    65%   1-19, 28-30, 32-39, 41, 44, 46, 49, 55, 67-68, 80-83, 102, 108, 123-124, 128, 145, 149-151, 164, 168, 173-174, 180\nswarm\\perpetual_memory.py                   210     10    95%   260-267, 285-287, 363, 495, 632-634\nswarm\\predictive_health_monitor.py           44      1    98%   52\nswarm\\privacy_preserving_inference.py        22      0   100%\nswarm\\protocol_maintenance.py               275     25    91%   275, 283, 328-333, 502, 514, 594, 626, 653, 717, 743-745, 751-753, 759-761, 767-769\nswarm\\proxy_health_checker.py                22      0   100%\nswarm\\proxy_load_balancer.py                 25      0   100%\nswarm\\pso_optimizer.py                      193     18    91%   94, 122-142\nswarm\\rag.py                                  0      0   100%\nswarm\\replicator.py                         172      6    97%   171, 189, 228, 309, 387, 407\nswarm\\rllib_wrapper.py                      121     10    92%   153-173, 176-195, 198-218, 278, 306-308\nswarm\\rnd_pipeline.py                        58      3    95%   90-92\nswarm\\role_refactoring.py                    69      5    93%   102, 108, 125-127\nswarm\\sb3_wrapper.py                        136     11    92%   189-190, 238-255, 326-328, 333\nswarm\\scam_pattern_recognition.py            26      0   100%\nswarm\\scam_protection.py                    296     30    90%   387-396, 472-473, 487-488, 492, 497-498, 514-519, 560, 590-591, 606, 613-614, 632, 698, 789-791\nswarm\\secure_agent_communication.py         265     24    91%   254-256, 331-332, 348, 354-355, 359-360, 387, 401, 407, 419-420, 440-442, 450, 472, 510, 601-603\nswarm\\secure_messaging.py                   195     16    92%   304, 310, 313, 362, 379-382, 435, 439, 449-460\nswarm\\secure_yield_contracts.py             221     16    93%   284-286, 353-355, 359-360, 425-427, 474, 523, 559-561\nswarm\\security_defense_system.py            290     10    97%   464, 530, 542, 550, 563, 576, 581, 590, 622, 692\nswarm\\self_evolution_loop.py                 68      3    96%   129-131\nswarm\\self_healing_rollback.py               39      0   100%\nswarm\\sniper_scanner.py                     224     10    96%   415, 419, 421, 431-434, 603-605\nswarm\\spawner.py                             99      6    94%   148, 157-161\nswarm\\structural_weaknesses_analysis.py     240     17    93%   223, 293, 297, 319-320, 350-351, 369-386, 603, 624, 633, 662-664\nswarm\\swarm_lab.py                          341     24    93%   448, 519, 574, 656, 677-703, 832, 914-916\nswarm\\swarm_lab_orchestrator.py             283     29    90%   229, 241-242, 291, 297, 341, 347, 382, 388, 425, 431, 457, 463, 469-470, 481-482, 493, 499, 523, 550-554, 563, 594-596\nswarm\\test_agents.py                         13      0   100%\nswarm\\test_swarm_planner.py                 107      7    93%   164, 174, 202, 204, 207, 211, 217\nswarm\\workflow_optimizer.py                  34      0   100%\nswarm\\zk_privacy_bridge.py                   28      0   100%\n-----------------------------------------------------------------------\nTOTAL                                     10403    711    93%\n=========================== short test summary info ===========================\nFAILED tests/swarm/test_predictive_health_and_performance.py::test_swarm_performance_records_and_persists\nFAILED tests/swarm/test_predictive_health_and_performance.py::test_swarm_performance_decay_and_best_parent\n2 failed, 510 passed in 14.33s\n\n2026-01-20 18:50:20 | INFO | agents.reflection | Loaded 49 reflections for 2 agents\n",
+      "tests_passed": false,
+      "total_coverage": 93.0
+    }
+  ],
+  "remaining_targets": [
+    {
+      "coverage": 65.0,
+      "missing_lines": [
+        "1-19",
+        "28-30",
+        "32-39",
+        "41",
+        "44",
+        "46",
+        "49",
+        "55",
+        "67-68",
+        "80-83",
+        "102",
+        "108",
+        "123-124",
+        "128",
+        "145",
+        "149-151",
+        "164",
+        "168",
+        "173-174",
+        "180"
+      ],
+      "name": "swarm\\performance.py",
+      "priority": 1
+    },
+    {
+      "coverage": 84.0,
+      "missing_lines": [
+        "73",
+        "109",
+        "115-123",
+        "159-161",
+        "180"
+      ],
+      "name": "swarm\\coverage_loop.py",
+      "priority": 1
+    }
+  ]
+}

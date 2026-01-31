@@ -431,11 +431,17 @@ class RegimeConditionedPolicy:
         }
 
 
+def _get_drift_reward_loop():
+    """Lazy import to avoid circular dependency."""
+    from core.drift_reward_loop import get_drift_reward_loop
+    return get_drift_reward_loop()
+
+
 class RegimeAdapter:
     """
     Manages regime adaptation for multiple policies.
     
-    Integrates with MERID-OPS regime detection.
+    Integrates with MERID-OPS regime detection and drift reward loop.
     """
     
     def __init__(self):
@@ -446,7 +452,54 @@ class RegimeAdapter:
         # Adaptation history
         self._adaptation_history: List[Dict[str, Any]] = []
         
+        # Drift-triggered adaptations
+        self._drift_triggered_adaptations: List[Dict[str, Any]] = []
+        
+        # Register with drift reward loop
+        self._register_drift_callback()
+        
         logger.info("Regime adapter initialized")
+    
+    def _register_drift_callback(self) -> None:
+        """Register callback with drift reward loop for regime-shift triggers."""
+        try:
+            drift_loop = _get_drift_reward_loop()
+            drift_loop.register_regime_callback(self._handle_drift_regime_trigger)
+            logger.info("RegimeAdapter registered with drift reward loop")
+        except Exception as e:
+            logger.warning("Could not register drift callback: %s", e)
+    
+    def _handle_drift_regime_trigger(self, component_id: str, penalty: float) -> None:
+        """Handle drift-triggered regime adaptation request."""
+        logger.info(
+            "Drift-triggered regime adaptation for %s (penalty=%.2f)",
+            component_id,
+            penalty,
+        )
+        
+        # Determine likely new regime based on drift signals
+        # For now, switch to HIGH_VOLATILITY as a conservative response
+        new_regime = MarketRegime.HIGH_VOLATILITY
+        confidence = max(0.5, 1.0 - penalty)
+        
+        # Update all policies to new regime
+        self.update_regime(new_regime, confidence)
+        
+        # Record drift-triggered adaptation
+        self._drift_triggered_adaptations.append({
+            "timestamp": time.time(),
+            "component_id": component_id,
+            "penalty": penalty,
+            "new_regime": new_regime.value,
+            "confidence": confidence,
+        })
+        
+        logger.warning(
+            "Regime switched to %s (confidence=%.2f) due to drift in %s",
+            new_regime.value,
+            confidence,
+            component_id,
+        )
     
     def register_policy(
         self,
@@ -503,7 +556,12 @@ class RegimeAdapter:
             "regime_confidence": round(self._regime_confidence, 4),
             "registered_policies": list(self._policies.keys()),
             "adaptation_count": len(self._adaptation_history),
+            "drift_triggered_count": len(self._drift_triggered_adaptations),
         }
+    
+    def get_drift_triggered_adaptations(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get drift-triggered adaptation history."""
+        return self._drift_triggered_adaptations[-limit:]
 
 
 # Singleton instance

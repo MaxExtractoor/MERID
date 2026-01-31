@@ -12,6 +12,21 @@ import httpx
 import pytest
 
 
+def _prod_api_available() -> bool:
+    try:
+        response = httpx.get("http://127.0.0.1:8000/api/v1/health", timeout=2.0)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+pytestmark = [
+    pytest.mark.prod_integration,
+    pytest.mark.quarantine,
+    pytest.mark.skipif(not _prod_api_available(), reason="Production API not reachable"),
+]
+
+
 BASE_URL = "http://127.0.0.1:8000"
 
 

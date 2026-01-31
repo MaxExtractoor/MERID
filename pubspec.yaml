@@ -25,6 +25,7 @@ dependencies:
   equatable: ^2.0.5
   provider: ^6.1.1
   flutter_riverpod: ^2.4.9
+  hooks_riverpod: ^2.4.9
 
 dev_dependencies:
   flutter_test:

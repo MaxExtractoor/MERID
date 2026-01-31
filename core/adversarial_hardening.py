@@ -6,7 +6,7 @@ import math
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple, Set
 
 import numpy as np
 
@@ -68,6 +68,8 @@ class SourceAgreementGraph:
     agreement_matrix: Dict[Tuple[str, str], float] = field(default_factory=dict)
     delta_history: Dict[str, Deque[float]] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=50)))
     suspect_clusters: List[List[str]] = field(default_factory=list)
+    window_size: int = 20
+    min_samples: int = 8
 
     def record_delta(self, source: str, delta: float) -> None:
         """Record a delta (deviation from consensus) for a source."""
@@ -75,48 +77,131 @@ class SourceAgreementGraph:
 
     def compute_agreements(self) -> None:
         """Compute pairwise agreement correlations between sources."""
-        sources = list(self.delta_history.keys())
+        self.agreement_matrix.clear()
+        sources = sorted(self.delta_history.keys())
         for i, src_a in enumerate(sources):
+            series_a = self._get_recent_series(src_a)
+            if len(series_a) < self.min_samples:
+                continue
             for src_b in sources[i + 1 :]:
-                if len(self.delta_history[src_a]) >= 10 and len(self.delta_history[src_b]) >= 10:
-                    corr = np.corrcoef(
-                        list(self.delta_history[src_a])[-10:],
-                        list(self.delta_history[src_b])[-10:],
-                    )[0, 1]
-                    if not np.isnan(corr):
-                        self.agreement_matrix[(src_a, src_b)] = corr
+                series_b = self._get_recent_series(src_b)
+                if len(series_b) < self.min_samples:
+                    continue
+                aligned_len = min(len(series_a), len(series_b))
+                if aligned_len < self.min_samples:
+                    continue
+                norm_a = self._normalize_series(series_a[-aligned_len:])
+                norm_b = self._normalize_series(series_b[-aligned_len:])
+                if norm_a.size == 0 or norm_b.size == 0:
+                    continue
+                corr = self._compute_correlation(norm_a, norm_b)
+                if corr is None:
+                    continue
+                key = tuple(sorted((src_a, src_b)))
+                self.agreement_matrix[key] = float(max(min(corr, 1.0), -1.0))
 
-    def detect_collusion(self, threshold_internal: float = 0.9, threshold_external: float = -0.5) -> List[List[str]]:
+    def detect_collusion(
+        self,
+        threshold_internal: float = 0.8,
+        threshold_external: float = 0.0,
+        min_cluster_size: int = 2,
+    ) -> List[List[str]]:
         """
         Detect suspect clusters: high mutual agreement, low agreement with majority.
         Returns list of suspect source clusters.
         """
         self.compute_agreements()
         sources = list(self.delta_history.keys())
-        clusters = []
-
-        # Simple clustering: find pairs with high agreement
+        adjacency: Dict[str, Set[str]] = defaultdict(set)
         for (src_a, src_b), corr in self.agreement_matrix.items():
-            if corr > threshold_internal:
-                # Check if cluster disagrees with global
-                global_sources = [s for s in sources if s not in (src_a, src_b)]
-                if global_sources:
-                    cluster_vs_global = []
-                    for global_src in global_sources:
-                        pair_key_a = tuple(sorted([src_a, global_src]))
-                        pair_key_b = tuple(sorted([src_b, global_src]))
-                        if pair_key_a in self.agreement_matrix:
-                            cluster_vs_global.append(self.agreement_matrix[pair_key_a])
-                        if pair_key_b in self.agreement_matrix:
-                            cluster_vs_global.append(self.agreement_matrix[pair_key_b])
-                    if cluster_vs_global and np.mean(cluster_vs_global) < threshold_external:
-                        cluster = [src_a, src_b]
-                        if cluster not in clusters:
-                            clusters.append(cluster)
-                            logger.warning("Collusion cluster detected: %s (internal=%.3f)", cluster, corr)
+            if corr >= threshold_internal:
+                adjacency[src_a].add(src_b)
+                adjacency[src_b].add(src_a)
+
+        clusters: List[List[str]] = []
+        visited: Set[str] = set()
+
+        for node in adjacency.keys():
+            if node in visited:
+                continue
+            stack = [node]
+            cluster_nodes: List[str] = []
+            while stack:
+                current = stack.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                cluster_nodes.append(current)
+                stack.extend(adjacency[current] - visited)
+
+            if len(cluster_nodes) < min_cluster_size:
+                continue
+
+            cluster_nodes.sort()
+            outsider_corrs: List[float] = []
+            for member in cluster_nodes:
+                for outsider in sources:
+                    if outsider in cluster_nodes:
+                        continue
+                    pair_key = tuple(sorted((member, outsider)))
+                    if pair_key in self.agreement_matrix:
+                        outsider_corrs.append(self.agreement_matrix[pair_key])
+
+            if outsider_corrs:
+                if np.mean(outsider_corrs) <= threshold_external:
+                    clusters.append(cluster_nodes)
+                    logger.warning(
+                        "Collusion cluster detected: %s (external_avg=%.3f)",
+                        cluster_nodes,
+                        float(np.mean(outsider_corrs)),
+                    )
+            else:
+                # No global comparison available—default to conservative flagging.
+                clusters.append(cluster_nodes)
+                logger.warning(
+                    "Collusion cluster detected without external comparators: %s",
+                    cluster_nodes,
+                )
 
         self.suspect_clusters = clusters
         return clusters
+
+    def _get_recent_series(self, source: str) -> List[float]:
+        return list(self.delta_history[source])[-self.window_size :]
+
+    def _normalize_series(self, series: List[float]) -> np.ndarray:
+        arr = np.asarray(series, dtype=float)
+        if arr.size == 0:
+            return arr
+        std = np.std(arr)
+        if std < 1e-6:
+            if np.allclose(arr, 0.0):
+                return np.asarray([], dtype=float)
+            signs = np.sign(arr)
+            signs[signs == 0] = 1.0
+            return signs
+        mean = np.mean(arr)
+        return (arr - mean) / std
+
+    def _compute_correlation(self, series_a: np.ndarray, series_b: np.ndarray) -> Optional[float]:
+        if series_a.size == 0 or series_b.size == 0:
+            return None
+        if series_a.size != series_b.size:
+            length = min(series_a.size, series_b.size)
+            series_a = series_a[-length:]
+            series_b = series_b[-length:]
+        std_a = np.std(series_a)
+        std_b = np.std(series_b)
+        if std_a < 1e-6 or std_b < 1e-6:
+            # Fallback to sign agreement score in [-1, 1]
+            signs_a = np.sign(series_a)
+            signs_b = np.sign(series_b)
+            matches = np.mean(signs_a == signs_b)
+            return (matches * 2.0) - 1.0
+        corr = np.corrcoef(series_a, series_b)[0, 1]
+        if np.isnan(corr):
+            return None
+        return corr
 
 
 @dataclass
@@ -251,6 +336,11 @@ class AdversarialHardeningLayer:
         self.trust_updates_frozen = False
         self.poisoning_alert_count = 0
         self.shadow_consensus.poisoning_suspected = False
+        self.temporal_profiles.clear()
+        # Clear residual collusion history so clean cycles are evaluated fresh
+        self.agreement_graph.delta_history.clear()
+        self.agreement_graph.agreement_matrix.clear()
+        self.agreement_graph.suspect_clusters = []
 
     def hardening_status(self) -> Dict[str, any]:
         """Return current hardening status for observability."""

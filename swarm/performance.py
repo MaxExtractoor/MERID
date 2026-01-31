@@ -8,9 +8,16 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Deque, Dict, List, Optional
+from typing import Callable, Deque, Dict, List, Optional
 
-from core.time_authority import current_time
+def _default_time_payload() -> Dict[str, object]:
+    """Local fallback for UTC timestamps to avoid core import cycles."""
+
+    now = datetime.now(timezone.utc)
+    return {
+        "utc_iso": now.isoformat().replace("+00:00", "Z"),
+        "unix": int(now.timestamp()),
+    }
 
 LOG_PATH = Path("logs/swarm_performance.json")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -86,16 +93,22 @@ class SwarmPerformanceLedger:
         decay_window_hours: int = 6,
         decay_rate: float = 0.92,
         min_decay_weight: float = 0.25,
+        log_path: Path | str | None = None,
+        now_provider: Optional[Callable[[], Dict[str, str]]] = None,
     ) -> None:
         self._decay_window_hours = decay_window_hours
         self._decay_rate = decay_rate
         self._min_decay_weight = min_decay_weight
         self._agents: Dict[str, AgentPerformance] = {}
         self._lock = threading.Lock()
+        target_log_path = log_path if log_path is not None else LOG_PATH
+        self._log_path = Path(target_log_path)
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._now_provider = now_provider or _default_time_payload
         self._load()
 
     def record_cycle(self, votes: List[Dict[str, object]], approved: bool) -> None:
-        now = current_time()["utc_iso"]
+        now = self._now_provider()["utc_iso"]
         with self._lock:
             for vote in votes:
                 agent_id = vote.get("agent_id")
@@ -158,13 +171,13 @@ class SwarmPerformanceLedger:
 
     def _persist(self) -> None:
         payload = {agent_id: entry.to_dict() for agent_id, entry in self._agents.items()}
-        LOG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._log_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _load(self) -> None:
-        if not LOG_PATH.exists():
+        if not self._log_path.exists():
             return
         try:
-            data = json.loads(LOG_PATH.read_text(encoding="utf-8"))
+            data = json.loads(self._log_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return
         for agent_id, payload in data.items():

@@ -11,6 +11,7 @@ from enum import Enum
 import logging
 
 from core.error_handling import get_error_handler, ErrorSeverity
+from social.social_aware_quant import get_social_aware_quant_engine
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,8 @@ class PortfolioRiskManager:
         self,
         symbol: str,
         position_size: float,
-        price: float
+        price: float,
+        strategy_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Check if position is allowed based on risk limits"""
         position_value = position_size * price
@@ -206,6 +208,33 @@ class PortfolioRiskManager:
                 'limit': self.max_leverage,
                 'severity': 'HIGH'
             })
+        
+        # Check social-specific constraints if this is a social strategy
+        if strategy_id:
+            try:
+                social_engine = get_social_aware_quant_engine()
+                if social_engine.is_social_asset(symbol):
+                    constraints = social_engine.get_position_constraints(symbol)
+                    
+                    if constraints.get("kill_switch_active"):
+                        violations.append({
+                            'type': 'social_kill_switch',
+                            'current': True,
+                            'limit': False,
+                            'severity': 'CRITICAL',
+                            'reason': constraints.get("kill_switch_reason", "unknown")
+                        })
+                    
+                    if not constraints.get("data_fresh", True):
+                        violations.append({
+                            'type': 'social_data_stale',
+                            'current': True,
+                            'limit': False,
+                            'severity': 'HIGH',
+                            'reason': 'Social data is stale for this asset'
+                        })
+            except Exception as e:
+                logger.error(f"Social risk check failed: {e}")
         
         allowed = len(violations) == 0
         

@@ -11,8 +11,8 @@ import asyncio
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
-import ccxt.async_support as ccxt
 from core.streaming_bus import streaming_bus, EventChannel, StreamEvent
+from utils.deps import get_ccxt_async
 from utils.logger import get_logger
 
 logger = get_logger("streams.market")
@@ -45,15 +45,19 @@ class MarketDataStream:
     
     def __init__(self, config: Optional[MarketConfig] = None):
         self.config = config or MarketConfig()
-        self.exchanges: Dict[str, ccxt.Exchange] = {}
+        self.exchanges: Dict[str, object] = {}
         self.running = False
         self._tasks: List[asyncio.Task] = []
         
     async def initialize(self):
         """Initialize exchange connections."""
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
+            raise RuntimeError("CCXT library not installed. Run: pip install ccxt")
+
         for exchange_id in self.config.exchanges:
             try:
-                exchange_class = getattr(ccxt, exchange_id)
+                exchange_class = getattr(ccxt_async, exchange_id)
                 exchange = exchange_class({
                     'enableRateLimit': True,
                     'options': {'defaultType': 'future'}
@@ -107,7 +111,7 @@ class MarketDataStream:
         self.exchanges.clear()
         logger.info("Market data stream stopped")
     
-    async def _stream_tickers(self, exchange_id: str, exchange: ccxt.Exchange):
+    async def _stream_tickers(self, exchange_id: str, exchange):
         """Stream ticker data continuously."""
         logger.info(f"Starting ticker stream for {exchange_id}")
         
@@ -153,7 +157,7 @@ class MarketDataStream:
                 logger.error(f"Ticker stream error for {exchange_id}: {exc}")
                 await asyncio.sleep(5)  # Back off on error
     
-    async def _stream_funding(self, exchange_id: str, exchange: ccxt.Exchange):
+    async def _stream_funding(self, exchange_id: str, exchange):
         """Stream funding rates continuously."""
         logger.info(f"Starting funding stream for {exchange_id}")
         

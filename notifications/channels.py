@@ -118,15 +118,19 @@ class EmailChannel(NotificationChannel):
     """Email notification channel."""
     
     def __init__(self):
+        import os
         super().__init__(ChannelType.EMAIL)
         
-        # SMTP configuration
-        self.smtp_host = ""
-        self.smtp_port = 587
-        self.smtp_user = ""
-        self.smtp_password = ""
-        self.from_address = "merid@localhost"
-        self.use_tls = True
+        # SMTP configuration from environment
+        self.smtp_host = os.getenv("SMTP_HOST", "")
+        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        self.smtp_user = os.getenv("SMTP_USER", "")
+        self.smtp_password = os.getenv("SMTP_PASSWORD", "")
+        self.from_address = os.getenv("SMTP_FROM_ADDRESS", "merid@localhost")
+        self.use_tls = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+        
+        if not self.smtp_host or not self.smtp_user:
+            logger.warning("SMTP credentials not configured - email notifications will fail")
     
     def configure(
         self,

@@ -1,6 +1,6 @@
 # MERID v2.0
 
-**Sovereign, Local-First Decision Organism**
+## Sovereign, Local-First Decision Organism
 
 A hardened control room for an AI organism with unrestricted internal cognition but strictly constrained execution. MERID is not a chatbot or trading bot—it's an "adult" system governed by immutable Charter/invariants, designed to evolve timelessly under human primacy.
 
@@ -31,6 +31,7 @@ A hardened control room for an AI organism with unrestricted internal cognition 
 ## Theme
 
 Industrial hardened control room:
+
 - Background: `#020617` (deep slate-black)
 - Monospace fonts: JetBrains Mono
 - Neon accents:
@@ -71,46 +72,112 @@ Industrial hardened control room:
 ## Features
 
 ### 1. Bus Hierarchy Mixer
+
 Control room mixer console with:
+
 - 6 agents (Brain, Heart, Immune, Learning, Reflection, Council)
 - 6 layer sliders (Reasoning, Perception, Governance, Simulation, Optimization, Security)
 - Master fader
 - Lockdown toggle
 
 ### 2. Distillation Gate
+
 - Input field for commands/queries
 - Collapsible raw cognition (internal thought)
 - Prominent distilled output (human-legible)
 - EKG meter (entropy, confidence, bias)
 
 ### 3. Market Exploit Scanner
+
 - Time-gap detection (Polymarket vs Binance)
 - Front-run simulation (1000 scenarios)
 - Advisory only (no execution without approval)
 
 ### 4. Quantum Simulation
+
 - QAOA for portfolio optimization (mean-variance QUBO)
 - VQE for risk minimization (CVaR)
 - Comparison gate (quantum vs classical, delta >0.1, variance <0.5)
 - Uncertainty intervals, reproducibility scores
 
 ### 5. Intuition Mode
+
 - Sentiment vs price divergence detection
 - Offline self-supervised "gut feel"
 - Narrative immunity (sentiment = advisory, price = truth)
 
 ### 6. Manifestation Simulator
+
 - Multiverse hypothesis testing (1000 scenarios)
 - Success rate, timeline variance, confidence intervals
 - "Thoughts create reality" simulation
 
 ### 7. Ports System
+
 - Tiered trust (Tier 1 read-only → Tier 4 execution)
 - Status indicators (secure, active, quarantined)
 - Hostile-by-default threat model
 
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+=======
+### 8. Unified Trading Suite (2026 build)
+
+- **Runtime config service** with global mode + per-venue overrides (Coinbase, Pump.fun, Paper, Kalshi).
+- **Execution router** that treats humans and swarm agents identically with explainability + guard enforcement.
+- **Adapter registry** with live Coinbase spot adapter, Pump.fun memecoin adapter, paper fallback, and a Kalshi balance adapter built on the official SDK.
+=======
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+### 8. Unified Trading Suite (2026 build)
+
+- **Runtime config service** with global mode + per-venue overrides (Coinbase, Pump.fun, Paper, Kalshi, Alpaca).
+- **Execution router** that treats humans and swarm agents identically with explainability + guard enforcement.
+- **Adapter registry** with live Coinbase spot adapter, Pump.fun memecoin adapter, paper fallback, Kalshi balance adapter, and Alpaca equities execution adapter (official SDKs for each venue).
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+- **Trading Arena UI** (`/trading-arena`) exposing runtime controls, manual order ticket, live intent/result stream, and guard/explainability feed.
+- **Spectator/backtest telemetry** surfaced via REST + WebSocket so dashboards can subscribe to live trading intents/results.
+
+> **Tip:** Set `MERID_ENABLE_TRADING_SUITE=true` and `MERID_ALLOW_LIVE_TRADES=true` in your environment when you are ready to route live orders. Leave spectator mode on (`MERID_SPECTATOR_MODE=true`) for read-only rehearsals.
+
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 ### 8. Stage 5 Data Feeds (Backend + Frontend)
-- **Heatmap feed** (`/api/v1/heatmap`): Hyperliquid + CoinGlass liquidation density, venue totals, and perp-market arbitrage candidates. Rendered in both React dashboard (Intel Grid) and Flutter ControlStation Distillation Gate.
+
+#### Observability Dashboards
+
+- `/observability` renders the new observability console (clock sync, feed parity, lag metrics).
+- `/api/v1/observability/summary` and `/api/v1/observability/dashboards` expose the data for React/Flutter dashboards.
+- Frontend JS: `web/static/js/observability_dashboard.js`.
+- Telemetry app also serves `/stats/observability` for localhost-only metrics.
+**Heatmap feed** (`/api/v1/heatmap`): Hyperliquid + CoinGlass liquidation density, venue totals, and perp-market arbitrage candidates. Rendered in both React dashboard (Intel Grid) and Flutter ControlStation Distillation Gate.
 - **Perp ticker feed** (`/api/v1/ticker`): Top perp quotes (price, basis, funding, OI, volume) plus funding extremes. Shown in React Perp Ticker card and Flutter intel panels.
 - **AI assist feed** (`/api/v1/assist`): Latest simulation intent summary, drivers, risk flags, news highlights, and embedded heatmap/ticker excerpts powering AI chat assist panels in both frontends.
 - **Hover explainability feed** (`/api/v1/hover-metadata`): Structured hover cards (theta, funding bias, oracle gap, risk flags) used for Stage 5 explainability overlays in React and ControlStation.
@@ -134,10 +201,30 @@ Control room mixer console with:
 ## Installation
 
 ### Prerequisites
+
 - Flutter SDK 3.2.0+
 - Android Studio / Xcode (for mobile deployment)
+- Python 3.11.9 with MERID backend dependencies (see below)
+
+### Backend Dependencies & Optional Modules
+
+The Python backend relies on a mix of required and optional libraries:
+
+- **Required**: `fastapi`, `uvicorn`, `ccxt`, `email-validator`, `pydantic`, `redis`, `neo4j`, etc. Install via `pip install -r requirements.txt`.
+- **Optional** (auto-detected):
+  - `torch`, `gymnasium`, `networkx` — enable swarm RL/learning modules.
+  - When these packages are absent, MERID gracefully degrades and related tests are skipped (e.g., `pytest.importorskip("torch")`). Install them only if you intend to train swarm agents locally.
+
+You can always check the live dependency status via the new health endpoint:
+
+```bash
+curl http://127.0.0.1:8001/api/health | jq
+```
+
+This reports CCXT availability, PyTorch/Gym optional status, and DB/cache connectivity.
 
 ### Setup
+
 ```bash
 # Install dependencies
 flutter pub get
@@ -150,8 +237,42 @@ flutter build apk --release  # Android
 flutter build ios --release  # iOS
 ```
 
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+=======
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+```bash
+# Python backend dependencies (includes Coinbase, Pump.fun, and Kalshi adapters)
+pip install -r requirements.txt
+```
+
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 ### Fonts
+
 Download **JetBrains Mono** and place TTF files in `assets/fonts/`:
+
 - `JetBrainsMono-Regular.ttf`
 - `JetBrainsMono-Bold.ttf`
 
@@ -160,10 +281,12 @@ Download **JetBrains Mono** and place TTF files in `assets/fonts/`:
 The Flutter ControlStation mirrors the React dashboard and surfaces the PoS stream, token economy, oracle anchoring, and whale alerts. Launch it alongside the backend for a full-stack local run.
 
 #### Requirements
+
 - Flutter SDK 3.16+ (stable)
 - Chrome (web target) or a mobile/desktop runtime (Android Studio, Xcode, Windows/macOS desktop)
 
 #### Steps
+
 ```bash
 # From repo root
 cd merid_flutter    # adjust if your flutter app lives elsewhere
@@ -184,12 +307,13 @@ flutter run -d windows   # or macos/linux
 
 Create a `.env` (or use `--dart-define`) with:
 
-```
+```bash
 MERID_API_URL=http://127.0.0.1:8000/api/v1
 # MERID_API_URL=https://your-remote-merid/api/v1   # for remote deployments
 ```
 
 The app polls `/api/v1/blocks/latest` every ~20 seconds and renders:
+
 - Latest PoS block with confidence + decayed/anchor context
 - Token balances and miner rewards
 - Whale alerts pushed via backend
@@ -197,11 +321,127 @@ The app polls `/api/v1/blocks/latest` every ~20 seconds and renders:
 
 Hot reload is fully supported, making it ideal for rapid UI iterations on the ControlStation panel.
 
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+=======
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+#### Trading Arena
+
+- Navigate to `http://127.0.0.1:8001/trading-arena` when the FastAPI server is running.
+- Update global mode, venue overrides, or trader overrides directly from the UI.
+- Submit manual orders (defaults to paper fallback unless guards allow live execution).
+- Inspect guard/explainability and spectator feeds in real time.
+
+##### API quickstart
+
+```bash
+# Enable live mode + venues
+curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/config \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"live","allow_live_trades":true,"spectator_mode":false}'
+
+curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/venues/coinbase \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"live","credentials_present":true}'
+
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+=======
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/venues/alpaca \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"live","credentials_present":true}'
+
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+# Submit an order (paper fallback when guards block live execution)
+curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/order \
+  -H "Content-Type: application/json" \
+  -d '{"trader_type":"human","trader_id":"arena-user","venue_id":"paper","instrument":"BTC/USDT","side":"buy","size":0.01}'
+```
+
+##### Kalshi SDK integration
+
+```python
+from trading.integrations import get_kalshi_client, fetch_kalshi_balance
+
+client = get_kalshi_client()
+balance = fetch_kalshi_balance()
+print("Available cash:", balance["balance"])
+```
+
+- Install dependency via `pip install -r requirements.txt` (adds `kalshi_python_sync`).
+- Set `KALSHI_API_KEY_ID` and either `KALSHI_PRIVATE_KEY_PEM` or `KALSHI_PRIVATE_KEY_PATH` in your `.env`.
+- Optional: override `KALSHI_API_HOST` if you need a different Kalshi environment.
+- The Kalshi adapter currently exposes balances/telemetry; upcoming work will enable full execution routing through the unified router.
+
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+##### Alpaca SDK integration
+
+```python
+from trading.integrations import get_alpaca_client, fetch_account_snapshot
+
+client = get_alpaca_client()
+account = fetch_account_snapshot()
+print("Equity buying power:", account.get("buying_power"))
+```
+
+- Dependency: `pip install -r requirements.txt` (adds `alpaca-trade-api`).
+- Set `ALPACA_API_KEY` / `ALPACA_API_SECRET` (or `MERID_ALPACA_*`) and optionally `ALPACA_ENVIRONMENT=live|paper` and `ALPACA_BASE_URL`.
+- The Alpaca adapter supports live market/limit orders for equities; guards still enforce notional/risk rules and will fall back to paper execution when blocked.
+
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+<<<<<<< C:\Dev\MERID\README.md
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
+=======
+>>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 ---
 
 ## Usage
 
 ### Basic Workflow
+
 1. **Launch app** → See control room interface
 2. **View Charter** → Tap "CHARTER v2.0" badge
 3. **Input command** → Distillation Gate input field
@@ -213,6 +453,7 @@ Hot reload is fully supported, making it ideal for rapid UI iterations on the Co
    - Manifestation Simulator
 
 ### Example Commands
+
 - `"Status Report"` → Full system health check
 - `"Scan markets"` → Market exploit detection
 - `"Run quantum optimization"` → QAOA/VQE simulation
@@ -220,6 +461,7 @@ Hot reload is fully supported, making it ideal for rapid UI iterations on the Co
 - `"Manifest: BTC breaks $105K"` → Multiverse simulation
 
 ### Lockdown Mode
+
 - Tap **LOCKDOWN** button → Freezes all execution
 - Master fader drops to 0
 - All actions blocked
@@ -230,7 +472,7 @@ Hot reload is fully supported, making it ideal for rapid UI iterations on the Co
 
 ## Architecture
 
-```
+```text
 lib/
 ├── main.dart                    # App entry point
 ├── home_screen.dart             # Main control room UI
@@ -286,10 +528,12 @@ lib/
 ## Comparisons
 
 ### vs LangChain
+
 - **MERID**: Governed buses, sovereign, quantum-ready, timeless
 - **LangChain**: Composable workflows, ungoverned, cloud-dependent
 
 ### vs MoonDev
+
 - **MERID**: Invariants, security, narrative immunity, unbreakable
 - **MoonDev**: Trading crew, no governance, market-focused only
 

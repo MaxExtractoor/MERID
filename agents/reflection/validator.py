@@ -177,9 +177,8 @@ class OutcomeValidator:
         
         # Calculate reality gap based on magnitude mismatch
         if validated:
-            # Correct direction, gap based on confidence vs magnitude
             magnitude = abs(actual_price_change)
-            expected_magnitude = confidence * 10  # Scale confidence to expected %
+            expected_magnitude = 0.0 if predicted_direction == "neutral" else confidence * 10
             reality_gap = min(abs(magnitude - expected_magnitude) / 10, 1.0)
         else:
             # Wrong direction

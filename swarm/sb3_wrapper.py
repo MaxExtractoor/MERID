@@ -8,12 +8,25 @@ from __future__ import annotations
 
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
-from gymnasium import spaces
-import gymnasium as gym
 
+from utils.deps import optional_dependency
 from utils.logger import get_logger
 
-logger = get_logger("swarm.sb3_wrapper")
+logger = get_logger("swarm.sb3")
+
+gym = optional_dependency("gymnasium")
+if gym:
+    from gymnasium import spaces
+else:  # pragma: no cover - optional dependency guard
+    spaces = None
+    logger.warning("Gymnasium not installed - SB3 wrapper unavailable")
+
+
+def _require_gym() -> None:
+    if gym is None:
+        raise RuntimeError(
+            "Gymnasium is required for the SB3 swarm wrapper. Install it with `pip install gymnasium`."
+        )
 
 
 class MERIDMultiAgentEnv(gym.Env):

@@ -8,14 +8,29 @@ from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.distributions import Categorical
 
+from utils.deps import optional_dependency
 from utils.logger import get_logger
 
 logger = get_logger("swarm.marl")
+
+torch = optional_dependency("torch")
+if torch:
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.distributions import Categorical
+else:  # pragma: no cover - optional dependency guard
+    nn = optim = Categorical = None
+    logger.warning("PyTorch not installed - MARL engine unavailable")
+
+TORCH_AVAILABLE = torch is not None
+
+
+def _require_torch() -> None:
+    if not TORCH_AVAILABLE:
+        raise RuntimeError(
+            "PyTorch is required for the MARL engine. Install it with `pip install torch`."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +591,7 @@ class MARLCoordinator:
                 agent.remember(states[i], actions[i], rewards[i], next_states[i], done)
 
             # Train
-            for agent in enumerate(self.agents):
+            for agent in self.agents:
                 loss = agent.replay()
                 if loss is not None:
                     episode_loss += loss

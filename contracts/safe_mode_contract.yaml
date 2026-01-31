@@ -1,0 +1,456 @@
+# MERID Safe Mode Contract
+# Version: 1.0
+# Last Updated: 2026-01-14
+# Authority: Governor Agent + Risk Admin + Human Approval
+
+version: "1.0"
+effective_date: "2026-01-14T00:00:00Z"
+
+# Safe Mode Definition
+description: |
+  Safe mode is a protective state where the system operates with maximum
+  conservatism, allowing only risk-reducing actions. It is triggered by
+  suspected breaches, extreme drift, critical failures, or governance overrides.
+
+# Trigger Conditions
+
+triggers:
+  breach_detection:
+    suspected_breach:
+      description: "Anomaly detection indicates possible security breach"
+      severity: "critical"
+      auto_trigger: true
+      
+    unauthorized_access_attempt:
+      description: "Failed authentication or authorization attempts exceed threshold"
+      threshold: 5
+      window_seconds: 300
+      severity: "critical"
+      auto_trigger: true
+      
+    suspicious_order_pattern:
+      description: "Order patterns deviate significantly from normal behavior"
+      severity: "high"
+      auto_trigger: true
+  
+  drift_detection:
+    extreme_model_drift:
+      description: "Model performance drift exceeds 3 sigma"
+      threshold_sigma: 3.0
+      severity: "high"
+      auto_trigger: true
+      
+    llm_behavioral_drift:
+      description: "LLM outputs deviate from expected patterns"
+      threshold_deviation: 0.30
+      severity: "medium"
+      auto_trigger: false
+      requires_confirmation: true
+      
+    strategy_performance_collapse:
+      description: "Strategy Sharpe ratio drops below threshold"
+      threshold_sharpe: -0.5
+      severity: "high"
+      auto_trigger: true
+  
+  infrastructure_failure:
+    multiple_circuit_breakers_open:
+      description: "Multiple critical circuit breakers are open"
+      threshold_count: 2
+      severity: "critical"
+      auto_trigger: true
+      
+    database_failure:
+      description: "Primary and backup databases unavailable"
+      severity: "critical"
+      auto_trigger: true
+      
+    execution_guard_failure:
+      description: "Execution guard service is down or unresponsive"
+      severity: "critical"
+      auto_trigger: true
+      
+    message_bus_failure:
+      description: "Message bus unavailable for agent coordination"
+      severity: "high"
+      auto_trigger: true
+  
+  risk_metrics_exceeded:
+    drawdown_threshold:
+      description: "Portfolio drawdown exceeds safe mode threshold"
+      threshold_pct: 0.12
+      severity: "high"
+      auto_trigger: true
+      
+    daily_loss_threshold:
+      description: "Daily loss exceeds safe mode threshold"
+      threshold_usd: 4000.0
+      severity: "high"
+      auto_trigger: true
+      
+    var_breach:
+      description: "VaR exceeded by multiplier"
+      threshold_multiplier: 1.5
+      severity: "high"
+      auto_trigger: true
+      
+    consecutive_losses:
+      description: "Consecutive losing trades exceed threshold"
+      threshold_count: 5
+      severity: "medium"
+      auto_trigger: true
+      
+    concentration_breach:
+      description: "Position concentration exceeds limits"
+      threshold_pct: 0.40
+      severity: "medium"
+      auto_trigger: false
+      requires_confirmation: true
+  
+  governance_override:
+    human_triggered:
+      description: "Human operator manually triggers safe mode"
+      severity: "varies"
+      auto_trigger: true
+      
+    governor_agent_triggered:
+      description: "Governor agent determines safe mode necessary"
+      severity: "varies"
+      auto_trigger: true
+      requires_human_notification: true
+      
+    scheduled_maintenance:
+      description: "Planned maintenance requires safe mode"
+      severity: "low"
+      auto_trigger: false
+      advance_notice_hours: 24
+
+# Allowed Actions in Safe Mode
+
+allowed_actions:
+  position_management:
+    - "close_positions"
+    - "reduce_position_sizes"
+    - "hedge_positions"
+    - "cancel_pending_orders"
+    
+  risk_management:
+    - "tighten_risk_limits"
+    - "reduce_leverage"
+    - "increase_margin"
+    
+  monitoring:
+    - "read_market_data"
+    - "read_positions"
+    - "read_metrics"
+    - "generate_reports"
+    - "send_alerts"
+    
+  investigation:
+    - "collect_diagnostics"
+    - "analyze_logs"
+    - "run_health_checks"
+    - "test_connections"
+
+# Prohibited Actions in Safe Mode
+
+prohibited_actions:
+  trading:
+    - "open_new_positions"
+    - "increase_position_sizes"
+    - "increase_leverage"
+    - "place_aggressive_orders"
+    
+  payments:
+    - "new_x402_payments"
+    - "new_defi_transactions"
+    - "wallet_transfers"
+    
+  configuration:
+    - "loosen_risk_limits"
+    - "promote_strategies"
+    - "deploy_new_models"
+    - "modify_governance_contracts"
+    
+  external:
+    - "new_venue_connections"
+    - "new_api_integrations"
+    - "experimental_features"
+
+# Safe Mode Levels
+
+levels:
+  level_1_cautious:
+    description: "Elevated caution, reduced risk limits"
+    risk_multiplier: 0.5
+    new_positions_allowed: true
+    position_size_max_multiplier: 0.5
+    human_approval_for_trades: false
+    
+  level_2_defensive:
+    description: "Defensive posture, close-only mode"
+    risk_multiplier: 0.25
+    new_positions_allowed: false
+    close_only: true
+    human_approval_for_trades: false
+    
+  level_3_lockdown:
+    description: "Full lockdown, emergency only"
+    risk_multiplier: 0.0
+    new_positions_allowed: false
+    close_only: true
+    human_approval_for_trades: true
+    auto_hedge_enabled: true
+
+# Entry Procedures
+
+entry_procedures:
+  automatic_entry:
+    steps:
+      - action: "detect_trigger_condition"
+        responsible: "monitoring_system"
+        
+      - action: "validate_trigger"
+        responsible: "governor_agent"
+        timeout_seconds: 10
+        
+      - action: "determine_safe_mode_level"
+        responsible: "governor_agent"
+        
+      - action: "activate_safe_mode"
+        responsible: "governor_agent"
+        
+      - action: "notify_stakeholders"
+        responsible: "alerting_system"
+        channels: ["email", "slack", "pagerduty"]
+        
+      - action: "log_entry_event"
+        responsible: "audit_system"
+        
+      - action: "record_explanation"
+        responsible: "explainability_service"
+  
+  manual_entry:
+    steps:
+      - action: "human_or_governor_initiates"
+        
+      - action: "specify_reason_and_level"
+        
+      - action: "confirm_entry"
+        required_approvers: ["risk_admin"]
+        
+      - action: "activate_safe_mode"
+        
+      - action: "notify_stakeholders"
+        
+      - action: "log_entry_event"
+        
+      - action: "record_explanation"
+
+# Exit Conditions
+
+exit_conditions:
+  required_approvals:
+    - "human_approval"
+    - "governor_agent_approval"
+    - "risk_admin_approval"
+    
+  health_metrics_restored:
+    drawdown_below_threshold: true
+    no_active_breaches: true
+    infrastructure_healthy: true
+    drift_within_bounds: true
+    
+  breach_resolution:
+    investigation_complete: true
+    root_cause_identified: true
+    remediation_applied: true
+    verification_passed: true
+    
+  minimum_duration:
+    level_1_min_minutes: 30
+    level_2_min_minutes: 60
+    level_3_min_minutes: 120
+    
+  cool_down_period:
+    after_breach: 24  # hours
+    after_infrastructure_failure: 12  # hours
+    after_drift: 6  # hours
+
+# Exit Procedures
+
+exit_procedures:
+  steps:
+    - action: "verify_exit_conditions_met"
+      responsible: "governor_agent"
+      
+    - action: "collect_approvals"
+      responsible: "governance_system"
+      required:
+        - "human_signoff"
+        - "governor_agent_signoff"
+        - "risk_admin_signoff"
+      
+    - action: "run_health_checks"
+      responsible: "monitoring_system"
+      
+    - action: "verify_metrics_restored"
+      responsible: "risk_monitor"
+      
+    - action: "gradual_ramp_up"
+      responsible: "governor_agent"
+      phases:
+        - name: "phase_1"
+          duration_minutes: 30
+          risk_multiplier: 0.25
+          
+        - name: "phase_2"
+          duration_minutes: 60
+          risk_multiplier: 0.50
+          
+        - name: "phase_3"
+          duration_minutes: 120
+          risk_multiplier: 0.75
+          
+        - name: "full_operation"
+          risk_multiplier: 1.0
+      
+    - action: "deactivate_safe_mode"
+      responsible: "governor_agent"
+      
+    - action: "notify_stakeholders"
+      responsible: "alerting_system"
+      
+    - action: "log_exit_event"
+      responsible: "audit_system"
+      
+    - action: "record_explanation"
+      responsible: "explainability_service"
+      
+    - action: "conduct_post_mortem"
+      responsible: "ops_team"
+      deadline_hours: 48
+
+# Monitoring During Safe Mode
+
+monitoring_requirements:
+  increased_frequency:
+    metrics_collection_interval_seconds: 5
+    health_check_interval_seconds: 10
+    alert_evaluation_interval_seconds: 15
+    
+  enhanced_logging:
+    log_level: "DEBUG"
+    log_all_decisions: true
+    log_all_actions: true
+    log_all_denials: true
+    
+  real_time_dashboards:
+    - "safe_mode_status"
+    - "trigger_conditions"
+    - "allowed_actions_log"
+    - "prohibited_actions_blocked"
+    - "exit_condition_progress"
+    
+  stakeholder_updates:
+    frequency_minutes: 15
+    channels: ["email", "slack"]
+    include:
+      - "current_level"
+      - "trigger_reason"
+      - "actions_taken"
+      - "exit_progress"
+
+# Escalation During Safe Mode
+
+escalation:
+  level_1_to_level_2:
+    triggers:
+      - "conditions_worsen"
+      - "new_triggers_detected"
+      - "remediation_ineffective"
+    approval_required: "governor_agent"
+    
+  level_2_to_level_3:
+    triggers:
+      - "critical_failure_detected"
+      - "breach_confirmed"
+      - "multiple_systems_failing"
+    approval_required: "human_and_governor"
+    
+  escalation_to_human:
+    conditions:
+      - "safe_mode_duration > 4 hours"
+      - "level_3_activated"
+      - "exit_conditions_not_improving"
+      - "governor_agent_requests_help"
+
+# Post-Safe-Mode Actions
+
+post_safe_mode:
+  required_actions:
+    - action: "conduct_post_mortem"
+      deadline_hours: 48
+      responsible: "ops_team"
+      deliverables:
+        - "root_cause_analysis"
+        - "timeline_of_events"
+        - "lessons_learned"
+        - "remediation_plan"
+      
+    - action: "update_runbooks"
+      deadline_hours: 72
+      responsible: "ops_team"
+      
+    - action: "review_trigger_thresholds"
+      deadline_hours: 168
+      responsible: "risk_admin"
+      
+    - action: "test_improvements"
+      deadline_hours: 168
+      responsible: "engineering_team"
+      
+    - action: "update_contracts_if_needed"
+      deadline_hours: 336
+      responsible: "governance"
+
+# Audit and Compliance
+
+audit_requirements:
+  log_all_entries: true
+  log_all_exits: true
+  log_all_actions_during: true
+  log_all_blocked_actions: true
+  log_all_approvals: true
+  explanation_required_for_all: true
+  
+  reporting:
+    immediate_notification: true
+    daily_status_reports: true
+    post_mortem_required: true
+    monthly_safe_mode_summary: true
+    
+  retention:
+    log_retention_days: 365
+    explanation_retention_days: 365
+    post_mortem_retention_days: 1825  # 5 years
+
+# Change Control
+
+change_authority:
+  trigger_threshold_adjustments:
+    approvers: ["risk_admin", "governor_agent"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 24
+    
+  level_definition_changes:
+    approvers: ["risk_admin", "ops_lead"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 48
+    governance_vote_required: true
+    
+  emergency_trigger_addition:
+    approvers: ["risk_admin"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 0
+    post_approval_review_required: true

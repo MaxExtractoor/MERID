@@ -28,6 +28,7 @@ from streams.base_stream import (
     ConnectionError,
     get_stream_registry,
 )
+from utils.deps import get_ccxt_async
 from utils.logger import get_logger
 
 logger = get_logger("streams.market")
@@ -124,19 +125,18 @@ class MarketStream(BaseStream):
         Raises:
             ConnectionError: If no exchanges could be connected
         """
-        try:
-            import ccxt.async_support as ccxt
-        except ImportError as e:
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
             raise ConnectionError(
                 self._stream_id,
                 "CCXT library not installed. Run: pip install ccxt"
-            ) from e
+            )
         
         connected_count = 0
         
         for exchange_id in self._market_config.exchanges:
             try:
-                exchange_class = getattr(ccxt, exchange_id, None)
+                exchange_class = getattr(ccxt_async, exchange_id, None)
                 if exchange_class is None:
                     self._logger.warning("Unknown exchange: %s", exchange_id)
                     continue

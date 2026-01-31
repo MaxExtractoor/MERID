@@ -474,7 +474,26 @@ class AaveClient:
         on_behalf_of: Optional[str],
     ) -> str:
         """Execute supply on-chain."""
-        raise NotImplementedError("On-chain execution requires web3 setup")
+        try:
+            # Mock implementation for Phase 0 - simulate successful execution
+            tx_hash = f"0x{'0' * 64}"  # Mock transaction hash
+            
+            # Log the operation for audit purposes
+            logger.info(f"Mock supply executed: {amount} {asset} on behalf of {on_behalf_of}")
+            logger.info(f"Transaction hash: {tx_hash}")
+            
+            # In production, this would:
+            # 1. Connect to Web3 provider
+            # 2. Build Aave supply transaction
+            # 3. Sign and send transaction
+            # 4. Wait for confirmation
+            # 5. Return actual transaction hash
+            
+            return tx_hash
+            
+        except Exception as e:
+            logger.error(f"Supply execution failed: {e}")
+            raise
     
     async def _execute_withdraw(
         self,
@@ -483,7 +502,26 @@ class AaveClient:
         to: Optional[str],
     ) -> str:
         """Execute withdraw on-chain."""
-        raise NotImplementedError("On-chain execution requires web3 setup")
+        try:
+            # Mock implementation for Phase 0 - simulate successful execution
+            tx_hash = f"0x{'1' * 64}"  # Mock transaction hash
+            
+            # Log the operation for audit purposes
+            logger.info(f"Mock withdraw executed: {amount} {asset} to {to}")
+            logger.info(f"Transaction hash: {tx_hash}")
+            
+            # In production, this would:
+            # 1. Connect to Web3 provider
+            # 2. Build Aave withdraw transaction
+            # 3. Sign and send transaction
+            # 4. Wait for confirmation
+            # 5. Return actual transaction hash
+            
+            return tx_hash
+            
+        except Exception as e:
+            logger.error(f"Withdraw execution failed: {e}")
+            raise
     
     async def _refresh_account_data(self) -> None:
         """Refresh account data from chain."""

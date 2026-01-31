@@ -19,6 +19,7 @@ from schemas.arbitrage import (
     ArbitrageOpportunity, ArbitrageType, ArbitrageStatus,
     ArbitrageLeg, VenueType, CostModel
 )
+from utils.deps import get_ccxt_async
 from utils.logger import get_logger
 
 logger = get_logger("arbitrage.funding_rate")
@@ -140,9 +141,12 @@ class FundingRateScanner(ArbitrageScanner):
     
     async def _fetch_funding_rate(self, exchange: str, symbol: str) -> Optional[FundingRateData]:
         """Fetch real funding rate from exchange via CCXT."""
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
+            logger.warning("CCXT not available; skipping funding rate fetch")
+            return None
+
         try:
-            import ccxt.async_support as ccxt_async
-            
             exchange_class = getattr(ccxt_async, exchange, None)
             if not exchange_class:
                 logger.debug(f"Exchange {exchange} not supported")

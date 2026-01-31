@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.time_authority import current_time
+from core.persistence_manager import get_persistence_manager
 from utils.logger import get_logger
 
 logger = get_logger("agents.reflection")
@@ -207,13 +208,26 @@ class ReflectionLayer:
                 reflections = [r for r in reflections if r.agent_id == agent_id]
             return [r.to_dict() for r in reflections[-limit:]]
     
+    def flush(self) -> None:
+        """Force immediate persistence of all reflections."""
+        with self._lock:
+            data = {
+                "reflections": [r.to_dict() for r in self._reflections],
+                "agent_stats": dict(self._agent_stats)
+            }
+            persist = get_persistence_manager()
+            persist.write_json(self._path, data, immediate=True)
+            logger.info("Flushed %d reflections to disk", len(self._reflections))
+    
     def _persist(self) -> None:
-        """Save reflections to disk."""
+        """Save reflections to disk using batched persistence."""
         data = {
             "reflections": [r.to_dict() for r in self._reflections],
             "agent_stats": dict(self._agent_stats)
         }
-        self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # Use persistence manager for batched writes
+        persist = get_persistence_manager()
+        persist.write_json(self._path, data, immediate=False)
     
     def _load(self) -> None:
         """Load reflections from disk."""

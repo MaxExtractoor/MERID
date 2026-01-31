@@ -8,10 +8,66 @@ name: Reality Enforcement
 on:
   pull_request:
     branches: [ main, develop ]
+    paths:
+      - "trading/**"
+      - "execution/**"
+      - "routing/**"
+      - "onboarding/**"
+      - "risk/**"
+      - "surveillance/**"
+      - "analytics/onboarding_metrics.py"
+      - "tests/test_onboarding_metrics.py"
+      - "onboarding/venue_registry.py"
+      - "tests/risk/**"
+      - "core/adversarial_hardening.py"
+      - "observability/**"
+      - "tests/core/test_poisoning_*"
+      - "tests/test_data_quality_*"
+      - ".github/workflows/reality_enforcement.yml"
+      - "scripts/run_tests_and_coverage.py"
   push:
     branches: [ main, develop ]
+    paths:
+      - "trading/**"
+      - "execution/**"
+      - "routing/**"
+      - "onboarding/**"
+      - "risk/**"
+      - "surveillance/**"
+      - "analytics/onboarding_metrics.py"
+      - "tests/test_onboarding_metrics.py"
+      - "onboarding/venue_registry.py"
+      - "tests/risk/**"
+      - "core/adversarial_hardening.py"
+      - "observability/**"
+      - "tests/core/test_poisoning_*"
+      - "tests/test_data_quality_*"
+      - ".github/workflows/reality_enforcement.yml"
+      - "scripts/run_tests_and_coverage.py"
 
 jobs:
+  safety-risk-tests:
+    name: Safety & Risk Test Lane
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run safety-critical and risk-core tests
+        run: |
+          pytest -m "safety_critical or risk_core" -vv --full-trace --maxfail=5
+
   forbidden-keys-check:
     name: Block Forbidden UI Keys
     runs-on: ubuntu-latest

@@ -97,19 +97,47 @@ class MeridCore:
             result = await agent.process(energy, phase="reasoning")
             return result
         except Exception as exc:  # pragma: no cover - best-effort resilience
-            self.logger.exception("[%s] agent failure: %s", agent.agent_id, exc)
+            # Handle structured agent errors specifically
+            error_type = "unknown"
+            error_details = str(exc)
+            
+            # Check if it's our structured AgentErrorResponse
+            from agents.base_agent import AgentErrorResponse
+            if isinstance(exc, AgentErrorResponse):
+                error_type = exc.error_type.value
+                error_details = exc.message
+                self.logger.error(
+                    "[%s] agent %s error: %s", 
+                    agent.agent_id, 
+                    error_type, 
+                    error_details
+                )
+            else:
+                self.logger.exception("[%s] agent failure: %s", agent.agent_id, exc)
+            
+            # Publish structured error event
             await event_stream.publish(
                 "agent:error",
-                {"agent_id": agent.agent_id, "energy_id": energy["energy_id"], "error": str(exc)},
+                {
+                    "agent_id": agent.agent_id, 
+                    "energy_id": energy["energy_id"], 
+                    "error": error_details,
+                    "error_type": error_type
+                },
             )
+            
+            # Return structured fallback response
+            fallback_reasoning = f"Agent {error_type} error: {error_details[:200]}"
             return {
                 "agent_id": agent.agent_id,
                 "vote": "abstain",
                 "confidence": 0.0,
-                "reasoning": f"Agent error: {exc}",
-                "simulation": "Agent encountered runtime error",
+                "reasoning": fallback_reasoning,
+                "simulation": f"Agent encountered {error_type} error",
                 "raw": "",
                 "trust": getattr(agent, "trust", 1.0),
+                "error_type": error_type,
+                "error_details": error_details,
             }
 
     async def _handle_approved_energy(

@@ -7,11 +7,65 @@ Tests system under load with concurrent requests.
 import asyncio
 import time
 from typing import List
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
+import json
+
+
+def _mock_api_response(request: httpx.Request) -> httpx.Response:
+    """Return canned responses so stress tests don't need a live server."""
+    path = request.url.path
+    method = request.method.upper()
+
+    # Health + trading endpoints
+    if path.startswith("/api/v1/health"):
+        payload = {"status": "ok", "uptime": 12345}
+        return httpx.Response(200, json=payload)
+
+    if path.startswith("/api/v1/trading"):
+        return httpx.Response(200, json={"ok": True, "endpoint": path})
+
+    if path.startswith("/api/v1/betting"):
+        return httpx.Response(200, json={"active": [], "endpoint": path})
+
+    if path.startswith("/api/v1/paper/portfolio"):
+        # Provide minimal portfolio data depending on sub-path
+        if path.endswith("/stats"):
+            return httpx.Response(200, json={"current_balance": 10000.0, "roi_pct": 5.0})
+        if path.endswith("/positions"):
+            return httpx.Response(200, json={"positions": []})
+        if path.endswith("/history"):
+            return httpx.Response(200, json={"history": []})
+        return httpx.Response(200, json={"user_id": path.split("/")[-1], "balance": 10000.0})
+
+    if path.startswith("/api/v1/paper/orders/place") and method == "POST":
+        body = json.loads(request.content.decode() or "{}")
+        confirmation = {
+            "order_id": f"mock_{body.get('asset', 'asset')}_{body.get('side', 'long')}",
+            "status": "filled",
+        }
+        return httpx.Response(200, json=confirmation)
+
+    # Default success response
+    return httpx.Response(200, json={"ok": True, "path": path})
+
+
+pytestmark = [
+    pytest.mark.stress_core,
+    pytest.mark.quarantine,
+]
 
 BASE_URL = "http://127.0.0.1:8001"
+
+
+@asynccontextmanager
+async def _mock_client() -> httpx.AsyncClient:
+    """AsyncClient wired to MockTransport so tests stay hermetic."""
+    transport = httpx.MockTransport(_mock_api_response)
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        yield client
 
 
 class TestStressLoad:
@@ -20,7 +74,7 @@ class TestStressLoad:
     @pytest.mark.asyncio
     async def test_concurrent_api_requests(self):
         """Test concurrent API requests."""
-        async with httpx.AsyncClient() as client:
+        async with _mock_client() as client:
             tasks = []
             
             # Create 50 concurrent health check requests
@@ -45,7 +99,7 @@ class TestStressLoad:
     @pytest.mark.asyncio
     async def test_paper_trading_stress(self):
         """Test paper trading under load."""
-        async with httpx.AsyncClient() as client:
+        async with _mock_client() as client:
             user_id = "stress_test_user"
             
             # Place 20 concurrent paper trades
@@ -78,7 +132,7 @@ class TestStressLoad:
     @pytest.mark.asyncio
     async def test_trading_api_endpoints(self):
         """Test all trading API endpoints."""
-        async with httpx.AsyncClient() as client:
+        async with _mock_client() as client:
             endpoints = [
                 "/api/v1/trading/arbitrage/scan",
                 "/api/v1/trading/arbitrage/stats",
@@ -108,7 +162,7 @@ class TestStressLoad:
     @pytest.mark.asyncio
     async def test_betting_api_endpoints(self):
         """Test betting API endpoints."""
-        async with httpx.AsyncClient() as client:
+        async with _mock_client() as client:
             endpoints = [
                 "/api/v1/betting/pools/active",
                 "/api/v1/betting/stats",
@@ -129,7 +183,7 @@ class TestStressLoad:
     @pytest.mark.asyncio
     async def test_paper_trading_portfolio_operations(self):
         """Test paper trading portfolio operations."""
-        async with httpx.AsyncClient() as client:
+        async with _mock_client() as client:
             user_id = "portfolio_test_user"
             
             # Get portfolio

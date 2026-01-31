@@ -9,8 +9,9 @@ import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query
-import ccxt
 import httpx
+
+from utils.deps import get_ccxt
 
 router = APIRouter(prefix="/api/v1/live", tags=["live"])
 
@@ -104,29 +105,28 @@ async def fetch_crypto_news():
 
 
 async def fetch_prediction_markets():
-    """Fetch prediction market data from Polymarket."""
+    """Fetch prediction market data from Kalshi."""
     global _predictions_cache
     
     try:
-        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
-            # Polymarket API for trending markets
-            url = "https://gamma-api.polymarket.com/markets?limit=10"
-            response = await client.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                markets = data if isinstance(data, list) else data.get('data', data.get('markets', []))
-                _predictions_cache = [
-                    {
-                        'question': market.get('question', market.get('title', 'Unknown')),
-                        'yes_price': market.get('outcomePrices', ['0.5', '0.5'])[0] if market.get('outcomePrices') else 0.5,
-                        'no_price': market.get('outcomePrices', ['0.5', '0.5'])[1] if market.get('outcomePrices') else 0.5,
-                        'volume': market.get('volume', 0),
-                        'end_date': market.get('endDate', ''),
-                        'market_id': market.get('id', market.get('condition_id', ''))
-                    }
-                    for market in markets[:10]
-                ]
-                print(f"[LiveData] Fetched {len(_predictions_cache)} prediction markets")
+        # Import Kalshi aggregator to get real markets
+        from monitoring.prediction_markets import get_prediction_market_aggregator
+        aggregator = get_prediction_market_aggregator()
+        
+        # Get markets from Kalshi aggregator
+        kalshi_markets = aggregator.get_all_markets()
+        _predictions_cache = [
+            {
+                'question': market.question,
+                'yes_price': market.yes_price,
+                'no_price': market.no_price,
+                'volume': market.volume_24h,
+                'end_date': datetime.fromtimestamp(market.resolution_date).isoformat() if market.resolution_date else '',
+                'market_id': market.market_id
+            }
+            for market_id, market in list(kalshi_markets.items())[:10]
+        ]
+        print(f"[LiveData] Fetched {len(_predictions_cache)} Kalshi prediction markets")
     except Exception as e:
         print(f"Error fetching predictions: {e}")
         # Don't use fallback - let frontend handle empty data
@@ -242,6 +242,10 @@ async def get_chart_data(
     limit: int = 100
 ):
     """Get OHLCV chart data for a symbol."""
+    ccxt = get_ccxt()
+    if not ccxt:
+        raise HTTPException(status_code=503, detail="Charting unavailable: ccxt not installed")
+
     try:
         # Try Kraken first (no geo-restrictions)
         exchange = ccxt.kraken({'enableRateLimit': True})

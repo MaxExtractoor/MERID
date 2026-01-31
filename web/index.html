@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>MERID Dashboard</title>
     <style>
         body { font-family: monospace; background: #0a0a0a; color: #00ff41; padding: 20px; }
@@ -20,7 +23,7 @@
         function startStream() {
             const out = document.getElementById("output");
             out.innerHTML = "Opening stream...<br>";
-            const es = new EventSource("/submit");
+            const es = new EventSource("http://127.0.0.1:8011/submit");
             es.onmessage = (e) => {
                 const data = JSON.parse(e.data);
                 if (data.agent) {

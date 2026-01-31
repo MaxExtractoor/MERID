@@ -13,7 +13,11 @@ from typing import Optional, List, Dict
 from dataclasses import dataclass
 from datetime import datetime
 
-import tweepy
+try:  # tweepy is optional for test environments
+    import tweepy
+except ImportError:  # pragma: no cover - exercised when dependency missing
+    tweepy = None  # type: ignore[assignment]
+
 from utils.logger import get_logger
 
 logger = get_logger("agents.twitter_agent")
@@ -51,7 +55,11 @@ class TwitterAgent:
         self.access_token_secret = os.getenv('X_ACCESS_TOKEN_SECRET')
         
         # Validate credentials
-        if not all([self.api_key, self.api_secret, self.access_token, self.access_token_secret]):
+        if tweepy is None:
+            logger.warning("tweepy not installed - Twitter agent disabled")
+            self.enabled = False
+            self.client = None
+        elif not all([self.api_key, self.api_secret, self.access_token, self.access_token_secret]):
             logger.warning("Twitter credentials incomplete - agent will run in dry-run mode")
             self.enabled = False
             self.client = None

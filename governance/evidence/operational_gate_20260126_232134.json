@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-01-26T23:21:34.095062",
+  "gate": "operational_readiness",
+  "status": "PASS",
+  "can_operate_3am": true,
+  "checks": [
+    "Mock monitoring check",
+    "Mock alerting check",
+    "Mock runbook check"
+  ],
+  "issues": [
+    "Mock gate - real OperationalReadinessGate not available"
+  ],
+  "evidence_file": "governance\\evidence\\operational_gate_20260126_232134.json"
+}

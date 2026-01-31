@@ -12,6 +12,9 @@ from core.adversarial_hardening import (
 )
 
 
+pytestmark = pytest.mark.safety_critical
+
+
 def test_temporal_profile_normal_updates():
     """Test temporal profile accepts normal gradual changes."""
     profile = TemporalProfile(source="test_source", metric="price", max_slope=0.01)
@@ -117,6 +120,32 @@ def test_collusion_detection():
     clusters = graph.detect_collusion(threshold_internal=0.9, threshold_external=-0.5)
     # Should detect at least one cluster
     assert len(clusters) > 0
+
+
+def test_collusion_detection_is_deterministic_and_sign_aware():
+    """Repeated agreement should yield deterministic clusters even for constant signals."""
+    graph = SourceAgreementGraph(window_size=12, min_samples=6)
+
+    for _ in range(12):
+        graph.record_delta("sybil_a", 0.5)
+        graph.record_delta("sybil_b", 0.5)
+        graph.record_delta("honest", -0.2)
+
+    clusters = graph.detect_collusion(threshold_internal=0.7, threshold_external=-0.1)
+    assert clusters == [["sybil_a", "sybil_b"]]
+
+
+def test_collusion_detection_respects_thresholds_and_limits_false_positive():
+    """Low agreement pairs should not be clustered."""
+    graph = SourceAgreementGraph(window_size=15, min_samples=8)
+
+    for idx in range(15):
+        graph.record_delta("noisy_a", (-1) ** idx * 0.3)
+        graph.record_delta("noisy_b", (-1) ** (idx + 1) * 0.25)
+        graph.record_delta("honest", 0.1)
+
+    clusters = graph.detect_collusion(threshold_internal=0.85, threshold_external=0.2)
+    assert clusters == []
 
 
 def test_hardening_layer_integration():

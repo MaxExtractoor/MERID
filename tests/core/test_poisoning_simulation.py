@@ -9,6 +9,9 @@ from core.consensus_gate import resolve_consensus
 from core.consensus_math import Vote
 
 
+pytestmark = pytest.mark.safety_critical
+
+
 class TestSyntheticPoisoningAttacks:
     """Synthetic attack scenarios to validate adversarial hardening."""
 
@@ -73,7 +76,7 @@ class TestSyntheticPoisoningAttacks:
         # After multiple cycles, collusion should be detected
         hardening = get_hardening_layer()
         clusters = hardening.detect_collusion_clusters()
-        assert len(clusters) > 0, "Sybil collusion was not detected"
+        assert any({"sybil_a", "sybil_b"}.issubset(set(cluster)) for cluster in clusters), "Sybil collusion was not detected"
 
     def test_confidence_inflation_attack(self):
         """

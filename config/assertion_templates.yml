@@ -1,0 +1,495 @@
+# MERID Assertion Templates Configuration
+# Version: 1.0.0
+# Owner: core team
+
+library:
+  name: merid-assertions
+  version: 1.0.0
+  description: Canonical assertion templates for MERID reality, risk, and CI systems
+  owner_team: core
+  last_updated: "2026-01-24T19:45:00Z"
+
+templates:
+  # Core Null Checks
+  - template_id: core.nulls.value_must_not_be_null
+    version: 1
+    description: "Value for key must not be null/NaN/undefined."
+    category: core
+    severity_default: major
+    parameters:
+      - name: key
+        type: string
+        required: true
+        description: "Logical key or field name"
+      - name: context
+        type: string
+        required: true
+        description: "Where this value is used (pipeline_metric, api_field, etc.)"
+      - name: message
+        type: string
+        required: false
+        description: "Optional custom error message"
+    tags:
+      env: [dev, staging, prod]
+      language: [python, java, javascript]
+    owner_team: core
+    lifecycle: enforced
+    bindings:
+      python:
+        module: merid_assertions.core
+        function: assert_not_null
+      java:
+        class: com.merid.assertions.CoreAssertions
+        method: assertNotNull
+      javascript:
+        module: "@merid/assertions-core"
+        function: assertNotNull
+
+  # Reality Assertions
+  - template_id: reality.forecast.must_resolve
+    version: 1
+    description: "Forecasts must have outcomes recorded within allowed lag time."
+    category: reality
+    severity_default: major
+    parameters:
+      - name: market_id
+        type: string
+        required: true
+        description: "Market identifier"
+      - name: forecast_time
+        type: float
+        required: true
+        description: "Timestamp when forecast was made"
+      - name: max_resolution_lag_hours
+        type: float
+        required: true
+        description: "Maximum allowed lag in hours"
+      - name: resolution_source
+        type: string
+        required: true
+        description: "Expected resolution source (polymarket, kalshi, etc.)"
+    tags:
+      env: [sim, paper, live]
+      domain: [prediction_markets, forecasting]
+    owner_team: core
+    lifecycle: enforced
+
+  - template_id: reality.outcomes.must_be_consistent
+    version: 1
+    description: "Market outcomes must be consistent across venues and sources."
+    category: reality
+    severity_default: major
+    parameters:
+      - name: market_id
+        type: string
+        required: true
+        description: "Market identifier"
+      - name: outcome_sources
+        type: list
+        required: true
+        description: "List of outcome sources to compare"
+      - name: max_discrepancy
+        type: float
+        required: false
+        description: "Maximum allowed discrepancy between sources"
+    tags:
+      env: [sim, paper, live]
+      domain: [data_quality, governance]
+    owner_team: core
+    lifecycle: experimental
+
+  # Risk Assertions
+  - template_id: risk.exposure.asset_limit
+    version: 1
+    description: "Total exposure per asset must stay within configured limits."
+    category: risk
+    severity_default: major
+    parameters:
+      - name: asset_id
+        type: string
+        required: true
+        description: "Asset identifier"
+      - name: exposure_amount
+        type: float
+        required: true
+        description: "Current exposure amount"
+      - name: exposure_limit
+        type: float
+        required: true
+        description: "Maximum allowed exposure"
+    tags:
+      env: [paper, live]
+      domain: [risk_management, trading]
+    owner_team: risk
+    lifecycle: enforced
+
+  - template_id: risk.arbitrage.spread_liquidity_rules
+    version: 1
+    description: "Arbitrage executions must meet minimum spread and liquidity requirements."
+    category: risk
+    severity_default: major
+    parameters:
+      - name: venue_a
+        type: string
+        required: true
+        description: "First venue identifier"
+      - name: venue_b
+        type: string
+        required: true
+        description: "Second venue identifier"
+      - name: min_spread
+        type: float
+        required: true
+        description: "Minimum required spread"
+      - name: min_liquidity
+        type: float
+        required: true
+        description: "Minimum required liquidity"
+      - name: actual_spread
+        type: float
+        required: false
+        description: "Actual spread achieved"
+      - name: actual_liquidity
+        type: float
+        required: false
+        description: "Actual liquidity available"
+    tags:
+      env: [sim, paper, live]
+      domain: [arbitrage, trading]
+    owner_team: risk
+    lifecycle: enforced
+
+  # Data Quality Assertions
+  - template_id: data_quality.probabilities.sum_to_one
+    version: 1
+    description: "Market probabilities must sum to approximately 1.0."
+    category: data_quality
+    severity_default: minor
+    parameters:
+      - name: market_id
+        type: string
+        required: true
+        description: "Market identifier"
+      - name: probabilities
+        type: object
+        required: true
+        description: "Dictionary of outcome probabilities"
+      - name: epsilon
+        type: float
+        required: false
+        description: "Allowed deviation from 1.0"
+        default: 0.01
+    tags:
+      env: [dev, staging, prod]
+      domain: [data_validation, prediction_markets]
+    owner_team: data
+    lifecycle: enforced
+
+  - template_id: data_quality.no_missing_critical_fields
+    version: 1
+    description: "Critical data fields must not be missing or empty."
+    category: data_quality
+    severity_default: major
+    parameters:
+      - name: data_source
+        type: string
+        required: true
+        description: "Data source identifier"
+      - name: critical_fields
+        type: list
+        required: true
+        description: "List of critical field names"
+      - name: record_count
+        type: integer
+        required: false
+        description: "Number of records checked"
+    tags:
+      env: [dev, staging, prod]
+      domain: [data_validation, governance]
+    owner_team: data
+    lifecycle: enforced
+
+  # Execution Assertions
+  - template_id: execution.order.fill_within_timeout
+    version: 1
+    description: "Orders must be filled within configured timeout period."
+    category: execution
+    severity_default: major
+    parameters:
+      - name: order_id
+        type: string
+        required: true
+        description: "Order identifier"
+      - name: timeout_ms
+        type: float
+        required: true
+        description: "Timeout in milliseconds"
+      - name: venue
+        type: string
+        required: true
+        description: "Trading venue"
+    tags:
+      env: [paper, live]
+      domain: [trading, execution]
+    owner_team: trading
+    lifecycle: enforced
+
+  - template_id: execution.slippage_within_bounds
+    version: 1
+    description: "Order execution slippage must stay within acceptable bounds."
+    category: execution
+    severity_default: minor
+    parameters:
+      - name: order_id
+        type: string
+        required: true
+        description: "Order identifier"
+      - name: expected_price
+        type: float
+        required: true
+        description: "Expected execution price"
+      - name: actual_price
+        type: float
+        required: true
+        description: "Actual execution price"
+      - name: max_slippage_pct
+        type: float
+        required: true
+        description: "Maximum allowed slippage percentage"
+    tags:
+      env: [paper, live]
+      domain: [trading, execution]
+    owner_team: trading
+    lifecycle: experimental
+
+  # CI/CD Assertions
+  - template_id: ci.stage.execution_success
+    version: 1
+    description: "CI/CD pipeline stage must execute successfully."
+    category: ci
+    severity_default: major
+    parameters:
+      - name: stage
+        type: string
+        required: true
+        description: "Pipeline stage name"
+      - name: duration_ms
+        type: float
+        required: true
+        description: "Stage execution duration in milliseconds"
+      - name: pipeline_id
+        type: string
+        required: true
+        description: "Pipeline identifier"
+    tags:
+      env: [dev, staging, prod]
+      stage: [build, test, deploy, postdeploy]
+    owner_team: infra
+    lifecycle: enforced
+
+  - template_id: ci.stage.execution_failure
+    version: 1
+    description: "CI/CD pipeline stage failure tracking."
+    category: ci
+    severity_default: major
+    parameters:
+      - name: stage
+        type: string
+        required: true
+        description: "Pipeline stage name"
+      - name: duration_ms
+        type: float
+        required: true
+        description: "Stage execution duration in milliseconds"
+      - name: pipeline_id
+        type: string
+        required: true
+        description: "Pipeline identifier"
+      - name: error
+        type: string
+        required: true
+        description: "Error message or type"
+    tags:
+      env: [dev, staging, prod]
+      stage: [build, test, deploy, postdeploy]
+    owner_team: infra
+    lifecycle: enforced
+
+  - template_id: ci.timeout.operation_must_complete_within_sla
+    version: 1
+    description: "Operation must complete within SLA bounds."
+    category: ci
+    severity_default: major
+    parameters:
+      - name: operation
+        type: string
+        required: true
+        description: "Operation name"
+      - name: duration_ms
+        type: float
+        required: true
+        description: "Actual duration in milliseconds"
+      - name: max_duration_ms
+        type: float
+        required: true
+        description: "Maximum allowed duration"
+      - name: context
+        type: string
+        required: true
+        description: "Context (stage, service, etc.)"
+    tags:
+      env: [dev, staging, prod]
+      stage: [build, test, deploy]
+    owner_team: infra
+    lifecycle: enforced
+
+  - template_id: ci.resources.job_resource_usage_within_limits
+    version: 1
+    description: "Job CPU and memory must remain within configured bounds."
+    category: ci
+    severity_default: major
+    parameters:
+      - name: job_name
+        type: string
+        required: true
+        description: "Job identifier"
+      - name: cpu_pct
+        type: float
+        required: true
+        description: "CPU usage percentage"
+      - name: memory_mb
+        type: float
+        required: true
+        description: "Memory usage in MB"
+      - name: max_cpu_pct
+        type: float
+        required: true
+        description: "Maximum CPU percentage"
+      - name: max_memory_mb
+        type: float
+        required: true
+        description: "Maximum memory in MB"
+    tags:
+      env: [dev, staging, prod]
+      stage: [build, test, load_test]
+    owner_team: infra
+    lifecycle: enforced
+
+  - template_id: ci.nulls.forbidden_in_critical_outputs
+    version: 1
+    description: "Critical metrics must not contain null/NaN values."
+    category: ci
+    severity_default: major
+    parameters:
+      - name: metric_names
+        type: list
+        required: true
+        description: "List of metric keys to check"
+      - name: scope
+        type: string
+        required: true
+        description: "Scope (pipeline, service, test_suite)"
+    tags:
+      env: [dev, staging, prod]
+      stage: [build, test, deploy]
+    owner_team: infra
+    lifecycle: enforced
+
+  # Infrastructure Assertions
+  - template_id: infra.k8s.container_requests_limits_set
+    version: 1
+    description: "Critical pods must have sane memory requests/limits."
+    category: infra
+    severity_default: major
+    parameters:
+      - name: namespace
+        type: string
+        required: true
+        description: "Kubernetes namespace"
+      - name: deployment
+        type: string
+        required: true
+        description: "Deployment name"
+      - name: min_mem_request_mb
+        type: float
+        required: true
+        description: "Minimum memory request in MB"
+      - name: max_mem_limit_mb
+        type: float
+        required: true
+        description: "Maximum memory limit in MB"
+    tags:
+      env: [staging, prod]
+      domain: [kubernetes, infrastructure]
+    owner_team: infra
+    lifecycle: enforced
+
+  - template_id: infra.service.health.endpoints_healthy
+    version: 1
+    description: "Critical service endpoints must be healthy."
+    category: infra
+    severity_default: critical
+    parameters:
+      - name: service_name
+        type: string
+        required: true
+        description: "Service name"
+      - name: endpoints
+        type: list
+        required: true
+        description: "List of endpoint URLs to check"
+      - name: timeout_ms
+        type: float
+        required: true
+        description: "Health check timeout in milliseconds"
+    tags:
+      env: [staging, prod]
+      domain: [monitoring, health_checks]
+    owner_team: infra
+    lifecycle: enforced
+
+  # Test Assertions
+  - template_id: test.unit.timeout.logical_limit
+    version: 1
+    description: "Unit test must complete within logical timeout."
+    category: test
+    severity_default: minor
+    parameters:
+      - name: test_name
+        type: string
+        required: true
+        description: "Test name"
+      - name: max_duration_ms
+        type: float
+        required: true
+        description: "Maximum allowed duration"
+    tags:
+      env: [dev, staging]
+      stage: [unit_test, integration_test]
+    owner_team: core
+    lifecycle: enforced
+
+  - template_id: test.integration.timeout.sla_bound
+    version: 1
+    description: "Integration test must complete within SLA, accounting for network/IO."
+    category: test
+    severity_default: major
+    parameters:
+      - name: test_name
+        type: string
+        required: true
+        description: "Test name"
+      - name: max_duration_ms
+        type: float
+        required: true
+        description: "Maximum allowed duration"
+      - name: retries_allowed
+        type: integer
+        required: false
+        description: "Number of retries allowed"
+        default: 0
+    tags:
+      env: [dev, staging]
+      stage: [integration_test, e2e_test]
+    owner_team: core
+    lifecycle: enforced

@@ -1,0 +1,69 @@
+# Baseline v1: Multi-Category Production Baseline
+version: "v1_multi_category"
+date_established: "2026-01-24"
+status: "production_ready"
+
+# Core Metric
+primary_metric: "Brier score"
+baseline_value: 0.004316
+description: "Mean squared error on predicted probabilities (0=perfect, 1=worst)"
+
+# Validated Data Regimes
+validated_conditions:
+  - name: "crypto_only"
+    categories: ["crypto"]
+    max_opportunities: 5
+    brier_score: 0.004316
+  - name: "multi_category"
+    categories: ["crypto", "politics", "sports"]
+    max_opportunities: 8
+    brier_score: 0.004316
+  - name: "high_volume"
+    categories: ["crypto", "politics", "sports"]
+    max_opportunities: 10
+    brier_score: 0.004316
+
+# Heuristics Configuration
+heuristics:
+  spread_weight: 5.0
+  spread_cap: 0.80
+  liquidity_threshold: 1500000
+  liquidity_bonus_max: 0.08
+  venue_bonus_weight: 0.02
+  venue_bonus_max: 0.04
+  forecast_cap: 0.85
+
+# Selection Rules
+filters:
+  min_spread: 0.05
+  min_liquidity: 50000
+  categories: ["crypto", "politics", "sports"]
+  max_opportunities: 10
+
+# Performance Metrics
+performance:
+  latency_ms: ~850
+  error_rate: 0%
+  success_rate: 100%
+
+# Promotion Criteria
+promotion_gate:
+  brier_improvement_threshold: 0.01  # 1% improvement required
+  min_runs_for_promotion: 3
+  max_latency_regression: 10  # 10ms max regression
+  min_success_rate: 99.5%
+
+# Dataset Definition
+dataset:
+  time_window: "2026-01-24"
+  categories: ["crypto", "politics", "sports"]
+  venue_count: 2
+  opportunity_range: [5, 10]
+  liquidity_range: [50000, 1500000]
+
+# Quality Assurance
+quality_checks:
+  deterministic_behavior: true
+  repeatable_results: true
+  variance_tolerance: 0.0001
+  calibration_stability: true

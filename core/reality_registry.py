@@ -217,6 +217,58 @@ class AssertionAlgebra:
         return True, "All assertions valid"
 
 
+class UIVisibility(Enum):
+    """UI visibility control for assertions."""
+    VISIBLE = "visible"
+    SUPPRESSED = "suppressed"
+    BLIND = "blind"
+
+
+class AuditorMode(Enum):
+    """Reality auditor operating modes."""
+    NORMAL = "normal"
+    STRICT = "strict"
+    BLINDNESS = "blindness"
+
+
+class BlindnessSeverity(Enum):
+    """Blindness severity levels."""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+@dataclass
+class BlindnessContext:
+    """Context for blindness detection and management."""
+    mode: AuditorMode = AuditorMode.NORMAL
+    severity: BlindnessSeverity = BlindnessSeverity.LOW
+    trigger_reason: str = ""
+    affected_domains: List[AssertionDomain] = field(default_factory=list)
+    mitigation_actions: List[str] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "mode": self.mode.value,
+            "severity": self.severity.value,
+            "trigger_reason": self.trigger_reason,
+            "affected_domains": [d.value for d in self.affected_domains],
+            "mitigation_actions": self.mitigation_actions,
+            "created_at": self.created_at,
+        }
+
+
+class AssertionPipelineHealth(Enum):
+    """Assertion pipeline health status."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
 class RealityRegistry:
     """
     The single source of truth for what MERID knows.

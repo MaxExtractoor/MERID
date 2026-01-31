@@ -278,11 +278,17 @@ class MultiAgentEnvironment(ABC):
     
     def get_observation_space(self, agent_id: str) -> Tuple[int, ...]:
         """Get observation space shape for agent."""
-        raise NotImplementedError
+        # Default observation space for Phase 0
+        # Returns a tuple representing the observation dimensions
+        # Format: (market_features, agent_state, global_state, history_length)
+        return (10, 8, 6, 20)  # (market_data, agent_state, global_state, history)
     
     def get_action_space(self, agent_id: str) -> int:
         """Get action space size for agent."""
-        raise NotImplementedError
+        # Default action space for Phase 0
+        # Returns the number of possible actions
+        # Actions: 0=hold, 1=buy, 2=sell, 3=stake, 4=unstake
+        return 5
 
 
 class MARLAgent:

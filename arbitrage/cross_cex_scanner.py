@@ -19,6 +19,7 @@ from schemas.arbitrage import (
     ArbitrageOpportunity, ArbitrageType, ArbitrageStatus,
     ArbitrageLeg, VenueType, CostModel
 )
+from utils.deps import get_ccxt_async
 from utils.logger import get_logger
 
 logger = get_logger("arbitrage.cross_cex")
@@ -115,9 +116,10 @@ class CrossCEXScanner(ArbitrageScanner):
         """Fetch prices from all exchanges for a symbol."""
         prices = []
         
+        ccxt_async = get_ccxt_async()
         for exchange in self.config.enabled_venues:
             try:
-                price = await self._fetch_exchange_price(exchange, symbol)
+                price = await self._fetch_exchange_price(ccxt_async, exchange, symbol)
                 if price:
                     prices.append(price)
                     self._price_cache[exchange][symbol] = price
@@ -126,7 +128,7 @@ class CrossCEXScanner(ArbitrageScanner):
         
         return prices
     
-    async def _fetch_exchange_price(self, exchange: str, symbol: str) -> Optional[ExchangePrice]:
+    async def _fetch_exchange_price(self, ccxt_async, exchange: str, symbol: str) -> Optional[ExchangePrice]:
         """Fetch price from a single exchange."""
         # In production, use CCXT to fetch real prices
         # For now, simulate with realistic spreads
@@ -141,9 +143,7 @@ class CrossCEXScanner(ArbitrageScanner):
                 return None
             
             # Fetch real orderbook from CCXT for accurate bid/ask
-            import ccxt.async_support as ccxt_async
-            
-            exchange_class = getattr(ccxt_async, exchange, None)
+            exchange_class = getattr(ccxt_async, exchange, None) if ccxt_async else None
             if not exchange_class:
                 # Fallback to price feed data
                 return ExchangePrice(
