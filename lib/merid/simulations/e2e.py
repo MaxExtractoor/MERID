@@ -43,7 +43,8 @@ class E2ESimulation:
                 price = min(a, b)
                 order = {"symbol": "BTCUSD", "side": side, "quantity": 1, "price": price}
                 try:
-                    r = place_order(order, idempotency_key=None, actor=self.actor)
+                    # Provide a test account so pre-trade checks can run in integration tests
+                    r = place_order(order, idempotency_key=None, actor=self.actor, account={"balance": 100_000, "max_notional_pct": 0.5})
                     self.orders.append(r)
                 except Exception:
                     # swallow to continue sim; audits will record failures
