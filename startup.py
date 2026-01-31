@@ -32,11 +32,16 @@ class MERIDStartup:
         self.components_initialized = []
         self.health_checks_passed = []
         self.errors = []
-    
+        self.skip_neo4j = os.getenv("MERID_SKIP_NEO4J", "0").lower() in {"1", "true", "yes", "on"}
+
     def load_environment(self) -> bool:
         """Load and validate environment variables."""
         logger.info("Loading environment configuration...")
-        
+
+        if self.skip_neo4j:
+            logger.warning("MERID_SKIP_NEO4J=1 - skipping Neo4j-dependent components.")
+            return True
+
         required_vars = [
             "NEO4J_URI",
             "NEO4J_USER",
@@ -58,7 +63,11 @@ class MERIDStartup:
     def initialize_graph_service(self) -> bool:
         """Initialize Neo4j graph database connection."""
         logger.info("Initializing Neo4j GraphService...")
-        
+
+        if self.skip_neo4j:
+            logger.info("  - Skipped (MERID_SKIP_NEO4J=1)")
+            return True
+
         try:
             from core.graph_service import initialize_graph_service
             
@@ -84,7 +93,11 @@ class MERIDStartup:
     def initialize_reality_registry(self) -> bool:
         """Initialize Reality Registry."""
         logger.info("Initializing Reality Registry...")
-        
+
+        if self.skip_neo4j:
+            logger.info("  - Skipped (MERID_SKIP_NEO4J=1)")
+            return True
+
         try:
             from core.reality_registry import RealityRegistry
             
@@ -105,7 +118,7 @@ class MERIDStartup:
     def initialize_execution_controller(self) -> bool:
         """Initialize Execution Controller."""
         logger.info("Initializing Execution Controller...")
-        
+
         try:
             # Module doesn't exist yet - skip for now
             logger.warning("⚠ Execution Controller module not found - skipping")
@@ -119,7 +132,11 @@ class MERIDStartup:
     def initialize_risk_envelope(self) -> bool:
         """Initialize Risk Envelope Manager."""
         logger.info("Initializing Risk Envelope Manager...")
-        
+
+        if self.skip_neo4j:
+            logger.info("  - Skipped (MERID_SKIP_NEO4J=1)")
+            return True
+
         try:
             from core.automated_risk_controls import AutomatedRiskControls
             
@@ -139,7 +156,11 @@ class MERIDStartup:
     def initialize_threat_monitor(self) -> bool:
         """Initialize Enhanced Threat Monitor."""
         logger.info("Initializing Enhanced Threat Monitor...")
-        
+
+        if self.skip_neo4j:
+            logger.info("  - Skipped (MERID_SKIP_NEO4J=1)")
+            return True
+
         try:
             from core.enhanced_threat_model import get_enhanced_threat_monitor
             
@@ -161,7 +182,11 @@ class MERIDStartup:
     def initialize_model_inventory(self) -> bool:
         """Initialize Model Inventory."""
         logger.info("Initializing Model Inventory...")
-        
+
+        if self.skip_neo4j:
+            logger.info("  - Skipped (MERID_SKIP_NEO4J=1)")
+            return True
+
         try:
             from core.model_risk_management import get_model_inventory
             
@@ -183,7 +208,11 @@ class MERIDStartup:
     def initialize_observability(self) -> bool:
         """Initialize Observability Dashboard."""
         logger.info("Initializing Observability Dashboard...")
-        
+
+        if self.skip_neo4j:
+            logger.info("  - Skipped (MERID_SKIP_NEO4J=1)")
+            return True
+
         try:
             from core.observability_dashboards import get_observability_dashboard
             
@@ -201,7 +230,11 @@ class MERIDStartup:
     def initialize_compliance_engine(self) -> bool:
         """Initialize Programmable Compliance Engine."""
         logger.info("Initializing Programmable Compliance Engine...")
-        
+
+        if self.skip_neo4j:
+            logger.info("  - Skipped (MERID_SKIP_NEO4J=1)")
+            return True
+
         try:
             from core.defi_compliance import get_programmable_compliance_engine
             
@@ -224,30 +257,36 @@ class MERIDStartup:
     def run_health_checks(self) -> bool:
         """Run health checks on all initialized components."""
         logger.info("\nRunning health checks...")
-        
+
         all_passed = True
-        
+
         # Check 1: Neo4j connectivity
-        try:
-            from core.graph_service import get_graph_service
-            graph = get_graph_service()
-            health = graph.get_system_health_summary()
-            logger.info(f"✓ Neo4j: {health.get('total_proposals', 0)} proposals in database")
-            self.health_checks_passed.append("Neo4j connectivity")
-        except Exception as e:
-            logger.error(f"✗ Neo4j health check failed: {e}")
-            all_passed = False
-        
+        if not self.skip_neo4j:
+            try:
+                from core.graph_service import get_graph_service
+                graph = get_graph_service()
+                health = graph.get_system_health_summary()
+                logger.info(f"✓ Neo4j: {health.get('total_proposals', 0)} proposals in database")
+                self.health_checks_passed.append("Neo4j connectivity")
+            except Exception as e:
+                logger.error(f"✗ Neo4j health check failed: {e}")
+                all_passed = False
+        else:
+            logger.info("- Skipped Neo4j health check (MERID_SKIP_NEO4J=1)")
+
         # Check 2: Reality Registry
-        try:
-            from core.reality_registry import get_reality_registry
-            registry = get_reality_registry()
-            domains = registry.get_all_domains()
-            logger.info(f"✓ Reality Registry: {len(domains)} domains active")
-            self.health_checks_passed.append("Reality Registry")
-        except Exception as e:
-            logger.error(f"✗ Reality Registry health check failed: {e}")
-            all_passed = False
+        if not self.skip_neo4j:
+            try:
+                from core.reality_registry import get_reality_registry
+                registry = get_reality_registry()
+                domains = registry.get_all_domains()
+                logger.info(f"✓ Reality Registry: {len(domains)} domains active")
+                self.health_checks_passed.append("Reality Registry")
+            except Exception as e:
+                logger.error(f"✗ Reality Registry health check failed: {e}")
+                all_passed = False
+        else:
+            logger.info("- Skipped Reality Registry health check (MERID_SKIP_NEO4J=1)")
         
         # Check 3: Execution Controller
         try:
@@ -264,15 +303,18 @@ class MERIDStartup:
             all_passed = False
         
         # Check 4: Risk Envelope
-        try:
-            from core.risk_envelope import get_risk_envelope_manager
-            risk_mgr = get_risk_envelope_manager()
-            logger.info("✓ Risk Envelope: Limits configured")
-            self.health_checks_passed.append("Risk Envelope")
-        except Exception as e:
-            logger.error(f"✗ Risk Envelope health check failed: {e}")
-            all_passed = False
-        
+        if not self.skip_neo4j:
+            try:
+                from core.risk_envelope import get_risk_envelope_manager
+                risk_mgr = get_risk_envelope_manager()
+                logger.info("✓ Risk Envelope: Limits configured")
+                self.health_checks_passed.append("Risk Envelope")
+            except Exception as e:
+                logger.error(f"✗ Risk Envelope health check failed: {e}")
+                all_passed = False
+        else:
+            logger.info("- Skipped Risk Envelope health check (MERID_SKIP_NEO4J=1)")
+
         return all_passed
     
     def print_startup_summary(self):

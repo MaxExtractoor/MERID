@@ -690,20 +690,36 @@ async def get_paper_trading_status():
 
 @router.get("/mode/set")
 async def set_trading_mode(mode: str = "paper"):
-    """Set trading mode (paper/hybrid/live)."""
+    """Set trading mode (paper/hybrid/live).
+
+    Frontend legacy endpoint that now proxies to the TradingModeController so
+    the system is explicitly locked to paper trading when requested.
+    """
+    from trading.mode_controller import get_trading_mode_controller
+
     valid_modes = ["paper", "hybrid", "live"]
     if mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f"Invalid mode. Must be one of: {valid_modes}")
-    
-    # For now, only paper mode is supported
+
+    controller = get_trading_mode_controller()
+
     if mode != "paper":
+        # Keep MERID in paper mode but inform caller why
         return {
             "status": "warning",
-            "mode": "paper",
-            "message": f"{mode} mode not yet enabled. Defaulting to paper mode."
+            "mode": controller.mode_name,
+            "message": f"{mode} mode not enabled. Staying in {controller.mode_name} mode."
         }
-    
+
+    controller.set_mode("paper", changed_by="web.api.trading", reason="Dashboard requested paper mode")
+    status = controller.get_status()
+
     return {
         "status": "success",
-        "mode": mode
+        "mode": status["mode"],
+        "message": "Trading mode locked to paper",
+        "details": {
+            "live_approval_required": status["live_approval_required"],
+            "spectator_trades": status["spectator_trades_count"],
+        }
     }

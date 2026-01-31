@@ -7,6 +7,11 @@ uvicorn[standard]==0.34.0
 pydantic[email]==2.12.5
 python-multipart==0.0.20
 
+# Structured Logging
+python-json-logger==2.0.7
+structlog==24.4.0
+asgi-correlation-id==4.3.1
+
 # Web & HTTP
 httpx==0.28.1
 aiohttp==3.11.11
@@ -51,6 +56,11 @@ tweepy==4.14.0
 # Crypto APIs
 ccxt==4.4.42
 
+# Polymarket Integration
+polymarket-clob==0.1.0
+gql==3.5.0
+websockets==13.1
+
 # Task Scheduling (Optional)
 apache-airflow==2.10.4
 
@@ -58,6 +68,7 @@ apache-airflow==2.10.4
 pytest==8.3.4
 pytest-asyncio==0.25.2
 pytest-cov==6.0.0
+pytest-xdist==3.6.1
 
 # Code Quality
 black==24.10.0
@@ -150,6 +161,16 @@ typer==0.15.1
 # Documentation
 mkdocs==1.6.1
 mkdocs-material==9.5.47
+
+# Resilience & Circuit Breakers (NEW for Gate 3)
+circuit-breaker==2.0.1
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-exporter-jaeger==1.21.0
+opentelemetry-instrumentation-requests==0.42b0
+opentelemetry-instrumentation-logging==0.42b0
+opentelemetry-instrumentation-fastapi==0.42b0
+opentelemetry-propagator-grpc==1.21.0
 
 # License: MIT
 # All packages are production-ready and actively maintained

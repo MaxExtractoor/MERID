@@ -18,6 +18,7 @@ from trading.mode_controller import (
     get_trading_mode_controller,
     TradingMode,
 )
+from trading.paper_trading import get_paper_engine
 from utils.logger import get_logger
 
 logger = get_logger("web.api.trading_mode")
@@ -61,9 +62,29 @@ class CloseTradeRequest(BaseModel):
 
 @router.get("/status")
 async def get_trading_mode_status() -> Dict[str, Any]:
-    """Get current trading mode status."""
+    """Get current trading mode status and live paper telemetry."""
     controller = get_trading_mode_controller()
-    return controller.get_status()
+    status = controller.get_status()
+    try:
+        engine = get_paper_engine()
+        stats = engine.get_global_stats()
+    except Exception as exc:
+        logger.warning(f"Failed to gather paper telemetry: {exc}")
+        stats = {
+            "accounts": 0,
+            "active_positions": 0,
+            "volume_24h": 0,
+            "trades_24h": 0,
+            "total_pnl": 0,
+            "equity": 0,
+            "cash": 0,
+            "positions": []
+        }
+
+    return {
+        "controller": status,
+        "paper": stats
+    }
 
 
 @router.get("/mode")

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
+from merid.execution.router import ExecutionRouter, TraderIdentity
 from utils.logger import get_logger
 
 logger = get_logger("trading.agents.execution")
@@ -111,9 +112,55 @@ class ExecutionAgent:
         self.daily_pnl = 0.0
         self.last_reset_date = time.time()
         self.failed_execution_count = 0
+        
+        # Recent trades for WebSocket streaming
+        self.recent_trades: List[Dict] = []
         self.consecutive_failures = 0
         
         logger.info("ExecutionAgent initialized with advanced risk management")
+        self._router = ExecutionRouter()
+
+    async def place_order_via_router(
+        self,
+        *,
+        venue_id: str,
+        instrument: str,
+        side: OrderSide,
+        size: float,
+        price: Optional[float] = None,
+        order_type: OrderType = OrderType.MARKET,
+        agent_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Order:
+        """Route order through the unified ExecutionRouter with guard+explainability."""
+        trader = TraderIdentity(trader_type="agent", trader_id=agent_id or "execution-agent")
+        result = await self._router.submit_trade(
+            trader=trader,
+            venue_id=venue_id,
+            symbol=instrument,
+            side=side.value,
+            size=size,
+            price=price,
+            params={"order_type": order_type.value},
+            metadata=metadata or {},
+        )
+        # Convert TradeResult back to ExecutionAgent Order for compatibility
+        order = Order(
+            order_id=result.tx_id or "unknown",
+            venue=result.venue,
+            asset=result.symbol,
+            side=OrderSide(result.side),
+            order_type=OrderType(order_type.value),
+            size=result.size,
+            price=result.price,
+            status=OrderStatus.FILLED if result.success else OrderStatus.REJECTED,
+            filled_at=time.time() if result.success else None,
+            fill_price=result.price,
+            filled_size=result.size,
+        )
+        if result.error:
+            order.rejection_reason = result.error
+        return order
     
     async def execute_order(self, order: Order) -> Order:
         """

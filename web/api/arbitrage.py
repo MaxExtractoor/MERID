@@ -7,6 +7,7 @@ Provides API access to arbitrage scanners, opportunities, and controls.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
@@ -30,15 +31,34 @@ logger = get_logger("web.api.arbitrage")
 
 # Store recent opportunities for API access
 _recent_opportunities: List[Dict[str, Any]] = []
+_latest_scan_snapshot: Dict[str, Any] = {}
 _max_opportunities: int = 100
+
+
+def _success(payload: Dict[str, Any], data_mode: str = "live") -> Dict[str, Any]:
+    data = dict(payload)
+    data.setdefault("status", "success")
+    data["data_mode"] = data_mode
+    data["timestamp"] = time.time()
+    return data
+
+
+def _offline(reason: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = dict(extra) if extra else {}
+    payload["error"] = reason
+    return _success(payload, data_mode="offline")
 
 
 def _opportunity_callback(opp: ArbitrageOpportunity) -> None:
     """Callback to store opportunities."""
-    global _recent_opportunities
+    global _recent_opportunities, _latest_scan_snapshot
     _recent_opportunities.append(opp.to_dict())
     if len(_recent_opportunities) > _max_opportunities:
         _recent_opportunities = _recent_opportunities[-_max_opportunities:]
+    scanner_id = opp.source_scanner or opp.arb_type.value.lower()
+    bucket = _latest_scan_snapshot.setdefault(scanner_id, [])
+    bucket.insert(0, opp.to_dict())
+    del bucket[_max_opportunities:]
 
 
 # Register callbacks on scanner creation
@@ -322,6 +342,88 @@ async def enable_symbol(request: SymbolControlRequest) -> Dict[str, Any]:
 async def get_cost_model_status() -> Dict[str, Any]:
     """Get cost model status."""
     return get_cost_model_engine().get_status()
+
+
+def _collect_scanner_data() -> List[Dict[str, Any]]:
+    scanners = [
+        get_cross_cex_scanner(),
+        get_dex_cex_scanner(),
+        get_perp_spot_scanner(),
+        get_funding_rate_scanner(),
+    ]
+    payload: List[Dict[str, Any]] = []
+    for scanner in scanners:
+        try:
+            status = scanner.get_status()
+            metrics = status.get("metrics", {})
+            last_scan_ts = metrics.get("last_scan_time")
+            payload.append({
+                "scanner_id": status.get("scanner_id"),
+                "arb_type": status.get("scanner_type"),
+                "enabled": status.get("state") in {ScannerState.RUNNING.value, ScannerState.PAUSED.value},
+                "state": status.get("state"),
+                "last_scan_ts": last_scan_ts,
+                "opportunities_detected_24h": metrics.get("opportunities_found", 0),
+                "opportunities_executed_24h": metrics.get("opportunities_executed", 0),
+                "win_rate_24h": metrics.get("win_rate", 0.0),
+                "gross_profit_usd_24h": metrics.get("total_potential_profit_usd", 0.0),
+                "net_profit_usd_24h": metrics.get("total_realized_profit_usd", 0.0),
+                "open_opportunities": len(_latest_scan_snapshot.get(status.get("scanner_id"), [])),
+            })
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"Scanner data collection failed: {exc}")
+    return payload
+
+
+@router.get("/stats")
+async def get_arbitrage_stats() -> Dict[str, Any]:
+    """Return aggregate stats for each arbitrage scanner."""
+    try:
+        scanners = _collect_scanner_data()
+        totals = {
+            "opportunities_detected_24h": sum(s["opportunities_detected_24h"] for s in scanners),
+            "opportunities_executed_24h": sum(s["opportunities_executed_24h"] for s in scanners),
+            "win_rate_24h": 0.0,
+            "gross_profit_usd_24h": sum(s["gross_profit_usd_24h"] for s in scanners),
+            "net_profit_usd_24h": sum(s["net_profit_usd_24h"] for s in scanners),
+            "open_opportunities": sum(s["open_opportunities"] for s in scanners),
+        }
+        if totals["opportunities_detected_24h"]:
+            totals["win_rate_24h"] = (
+                totals["opportunities_executed_24h"] / totals["opportunities_detected_24h"]
+            )
+
+        return _success({
+            "scanners": scanners,
+            "totals": totals,
+        }, data_mode="live" if scanners else "offline")
+    except Exception as exc:
+        logger.exception("Arbitrage stats failed: %s", exc)
+        return _offline(f"arbitrage_stats_error: {exc}", {"scanners": [], "totals": {}})
+
+
+@router.get("/scan")
+async def get_latest_scan() -> Dict[str, Any]:
+    """Return most recent opportunities grouped by scanner."""
+    try:
+        scanners_payload: List[Dict[str, Any]] = []
+        for scanner in _collect_scanner_data():
+            opportunities = _latest_scan_snapshot.get(scanner["scanner_id"], [])
+            scanners_payload.append({
+                "scanner_id": scanner["scanner_id"],
+                "arb_type": scanner["arb_type"],
+                "state": scanner["state"],
+                "enabled": scanner["enabled"],
+                "last_scan_ts": scanner["last_scan_ts"],
+                "opportunities": opportunities,
+            })
+
+        return _success({
+            "scanners": scanners_payload,
+        }, data_mode="live" if scanners_payload else "offline")
+    except Exception as exc:
+        logger.exception("Arbitrage scan snapshot failed: %s", exc)
+        return _offline(f"arbitrage_scan_error: {exc}", {"scanners": []})
 
 
 @router.post("/start-all")

@@ -22,15 +22,13 @@ from hardening.circuit_breaker import (
 )
 from hardening.lockdown import (
     LockdownManager,
-    LockdownConfig,
     LockdownLevel,
     LockdownReason,
-    LockdownEvent,
     get_lockdown_manager,
-    trigger_emergency_lockdown,
-    is_system_locked,
-    can_execute,
-    can_trade,
+    enable_lockdown,
+    disable_lockdown,
+    is_lockdown_active,
+    check_operation_allowed,
 )
 
 __all__ = [
@@ -44,13 +42,11 @@ __all__ = [
     "get_circuit_registry",
     "get_circuit",
     "LockdownManager",
-    "LockdownConfig",
     "LockdownLevel",
     "LockdownReason",
-    "LockdownEvent",
     "get_lockdown_manager",
-    "trigger_emergency_lockdown",
-    "is_system_locked",
-    "can_execute",
-    "can_trade",
+    "enable_lockdown",
+    "disable_lockdown",
+    "is_lockdown_active",
+    "check_operation_allowed",
 ]

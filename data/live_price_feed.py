@@ -13,8 +13,16 @@ from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-import ccxt
+import httpx
+
+from utils.deps import optional_dependency
+
+ccxt = optional_dependency("ccxt")  # type: ignore
+_CCXT_AVAILABLE = ccxt is not None
+
 from utils.logger import get_logger
+from core.environment import get_environment_flags
+from core.network_client import RoutingProfile, get_network_client
 
 logger = get_logger("data.live_price_feed")
 
@@ -54,6 +62,7 @@ class LivePriceFeed:
         
         self.running = False
         self.update_interval = 1.0  # Update every 1 second
+        self.exchange_priority = ['kraken', 'coinbase', 'gemini']  # All accessible from US
         
         # Error recovery parameters
         self.max_retries = 3
@@ -62,6 +71,9 @@ class LivePriceFeed:
         self.last_successful_fetch: Dict[str, float] = {}
         self.circuit_breaker_threshold = 10  # failures before circuit break
         self.circuit_breaker_reset_time = 300  # 5 minutes
+        self._network_client = get_network_client()
+        self._module_name = "data.live_price_feed"
+        self._network_client.register_module_profile(self._module_name, RoutingProfile.VPN_A)
         
         # Initialize exchanges
         self._initialize_exchanges()
@@ -69,20 +81,71 @@ class LivePriceFeed:
         logger.info(f"Live price feed initialized for {len(self.symbols)} symbols with error recovery")
     
     def _initialize_exchanges(self):
-        """Initialize exchange connections with retry logic."""
+        """Initialize exchange connections with real API keys and retry logic."""
+        if not _CCXT_AVAILABLE:
+            logger.warning("CCXT not installed; LivePriceFeed running in offline stub mode")
+            return
+
+        if not self._can_use_network():
+            logger.warning("LivePriceFeed running in offline/VPN-restricted mode; skipping exchange init")
+            return
+
+        if self.exchanges:
+            # Defensive: ensure previous exchange clients are torn down before recreating.
+            logger.debug("Closing existing exchanges before reinitializing")
+            asyncio.get_event_loop().create_task(self._close_exchanges())
+        
+        # Import environment variables for API keys
+        import os
+        
         exchanges_config = [
-            ('kraken', {'enableRateLimit': True}, 'primary'),
-            ('coinbase', {'enableRateLimit': True}, 'backup'),
-            ('binance', {'enableRateLimit': True, 'options': {'defaultType': 'future'}}, 'tertiary')
+            ('kraken', {
+                'enableRateLimit': True,
+                'apiKey': os.getenv('KRAKEN_API_KEY'),
+                'privateKey': os.getenv('KRAKE_PRIVATE_KEY')
+            }, 'primary'),
+            ('coinbase', {
+                'enableRateLimit': True,
+                'apiKey': os.getenv('COINBASE_API_KEY'),
+                'secret': os.getenv('COINBASE_API_SECRET')
+            }, 'backup'),
+            ('gemini', {
+                'enableRateLimit': True,
+                # Gemini doesn't require API keys for public data
+            }, 'tertiary'),
+            ('binance', {
+                'enableRateLimit': True,
+                'apiKey': os.getenv('BINANCE_API_KEY'),
+                'secret': os.getenv('BINANCE_API_SECRET')
+            }, 'quaternary'),
+            ('bybit', {
+                'enableRateLimit': True,
+                'apiKey': os.getenv('BYBIT_API_KEY'),
+                'secret': os.getenv('BYBIT_API_SECRET')
+            }, 'quinary'),
+            ('okx', {
+                'enableRateLimit': True,
+                'apiKey': os.getenv('OKX_API_KEY'),
+                'secret': os.getenv('OKX_SECRET_KEY'),
+                'password': os.getenv('OKX_API_KEY_NAME')
+            }, 'senary')
         ]
         
         for exchange_name, config, priority in exchanges_config:
             for attempt in range(self.max_retries):
                 try:
                     exchange_class = getattr(ccxt, exchange_name)
-                    self.exchanges[exchange_name] = exchange_class(config)
+                    
+                    # Filter out None values from config
+                    filtered_config = {k: v for k, v in config.items() if v is not None and v != 'change_me'}
+                    
+                    self._guard_network_call("init", exchange_name)
+                    self.exchanges[exchange_name] = exchange_class(filtered_config)
                     self.exchange_failures[exchange_name] = 0
-                    logger.info(f"{exchange_name.capitalize()} exchange initialized ({priority})")
+                    
+                    # Log API key status
+                    api_key_status = "configured" if filtered_config.get('apiKey') else "public only"
+                    logger.info(f"{exchange_name.capitalize()} exchange initialized ({priority}) - {api_key_status}")
                     break
                 except Exception as exc:
                     if attempt < self.max_retries - 1:
@@ -99,6 +162,10 @@ class LivePriceFeed:
         
         while self.running:
             try:
+                if not self._can_use_network():
+                    logger.info("Network disabled (offline/VPN restriction); skipping fetch cycle")
+                    await asyncio.sleep(self.update_interval)
+                    continue
                 await self.fetch_and_broadcast_prices()
                 await asyncio.sleep(self.update_interval)
             except Exception as exc:
@@ -109,6 +176,25 @@ class LivePriceFeed:
         """Stop price streaming."""
         self.running = False
         logger.info("Price streaming stopped")
+        asyncio.get_event_loop().create_task(self._close_exchanges())
+
+    async def _close_exchanges(self):
+        """Close any CCXT exchange clients to avoid aiohttp connector leaks."""
+        if not self.exchanges:
+            return
+        logger.debug("Closing %d exchange clients", len(self.exchanges))
+        for name, exchange in list(self.exchanges.items()):
+            close_fn = getattr(exchange, "close", None)
+            if not close_fn:
+                continue
+            try:
+                if asyncio.iscoroutinefunction(close_fn):
+                    await close_fn()
+                else:
+                    close_fn()
+            except Exception as exc:
+                logger.warning(f"Failed to close exchange {name}: {exc}")
+        self.exchanges.clear()
     
     async def fetch_and_broadcast_prices(self):
         """Fetch latest prices and broadcast to subscribers with error recovery."""
@@ -117,10 +203,8 @@ class LivePriceFeed:
     
     async def _fetch_price_with_retry(self, symbol: str):
         """Fetch price with retry logic and circuit breaker."""
-        exchange_priority = ['kraken', 'coinbase', 'binance']
-        
         fetched = False
-        for exchange_name in exchange_priority:
+        for exchange_name in self.exchange_priority:
             if exchange_name not in self.exchanges:
                 continue
             
@@ -133,6 +217,7 @@ class LivePriceFeed:
             for attempt in range(self.max_retries):
                 try:
                     exchange = self.exchanges[exchange_name]
+                    self._guard_network_call("ticker", f"{exchange_name}:{symbol}")
                     
                     # Adjust symbol format for different exchanges
                     fetch_symbol = symbol
@@ -181,14 +266,15 @@ class LivePriceFeed:
                 break
         
         if not fetched:
-            logger.warning(f"Failed to fetch {symbol} from all exchanges")
-            # Use cached data if available
-            if symbol in self.price_cache:
-                cached_age = (datetime.now() - self.price_cache[symbol].timestamp).total_seconds()
-                if cached_age < 60:  # Use cache if less than 60 seconds old
-                    logger.info(f"Using cached price for {symbol} (age: {cached_age:.1f}s)")
-                else:
-                    logger.error(f"Cached price for {symbol} too old ({cached_age:.1f}s)")
+            fetched = await self._fetch_from_coingecko(symbol)
+            if not fetched:
+                logger.warning(f"Failed to fetch {symbol} from exchanges and CoinGecko")
+                if symbol in self.price_cache:
+                    cached_age = (datetime.now() - self.price_cache[symbol].timestamp).total_seconds()
+                    if cached_age < 60:
+                        logger.info(f"Using cached price for {symbol} (age: {cached_age:.1f}s)")
+                    else:
+                        logger.error(f"Cached price for {symbol} too old ({cached_age:.1f}s)")
     
     async def _broadcast_update(self, price_data: PriceData):
         """Broadcast price update to all subscribers."""
@@ -221,6 +307,11 @@ class LivePriceFeed:
         """Get current cached price for a symbol."""
         return self.price_cache.get(symbol)
     
+    # Legacy compatibility
+    def get_price(self, symbol: str) -> Optional[PriceData]:
+        """Alias for older callers expecting get_price."""
+        return self.get_current_price(symbol)
+    
     def get_all_prices(self) -> Dict[str, PriceData]:
         """Get all current cached prices."""
         return self.price_cache.copy()
@@ -250,6 +341,7 @@ class LivePriceFeed:
                 
             try:
                 exchange = self.exchanges[exchange_name]
+                self._guard_network_call("ohlcv", f"{exchange_name}:{symbol}:{timeframe}")
                 fetch_symbol = symbol
                 if exchange_name in ['kraken', 'coinbase']:
                     fetch_symbol = symbol.replace('/USDT', '/USD')
@@ -348,8 +440,76 @@ class LivePriceFeed:
             "subscribers": len(self.subscribers),
             "cached_prices": len(self.price_cache),
             "update_interval": self.update_interval,
-            "exchange_health": exchange_health
+            "exchange_health": exchange_health,
         }
+
+    def _can_use_network(self) -> bool:
+        flags = get_environment_flags()
+        if not flags.online:
+            return False
+        return self._network_client.can_call_outbound(self._module_name)
+
+    def _guard_network_call(self, action: str, endpoint: str) -> None:
+        self._network_client.resolve_endpoint(self._module_name, f"{action}:{endpoint}")
+
+    async def _fetch_from_coingecko(self, symbol: str) -> bool:
+        """Fallback to CoinGecko public API (US-accessible)."""
+        mapping = {
+            'BTC/USDT': 'bitcoin',
+            'ETH/USDT': 'ethereum',
+            'SOL/USDT': 'solana',
+            'AVAX/USDT': 'avalanche-2',
+        }
+        asset_id = mapping.get(symbol)
+        if not asset_id:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    "https://api.coingecko.com/api/v3/coins/markets",
+                    params={
+                        "vs_currency": "usd",
+                        "ids": asset_id,
+                        "price_change_percentage": "24h",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+        except Exception as exc:
+            logger.error(f"CoinGecko fallback failed for {symbol}: {exc}")
+            return False
+        if not data:
+            return False
+        market = data[0]
+        price = float(market.get("current_price") or 0)
+        if price <= 0:
+            return False
+        timestamp = datetime.utcnow()
+        price_data = PriceData(
+            symbol=symbol,
+            price=price,
+            bid=price * 0.999,
+            ask=price * 1.001,
+            volume_24h=float(market.get("total_volume") or 0),
+            change_24h_pct=float(market.get("price_change_percentage_24h") or 0.0),
+            timestamp=timestamp,
+            exchange="coingecko",
+        )
+        self.price_cache[symbol] = price_data
+        await self._broadcast_update(price_data)
+        return True
+
+    def get_latest_prices(self) -> Dict[str, Dict[str, Any]]:
+        """Get latest cached prices for all symbols."""
+        prices = {}
+        for symbol, price_data in self.price_cache.items():
+            prices[symbol] = {
+                "price": price_data.price,
+                "change_24h": getattr(price_data, "change_24h", 0.0),
+                "timestamp": price_data.timestamp.isoformat() if price_data.timestamp else None,
+                "source": price_data.source
+            }
+        return prices
 
 
 # Global singleton

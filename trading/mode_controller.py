@@ -214,10 +214,11 @@ class TradingModeController:
         confidence: float = 0.0,
         reasoning: str = "",
         metadata: Optional[Dict[str, Any]] = None,
+        trade_id: Optional[str] = None,
     ) -> SpectatorTrade:
         """Record a trade for spectator viewing."""
         trade = SpectatorTrade(
-            trade_id=str(uuid.uuid4()),
+            trade_id=trade_id or str(uuid.uuid4()),
             agent_id=agent_id,
             symbol=symbol,
             action=action,

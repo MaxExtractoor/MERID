@@ -23,6 +23,7 @@ from agents.reflection.analytics import PerformanceAnalytics, AgentMetrics
 from agents.reflection.learning import LearningEngine, LearningInsight
 from agents.reflection.context import ContextProvider
 from agents.reflection.persistence import PersistenceLayer
+from agents.reflection.orchestrator import ReflectionOrchestrator
 
 __all__ = [
     "ReflectionCore",
@@ -35,6 +36,7 @@ __all__ = [
     "LearningInsight",
     "ContextProvider",
     "PersistenceLayer",
+    "ReflectionOrchestrator",
     "get_reflection_system",
 ]
 

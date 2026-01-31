@@ -136,6 +136,7 @@ class ReflectionCore:
         self._update_count = 0
         self._query_count = 0
         self._start_time = time.time()
+        self._started_at = time.time()
         
         logger.info("ReflectionCore initialized (max_reflections=%d)", max_reflections)
     
@@ -345,14 +346,16 @@ class ReflectionCore:
     def get_stats(self) -> Dict[str, Any]:
         """Get core layer statistics."""
         with self._lock:
-            uptime = time.time() - self._start_time
+            current_time = time.time()
+            uptime_seconds = current_time - getattr(self, "_started_at", self._start_time)
+            uptime_seconds = max(uptime_seconds, 1e-3)
             
             outcome_counts = {}
             for reflection in self._reflections.values():
                 outcome = reflection.outcome.value
                 outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
             
-            return {
+            stats = {
                 "total_reflections": len(self._reflections),
                 "active_agents": len(self._agent_index),
                 "unique_energies": len(self._energy_index),
@@ -363,10 +366,12 @@ class ReflectionCore:
                     "queries": self._query_count
                 },
                 "performance": {
-                    "uptime_seconds": round(uptime, 2),
-                    "records_per_second": round(self._record_count / uptime, 2) if uptime > 0 else 0
+                    "uptime_seconds": uptime_seconds,
+                    "decisions_per_minute": self._record_count / max(uptime_seconds / 60, 1),
+                    "updates_per_minute": self._update_count / max(uptime_seconds / 60, 1),
                 }
             }
+            return stats
     
     def _evict_oldest(self):
         """Evict oldest reflections when limit exceeded."""

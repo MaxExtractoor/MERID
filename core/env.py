@@ -87,6 +87,26 @@ class Capabilities:
         return self._get("X_BEARER_TOKEN")
 
     @property
+    def x_bot_service_token(self) -> str | None:
+        return self._get("X_BOT_SERVICE_TOKEN")
+
+    @property
+    def moat_service_token(self) -> str | None:
+        return self._get("MOAT_SERVICE_TOKEN", self.x_bot_service_token)
+
+    @property
+    def telegram_bot_service_token(self) -> str | None:
+        return self._get("TELEGRAM_BOT_SERVICE_TOKEN")
+
+    @property
+    def merid_api_base_url(self) -> str:
+        return self._get("MERID_API_BASE_URL", "http://localhost:8000/api/v1")
+
+    @property
+    def x_bot_account_id(self) -> str | None:
+        return self._get("X_BOT_ACCOUNT_ID")
+
+    @property
     def searxng_url(self) -> str | None:
         return self._get("SEARXNG_URL", "http://localhost:8080/search")
 

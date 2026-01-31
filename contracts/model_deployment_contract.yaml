@@ -1,0 +1,262 @@
+# MERID Model & Deployment Contract
+# Version: 1.0
+# Last Updated: 2026-01-14
+# Authority: Research Swarm proposes, Governance approves, Human approval for live
+
+version: "1.0"
+effective_date: "2026-01-14T00:00:00Z"
+
+# Promotion Pipeline
+promotion_pipeline:
+  stages:
+    - name: "simulation"
+      description: "Pure simulation with no real capital"
+      duration_min_days: 7
+      
+    - name: "paper"
+      description: "Paper trading with simulated fills"
+      duration_min_days: 14
+      
+    - name: "guarded_live"
+      description: "Live trading with reduced limits"
+      duration_min_days: 30
+      
+    - name: "full_live"
+      description: "Full live trading with standard limits"
+      duration_min_days: null  # Indefinite
+
+# Promotion Criteria
+promotion_criteria:
+  simulation_to_paper:
+    min_runs: 10
+    min_success_rate: 0.70
+    min_sharpe_ratio: 0.5
+    max_drawdown_pct: 0.15
+    min_profit_factor: 1.2
+    human_approval_required: false
+    
+  paper_to_guarded_live:
+    min_runs: 5
+    min_success_rate: 0.60
+    min_sharpe_ratio: 0.8
+    max_drawdown_pct: 0.10
+    min_profit_factor: 1.3
+    min_win_rate: 0.45
+    max_consecutive_losses: 4
+    regime_robustness_required: true  # Must perform in multiple regimes
+    human_approval_required: true
+    
+  guarded_live_to_full_live:
+    min_runs: 10
+    min_success_rate: 0.65
+    min_sharpe_ratio: 1.0
+    max_drawdown_pct: 0.08
+    min_profit_factor: 1.5
+    min_calmar_ratio: 2.0
+    stability_window_days: 30
+    human_approval_required: true
+    governance_vote_required: true
+
+# Demotion Criteria (Automatic)
+demotion_triggers:
+  full_live_to_guarded:
+    drawdown_threshold_pct: 0.10
+    sharpe_below: 0.5
+    consecutive_losses: 5
+    var_breach_count: 3
+    
+  guarded_to_paper:
+    drawdown_threshold_pct: 0.08
+    sharpe_below: 0.3
+    consecutive_losses: 4
+    error_rate_above: 0.15
+    
+  paper_to_simulation:
+    drawdown_threshold_pct: 0.12
+    negative_sharpe: true
+    error_rate_above: 0.20
+    
+  any_to_disabled:
+    critical_error: true
+    safe_mode_violation: true
+    constitution_violation: true
+
+# Required Metrics
+required_metrics:
+  performance:
+    - "cumulative_return"
+    - "cagr"
+    - "sharpe_ratio"
+    - "sortino_ratio"
+    - "calmar_ratio"
+    - "information_ratio"
+    
+  risk:
+    - "max_drawdown"
+    - "avg_drawdown"
+    - "volatility"
+    - "var_95"
+    - "cvar_95"
+    - "tail_risk_ratio"
+    
+  execution:
+    - "avg_slippage"
+    - "avg_impact"
+    - "fill_ratio"
+    - "reject_rate"
+    - "avg_latency_ms"
+    
+  behavioral:
+    - "constraint_adherence_rate"
+    - "fallback_activation_count"
+    - "safe_mode_trigger_count"
+    - "constitution_compliance_rate"
+
+# Regime Robustness Requirements
+regime_requirements:
+  min_regimes_tested: 3
+  regimes:
+    - "low_volatility"
+    - "high_volatility"
+    - "trending_up"
+    - "trending_down"
+    - "sideways"
+    - "high_liquidity"
+    - "low_liquidity"
+    
+  performance_per_regime:
+    min_sharpe_any_regime: 0.3
+    max_drawdown_any_regime: 0.20
+    no_catastrophic_regime: true  # No regime with <-50% return
+
+# Testing Requirements
+testing_requirements:
+  before_paper:
+    - "unit_tests_pass"
+    - "integration_tests_pass"
+    - "simulation_runs_complete"
+    - "risk_limit_validation"
+    
+  before_guarded_live:
+    - "paper_trading_complete"
+    - "stress_tests_pass"
+    - "regime_tests_pass"
+    - "fallback_tests_pass"
+    - "human_review_complete"
+    
+  before_full_live:
+    - "guarded_live_stable"
+    - "governance_approval"
+    - "final_human_signoff"
+    - "rollback_plan_documented"
+
+# Rollback Criteria
+rollback_triggers:
+  immediate_rollback:
+    - "critical_error_detected"
+    - "safe_mode_triggered"
+    - "constitution_violation"
+    - "drawdown_exceeds_threshold"
+    
+  scheduled_rollback:
+    - "performance_degradation"
+    - "drift_detected"
+    - "regime_shift_poor_performance"
+    
+  rollback_procedure:
+    1: "Pause strategy immediately"
+    2: "Assess current positions"
+    3: "Close or hedge positions if needed"
+    4: "Revert to previous version"
+    5: "Notify stakeholders"
+    6: "Conduct post-mortem"
+
+# Version Control
+version_control:
+  required_fields:
+    - "version_hash"
+    - "description"
+    - "author"
+    - "timestamp"
+    - "parent_version"
+    - "promotion_stage"
+    
+  storage:
+    - "git_repository"
+    - "model_registry"
+    - "governance_contract"  # On-chain for critical models
+    
+  retention:
+    keep_all_versions: true
+    min_retention_days: 365
+
+# Approval Workflow
+approval_workflow:
+  simulation_to_paper:
+    steps:
+      - "automated_metrics_check"
+      - "governor_agent_review"
+    
+  paper_to_guarded_live:
+    steps:
+      - "automated_metrics_check"
+      - "governor_agent_review"
+      - "risk_admin_approval"
+      - "human_signoff"
+    
+  guarded_live_to_full_live:
+    steps:
+      - "automated_metrics_check"
+      - "governor_agent_review"
+      - "risk_admin_approval"
+      - "ops_lead_approval"
+      - "governance_vote"
+      - "final_human_signoff"
+    timeout_hours: 72
+
+# Monitoring and Reporting
+monitoring:
+  real_time_metrics:
+    - "pnl"
+    - "drawdown"
+    - "position_sizes"
+    - "risk_utilization"
+    
+  daily_reports:
+    - "performance_summary"
+    - "risk_metrics"
+    - "execution_quality"
+    - "behavioral_compliance"
+    
+  weekly_reviews:
+    - "regime_performance"
+    - "drift_analysis"
+    - "promotion_eligibility"
+    - "demotion_risk"
+
+# Change Control
+change_authority:
+  criteria_adjustments:
+    approvers: ["risk_admin", "ops_lead"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 48
+    
+  emergency_demotion:
+    approvers: ["governor_agent", "risk_admin"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 0
+    
+  pipeline_changes:
+    approvers: ["ops_lead", "dev_lead"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 72
+    governance_vote_required: true
+
+# Audit and Compliance
+audit_requirements:
+  log_all_promotions: true
+  log_all_demotions: true
+  log_all_approvals: true
+  log_all_rollbacks: true
+  explanation_required: true
+  monthly_audit_report: true

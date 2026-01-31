@@ -19,6 +19,7 @@ from schemas.arbitrage import (
     ArbitrageOpportunity, ArbitrageType, ArbitrageStatus,
     ArbitrageLeg, VenueType, CostModel
 )
+from utils.deps import get_ccxt_async
 from utils.logger import get_logger
 
 logger = get_logger("arbitrage.perp_spot")
@@ -112,6 +113,7 @@ class PerpSpotScanner(ArbitrageScanner):
         logger.info(f"Venues: {self.config.enabled_venues}")
         logger.info(f"Symbols: {self.config.enabled_symbols}")
         logger.info(f"Min annualized basis: {self._min_basis_annualized}%")
+
     
     async def _cleanup(self) -> None:
         """Cleanup scanner."""
@@ -121,12 +123,17 @@ class PerpSpotScanner(ArbitrageScanner):
         """Scan for perp-spot basis opportunities."""
         opportunities = []
         
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
+            logger.warning("CCXT async support unavailable; skipping perp-spot scan cycle")
+            return opportunities
+
         for symbol in self.config.enabled_symbols:
             for exchange in self.config.enabled_venues:
                 # Fetch perp and spot prices
-                perp_price = await self._fetch_perp_price(exchange, symbol)
-                spot_price = await self._fetch_spot_price(exchange, symbol)
-                
+                perp_price = await self._fetch_perp_price(ccxt_async, exchange, symbol)
+                spot_price = await self._fetch_spot_price(ccxt_async, exchange, symbol)
+
                 if not perp_price or not spot_price:
                     continue
                 
@@ -137,11 +144,9 @@ class PerpSpotScanner(ArbitrageScanner):
         
         return opportunities
     
-    async def _fetch_perp_price(self, exchange: str, symbol: str) -> Optional[PerpPrice]:
+    async def _fetch_perp_price(self, ccxt_async, exchange: str, symbol: str) -> Optional[PerpPrice]:
         """Fetch perpetual futures price from CCXT."""
         try:
-            import ccxt.async_support as ccxt_async
-            
             # Get exchange instance
             exchange_class = getattr(ccxt_async, exchange, None)
             if not exchange_class:
@@ -196,11 +201,9 @@ class PerpSpotScanner(ArbitrageScanner):
             logger.debug(f"Perp price fetch error for {exchange}/{symbol}: {e}")
             return None
     
-    async def _fetch_spot_price(self, exchange: str, symbol: str) -> Optional[SpotPrice]:
+    async def _fetch_spot_price(self, ccxt_async, exchange: str, symbol: str) -> Optional[SpotPrice]:
         """Fetch spot price from CCXT with real bid/ask."""
         try:
-            import ccxt.async_support as ccxt_async
-            
             # Get exchange instance
             exchange_class = getattr(ccxt_async, exchange, None)
             if not exchange_class:

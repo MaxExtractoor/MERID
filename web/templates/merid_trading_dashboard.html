@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID - Algorithmic Trading & Portfolio Management</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+        
+        * {
+            font-family: 'Inter', sans-serif;
+        }
+        
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #111111;
+            --bg-tertiary: #1a1a1a;
+            --border-color: #2a2a2a;
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0a0;
+            --text-tertiary: #666666;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --accent: #3b82f6;
+        }
+        
+        body {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            overflow-x: hidden;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+            background: #3a3a3a;
+        }
+        
+        .metric-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            transition: all 0.2s ease;
+        }
+        
+        .metric-card:hover {
+            border-color: var(--accent);
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.1);
+        }
+        
+        .nav-item {
+            transition: all 0.2s ease;
+            border-radius: 6px;
+        }
+        
+        .nav-item:hover {
+            background: var(--bg-tertiary);
+            transform: translateX(2px);
+        }
+        
+        .nav-item.active {
+            background: var(--accent);
+            color: white;
+        }
+        
+        .table-row-hover:hover {
+            background: var(--bg-tertiary);
+        }
+        
+        .price-up {
+            color: var(--success);
+        }
+        
+        .price-down {
+            color: var(--danger);
+        }
+        
+        .price-neutral {
+            color: var(--text-secondary);
+        }
+        
+        .shimmer {
+            background: linear-gradient(90deg, var(--bg-secondary) 25%, var(--bg-tertiary) 50%, var(--bg-secondary) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+        }
+        
+        @keyframes shimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        
+        .pulse-green {
+            animation: pulse-green 2s infinite;
+        }
+        
+        @keyframes pulse-green {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+            50% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
+        }
+        
+        .tab-active {
+            border-bottom: 2px solid var(--accent);
+            color: var(--accent);
+        }
+        
+        .status-badge {
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .status-live {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--success);
+            border: 1px solid var(--success);
+        }
+        
+        .status-paper {
+            background: rgba(59, 130, 246, 0.2);
+            color: var(--accent);
+            border: 1px solid var(--accent);
+        }
+        
+        .status-dev {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--warning);
+            border: 1px solid var(--warning);
+        }
+        
+        .risk-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .risk-low { background: var(--success); }
+        .risk-medium { background: var(--warning); }
+        .risk-high { background: var(--danger); }
+    </style>
+</head>
+<body class="scrollbar-thin">
+    <!-- Top Command Bar -->
+    <header class="sticky top-0 z-50 bg-black border-b border-gray-800">
+        <div class="flex items-center justify-between px-4 py-3">
+            <!-- Logo & Environment -->
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2">
+                    <div class="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
+                        <i data-lucide="trending-up" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <span class="text-xl font-bold">MERID</span>
+                </div>
+                <div class="status-badge status-live pulse-green">LIVE</div>
+                <div class="text-sm text-gray-400">|</div>
+                <div class="text-sm">
+                    <span class="text-gray-400">P&L:</span>
+                    <span class="text-green-400 font-semibold ml-1">+$12,847.32</span>
+                    <span class="text-green-400 text-xs ml-1">(+2.34%)</span>
+                </div>
+            </div>
+            
+            <!-- Command Bar -->
+            <div class="flex-1 max-w-md mx-8">
+                <div class="relative">
+                    <input type="text" placeholder="Search symbols, commands, or actions..." 
+                           class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 pl-10 text-sm focus:outline-none focus:border-blue-500">
+                    <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-gray-400"></i>
+                </div>
+            </div>
+            
+            <!-- Right Actions -->
+            <div class="flex items-center gap-4">
+                <button class="p-2 hover:bg-gray-800 rounded-lg transition-colors">
+                    <i data-lucide="bell" class="w-5 h-5"></i>
+                    <span class="absolute -mt-1 -mr-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center">3</span>
+                </button>
+                <button class="p-2 hover:bg-gray-800 rounded-lg transition-colors">
+                    <i data-lucide="settings" class="w-5 h-5"></i>
+                </button>
+                <div class="flex items-center gap-2">
+                    <div class="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center">
+                        <span class="text-sm font-semibold">JD</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+    
+    <div class="flex h-screen pt-14">
+        <!-- Left Sidebar Navigation -->
+        <nav class="w-64 bg-black border-r border-gray-800 overflow-y-auto scrollbar-thin">
+            <div class="p-4">
+                <div class="space-y-1">
+                    <a href="#" class="nav-item active flex items-center gap-3 px-3 py-2 text-sm">
+                        <i data-lucide="layout-dashboard" class="w-4 h-4"></i>
+                        <span>Overview</span>
+                    </a>
+                    <a href="#" class="nav-item flex items-center gap-3 px-3 py-2 text-sm text-gray-400">
+                        <i data-lucide="activity" class="w-4 h-4"></i>
+                        <span>Live Trading</span>
+                    </a>
+                    <a href="#" class="nav-item flex items-center gap-3 px-3 py-2 text-sm text-gray-400">
+                        <i data-lucide="search" class="w-4 h-4"></i>
+                        <span>Research</span>
+                    </a>
+                    <a href="#" class="nav-item flex items-center gap-3 px-3 py-2 text-sm text-gray-400">
+                        <i data-lucide="trending-up" class="w-4 h-4"></i>
+                        <span>Prediction Markets</span>
+                    </a>
+                    <a href="#" class="nav-item flex items-center gap-3 px-3 py-2 text-sm text-gray-400">
+                        <i data-lucide="shield" class="w-4 h-4"></i>
+                        <span>Risk</span>
+                    </a>
+                    <a href="#" class="nav-item flex items-center gap-3 px-3 py-2 text-sm text-gray-400">
+                        <i data-lucide="cpu" class="w-4 h-4"></i>
+                        <span>Bots/Agents</span>
+                    </a>
+                    <a href="#" class="nav-item flex items-center gap-3 px-3 py-2 text-sm text-gray-400">
+                        <i data-lucide="file-text" class="w-4 h-4"></i>
+                        <span>Logs</span>
+                    </a>
+                    <a href="#" class="nav-item flex items-center gap-3 px-3 py-2 text-sm text-gray-400">
+                        <i data-lucide="settings" class="w-4 h-4"></i>
+                        <span>Settings</span>
+                    </a>
+                    <a href="#" class="nav-item flex items-center gap-3 px-3 py-2 text-sm text-gray-400">
+                        <i data-lucide="api" class="w-4 h-4"></i>
+                        <span>API Dashboard</span>
+                    </a>
+                </div>
+            </div>
+        </nav>
+        
+        <!-- Main Content Area -->
+        <main class="flex-1 overflow-hidden">
+            <div class="h-full overflow-y-auto scrollbar-thin">
+                <!-- Overview Screen Content -->
+                <div class="p-6">
+                    <!-- Portfolio Snapshot -->
+                    <div class="metric-card p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <h2 class="text-lg font-semibold">Portfolio Snapshot</h2>
+                            <span class="text-xs text-gray-400">Last updated: 2s ago</span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                            <div>
+                                <div class="text-sm text-gray-400 mb-1">Total Equity</div>
+                                <div class="text-2xl font-bold">$562,847.32</div>
+                            </div>
+                            <div>
+                                <div class="text-sm text-gray-400 mb-1">Daily P&L</div>
+                                <div class="text-2xl font-bold text-green-400">+$12,847.32</div>
+                                <div class="text-sm text-green-400">+2.34%</div>
+                            </div>
+                            <div>
+                                <div class="text-sm text-gray-400 mb-1">Available Margin</div>
+                                <div class="text-2xl font-bold">$124,523.18</div>
+                                <div class="text-sm text-gray-400">22.1% available</div>
+                            </div>
+                            <div>
+                                <div class="text-sm text-gray-400 mb-1">7-Day Performance</div>
+                                <canvas id="portfolioSparkline" width="120" height="40"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Key Metrics Grid -->
+                    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
+                        <div class="metric-card p-4">
+                            <div class="text-sm text-gray-400 mb-1">Win Rate</div>
+                            <div class="text-xl font-bold text-green-400">68.4%</div>
+                            <div class="text-xs text-gray-400">Last 30 days</div>
+                        </div>
+                        <div class="metric-card p-4">
+                            <div class="text-sm text-gray-400 mb-1">Sharpe Ratio</div>
+                            <div class="text-xl font-bold">1.84</div>
+                            <div class="text-xs text-gray-400">Annualized</div>
+                        </div>
+                        <div class="metric-card p-4">
+                            <div class="text-sm text-gray-400 mb-1">Max Drawdown</div>
+                            <div class="text-xl font-bold text-red-400">-8.2%</div>
+                            <div class="text-xs text-gray-400">All time</div>
+                        </div>
+                        <div class="metric-card p-4">
+                            <div class="text-sm text-gray-400 mb-1">Open Risk</div>
+                            <div class="text-xl font-bold text-yellow-400">$45,231</div>
+                            <div class="text-xs text-gray-400">8.0% of equity</div>
+                        </div>
+                        <div class="metric-card p-4">
+                            <div class="text-sm text-gray-400 mb-1">Active Bots</div>
+                            <div class="text-xl font-bold">12</div>
+                            <div class="text-xs text-gray-400">3 paused</div>
+                        </div>
+                        <div class="metric-card p-4">
+                            <div class="text-sm text-gray-400 mb-1">API Health</div>
+                            <div class="text-xl font-bold text-green-400">94%</div>
+                            <div class="text-xs text-gray-400">17/18 online</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Watchlist Table -->
+                    <div class="metric-card p-6 mb-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <h2 class="text-lg font-semibold">Live Watchlist</h2>
+                            <button class="text-sm text-blue-400 hover:text-blue-300">Add Symbol</button>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead>
+                                    <tr class="text-left text-gray-400 border-b border-gray-800">
+                                        <th class="pb-2">Symbol</th>
+                                        <th class="pb-2">Last Price</th>
+                                        <th class="pb-2">24h Change</th>
+                                        <th class="pb-2">Volume</th>
+                                        <th class="pb-2">Spread</th>
+                                        <th class="pb-2">Venue</th>
+                                        <th class="pb-2">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="watchlistTable">
+                                    <!-- Watchlist rows will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <!-- Multi-tab Chart Area -->
+                    <div class="metric-card p-6">
+                        <div class="border-b border-gray-800 mb-6">
+                            <div class="flex space-x-6">
+                                <button class="tab-active pb-2 px-1 text-sm font-medium" onclick="switchChartTab('price')">Price</button>
+                                <button class="pb-2 px-1 text-sm font-medium text-gray-400 hover:text-white" onclick="switchChartTab('pnl')">P&L</button>
+                                <button class="pb-2 px-1 text-sm font-medium text-gray-400 hover:text-white" onclick="switchChartTab('exposure')">Exposure</button>
+                                <button class="pb-2 px-1 text-sm font-medium text-gray-400 hover:text-white" onclick="switchChartTab('predictions')">Predictions</button>
+                            </div>
+                        </div>
+                        <div class="h-96">
+                            <canvas id="mainChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+        
+        <!-- Right Sidebar -->
+        <aside class="w-80 bg-black border-l border-gray-800 overflow-y-auto scrollbar-thin">
+            <!-- Positions Summary -->
+            <div class="p-4 border-b border-gray-800">
+                <h3 class="text-sm font-semibold mb-3">Open Positions</h3>
+                <div class="space-y-2">
+                    <div class="flex justify-between text-sm">
+                        <span class="text-gray-400">Total Positions:</span>
+                        <span>24</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                        <span class="text-gray-400">Unrealized P&L:</span>
+                        <span class="text-green-400">+$8,234.12</span>
+                    </div>
+                    <div class="flex justify-between text-sm">
+                        <span class="text-gray-400">Margin Used:</span>
+                        <span>$438,324.14 (77.9%)</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Recent Orders -->
+            <div class="p-4 border-b border-gray-800">
+                <h3 class="text-sm font-semibold mb-3">Recent Orders</h3>
+                <div class="space-y-2" id="recentOrders">
+                    <!-- Orders will be populated here -->
+                </div>
+            </div>
+            
+            <!-- Alerts -->
+            <div class="p-4">
+                <h3 class="text-sm font-semibold mb-3">Alerts</h3>
+                <div class="space-y-2" id="alertsPanel">
+                    <!-- Alerts will be populated here -->
+                </div>
+            </div>
+        </aside>
+    </div>
+    
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+        
+        // Global state
+        let currentChartTab = 'price';
+        let mainChart = null;
+        let portfolioSparkline = null;
+        
+        // Mock data
+        const watchlistData = [
+            { symbol: 'BTC/USD', price: 43256.78, change: 2.34, volume: '1.2B', spread: '0.01%', venue: 'Coinbase' },
+            { symbol: 'ETH/USD', price: 2245.12, change: -1.23, volume: '890M', spread: '0.02%', venue: 'Kraken' },
+            { symbol: 'SOL/USD', price: 98.45, change: 5.67, volume: '445M', spread: '0.03%', venue: 'Binance' },
+            { symbol: 'AAPL', price: 178.92, change: 0.45, volume: '52M', spread: '0.01%', venue: 'Alpaca' },
+            { symbol: 'NVDA', price: 485.23, change: 3.21, volume: '38M', spread: '0.02%', venue: 'Alpaca' },
+            { symbol: 'BTC/USD-PERP', price: 43258.90, change: 2.35, volume: '2.1B', spread: '0.005%', venue: 'Bybit' }
+        ];
+        
+        const recentOrders = [
+            { symbol: 'BTC/USD', side: 'BUY', type: 'LIMIT', size: '0.1', status: 'FILLED', time: '2m ago' },
+            { symbol: 'ETH/USD', side: 'SELL', type: 'MARKET', size: '2.5', status: 'PENDING', time: '5m ago' },
+            { symbol: 'NVDA', side: 'BUY', type: 'LIMIT', size: '50', status: 'FILLED', time: '12m ago' }
+        ];
+        
+        const alerts = [
+            { type: 'warning', message: 'BTC volatility increased 45%', time: '1m ago' },
+            { type: 'info', message: 'Risk bot paused: threshold reached', time: '3m ago' },
+            { type: 'success', message: 'Arb opportunity detected: ETH-USD', time: '7m ago' }
+        ];
+        
+        // Initialize portfolio sparkline
+        function initPortfolioSparkline() {
+            const ctx = document.getElementById('portfolioSparkline').getContext('2d');
+            portfolioSparkline = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+                    datasets: [{
+                        data: [545000, 548000, 542000, 551000, 558000, 562000, 562847],
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: { enabled: false }
+                    },
+                    scales: {
+                        x: { display: false },
+                        y: { display: false }
+                    }
+                }
+            });
+        }
+        
+        // Initialize main chart
+        function initMainChart() {
+            const ctx = document.getElementById('mainChart').getContext('2d');
+            mainChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: []
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: { color: '#a0a0a0' }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: '#2a2a2a' },
+                            ticks: { color: '#a0a0a0' }
+                        },
+                        y: {
+                            grid: { color: '#2a2a2a' },
+                            ticks: { color: '#a0a0a0' }
+                        }
+                    }
+                }
+            });
+            
+            // Load initial chart data
+            loadChartData('price');
+        }
+        
+        // Load chart data based on tab
+        function loadChartData(tab) {
+            let chartData;
+            
+            switch(tab) {
+                case 'price':
+                    chartData = {
+                        labels: ['09:00', '09:30', '10:00', '10:30', '11:00', '11:30', '12:00'],
+                        datasets: [{
+                            label: 'BTC/USD',
+                            data: [42800, 42950, 43100, 43050, 43200, 43150, 43256],
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.1
+                        }]
+                    };
+                    break;
+                case 'pnl':
+                    chartData = {
+                        labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+                        datasets: [{
+                            label: 'Daily P&L',
+                            data: [2340, -1230, 3450, 1230, 5670, 2340, 12847],
+                            borderColor: '#10b981',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            type: 'bar'
+                        }]
+                    };
+                    break;
+                case 'exposure':
+                    chartData = {
+                        labels: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00'],
+                        datasets: [
+                            {
+                                label: 'Crypto',
+                                data: [120000, 125000, 122000, 128000, 135000, 132000, 138000],
+                                backgroundColor: 'rgba(59, 130, 246, 0.7)'
+                            },
+                            {
+                                label: 'Equities',
+                                data: [80000, 82000, 85000, 83000, 87000, 86000, 88000],
+                                backgroundColor: 'rgba(16, 185, 129, 0.7)'
+                            },
+                            {
+                                label: 'FX',
+                                data: [45000, 44000, 46000, 47000, 45000, 48000, 47000],
+                                backgroundColor: 'rgba(245, 158, 11, 0.7)'
+                            }
+                        ]
+                    };
+                    break;
+                case 'predictions':
+                    chartData = {
+                        labels: ['BTC > $45k', 'ETH > $2.5k', 'SOL > $100', 'Rate Cut', 'Election'],
+                        datasets: [{
+                            label: 'Probability',
+                            data: [65, 72, 58, 45, 38],
+                            backgroundColor: [
+                                'rgba(59, 130, 246, 0.7)',
+                                'rgba(16, 185, 129, 0.7)',
+                                'rgba(245, 158, 11, 0.7)',
+                                'rgba(239, 68, 68, 0.7)',
+                                'rgba(168, 85, 247, 0.7)'
+                            ],
+                            borderWidth: 0
+                        }]
+                    };
+                    break;
+            }
+            
+            if (mainChart) {
+                mainChart.data = chartData;
+                mainChart.update();
+            }
+        }
+        
+        // Switch chart tab
+        function switchChartTab(tab) {
+            currentChartTab = tab;
+            
+            // Update tab styling
+            document.querySelectorAll('.tab-active').forEach(el => {
+                el.classList.remove('tab-active', 'text-blue-400');
+                el.classList.add('text-gray-400');
+            });
+            
+            event.target.classList.add('tab-active', 'text-blue-400');
+            event.target.classList.remove('text-gray-400');
+            
+            // Load new chart data
+            loadChartData(tab);
+        }
+        
+        // Populate watchlist table
+        function populateWatchlist() {
+            const tbody = document.getElementById('watchlistTable');
+            tbody.innerHTML = '';
+            
+            watchlistData.forEach(item => {
+                const changeClass = item.change >= 0 ? 'price-up' : 'price-down';
+                const changePrefix = item.change >= 0 ? '+' : '';
+                
+                const row = `
+                    <tr class="table-row-hover border-b border-gray-800">
+                        <td class="py-3 font-medium">${item.symbol}</td>
+                        <td class="py-3">$${item.price.toLocaleString()}</td>
+                        <td class="py-3 ${changeClass}">${changePrefix}${item.change}%</td>
+                        <td class="py-3">${item.volume}</td>
+                        <td class="py-3">${item.spread}</td>
+                        <td class="py-3">
+                            <span class="text-xs bg-gray-800 px-2 py-1 rounded">${item.venue}</span>
+                        </td>
+                        <td class="py-3">
+                            <button class="text-blue-400 hover:text-blue-300 text-sm">Trade</button>
+                        </td>
+                    </tr>
+                `;
+                tbody.innerHTML += row;
+            });
+        }
+        
+        // Populate recent orders
+        function populateRecentOrders() {
+            const container = document.getElementById('recentOrders');
+            container.innerHTML = '';
+            
+            recentOrders.forEach(order => {
+                const sideClass = order.side === 'BUY' ? 'text-green-400' : 'text-red-400';
+                const statusClass = order.status === 'FILLED' ? 'text-green-400' : 'text-yellow-400';
+                
+                const orderEl = `
+                    <div class="bg-gray-900 rounded p-2">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <span class="font-medium text-sm">${order.symbol}</span>
+                                <span class="${sideClass} text-xs ml-2">${order.side}</span>
+                            </div>
+                            <span class="${statusClass} text-xs">${order.status}</span>
+                        </div>
+                        <div class="text-xs text-gray-400 mt-1">
+                            ${order.type} ${order.size} • ${order.time}
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += orderEl;
+            });
+        }
+        
+        // Populate alerts
+        function populateAlerts() {
+            const container = document.getElementById('alertsPanel');
+            container.innerHTML = '';
+            
+            alerts.forEach(alert => {
+                let iconClass, bgClass;
+                
+                switch(alert.type) {
+                    case 'warning':
+                        iconClass = 'alert-triangle';
+                        bgClass = 'bg-yellow-900/20 border-yellow-700';
+                        break;
+                    case 'info':
+                        iconClass = 'info';
+                        bgClass = 'bg-blue-900/20 border-blue-700';
+                        break;
+                    case 'success':
+                        iconClass = 'check-circle';
+                        bgClass = 'bg-green-900/20 border-green-700';
+                        break;
+                }
+                
+                const alertEl = `
+                    <div class="${bgClass} border rounded p-2">
+                        <div class="flex items-start gap-2">
+                            <i data-lucide="${iconClass}" class="w-4 h-4 mt-0.5"></i>
+                            <div class="flex-1">
+                                <div class="text-xs">${alert.message}</div>
+                                <div class="text-xs text-gray-400 mt-1">${alert.time}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += alertEl;
+            });
+            
+            // Re-initialize lucide icons for new elements
+            lucide.createIcons();
+        }
+        
+        // Simulate real-time updates
+        function startRealTimeUpdates() {
+            setInterval(() => {
+                // Update random watchlist prices
+                const randomIndex = Math.floor(Math.random() * watchlistData.length);
+                const item = watchlistData[randomIndex];
+                const changeAmount = (Math.random() - 0.5) * 100;
+                item.price += changeAmount;
+                item.change += (Math.random() - 0.5) * 0.5;
+                
+                // Re-render watchlist
+                populateWatchlist();
+                
+                // Update last updated timestamp
+                document.querySelector('.text-xs.text-gray-400').textContent = 'Last updated: just now';
+            }, 3000);
+        }
+        
+        // Initialize everything on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            initPortfolioSparkline();
+            initMainChart();
+            populateWatchlist();
+            populateRecentOrders();
+            populateAlerts();
+            startRealTimeUpdates();
+        });
+    </script>
+</body>
+</html>

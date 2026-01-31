@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from swarm.marl_engine import (
+    COMACritic,
     DuelingQNetwork,
     MAPPOSwarm,
     MARLAgent,
     MARLCoordinator,
     MARLTrainingConfig,
+    QMIX,
     QMIXMixer,
     QNetwork,
     VDN,
@@ -113,6 +116,22 @@ def test_marl_agent_replay():
     assert agent.epsilon < 1.0  # Epsilon should decay
 
 
+def test_marl_agent_replay_returns_none_when_memory_small():
+    agent = MARLAgent(
+        agent_id="test_agent",
+        state_size=6,
+        action_size=3,
+        batch_size=32,
+    )
+
+    # Memory smaller than batch size
+    for _ in range(10):
+        state = np.random.randn(6)
+        agent.remember(state, 0, 0.0, state, False)
+
+    assert agent.replay() is None
+
+
 def test_vdn_joint_q():
     """Test VDN joint Q-value computation."""
     agents = [
@@ -140,8 +159,50 @@ def test_qmix_mixer_forward():
     global_state = torch.randn(1, state_size)
     
     q_tot = mixer(q_values, global_state)
-    
-    assert q_tot.shape == (1,)
+    # The mixer squeezes to a scalar; ensure it's 0-d or 1-d with single entry
+    assert q_tot.numel() == 1
+    _ = q_tot.item()
+
+
+def test_qmix_compute_loss_and_update_targets(monkeypatch):
+    agents = [
+        MARLAgent(agent_id=f"agent_{i}", state_size=4, action_size=2, use_dueling=False)
+        for i in range(2)
+    ]
+    qmix = QMIX(agents, state_size=4, embed_size=8)
+
+    def simple_forward(self, q_values, state):
+        return q_values.sum()
+
+    monkeypatch.setattr(qmix.mixer, "forward", simple_forward.__get__(qmix.mixer, type(qmix.mixer)))
+    monkeypatch.setattr(qmix.target_mixer, "forward", simple_forward.__get__(qmix.target_mixer, type(qmix.target_mixer)))
+
+    states = [np.ones(4) * i for i in range(2)]
+    next_states = [np.ones(4) * (i + 1) for i in range(2)]
+    global_state = np.ones(4)
+    next_global_state = np.ones(4) * 2
+    actions = [0, 1]
+
+    loss = qmix.compute_loss(
+        states=states,
+        actions=actions,
+        reward=1.0,
+        next_states=next_states,
+        done=False,
+        global_state=global_state,
+        next_global_state=next_global_state,
+    )
+
+    assert isinstance(loss, float)
+
+    # Ensure update call propagates without errors and adjusts target mixer
+    before = [param.clone() for param in qmix.target_mixer.parameters()]
+    with torch.no_grad():
+        for param in qmix.mixer.parameters():
+            param.add_(0.01)
+    qmix.update_target_networks()
+    after = list(qmix.target_mixer.parameters())
+    assert any(not torch.allclose(b, a) for b, a in zip(before, after))
 
 
 def test_mappo_swarm_initialization():
@@ -314,3 +375,153 @@ def test_double_dqn_target_computation():
     # Train should not raise errors
     loss = agent.replay()
     assert loss is not None
+
+
+def test_coma_critic_forward_vectorized():
+    critic = COMACritic(state_size=4, action_size=2, n_agents=2)
+
+    global_state = torch.randn(3, 4)
+    actions = torch.randn(3, 4)  # Already one-hot concatenated representation
+
+    q_values = critic(global_state, actions)
+
+    assert q_values.shape == (3, 2)
+
+
+def test_mappo_compute_advantages_handles_terminal_transition():
+    mappo = MAPPOSwarm(
+        num_agents=2,
+        obs_size=4,
+        action_size=3,
+        global_state_size=8,
+    )
+
+    global_states = [np.zeros(8), np.ones(8)]
+    next_global_states = [np.ones(8), np.ones(8) * 2]
+    rewards = [1.0, 0.5]
+    dones = [False, True]
+
+    advantages = mappo.compute_advantages(global_states, rewards, next_global_states, dones)
+
+    assert len(advantages) == 2
+    assert all(isinstance(val, float) for val in advantages)
+
+
+def test_mappo_update_runs_single_epoch():
+    num_agents = 2
+    obs_size = 4
+    global_state_size = 8
+
+    mappo = MAPPOSwarm(
+        num_agents=num_agents,
+        obs_size=obs_size,
+        action_size=3,
+        global_state_size=global_state_size,
+        epochs=1,
+    )
+
+    batch_len = 2
+    obs_batch = [
+        [np.random.randn(obs_size) for _ in range(num_agents)]
+        for _ in range(batch_len)
+    ]
+    actions_batch = [
+        [np.random.randint(0, 3) for _ in range(num_agents)]
+        for _ in range(batch_len)
+    ]
+    global_states_batch = [np.random.randn(global_state_size) for _ in range(batch_len)]
+    returns_batch = [1.0, 0.5]
+    advantages_batch = [0.2, -0.1]
+
+    old_log_probs_batch = []
+    for b in range(batch_len):
+        agent_logs = []
+        for agent_idx in range(num_agents):
+            obs_tensor = torch.tensor(obs_batch[b][agent_idx], dtype=torch.float32)
+            probs = mappo.actors[agent_idx](obs_tensor)
+            dist = torch.distributions.Categorical(probs)
+            action_tensor = torch.tensor(actions_batch[b][agent_idx])
+            agent_logs.append(dist.log_prob(action_tensor))
+        old_log_probs_batch.append(agent_logs)
+
+    losses = mappo.update(
+        obs_batch=obs_batch,
+        actions_batch=actions_batch,
+        old_log_probs_batch=old_log_probs_batch,
+        advantages_batch=advantages_batch,
+        returns_batch=returns_batch,
+        global_states_batch=global_states_batch,
+    )
+
+    assert set(losses.keys()) == {"actor", "critic", "entropy"}
+
+
+def test_marl_coordinator_qmix_initialization():
+    config = MARLTrainingConfig(
+        state_size=6,
+        action_size=3,
+        num_agents=2,
+        algorithm="qmix",
+    )
+
+    coordinator = MARLCoordinator(config)
+
+    assert isinstance(coordinator.algorithm, QMIX)
+
+
+def test_marl_coordinator_mappo_initialization():
+    config = MARLTrainingConfig(
+        state_size=6,
+        action_size=3,
+        num_agents=2,
+        algorithm="mappo",
+    )
+
+    coordinator = MARLCoordinator(config)
+
+    assert isinstance(coordinator.algorithm, MAPPOSwarm)
+
+
+def test_marl_coordinator_train_episode_runs(monkeypatch):
+    config = MARLTrainingConfig(
+        state_size=2,
+        action_size=2,
+        num_agents=2,
+        max_steps=3,
+        algorithm="dqn",
+    )
+    coordinator = MARLCoordinator(config)
+
+    call_counts = {"act": 0, "replay": 0, "update": 0}
+
+    def fake_act(self, _state, explore=True):  # noqa: ARG001
+        call_counts["act"] += 1
+        return 0
+
+    def fake_replay(self):
+        call_counts["replay"] += 1
+        return 0.1
+
+    def fake_remember(self, *_args, **_kwargs):  # pragma: no cover - simple stub
+        return None
+
+    def fake_update(self):
+        call_counts["update"] += 1
+
+    monkeypatch.setattr(MARLAgent, "act", fake_act, raising=False)
+    monkeypatch.setattr(MARLAgent, "replay", fake_replay, raising=False)
+    monkeypatch.setattr(MARLAgent, "remember", fake_remember, raising=False)
+    monkeypatch.setattr(MARLAgent, "update_target_network", fake_update, raising=False)
+
+    def env_step_fn(states, actions):  # noqa: ARG001
+        next_states = [np.array(state) + 1 for state in states]
+        rewards = [1.0 for _ in actions]
+        done = True
+        return next_states, rewards, done
+
+    result = coordinator.train_episode(env_step_fn)
+
+    assert set(result.keys()) == {"episode_reward", "episode_loss", "steps"}
+    assert call_counts["act"] > 0
+    assert call_counts["replay"] > 0
+    assert call_counts["update"] == config.num_agents

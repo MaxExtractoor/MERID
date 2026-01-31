@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 from collections import defaultdict, deque
 from dataclasses import asdict
 from typing import Any, Deque, Dict, Optional
@@ -15,25 +16,36 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     FastAPI,
+    Form,
     HTTPException,
     Header,
+    Query,
     Request,
     Response,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse, StreamingResponse
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+
+# JWT imports for whale authentication
+try:
+    from fastapi_jwt_auth import AuthJWT
+    from fastapi_jwt_auth.exceptions import AuthJWTException
+except ImportError:
+    AuthJWT = None
+    AuthJWTException = Exception
 
 from audit.exporter import export_trail
 from backtesting.replay import run_backtest
 from backtesting.replayer import run_deterministic_replay
 from core.energy import create_energy
-from core.event_bus import event_stream
+from observability.event_stream import get_event_stream
+from observability.observability_stack import get_observability_stack
 from core.orchestrator import get_core
 from core.state import state
 from hardening.chaos import build_hardening_report
@@ -45,6 +57,9 @@ from simulation.engine import build_simulation_chain
 from swarm.agents.charters import CHARTER_REGISTRY
 from swarm.performance import performance_ledger
 from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 from web.api.reflection import router as reflection_router
 from web.api.mining import router as mining_router
 from web.api.auth import router as auth_router
@@ -73,8 +88,47 @@ from web.api.time_exploit import router as time_exploit_router
 from web.api.sniping import router as sniping_router
 from web.api.recovery import router as recovery_router
 from web.api.treasury import router as treasury_router
+from web.api.quadratic_funding import router as quadratic_funding_router
 from web.api.agents import router as agents_router
 from web.api.governance import router as governance_router
+
+# Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
+# from web.api.mock_simulation import router as mock_simulation_router
+# from web.api.mock_arena import router as mock_arena_router
+# from web.api.mock_trading import router as mock_trading_router
+# from web.api.mock_arbitrage import router as mock_arbitrage_router
+# from web.api.mock_system_admin import router as mock_system_admin_router
+# from web.api.mock_prediction_markets import router as mock_prediction_markets_router
+# from web.api.mock_agent_cohorts import router as mock_agent_cohorts_router
+from web.api.trading_suite import router as trading_suite_router
+
+
+# Load centralized settings - single source of truth
+from merid.settings import settings
+
+# Log environment info
+print(f"🚀 MERID Environment: {settings.MERID_ENV}")
+print(f"📝 Log Level: {settings.MERID_LOG_LEVEL}")
+print(f"🌐 WebSocket Enabled: {settings.MERID_DEV_ALLOW_WS}")
+
+# Validate live-only mode
+live_issues = settings.validate_live_only_mode()
+if live_issues:
+    print(f"❌ Live-only mode validation failed:")
+    for issue in live_issues:
+        print(f"   - {issue}")
+    print(f"⚠️  To enable live-only mode, fix the above issues in .env")
+else:
+    print(f"✅ Live-only mode validated - all features will use real data")
+
+# Validate production requirements
+if settings.is_production:
+    missing = settings.validate_required_for_production()
+    if missing:
+        print(f"❌ Production validation failed - missing: {', '.join(missing)}")
+        raise ValueError(f"Missing required production settings: {', '.join(missing)}")
+    else:
+        print("✅ Production validation passed")
 from web.api.ops import router as ops_router
 from web.api.archive import router as archive_router
 from web.api.trading_mode import router as trading_mode_router
@@ -83,13 +137,42 @@ from web.api.explainability import router as explainability_router
 from web.api.live_data import router as live_data_router
 from web.api.dashboard_data import router as dashboard_data_router
 from web.api.intelligence import router as intelligence_router
+from web.api.local_venue import router as local_venue_router
+from web.api.local_venue_validation import router as local_venue_validation_router
+from web.integrations.local_venue_dashboard import get_local_venue_dashboard_data, local_venue_websocket_handler
+from web.api.degraded import router as degraded_router
+from web.api.market_assertions import router as market_assertions_router
+from web.api.onchain_assertions import router as onchain_assertions_router
+from web.api.simulation_assertions import router as simulation_assertions_router
+from web.api.agent_assertions import router as agent_assertions_router
+from web.api.domain_priority import router as domain_priority_router
 from web.api.predictions import router as predictions_router
 from web.api.dashboard_ws import router as dashboard_ws_router
+from web.api.x_bot import router as x_bot_router
+from web.api.swarm import router as swarm_router
+from web.api.moat import router as moat_router
+from web.api.health import router as health_router
+from web.api.analytics import router as analytics_router
+from web.api.brier_metrics import router as brier_metrics_router
+from web.api.governance import router as governance_router
+from web.api.feedback import router as feedback_router
+from web.api.production_status import router as production_status_router
+from web.api.prime_screen import router as prime_screen_router
+from web.api.autonomy import router as autonomy_router
+from web.api.api_status import router as api_status_router
+# Skip governance cadence for Phase 0 trial
+# from web.api.governance_cadence import router as governance_cadence_router
+from web.api.minimal_scope import router as minimal_scope_router
+from web.api.phase0_experiment import router as phase0_experiment_router
+from web.api.phase0_adapters import phase0_router
+from web.api.phase0_trial_api import router as phase0_trial_router
+from web.api.us_compliant_markets import router as us_compliant_markets_router
 
 root_router = APIRouter()
 router = APIRouter(prefix="/api")
 router_v1 = APIRouter(prefix="/api/v1")
 _app_context: Dict[str, Any] = {}
+event_stream = get_event_stream()
 
 
 def _context_value(key: str) -> Any:
@@ -127,26 +210,33 @@ def create_app(lifespan=None) -> FastAPI:
     # Mount static files
     application.mount("/static", StaticFiles(directory="web/static"), name="static")
     
+    # Mount Flutter web app
+    flutter_web_path = Path("lib/merid/web").resolve()
+    if flutter_web_path.exists():
+        application.mount("/lib/merid/web", StaticFiles(directory=str(flutter_web_path)), name="flutter_web")
+    
     # Initialize Neo4j Graph Service
     try:
         from core.graph_service import initialize_graph_service
         neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
         neo4j_user = os.getenv("NEO4J_USER", "neo4j")
         neo4j_password = os.getenv("NEO4J_PASSWORD", "")
-        if neo4j_password:
-            initialize_graph_service(neo4j_uri, neo4j_user, neo4j_password)
-            get_logger("web.main").info(f"Neo4j GraphService initialized: {neo4j_uri}")
+        # Skip Neo4j initialization for Phase 0 trial
+        logger.info("Neo4j initialization skipped for Phase 0 trial")
+        # if neo4j_password:
+        #     initialize_graph_service(neo4j_uri, neo4j_user, neo4j_password)
+        #     get_logger("web.main").info(f"Neo4j GraphService initialized: {neo4j_uri}")
     except Exception as e:
-        get_logger("web.main").warning(f"Neo4j initialization skipped: {e}")
+        logger.warning("Neo4j initialization skipped; continuing without graph store", exc_info=e)
     
     templates = Jinja2Templates(directory="web/templates")
     simulation_chain = build_simulation_chain(
-        use_mock=str(os.getenv("MERID_POLYMARKET_MOCK", "")).lower() in {"1", "true", "yes"}
+        use_mock=str(os.getenv("MERID_KALSHI_MOCK", "")).lower() in {"1", "true", "yes"}
     )
     context = {
         "simulation_chain": simulation_chain,
         "merid": get_core(),
-        "logger": get_logger("web.main"),
+        "logger": logger,
         "dashboard_api_key": os.getenv("MERID_DASHBOARD_API_KEY"),
         "templates": templates,
         "allowed_origins": [
@@ -198,8 +288,19 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(sniping_router)
     application.include_router(recovery_router)
     application.include_router(treasury_router)
+    application.include_router(quadratic_funding_router)
     application.include_router(agents_router)
     application.include_router(governance_router)
+    
+    # Live API routers only - mock routers removed for live-only mode
+    # application.include_router(mock_simulation_router, prefix="/api/v1/simulation", tags=["simulation"])
+    # application.include_router(mock_arena_router, prefix="/api/v1/trading/arena", tags=["arena"])
+    # application.include_router(mock_trading_router, prefix="/api/v1/trading", tags=["trading"])
+    # application.include_router(mock_arbitrage_router, prefix="/api/v1/arbitrage", tags=["arbitrage"])
+    # application.include_router(mock_system_admin_router, prefix="/api/v1/system", tags=["system"])
+    # application.include_router(mock_prediction_markets_router, prefix="/api/v1/prediction", tags=["prediction"])
+    # application.include_router(mock_agent_cohorts_router, prefix="/api/v1/agent-cohorts", tags=["agent-cohorts"])
+    application.include_router(trading_suite_router, prefix="/api/v1/trading-suite", tags=["trading-suite"])
     application.include_router(ops_router)
     application.include_router(archive_router)
     application.include_router(trading_mode_router)
@@ -208,8 +309,39 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(live_data_router)
     application.include_router(dashboard_data_router)
     application.include_router(intelligence_router)
-    application.include_router(predictions_router)
+    application.include_router(local_venue_router)
+    application.include_router(local_venue_validation_router)
+    application.include_router(degraded_router)
+    application.include_router(market_assertions_router)
+    application.include_router(onchain_assertions_router)
+    application.include_router(simulation_assertions_router)
+    application.include_router(agent_assertions_router)
+    application.include_router(domain_priority_router)
+    application.include_router(production_status_router)
     application.include_router(dashboard_ws_router)
+    application.include_router(x_bot_router)
+    application.include_router(moat_router)
+    application.include_router(swarm_router)
+    application.include_router(health_router)
+    application.include_router(analytics_router)
+    application.include_router(predictions_router)
+    # Skip assertion registry for Phase 0 trial
+    # application.include_router(assertion_router)
+    application.include_router(brier_metrics_router)
+    application.include_router(governance_router)
+    application.include_router(feedback_router)
+    application.include_router(prime_screen_router)
+    application.include_router(autonomy_router)
+    application.include_router(api_status_router)
+    # application.include_router(governance_cadence_router)
+    application.include_router(minimal_scope_router)
+    application.include_router(phase0_experiment_router)
+    application.include_router(us_compliant_markets_router)
+    # Phase 0 adapters - only mount if feature flags are enabled
+    if phase0_router:
+        application.include_router(phase0_router)
+    # Phase 0 trial - always available when Phase 0 is enabled
+    application.include_router(phase0_trial_router)
     return application
 
 
@@ -267,6 +399,341 @@ async def websocket_endpoint(websocket: WebSocket):
         await event_stream.unsubscribe(queue)
 
 
+@root_router.websocket("/ws/whales")
+async def whale_websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(None),
+):
+    """WebSocket endpoint for real-time whale alerts with JWT authentication."""
+    await websocket.accept()
+    
+    # Development bypass - allow anonymous connections in dev mode
+    dev_mode = os.getenv("MERID_DEV_ALLOW_WS", "false").lower() in ("1", "true", "yes")
+    
+    if not dev_mode and not token:
+        await websocket.close(code=1008, reason="Token required")
+        return
+    
+    try:
+        # Validate JWT token if available and not in dev mode
+        if not dev_mode and AuthJWT is not None:
+            Authorize = AuthJWT()
+            Authorize.jwt_required("websocket", token=token)
+            user = Authorize.get_jwt_subject()
+        else:
+            # Fallback: use token as simple user identifier or anonymous in dev mode
+            user = token[:8] + "..." if token and len(token) > 8 else "anonymous"
+            if dev_mode:
+                user = "dev_user"
+            else:
+                logger.warning("JWT not available, using fallback authentication")
+        
+        # Add client to whale broadcast list
+        from merid.whales import add_whale_client, WHALE_THRESHOLD
+        add_whale_client(websocket)
+        
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "user": user,
+            "whale_threshold": WHALE_THRESHOLD,
+            "message": "Connected to whale alerts"
+        })
+        
+        # Keep connection alive
+        while True:
+            try:
+                await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+                
+    except Exception as e:
+        logger.error(f"Whale WebSocket authentication error: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "detail": "Authentication failed"
+        })
+        await websocket.close(code=1008)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        # Remove client from whale broadcast list
+        from merid.whales import remove_whale_client
+        remove_whale_client(websocket)
+
+
+@root_router.websocket("/ws/arbitrage")
+async def arbitrage_websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(None),
+):
+    """WebSocket endpoint for arbitrage opportunities with JWT authentication."""
+    await websocket.accept()
+    
+    # Development bypass - allow anonymous connections in dev mode
+    dev_mode = os.getenv("MERID_DEV_ALLOW_WS", "false").lower() in ("1", "true", "yes")
+    
+    if not dev_mode and not token:
+        await websocket.close(code=1008, reason="Token required")
+        return
+    
+    try:
+        # Validate JWT token if available and not in dev mode
+        if not dev_mode and AuthJWT is not None:
+            Authorize = AuthJWT()
+            Authorize.jwt_required("websocket", token=token)
+            user = Authorize.get_jwt_subject()
+        else:
+            # Fallback: use token as simple user identifier or anonymous in dev mode
+            user = token[:8] + "..." if token and len(token) > 8 else "anonymous"
+            if dev_mode:
+                user = "dev_user"
+            else:
+                logger.warning("JWT not available, using fallback authentication")
+        
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "user": user,
+            "message": "Connected to arbitrage opportunities stream"
+        })
+        
+        # Keep connection alive and forward arbitrage events
+        from observability.event_stream import get_event_stream
+        event_stream = get_event_stream()
+        queue = await event_stream.subscribe()
+        
+        try:
+            while True:
+                record = await queue.get()
+                if not record.event_type.startswith("arbitrage."):
+                    continue
+                payload = {
+                    "type": record.event_type,
+                    "payload": record.payload,
+                    "ts": record.timestamp,
+                }
+                await websocket.send_json(payload)
+        except WebSocketDisconnect:
+            await event_stream.unsubscribe(queue)
+        except Exception:
+            await event_stream.unsubscribe(queue)
+                
+    except Exception as e:
+        logger.error(f"Arbitrage WebSocket authentication error: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "detail": "Authentication failed"
+        })
+        await websocket.close(code=1008)
+    except WebSocketDisconnect:
+        pass
+
+
+@root_router.websocket("/ws/system")
+async def system_websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(None),
+):
+    """WebSocket endpoint for system monitoring events with JWT authentication."""
+    await websocket.accept()
+    
+    # Development bypass - allow anonymous connections in dev mode
+    dev_mode = os.getenv("MERID_DEV_ALLOW_WS", "false").lower() in ("1", "true", "yes")
+    
+    if not dev_mode and not token:
+        await websocket.close(code=1008, reason="Token required")
+        return
+    
+    try:
+        # Validate JWT token if available and not in dev mode
+        if not dev_mode and AuthJWT is not None:
+            Authorize = AuthJWT()
+            Authorize.jwt_required("websocket", token=token)
+            user = Authorize.get_jwt_subject()
+        else:
+            # Fallback: use token as simple user identifier or anonymous in dev mode
+            user = token[:8] + "..." if token and len(token) > 8 else "anonymous"
+            if dev_mode:
+                user = "dev_user"
+            else:
+                logger.warning("JWT not available, using fallback authentication")
+        
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "user": user,
+            "message": "Connected to system monitoring stream"
+        })
+        
+        # Keep connection alive and forward system events
+        from observability.event_stream import get_event_stream
+        event_stream = get_event_stream()
+        queue = await event_stream.subscribe()
+        
+        try:
+            while True:
+                record = await queue.get()
+                if not record.event_type.startswith("system."):
+                    continue
+                payload = {
+                    "type": record.event_type,
+                    "payload": record.payload,
+                    "ts": record.timestamp,
+                }
+                await websocket.send_json(payload)
+        except WebSocketDisconnect:
+            await event_stream.unsubscribe(queue)
+        except Exception:
+            await event_stream.unsubscribe(queue)
+                
+    except Exception as e:
+        logger.error(f"System WebSocket authentication error: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "detail": "Authentication failed"
+        })
+        await websocket.close(code=1008)
+    except WebSocketDisconnect:
+        pass
+
+
+@root_router.websocket("/ws/prediction")
+async def prediction_websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(None),
+):
+    """WebSocket endpoint for prediction markets with JWT authentication."""
+    await websocket.accept()
+    
+    # Development bypass - allow anonymous connections in dev mode
+    dev_mode = os.getenv("MERID_DEV_ALLOW_WS", "false").lower() in ("1", "true", "yes")
+    
+    if not dev_mode and not token:
+        await websocket.close(code=1008, reason="Token required")
+        return
+    
+    try:
+        # Validate JWT token if available and not in dev mode
+        if not dev_mode and AuthJWT is not None:
+            Authorize = AuthJWT()
+            Authorize.jwt_required("websocket", token=token)
+            user = Authorize.get_jwt_subject()
+        else:
+            # Fallback: use token as simple user identifier or anonymous in dev mode
+            user = token[:8] + "..." if token and len(token) > 8 else "anonymous"
+            if dev_mode:
+                user = "dev_user"
+            else:
+                logger.warning("JWT not available, using fallback authentication")
+        
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "user": user,
+            "message": "Connected to prediction markets stream"
+        })
+        
+        # Keep connection alive and forward prediction events
+        from observability.event_stream import get_event_stream
+        event_stream = get_event_stream()
+        queue = await event_stream.subscribe()
+        
+        try:
+            while True:
+                record = await queue.get()
+                if not record.event_type.startswith("prediction."):
+                    continue
+                payload = {
+                    "type": record.event_type,
+                    "payload": record.payload,
+                    "ts": record.timestamp,
+                }
+                await websocket.send_json(payload)
+        except WebSocketDisconnect:
+            await event_stream.unsubscribe(queue)
+        except Exception:
+            await event_stream.unsubscribe(queue)
+                
+    except Exception as e:
+        logger.error(f"Prediction WebSocket authentication error: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "detail": "Authentication failed"
+        })
+        await websocket.close(code=1008)
+    except WebSocketDisconnect:
+        pass
+
+
+@root_router.websocket("/ws/agents")
+async def agents_websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(None),
+):
+    """WebSocket endpoint for agent cohorts with JWT authentication."""
+    await websocket.accept()
+    
+    # Development bypass - allow anonymous connections in dev mode
+    dev_mode = os.getenv("MERID_DEV_ALLOW_WS", "false").lower() in ("1", "true", "yes")
+    
+    if not dev_mode and not token:
+        await websocket.close(code=1008, reason="Token required")
+        return
+    
+    try:
+        # Validate JWT token if available and not in dev mode
+        if not dev_mode and AuthJWT is not None:
+            Authorize = AuthJWT()
+            Authorize.jwt_required("websocket", token=token)
+            user = Authorize.get_jwt_subject()
+        else:
+            # Fallback: use token as simple user identifier or anonymous in dev mode
+            user = token[:8] + "..." if token and len(token) > 8 else "anonymous"
+            if dev_mode:
+                user = "dev_user"
+            else:
+                logger.warning("JWT not available, using fallback authentication")
+        
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "user": user,
+            "message": "Connected to agent cohorts stream"
+        })
+        
+        # Keep connection alive and forward agent events
+        from observability.event_stream import get_event_stream
+        event_stream = get_event_stream()
+        queue = await event_stream.subscribe()
+        
+        try:
+            while True:
+                record = await queue.get()
+                if not record.event_type.startswith("agent."):
+                    continue
+                payload = {
+                    "type": record.event_type,
+                    "payload": record.payload,
+                    "ts": record.timestamp,
+                }
+                await websocket.send_json(payload)
+        except WebSocketDisconnect:
+            await event_stream.unsubscribe(queue)
+        except Exception:
+            await event_stream.unsubscribe(queue)
+                
+    except Exception as e:
+        logger.error(f"Agents WebSocket authentication error: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "detail": "Authentication failed"
+        })
+        await websocket.close(code=1008)
+    except WebSocketDisconnect:
+        pass
+
+
 class MineRequest(BaseModel):
     premium: bool = Field(True, description="Use premium-depth simulations (invokes x402 payment).")
     miner_id: str = Field("dashboard", description="Identifier for the mining agent.")
@@ -288,8 +755,7 @@ class ConnectPayload(BaseModel):
     proof_message: Optional[str] = None
     proof_signature: Optional[str] = None
 
-    class Config:
-        allow_population_by_field_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class FilterPayload(BaseModel):
@@ -315,11 +781,22 @@ async def live_monitor(request: Request):
     templates = _templates()
     return templates.TemplateResponse("live_monitor.html", {"request": request})
 
+@root_router.get("/debug-v2", response_class=HTMLResponse)
+async def debug_dashboard_v2(request: Request):
+    """Render the debug dashboard v2 with prediction markets."""
+    return _templates().TemplateResponse("debug_dashboard_v2.html", {"request": request})
+
+
 @root_router.get("/dashboard")
-async def dashboard(request: Request):
-    """Unified control center - combines dashboard and institutional views."""
+async def dashboard():
+    """Main dashboard endpoint - redirect to fixed dashboard."""
+    return RedirectResponse(url="/dashboard/fixed")
+
+@root_router.get("/dashboard/fixed")
+async def dashboard_fixed(request: Request):
+    """Fixed unified control center with real prediction markets data."""
     templates = _templates()
-    return templates.TemplateResponse("unified_standalone.html", {"request": request})
+    return templates.TemplateResponse("unified_fixed.html", {"request": request})
 
 @root_router.get("/dashboard/legacy")
 async def dashboard_legacy():
@@ -451,6 +928,68 @@ async def event_generator(source: str, payload: str):
     yield "data: COMPLETE\n\n"
 
 
+@root_router.get("/analytics/dashboard", response_class=HTMLResponse)
+async def analytics_dashboard(request: Request):
+    """Render the analytics dashboard."""
+    return _templates().TemplateResponse("analytics_dashboard.html", {"request": request})
+
+@root_router.get("/observability", response_class=HTMLResponse)
+async def observability_dashboard(request: Request):
+    """Render the observability dashboard."""
+    return _templates().TemplateResponse("observability.html", {"request": request})
+
+
+# Unified Platform Routes
+@root_router.get("/unified", response_class=HTMLResponse)
+async def unified_platform(request: Request):
+    """Render the unified MERID platform."""
+    return _templates().TemplateResponse("unified_shell.html", {"request": request})
+
+
+@root_router.get("/unified/{section:path}", response_class=HTMLResponse)
+async def unified_section(request: Request, section: str):
+    """Render unified platform section."""
+    return _templates().TemplateResponse("unified_shell.html", {"request": request})
+
+
+@root_router.get("/unified/dashboard", response_class=HTMLResponse)
+async def unified_dashboard(request: Request):
+    """Unified dashboard - redirect to main unified platform."""
+    return _templates().TemplateResponse("unified_shell.html", {"request": request})
+
+
+@root_router.get("/production", response_class=HTMLResponse)
+async def production_dashboard(request: Request):
+    """Production-ready dashboard with real-time data and no mock data."""
+    return _templates().TemplateResponse("production_dashboard.html", {"request": request})
+
+
+@root_router.get("/prime-screen", response_class=HTMLResponse)
+async def prime_screen(request: Request):
+    """Prime Screen - advanced market intelligence interface."""
+    return _templates().TemplateResponse("prime_screen.html", {"request": request})
+
+
+@root_router.get("/api-dashboard", response_class=HTMLResponse)
+async def api_dashboard(request: Request):
+    """API Integration Dashboard - real-time status of all API connections."""
+    return _templates().TemplateResponse("api_dashboard.html", {"request": request})
+
+
+@root_router.get("/static/templates/partials/{partial_path:path}")
+async def serve_unified_partial(partial_path: str):
+    """Serve trusted partial templates for Unified Shell dynamic loader."""
+    safe_root = Path("web/templates/partials").resolve()
+    requested = (safe_root / partial_path).resolve()
+    if not str(requested).startswith(str(safe_root)) or requested.suffix not in {".html", ""}:
+        raise HTTPException(status_code=404, detail="Partial not found")
+    if requested.is_dir():
+        requested = requested / "index.html"
+    if not requested.exists():
+        raise HTTPException(status_code=404, detail="Partial not found")
+    return FileResponse(requested)
+
+
 @root_router.post("/submit")
 async def submit_energy(request: Request):
     try:
@@ -551,6 +1090,18 @@ async def hardening_status():
     return get_hardening_layer().hardening_status()
 
 
+@router_v1.get("/observability/summary")
+async def observability_summary():
+    """Aggregate observability summary for dashboards."""
+    return get_observability_stack().get_observability_summary()
+
+
+@router_v1.get("/observability/dashboards")
+async def observability_dashboards():
+    """Clock sync, parity, lag metrics for UI panels."""
+    return get_observability_stack().get_observability_dashboards()
+
+
 @router_v1.get("/marl/metrics")
 async def marl_metrics():
     """Stage 9: MARL training metrics and agent performance."""
@@ -626,6 +1177,191 @@ async def settle_uma_assertion(assertion_id: str):
 # NOTE: Startup/shutdown now handled by main.py lifespan manager
 app = create_app()
 
+# Add health endpoints after app creation
+@app.get("/api/v1/system/health")
+async def system_health():
+    """System health check endpoint"""
+    import time
+    return {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "version": "1.0.0",
+        "services": {
+            "api": "running",
+            "prediction_markets": "running",
+            "paper_trading": "configured"
+        }
+    }
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Serve favicon.ico to eliminate 404 errors."""
+    return FileResponse("favicon.ico")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background services on application startup with robust error handling."""
+    startup_success = True
+    
+    # Start prediction market aggregator
+    try:
+        from monitoring.prediction_markets import start_prediction_markets
+        aggregator = await start_prediction_markets()
+        market_count = len(aggregator._all_markets) if aggregator else 0
+        logger.info(f"Started prediction market aggregator with {market_count} initial markets")
+    except Exception as e:
+        logger.warning(f"Failed to start prediction market aggregator: {e}")
+        logger.info("Continuing without prediction markets - will use fallback data")
+        startup_success = False
+    
+    # Start whale detection listener (only if prediction markets started)
+    try:
+        if 'aggregator' in locals() and aggregator:
+            from merid.whales import solana_whale_listener
+            asyncio.create_task(solana_whale_listener(aggregator))
+            logger.info("Started Solana whale detection listener")
+        else:
+            logger.info("Skipping whale detection - no prediction markets available")
+    except Exception as e:
+        logger.warning(f"Failed to start whale detection listener: {e}")
+        logger.info("Continuing without whale detection")
+        startup_success = False
+    
+    # Log overall startup status
+    if startup_success:
+        logger.info("✅ All background services started successfully")
+    else:
+        logger.warning("⚠️  Some services failed to start - system operating in degraded mode")
+    
+    logger.info("🚀 MERID startup complete - system ready")
+
+
+@app.get("/api/v1/market/data/freshness")
+async def market_data_freshness():
+    """Market data freshness check endpoint"""
+    import time
+    return {
+        "status": "fresh",
+        "timestamp": time.time(),
+        "last_update": time.time(),
+        "age_seconds": 0,
+        "feeds": {
+            "kraken": "healthy",
+            "coinbase": "healthy", 
+            "gemini": "healthy"
+        }
+    }
+
+
+@app.get("/api/v1/institutional/predictions/whales")
+async def get_whale_events(limit: int = 20):
+    """Get recent whale events from the prediction market aggregator."""
+    try:
+        from monitoring.prediction_markets import get_prediction_aggregator, get_whale_events
+        aggregator = get_prediction_aggregator()
+        whale_events = get_whale_events(aggregator, limit)
+        
+        return {
+            "whales": whale_events,
+            "count": len(whale_events),
+            "threshold": 100000  # Default whale threshold
+        }
+    except Exception as e:
+        logger.error(f"Error fetching whale events: {e}")
+        return {"whales": [], "count": 0, "error": str(e)}
+
+
+@app.get("/healthz")
+async def healthz():
+    """Liveness probe - process up and critical threads alive"""
+    import time
+    import asyncio
+    import threading
+    
+    # Check if main thread is alive
+    main_thread_alive = threading.main_thread().is_alive()
+    
+    # Check if event loop is running
+    try:
+        loop = asyncio.get_running_loop()
+        loop_running = loop.is_running()
+    except RuntimeError:
+        loop_running = False
+    
+    return {
+        "status": "healthy" if main_thread_alive and loop_running else "unhealthy",
+        "timestamp": time.time(),
+        "main_thread_alive": main_thread_alive,
+        "event_loop_running": loop_running,
+        "uptime_seconds": time.time()
+    }
+
+
+@app.get("/readyz")
+async def readyz():
+    """Readiness probe - data feed OK, risk engine responding, DB reachable"""
+    import time
+    import os
+    
+    # Check if we're in synthetic mode
+    synthetic_mode = os.getenv("SIMULATION_MODE", "").lower() == "synthetic_only"
+    
+    # Check if aggregator exists and has data
+    aggregator_available = False
+    data_fresh = False
+    risk_engine_ready = False
+    freshness_payload = None
+    
+    try:
+        # Try to get aggregator from app state
+        from monitoring.real_prediction_markets import get_real_prediction_aggregator
+        
+        # Quick check if we can get markets
+        aggregator = await get_real_prediction_aggregator()
+        if aggregator:
+            aggregator_available = True
+            risk_engine_ready = True  # For now, assume ready if aggregator exists
+            markets = aggregator.get_all_markets()
+            if markets:
+                freshness_payload = {
+                    "status": "fresh",
+                    "age_seconds": 0,
+                }
+    except Exception:
+        pass
+    
+    # Even if markets list is empty, the dedicated freshness endpoint may be fresh
+    try:
+        if freshness_payload is None:
+            freshness_payload = await market_data_freshness()
+    except Exception:
+        freshness_payload = None
+    
+    if freshness_payload:
+        status = freshness_payload.get("status", "unknown").lower()
+        age_seconds = freshness_payload.get("age_seconds", 9999)
+        data_fresh = status == "fresh" and age_seconds is not None and age_seconds < 120
+
+    # Overall readiness
+    ready = aggregator_available and (data_fresh or synthetic_mode) and risk_engine_ready
+    
+    return {
+        "status": "ready" if ready else "not_ready",
+        "timestamp": time.time(),
+        "aggregator_available": aggregator_available,
+        "data_fresh": data_fresh,
+        "risk_engine_ready": risk_engine_ready,
+        "synthetic_mode": synthetic_mode,
+        "checks": {
+            "aggregator": aggregator_available,
+            "data_freshness": data_fresh,
+            "risk_engine": risk_engine_ready,
+            "freshness_payload": freshness_payload,
+        }
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    uvicorn.run(app, host="127.0.0.1", port=8011)

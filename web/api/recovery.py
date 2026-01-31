@@ -212,8 +212,8 @@ async def report_component_health(
     return {"status": "reported", "component_id": component_id}
 
 
-@router.get("/shadow/status")
-async def get_shadow_status() -> Dict[str, Any]:
+@router.get("/shadow/promotion/status")
+async def get_shadow_promotion_status() -> Dict[str, Any]:
     """Get shadow promotion status."""
     return get_disaster_recovery().shadow_promotion.get_status()
 

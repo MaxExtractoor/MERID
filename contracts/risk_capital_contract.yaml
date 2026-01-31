@@ -1,0 +1,137 @@
+# MERID Risk & Capital Contract
+# Version: 1.0
+# Last Updated: 2026-01-14
+# Authority: Risk Admin + Governor Agent (with human approval)
+
+version: "1.0"
+effective_date: "2026-01-14T00:00:00Z"
+
+# Global Risk Limits
+global_limits:
+  max_total_notional_usd: 100000.0
+  max_leverage: 3.0
+  max_concentration_single_asset: 0.25  # 25% of portfolio
+  max_concentration_single_venue: 0.40  # 40% of portfolio
+  max_daily_loss_usd: 5000.0
+  max_drawdown_pct: 0.15  # 15%
+  
+  # VaR/CVaR limits
+  var_95_daily_usd: 2000.0
+  cvar_95_daily_usd: 3000.0
+
+# Per-Strategy Risk Budgets
+strategy_limits:
+  trend_following:
+    max_notional_usd: 20000.0
+    max_leverage: 2.0
+    max_drawdown_pct: 0.10
+    allowed_assets: ["BTC", "ETH", "SOL"]
+    
+  mean_reversion:
+    max_notional_usd: 15000.0
+    max_leverage: 1.5
+    max_drawdown_pct: 0.08
+    allowed_assets: ["BTC", "ETH", "USDC", "USDT"]
+    
+  arbitrage:
+    max_notional_usd: 30000.0
+    max_leverage: 3.0
+    max_drawdown_pct: 0.05
+    allowed_assets: ["BTC", "ETH", "SOL", "AVAX"]
+    
+  event_driven:
+    max_notional_usd: 10000.0
+    max_leverage: 1.0
+    max_drawdown_pct: 0.12
+    allowed_assets: ["BTC", "ETH", "SOL", "AVAX", "MATIC"]
+    
+  memecoin:
+    max_notional_usd: 2000.0
+    max_leverage: 1.0
+    max_drawdown_pct: 0.20
+    max_position_size_usd: 500.0
+    allowed_assets: []  # Dynamic, must pass safety filters
+
+# Per-Venue Risk Budgets
+venue_limits:
+  binance:
+    max_notional_usd: 40000.0
+    max_leverage: 3.0
+    allowed_asset_types: ["spot", "perp"]
+    
+  coinbase:
+    max_notional_usd: 30000.0
+    max_leverage: 1.0
+    allowed_asset_types: ["spot"]
+    
+  uniswap_v3:
+    max_notional_usd: 20000.0
+    max_leverage: 1.0
+    allowed_asset_types: ["swap", "lp"]
+    
+  aave:
+    max_notional_usd: 15000.0
+    max_leverage: 2.0
+    allowed_asset_types: ["lending"]
+
+# Execution Constraints
+execution_limits:
+  max_slippage_pct: 0.005  # 0.5%
+  max_impact_pct: 0.003  # 0.3%
+  max_order_size_usd: 10000.0
+  min_liquidity_usd: 50000.0  # Minimum market liquidity
+  
+  # Time-based limits
+  max_orders_per_minute: 10
+  max_orders_per_hour: 100
+  cooldown_after_reject_seconds: 60
+
+# Asset Universe
+allowed_assets:
+  crypto_majors: ["BTC", "ETH", "SOL", "AVAX", "MATIC", "ARB", "OP"]
+  stablecoins: ["USDC", "USDT", "DAI", "USDE"]
+  defi_tokens: ["UNI", "AAVE", "CRV", "LDO"]
+  xstocks: ["TSLA", "AAPL", "NVDA", "MSFT"]
+  
+  # Restricted (require special approval)
+  restricted: ["memecoins", "new_listings", "low_liquidity"]
+
+# Safe Mode Thresholds
+safe_mode_triggers:
+  drawdown_threshold_pct: 0.12  # 12% drawdown triggers safe mode
+  daily_loss_threshold_usd: 4000.0
+  var_breach_multiplier: 1.5  # 1.5x VaR limit
+  consecutive_losses: 5
+  error_rate_threshold: 0.10  # 10% error rate
+  circuit_breakers_open: 2  # Number of open breakers
+
+# Change Control
+change_authority:
+  minor_adjustments:  # <10% change to limits
+    approvers: ["risk_admin"]
+    notification: ["ops", "governor_agent"]
+    
+  major_adjustments:  # >10% change to limits
+    approvers: ["risk_admin", "ops_lead"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 24
+    
+  emergency_tightening:  # Can tighten limits immediately
+    approvers: ["governor_agent", "risk_admin"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 0
+
+# Audit and Compliance
+audit_requirements:
+  log_all_limit_checks: true
+  log_all_violations: true
+  log_all_changes: true
+  daily_risk_report: true
+  weekly_compliance_review: true
+
+# Enforcement
+enforcement:
+  strict_mode: true  # Reject on violation vs warn
+  auto_deleverage: true  # Auto-reduce on breach
+  safe_mode_on_breach: true
+  notify_on_violation: true

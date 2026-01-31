@@ -2,11 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 
+import 'prime_screen/app.dart';
+
 void main() {
-  runApp(const MeridApp());
+  runApp(const ProviderScope(child: PrimeScreenApp()));
 }
 
 class _OracleFeed {

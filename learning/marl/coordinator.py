@@ -29,6 +29,12 @@ from utils.logger import get_logger
 logger = get_logger("learning.marl.coordinator")
 
 
+def _get_drift_reward_loop():
+    """Lazy import to avoid circular dependency."""
+    from core.drift_reward_loop import get_drift_reward_loop
+    return get_drift_reward_loop()
+
+
 class MARLAlgorithm(Enum):
     """Available MARL algorithms."""
     MAPPO = "mappo"
@@ -134,6 +140,10 @@ class MARLCoordinator:
         
         # Results
         self._training_results: List[TrainingResult] = []
+        
+        # Drift integration
+        self._drift_adjustment_enabled = True
+        self._coordinator_id = "marl_coordinator"
         
         logger.info("MARL Coordinator initialized")
     
@@ -243,6 +253,13 @@ class MARLCoordinator:
             global_states.append(next_global_state)
             joint_actions.append(actions)
             
+            # Apply drift adjustment to rewards
+            if self._drift_adjustment_enabled:
+                drift_loop = _get_drift_reward_loop()
+                for agent_id in rewards:
+                    original = rewards[agent_id]
+                    rewards[agent_id] = drift_loop.adjust_reward(agent_id, original)
+            
             total_reward += sum(rewards.values())
             
             # Check if done
@@ -251,6 +268,11 @@ class MARLCoordinator:
             
             observations = next_observations
             global_state = next_global_state
+        
+        # Poll drift events and process
+        if self._drift_adjustment_enabled:
+            drift_loop = _get_drift_reward_loop()
+            drift_loop.poll_and_process()
         
         # Update algorithm
         update_info = self._update_algorithm(trajectories, global_states, joint_actions)
@@ -446,6 +468,23 @@ class MARLCoordinator:
     def get_training_history(self) -> List[Dict[str, Any]]:
         """Get training history."""
         return [r.to_dict() for r in self._training_results]
+    
+    def set_drift_adjustment(self, enabled: bool) -> None:
+        """Enable or disable drift-based reward adjustment."""
+        self._drift_adjustment_enabled = enabled
+        logger.info("Drift adjustment %s", "enabled" if enabled else "disabled")
+    
+    def get_drift_status(self) -> Dict[str, Any]:
+        """Get drift-related status."""
+        if not self._drift_adjustment_enabled:
+            return {"enabled": False}
+        
+        drift_loop = _get_drift_reward_loop()
+        return {
+            "enabled": True,
+            "loop_status": drift_loop.get_status(),
+            "recent_decisions": drift_loop.get_recent_decisions(limit=5),
+        }
 
 
 # Singleton instance

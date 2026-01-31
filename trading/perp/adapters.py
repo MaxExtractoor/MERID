@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import os
 import random
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from utils.logger import get_logger
+
+try:
+    from data.asset_universe import ASSET_UNIVERSE
+except Exception:  # pragma: no cover - optional dependency
+    ASSET_UNIVERSE = None
 
 from .base import (
     FundingRateSnapshot,
@@ -32,6 +38,19 @@ class HyperliquidAdapter(PerpVenueAdapterBase):
 
     def __init__(self, *, info_url: Optional[str] = None, use_mock: bool = False) -> None:
         super().__init__(base_url=info_url or os.getenv("MERID_HYPERLIQUID_INFO_URL") or "https://api.hyperliquid.xyz/info", use_mock=use_mock)
+        self._symbol_cache: List[str] = []
+        self._fallback_symbols = self._derive_fallback_symbols()
+
+    def _derive_fallback_symbols(self) -> List[str]:
+        if ASSET_UNIVERSE:
+            symbols = set()
+            for key, asset in ASSET_UNIVERSE.items():
+                name = key.split('-')[0]
+                if "-PERP" in key or ':USDT' in asset.symbol:
+                    symbols.add(name.upper())
+            if symbols:
+                return sorted(symbols)
+        return ["BTC", "ETH", "SOL"]
 
     def _fetch_markets_live(self, limit: int) -> List[PerpMarketSnapshot]:
         try:
@@ -46,12 +65,27 @@ class HyperliquidAdapter(PerpVenueAdapterBase):
                     coin = entry
                 if coin:
                     symbols.append(str(coin))
+            if symbols:
+                self._symbol_cache = symbols
             if not symbols:
-                # fallback to a handful of flagship pairs
-                symbols = ["BTC", "ETH", "SOL"]
+                if self._symbol_cache:
+                    symbols = self._symbol_cache
+                    logger.info("Hyperliquid meta empty, using cached symbols (%d)", len(symbols))
+                elif self._fallback_symbols:
+                    symbols = self._fallback_symbols
+                    logger.info("Hyperliquid meta empty, using fallback symbols (%d)", len(symbols))
+                else:
+                    symbols = ["BTC", "ETH", "SOL"]
         except Exception as exc:
             logger.warning("Hyperliquid meta fetch failed: %s", exc)
-            return self._mock_markets(limit)
+            if self._symbol_cache:
+                logger.info("Using cached Hyperliquid symbols after meta failure (%d)", len(self._symbol_cache))
+                symbols = self._symbol_cache
+            elif self._fallback_symbols:
+                logger.info("Using fallback Hyperliquid symbols after meta failure (%d)", len(self._fallback_symbols))
+                symbols = self._fallback_symbols
+            else:
+                return self._mock_markets(limit)
 
         snapshots: List[PerpMarketSnapshot] = []
         for coin in symbols[:limit]:
@@ -85,7 +119,7 @@ class HyperliquidAdapter(PerpVenueAdapterBase):
         return snapshots
 
     def _fetch_funding_live(self, symbols: Optional[List[str]]) -> List[FundingRateSnapshot]:
-        symbols = symbols or ["BTC", "ETH", "SOL"]
+        symbols = symbols or self._symbol_cache or self._fallback_symbols or ["BTC", "ETH", "SOL"]
         snapshots: List[FundingRateSnapshot] = []
         for coin in symbols:
             try:

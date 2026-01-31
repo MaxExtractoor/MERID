@@ -13,9 +13,13 @@ from pydantic import BaseModel, EmailStr, Field
 
 from auth.user_manager import user_manager
 from utils.logger import get_logger
+from utils.deps import require_dependency
 
 router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
 logger = get_logger("web.api.auth")
+
+# Ensure email validation stack is available early so API fails fast if missing.
+require_dependency("email_validator", feature="Email authentication")
 
 
 class WalletAuthRequest(BaseModel):

@@ -6,37 +6,57 @@ Foerster et al. (2018) - Centralized critic, decentralized actors with counterfa
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.distributions import Categorical
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 
+from utils.deps import optional_dependency
 from utils.logger import get_logger
 
 logger = get_logger("swarm.coma")
 
+torch = optional_dependency("torch")
+if torch:
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.distributions import Categorical
+else:  # pragma: no cover - optional dependency guard
+    nn = optim = Categorical = None
+    logger.warning("PyTorch not installed - COMA agent unavailable")
 
-class COMAActorRNN(nn.Module):
-    """Per-agent policy network with RNN for history encoding."""
-    
-    def __init__(self, obs_size: int, action_size: int, hidden_size: int = 128):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.rnn = nn.GRU(obs_size, hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size, action_size)
+TORCH_AVAILABLE = torch is not None
+
+
+def _require_torch() -> None:
+    if not TORCH_AVAILABLE:
+        raise RuntimeError(
+            "PyTorch is required for COMA. Install it with `pip install torch` to enable this agent."
+        )
+
+
+if TORCH_AVAILABLE:
+    class COMAActorRNN(nn.Module):
+        """Per-agent policy network with RNN for history encoding."""
         
-    def forward(self, obs: torch.Tensor, hidden: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass with history. Returns action probs and hidden state."""
-        if hidden is None:
-            hidden = torch.zeros(1, obs.size(0), self.hidden_size)
-        
-        rnn_out, hidden = self.rnn(obs.unsqueeze(1), hidden)
-        logits = self.fc(rnn_out.squeeze(1))
-        probs = torch.softmax(logits, dim=-1)
-        return probs, hidden
+        def __init__(self, obs_size: int, action_size: int, hidden_size: int = 128):
+            super().__init__()
+            self.hidden_size = hidden_size
+            self.rnn = nn.GRU(obs_size, hidden_size, batch_first=True)
+            self.fc = nn.Linear(hidden_size, action_size)
+            
+        def forward(self, obs: torch.Tensor, hidden: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+            """Forward pass with history. Returns action probs and hidden state."""
+            if hidden is None:
+                hidden = torch.zeros(1, obs.size(0), self.hidden_size)
+            
+            rnn_out, hidden = self.rnn(obs.unsqueeze(1), hidden)
+            logits = self.fc(rnn_out.squeeze(1))
+            probs = torch.softmax(logits, dim=-1)
+            return probs, hidden
+else:
+    class COMAActorRNN:
+        def __init__(self, *args, **kwargs):
+            _require_torch()
 
 
 class COMACriticCentralized(nn.Module):
@@ -211,7 +231,7 @@ class COMA:
         This is the expected Q-value if agent_idx follows its policy while others' actions are fixed.
         """
         batch_size = global_state.size(0)
-        baseline = torch.zeros(batch_size)
+        baseline = torch.zeros(batch_size, device=global_state.device, dtype=torch.float32)
         
         # For each possible action of agent_idx
         for a_prime in range(self.action_size):
@@ -224,8 +244,12 @@ class COMA:
                 q_cf = self.critic(global_state, actions_cf, agent_idx)
                 q_cf_action = q_cf[:, a_prime]
             
-            # Weight by policy probability
-            prob_a_prime = policy_probs[:, a_prime]
+            # Weight by policy probability (support 1-D or batched tensors)
+            if policy_probs.dim() == 1:
+                prob_a_prime = policy_probs[a_prime]
+            else:
+                prob_a_prime = policy_probs[:, a_prime]
+            
             baseline += prob_a_prime * q_cf_action
         
         return baseline

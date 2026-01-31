@@ -15,12 +15,67 @@ from utils.logger import get_logger
 
 logger = get_logger("config.settings")
 
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
 
 class Environment(Enum):
     """Deployment environment."""
     DEVELOPMENT = "development"
     STAGING = "staging"
     PRODUCTION = "production"
+
+
+_ENVIRONMENT_ALIASES = {
+    "dev": Environment.DEVELOPMENT,
+    "development": Environment.DEVELOPMENT,
+    "dev-swarm": Environment.DEVELOPMENT,
+    "local": Environment.DEVELOPMENT,
+    "stage": Environment.STAGING,
+    "staging": Environment.STAGING,
+    "qa": Environment.STAGING,
+    "prod": Environment.PRODUCTION,
+    "production": Environment.PRODUCTION,
+}
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Return boolean env var with tolerant parsing."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    return default
+
+
+def _env_list(name: str, default: Optional[List[str]] = None) -> List[str]:
+    """Return comma-delimited env var as cleaned list."""
+    raw = os.getenv(name)
+    if not raw:
+        return list(default) if default is not None else []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _coerce_environment(value: Optional[str]) -> Environment:
+    """Map arbitrary strings to an Environment enum with logging."""
+    normalized = (value or "").strip().lower()
+    env = _ENVIRONMENT_ALIASES.get(normalized)
+    if env:
+        return env
+    try:
+        return Environment(normalized)
+    except ValueError:
+        if normalized:
+            logger.warning(
+                "Unknown MERID_ENV '%s', defaulting to %s",
+                value,
+                Environment.DEVELOPMENT.value,
+            )
+        return Environment.DEVELOPMENT
 
 
 @dataclass
@@ -60,7 +115,7 @@ class ExchangeConfig:
             name=os.getenv(f"{prefix}_NAME", "coinbase"),
             api_key=os.getenv(f"{prefix}_API_KEY", ""),
             api_secret=os.getenv(f"{prefix}_API_SECRET", ""),
-            sandbox=os.getenv(f"{prefix}_SANDBOX", "true").lower() == "true",
+            sandbox=_env_bool(f"{prefix}_SANDBOX", True),
             rate_limit=float(os.getenv(f"{prefix}_RATE_LIMIT", "1.0")),
         )
 
@@ -137,11 +192,11 @@ class ServerConfig:
     
     @classmethod
     def from_env(cls) -> "ServerConfig":
-        origins = os.getenv("CORS_ORIGINS", "*").split(",")
+        origins = _env_list("CORS_ORIGINS", ["*"])
         return cls(
             host=os.getenv("SERVER_HOST", "0.0.0.0"),
             port=int(os.getenv("SERVER_PORT", "8001")),
-            debug=os.getenv("DEBUG", "true").lower() == "true",
+            debug=_env_bool("DEBUG", True),
             cors_origins=origins,
         )
 
@@ -162,15 +217,17 @@ class Settings:
     enable_prediction_markets: bool = True
     enable_news_monitoring: bool = True
     enable_backtesting: bool = True
+    enable_prediction_market_stub: bool = False
     
     @classmethod
     def from_env(cls) -> "Settings":
-        env_str = os.getenv("MERID_ENV", "development").lower()
-        try:
-            environment = Environment(env_str)
-        except ValueError:
-            environment = Environment.DEVELOPMENT
-        
+        environment = _coerce_environment(os.getenv("MERID_ENV", "development"))
+        stub_env = os.getenv("ENABLE_PREDICTION_MARKET_STUB")
+        if stub_env is None:
+            stub_enabled = False
+        else:
+            stub_enabled = stub_env.lower() == "true"
+
         return cls(
             environment=environment,
             database=DatabaseConfig.from_env(),
@@ -179,10 +236,11 @@ class Settings:
             agents=AgentConfig.from_env(),
             alerts=AlertConfig.from_env(),
             server=ServerConfig.from_env(),
-            enable_live_trading=os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true",
-            enable_prediction_markets=os.getenv("ENABLE_PREDICTION_MARKETS", "true").lower() == "true",
-            enable_news_monitoring=os.getenv("ENABLE_NEWS_MONITORING", "true").lower() == "true",
-            enable_backtesting=os.getenv("ENABLE_BACKTESTING", "true").lower() == "true",
+            enable_live_trading=_env_bool("ENABLE_LIVE_TRADING"),
+            enable_prediction_markets=_env_bool("ENABLE_PREDICTION_MARKETS", True),
+            enable_news_monitoring=_env_bool("ENABLE_NEWS_MONITORING", True),
+            enable_backtesting=_env_bool("ENABLE_BACKTESTING", True),
+            enable_prediction_market_stub=stub_enabled,
         )
     
     def to_dict(self) -> Dict[str, Any]:

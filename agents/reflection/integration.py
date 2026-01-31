@@ -20,6 +20,7 @@ from agents.reflection.analytics import PerformanceAnalytics, AgentMetrics
 from agents.reflection.learning import LearningEngine, LearningInsight
 from agents.reflection.context import ContextProvider
 from agents.reflection.persistence import PersistenceLayer
+from agents.reflection.orchestrator import ReflectionOrchestrator
 from utils.logger import get_logger
 
 logger = get_logger("reflection.system")
@@ -54,6 +55,7 @@ class ReflectionSystem:
         )
         
         self.auto_persist = auto_persist
+        self.orchestrator = ReflectionOrchestrator(reflection_system=self)
         
         # Load existing reflections
         self._load_from_storage()

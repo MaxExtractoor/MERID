@@ -14,6 +14,7 @@ from web.api.live_stream import router as live_stream_router
 from web.api.betting import router as betting_router
 from web.api.paper_trading import router as paper_trading_router
 from web.api.data_endpoints import router as data_router
+from web.api.trading_suite import router as trading_suite_router
 
 __all__ = [
     "institutional_router",
@@ -26,4 +27,5 @@ __all__ = [
     "betting_router",
     "paper_trading_router",
     "data_router",
+    "trading_suite_router",
 ]

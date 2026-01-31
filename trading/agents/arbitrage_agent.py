@@ -15,9 +15,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from utils.deps import get_ccxt_async
 from utils.logger import get_logger
 
 logger = get_logger("trading.agents.arbitrage")
+VENUE_FALLBACKS = {
+    "binance": "binanceus",
+}
 
 
 @dataclass
@@ -93,6 +97,8 @@ class ArbitrageAgent:
         self.total_executed = 0
         self.total_profit = 0.0
         self.win_rate = 0.0
+        self._restricted_venues: set[str] = set()
+        self._venue_overrides: Dict[str, str] = {}
         
         logger.info(
             "ArbitrageAgent initialized: min_spread=%.1f bps, max_slippage=%.1f bps",
@@ -297,28 +303,55 @@ class ArbitrageAgent:
     ) -> Dict[str, float]:
         """Fetch current prices across venues using CCXT."""
         prices: Dict[str, float] = {}
-        try:
-            import ccxt.async_support as ccxt
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
+            logger.warning("CCXT not available, using cached prices")
+            prices = {venue: 100.0 for venue in venues}
+        else:
             for venue in venues:
+                exchange = None
+                venue_key = venue.lower()
+                target_exchange = self._venue_overrides.get(venue_key, venue_key)
                 try:
-                    exchange_class = getattr(ccxt, venue.lower(), None)
+                    exchange_class = getattr(ccxt_async, target_exchange, None)
                     if exchange_class:
                         exchange = exchange_class()
                         ticker = await exchange.fetch_ticker(f"{asset}/USDT")
                         prices[venue] = ticker["last"]
-                        await exchange.close()
                 except Exception as exc:  # pragma: no cover - network failures
-                    logger.warning("Failed to fetch price from %s: %s", venue, exc)
-        except ImportError:
-            logger.warning("CCXT not available, using cached prices")
-            prices = {venue: 100.0 for venue in venues}
+                    message = str(exc).lower()
+                    if "restricted" in message or "451" in message:
+                        if venue_key not in self._restricted_venues:
+                            logger.warning(
+                                "Venue %s blocked access (likely geo restriction). Skipping future requests.",
+                                venue,
+                            )
+                            self._restricted_venues.add(venue_key)
+                            fallback = VENUE_FALLBACKS.get(venue_key)
+                            if fallback and venue_key not in self._venue_overrides:
+                                self._venue_overrides[venue_key] = fallback
+                                logger.info(
+                                    "Routing %s price lookups through %s due to geo restrictions",
+                                    venue,
+                                    fallback,
+                                )
+                        else:
+                            logger.debug("Venue %s still restricted", venue)
+                    else:
+                        logger.warning("Failed to fetch price from %s: %s", venue, exc)
+                finally:
+                    if exchange:
+                        try:
+                            await exchange.close()
+                        except Exception:
+                            logger.debug("Failed to close %s exchange cleanly", venue)
 
         # Backfill missing venues using cached market data
         if len(prices) < len(venues):
             try:
-                from data.live_price_feed import live_price_feed
+                from data.live_price_feed import get_live_price_feed
 
-                feed = live_price_feed()
+                feed = get_live_price_feed()
                 for venue in venues:
                     if venue not in prices:
                         price = feed.get_price(asset)
@@ -335,11 +368,14 @@ class ArbitrageAgent:
     ) -> Dict[str, float]:
         """Fetch funding rates across perp venues using CCXT."""
         rates: Dict[str, float] = {}
-        try:
-            import ccxt.async_support as ccxt
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
+            logger.warning("CCXT not available, using default rates")
+            rates = {venue: 0.0001 for venue in venues}
+        else:
             for venue in venues:
                 try:
-                    exchange_class = getattr(ccxt, venue.lower(), None)
+                    exchange_class = getattr(ccxt_async, venue.lower(), None)
                     if exchange_class and hasattr(exchange_class, "fetch_funding_rate"):
                         exchange = exchange_class()
                         funding = await exchange.fetch_funding_rate(f"{asset}/USDT:USDT")
@@ -348,9 +384,6 @@ class ArbitrageAgent:
                 except Exception as exc:
                     logger.debug("Funding rate not available for %s: %s", venue, exc)
                     rates[venue] = 0.0
-        except ImportError:
-            logger.warning("CCXT not available, using default rates")
-            rates = {venue: 0.0001 for venue in venues}
         return rates
 
     def _estimate_slippage(

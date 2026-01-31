@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from core.events import EventEnvelope, EventType, EventPriority, create_audit_event
 from core.error_handling import (
@@ -25,7 +25,12 @@ from core.error_handling import (
     RetryStrategy, get_health_monitor
 )
 from core.state_recovery import get_state_manager, get_self_healing
+from core.reality_auditor import RealityAuditorProtocol
+from utils.deps import get_ccxt_async
 from utils.logger import get_logger
+from core.social_strategy_router import evaluate_social_trade, release_social_position
+from latency_optimizer.orchestrator_hooks import record_trading_tick
+from trading.execution.defense import DefenseAction, ThreatLevel
 
 logger = get_logger("trading.execution")
 
@@ -67,6 +72,16 @@ class PositionSide(Enum):
     LONG = "long"
     SHORT = "short"
     FLAT = "flat"
+
+
+def _is_abort_action(action: DefenseAction) -> bool:
+    """Return True when MEV defense recommends aborting execution."""
+    return action == DefenseAction.ABORT
+
+
+def _is_high_threat(level: ThreatLevel) -> bool:
+    """Return True when threat level is high enough to force abort."""
+    return level in {ThreatLevel.HIGH, ThreatLevel.CRITICAL}
 
 
 @dataclass
@@ -179,6 +194,9 @@ class ExecutionConfig:
     max_position_size_usd: float = 10000.0
     max_total_exposure_usd: float = 50000.0
     max_leverage: float = 3.0
+    # Paper-mode risk limits (used for fallbacks/degraded execution)
+    paper_max_position_size_usd: float = 50000.0
+    paper_max_total_exposure_usd: float = 200000.0
     
     # Default stop/take profit
     default_stop_loss_pct: float = 0.05
@@ -251,7 +269,7 @@ class ExecutionEngine:
         self._monitor_task: Optional[asyncio.Task[None]] = None
         
         # Reality enforcement integration
-        self._reality_auditor = None
+        self._reality_auditor: RealityAuditorProtocol | None = None
         try:
             from core.reality_auditor import get_reality_auditor
             self._reality_auditor = get_reality_auditor()
@@ -264,7 +282,11 @@ class ExecutionEngine:
         # MEV defense integration
         self._mev_defender = None
         try:
-            from trading.execution.defense import get_mev_defense
+            from trading.execution.defense import (
+                get_mev_defense,
+                DefenseAction,
+                ThreatLevel,
+            )
             self._mev_defender = get_mev_defense()
             self._logger.info("MEV defense integrated - protection active")
         except Exception as e:
@@ -303,6 +325,26 @@ class ExecutionEngine:
         )
         
         self._logger.info("Execution engine initialized with full production-grade features")
+
+    def set_reality_auditor(self, auditor: RealityAuditorProtocol | None) -> None:
+        """Inject or override the reality auditor (primarily for tests)."""
+
+        self._reality_auditor = auditor
+
+    def set_mev_defender(self, defender) -> None:
+        """Inject or override the MEV defender implementation."""
+
+        self._mev_defender = defender
+
+    def _resolve_execution_mode(self) -> ExecutionMode:
+        """Determine actual execution mode, accounting for degraded fallbacks."""
+        if self.config.mode == ExecutionMode.LIVE:
+            if not (self.config.api_key and self.config.api_secret):
+                self._logger.warning(
+                    "Live mode requested but API credentials missing; executing in PAPER mode"
+                )
+                return ExecutionMode.PAPER
+        return self.config.mode
     
     async def start(self) -> None:
         """Start the execution engine."""
@@ -382,6 +424,9 @@ class ExecutionEngine:
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         consensus_round_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        sentiment_score: Optional[float] = None,
+        portfolio_value: Optional[float] = None,
     ) -> Order:
         """
         Submit a new order.
@@ -395,6 +440,9 @@ class ExecutionEngine:
             stop_loss: Stop loss price
             take_profit: Take profit price
             consensus_round_id: Associated consensus round
+            strategy_id: Optional strategy identifier for social gating
+            sentiment_score: Optional sentiment score for social strategies
+            portfolio_value: Optional portfolio value for social sizing
             
         Returns:
             Created Order object
@@ -404,152 +452,226 @@ class ExecutionEngine:
         """
         if self.config.mode == ExecutionMode.DISABLED:
             raise ExecutionError("Execution is disabled")
-        
-        order = Order(
-            order_id=str(uuid.uuid4()),
-            symbol=symbol,
-            side=side,
-            order_type=order_type,
-            quantity=quantity,
-            price=price,
-            stop_price=stop_loss,
-            consensus_round_id=consensus_round_id,
-            metadata={
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-            },
-        )
-        
-        # CONSTITUTIONAL: Audit execution intent with Reality Auditor
-        if self._reality_auditor:
-            audit_result = self._reality_auditor.audit_execution_intent(
-                order_id=order.order_id,
+
+        order_id = str(uuid.uuid4())
+        latency_metadata = {
+            "symbol": symbol,
+            "side": side.value,
+            "strategy": strategy_id or "unspecified",
+        }
+        decision_key = f"order:{order_id}"
+
+        with record_trading_tick(latency_metadata, decision_key=decision_key):
+            if strategy_id and sentiment_score is not None:
+                try:
+                    current_price = price or self._price_cache.get(symbol, 0.0)
+                    if current_price == 0.0:
+                        self._logger.warning(
+                            f"No price available for {symbol}, skipping social gating"
+                        )
+                    else:
+                        pv = portfolio_value or self._equity
+                        social_eval = evaluate_social_trade(
+                            strategy_id=strategy_id,
+                            asset=symbol,
+                            portfolio_value=pv,
+                            sentiment_score=sentiment_score,
+                            market_metrics={"price": current_price},
+                            latency_decision_key=f"social:{order_id}",
+                        )
+
+                        if not social_eval["allowed"]:
+                            reasons = "; ".join(social_eval["reasons"])
+                            self._logger.error(
+                                f"Social strategy gating blocked order: {reasons}"
+                            )
+                            raise OrderRejectedError(f"Social gating failed: {reasons}")
+
+                        self._logger.info(
+                            f"Social strategy gating passed for {symbol}: size=$%.2f",
+                            social_eval["sizing"].get("size_usd", 0.0),
+                        )
+                except OrderRejectedError:
+                    raise
+                except Exception as exc:
+                    self._logger.error("Social gating error: %s", exc)
+                    raise OrderRejectedError(f"Social gating error: {exc}")
+
+            order = Order(
+                order_id=order_id,
                 symbol=symbol,
-                side=side.value,
+                side=side,
+                order_type=order_type,
                 quantity=quantity,
-                order_value=quantity * (price or self._price_cache.get(symbol, 0))
+                price=price,
+                stop_price=stop_loss,
+                consensus_round_id=consensus_round_id,
+                metadata={
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "strategy_id": strategy_id,
+                    "sentiment_score": sentiment_score,
+                    "portfolio_value": portfolio_value,
+                },
             )
-            
-            if not audit_result.passed:
-                self._logger.error(f"Execution blocked by reality auditor: {audit_result.reason}")
-                await self._error_handler.handle_error(
-                    OrderRejectedError(f"Reality audit failed: {audit_result.reason}"),
-                    "execution_engine", "submit_order", ErrorSeverity.HIGH
-                )
-                raise OrderRejectedError(f"Reality audit failed: {audit_result.reason}")
-            
-            if audit_result.warnings:
-                for warning in audit_result.warnings:
-                    self._logger.warning(f"Execution warning: {warning}")
-        
-        # MEV DEFENSE: Assess and apply protection
-        mev_recommendation = None
-        if self._mev_defender:
-            try:
-                current_price = price or self._price_cache.get(symbol, 0)
-                order_value = quantity * current_price
-                
-                # Get MEV risk assessment
-                mev_recommendation = self._mev_defender.get_defense_recommendation(
-                    symbol=symbol,
-                    venue="default",
-                    side=side.value,
-                    order_size=order_value,
-                    daily_volume=order_value * 100,  # Estimate
-                    volatility=0.02  # Estimate 2% volatility
-                )
-                
-                self._logger.info(
-                    f"MEV defense recommendation: {mev_recommendation.action.value} "
-                    f"(threat: {mev_recommendation.threat_level.value}, "
-                    f"risk: ${mev_recommendation.estimated_mev_risk:.2f})"
-                )
-                
-                # Register pending order for front-running detection
-                self._mev_defender.front_running_detector.register_pending_order(
+
+            if self._reality_auditor:
+                audit_result = self._reality_auditor.audit_execution_intent(
                     order_id=order.order_id,
                     symbol=symbol,
                     side=side.value,
-                    size=quantity,
-                    price=current_price
+                    quantity=quantity,
+                    order_value=quantity * (price or self._price_cache.get(symbol, 0)),
                 )
-                
-                # Store MEV recommendation in order metadata
-                order.metadata["mev_recommendation"] = mev_recommendation.to_dict()
-                
-            except Exception as e:
-                self._logger.error(f"MEV defense error: {e}")
-                await self._error_handler.handle_error(
-                    e, "execution_engine", "mev_defense", ErrorSeverity.MEDIUM
-                )
-        
-        # VALIDATION: External validation before execution
-        if self._validator:
-            try:
-                validation_result = await self._validator.validate_order(order)
-                if not validation_result.passed:
-                    self._logger.error(f"Order validation failed: {validation_result.reason}")
-                    raise OrderRejectedError(f"Validation failed: {validation_result.reason}")
-            except Exception as e:
-                self._logger.error(f"Validation error: {e}")
-                await self._error_handler.handle_error(
-                    e, "execution_engine", "validation", ErrorSeverity.HIGH
-                )
-        
-        self._validate_order(order)
-        
-        self._orders[order.order_id] = order
-        
-        self._emit_event(create_audit_event(
-            action="order_submitted",
-            actor="execution_engine",
-            details={
-                "order_id": order.order_id,
-                "symbol": symbol,
-                "side": side.value,
-                "quantity": quantity,
-                "order_type": order_type.value,
-            },
-            severity="info",
-        ))
-        
-        if self.config.mode == ExecutionMode.PAPER:
-            await self._execute_paper_order(order, stop_loss, take_profit)
-        else:
-            await self._execute_live_order(order, stop_loss, take_profit)
-        
+
+                if not audit_result.passed:
+                    self._logger.error(
+                        f"Execution blocked by reality auditor: {audit_result.reason}"
+                    )
+                    await self._error_handler.handle_error(
+                        OrderRejectedError(
+                            f"Reality audit failed: {audit_result.reason}"
+                        ),
+                        "execution_engine",
+                        "submit_order",
+                        ErrorSeverity.HIGH,
+                    )
+                    raise OrderRejectedError(
+                        f"Reality audit failed: {audit_result.reason}"
+                    )
+
+                if audit_result.warnings:
+                    for warning in audit_result.warnings:
+                        self._logger.warning("Execution warning: %s", warning)
+
+            mev_recommendation = None
+            if self._mev_defender:
+                try:
+                    current_price = price or self._price_cache.get(symbol, 0)
+                    order_value = quantity * current_price
+                    mev_recommendation = self._mev_defender.get_defense_recommendation(
+                        symbol=symbol,
+                        venue="default",
+                        side=side.value,
+                        order_size=order_value,
+                        daily_volume=order_value * 100,
+                        volatility=0.02,
+                    )
+
+                    self._logger.info(
+                        "MEV defense recommendation: %s (threat=%s, risk=$%.2f)",
+                        mev_recommendation.action.value,
+                        mev_recommendation.threat_level.value,
+                        mev_recommendation.estimated_mev_risk,
+                    )
+
+                    self._mev_defender.front_running_detector.register_pending_order(
+                        order_id=order.order_id,
+                        symbol=symbol,
+                        side=side.value,
+                        size=quantity,
+                        price=current_price,
+                    )
+
+                    order.metadata["mev_recommendation"] = (
+                        mev_recommendation.to_dict()
+                    )
+
+                    if (
+                        _is_abort_action(mev_recommendation.action)
+                        and _is_high_threat(mev_recommendation.threat_level)
+                    ):
+                        raise OrderRejectedError(
+                            f"MEV defense aborted order ({mev_recommendation.threat_level.value} threat)"
+                        )
+
+                except OrderRejectedError:
+                    raise
+                except Exception as exc:
+                    self._logger.error("MEV defense error: %s", exc)
+                    await self._error_handler.handle_error(
+                        exc,
+                        "execution_engine",
+                        "mev_defense",
+                        ErrorSeverity.MEDIUM,
+                    )
+
+            if self._validator:
+                try:
+                    validation_result = await self._validator.validate_order(order)
+                    if not validation_result.passed:
+                        self._logger.error(
+                            "Order validation failed: %s",
+                            validation_result.reason,
+                        )
+                        raise OrderRejectedError(
+                            f"Validation failed: {validation_result.reason}"
+                        )
+                except Exception as exc:
+                    self._logger.error("Validation error: %s", exc)
+                    await self._error_handler.handle_error(
+                        exc,
+                        "execution_engine",
+                        "validation",
+                        ErrorSeverity.HIGH,
+                    )
+
+            execution_mode = self._resolve_execution_mode()
+            order.metadata["execution_mode"] = execution_mode.value
+
+            self._validate_order(order, execution_mode=execution_mode)
+            self._orders[order.order_id] = order
+
+            self._emit_event(create_audit_event(
+                action="order_submitted",
+                actor="execution_engine",
+                details={
+                    "order_id": order.order_id,
+                    "symbol": symbol,
+                    "side": side.value,
+                    "quantity": quantity,
+                    "order_type": order_type.value,
+                },
+                severity="info",
+            ))
+
+            if execution_mode == ExecutionMode.PAPER:
+                await self._execute_paper_order(order, stop_loss, take_profit)
+            else:
+                await self._execute_live_order(order, stop_loss, take_profit)
+
         return order
-    
+
     async def cancel_order(self, order_id: str) -> bool:
         """
         Cancel an open order.
-        
+
         Args:
-            order_id: Order to cancel
-            
+            order_id: ID of the order to cancel
+
         Returns:
             True if cancelled successfully
         """
         if order_id not in self._orders:
             return False
-        
+
         order = self._orders[order_id]
-        
+
         if order.is_complete():
             return False
-        
+
         order.status = OrderStatus.CANCELLED
         order.updated_at = time.time()
-        
+
         self._emit_event(create_audit_event(
             action="order_cancelled",
             actor="execution_engine",
             details={"order_id": order_id},
             severity="info",
         ))
-        
+
         return True
-    
+
     async def close_position(
         self,
         symbol: str,
@@ -557,28 +679,42 @@ class ExecutionEngine:
     ) -> Optional[Order]:
         """
         Close an open position.
-        
+
         Args:
             symbol: Position symbol to close
             reason: Reason for closing
-            
+
         Returns:
             Closing order if position existed
         """
         if symbol not in self._positions:
             return None
-        
+
         position = self._positions[symbol]
-        
         close_side = OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY
-        
+
         order = await self.submit_order(
             symbol=symbol,
             side=close_side,
             quantity=position.quantity,
             order_type=OrderType.MARKET,
         )
-        
+
+        if (
+            position.metadata.get("strategy_id")
+            and position.metadata.get("sentiment_score") is not None
+        ):
+            try:
+                position_value = position.quantity * position.current_price
+                release_social_position(symbol, position_value)
+                self._logger.info(
+                    "Released social exposure for %s: $%.2f",
+                    symbol,
+                    position_value,
+                )
+            except Exception as exc:
+                self._logger.error("Failed to release social exposure: %s", exc)
+
         self._emit_event(create_audit_event(
             action="position_closed",
             actor="execution_engine",
@@ -589,25 +725,25 @@ class ExecutionEngine:
             },
             severity="info",
         ))
-        
+
         return order
-    
+
     def get_position(self, symbol: str) -> Optional[Position]:
         """Get position for a symbol."""
         return self._positions.get(symbol)
-    
+
     def get_all_positions(self) -> List[Position]:
         """Get all open positions."""
         return list(self._positions.values())
-    
+
     def get_order(self, order_id: str) -> Optional[Order]:
         """Get order by ID."""
         return self._orders.get(order_id)
-    
+
     def get_open_orders(self) -> List[Order]:
         """Get all open orders."""
         return [o for o in self._orders.values() if not o.is_complete()]
-    
+
     def get_account_summary(self) -> Dict[str, object]:
         """Get account summary."""
         return {
@@ -621,7 +757,7 @@ class ExecutionEngine:
             "open_orders": len([o for o in self._orders.values() if not o.is_complete()]),
             "margin_used": sum(p.margin_used for p in self._positions.values()),
         }
-    
+
     async def sync_with_exchange(self) -> Dict[str, object]:
         """
         Synchronize positions and balance with exchange.
@@ -633,9 +769,11 @@ class ExecutionEngine:
         if not self.config.api_key or not self.config.api_secret:
             return {"status": "error", "reason": "No API keys configured"}
         
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
+            return {"status": "error", "reason": "CCXT not installed"}
+
         try:
-            import ccxt.async_support as ccxt_async
-            
             exchange_class = getattr(ccxt_async, self.config.exchange)
             exchange = exchange_class({
                 'apiKey': self.config.api_key,
@@ -697,30 +835,50 @@ class ExecutionEngine:
         """Register callback for execution events."""
         self._event_callbacks.append(callback)
     
-    def _validate_order(self, order: Order) -> None:
+    def _validate_order(
+        self,
+        order: Order,
+        execution_mode: Optional[ExecutionMode] = None,
+    ) -> None:
         """
         Validate order against risk controls.
         
         Raises:
             ExecutionError: If validation fails
         """
+        mode = execution_mode or self.config.mode
         current_price = self._price_cache.get(order.symbol, 0)
         if current_price == 0 and order.order_type == OrderType.MARKET:
             raise ExecutionError(f"No price available for {order.symbol}")
         
         order_value = order.quantity * (order.price or current_price)
+
+        if mode == ExecutionMode.PAPER:
+            max_position = getattr(
+                self.config,
+                "paper_max_position_size_usd",
+                self.config.max_position_size_usd,
+            )
+            max_total = getattr(
+                self.config,
+                "paper_max_total_exposure_usd",
+                self.config.max_total_exposure_usd,
+            )
+        else:
+            max_position = self.config.max_position_size_usd
+            max_total = self.config.max_total_exposure_usd
         
-        if order_value > self.config.max_position_size_usd:
+        if order_value > max_position:
             raise PositionLimitError(
                 f"Order value ${order_value:.0f} exceeds max position size "
-                f"${self.config.max_position_size_usd:.0f}"
+                f"${max_position:.0f}"
             )
         
         new_exposure = self._total_exposure + order_value
-        if new_exposure > self.config.max_total_exposure_usd:
+        if new_exposure > max_total:
             raise PositionLimitError(
                 f"Total exposure ${new_exposure:.0f} would exceed max "
-                f"${self.config.max_total_exposure_usd:.0f}"
+                f"${max_total:.0f}"
             )
         
         if order_value > self._balance:
@@ -771,9 +929,14 @@ class ExecutionEngine:
         
         Requires exchange API keys to be configured.
         """
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
+            self._logger.error("CCXT not installed; cannot execute live order")
+            self._validate_order(order, execution_mode=ExecutionMode.PAPER)
+            await self._execute_paper_order(order, stop_loss, take_profit)
+            return
+
         try:
-            import ccxt.async_support as ccxt_async
-            
             # Get exchange from config or default to coinbase
             exchange_id = getattr(self.config, 'exchange', 'coinbase')
             api_key = getattr(self.config, 'api_key', None)
@@ -845,6 +1008,7 @@ class ExecutionEngine:
                 "Live order execution failed: %s. Falling back to paper mode.",
                 str(e)
             )
+            self._validate_order(order, execution_mode=ExecutionMode.PAPER)
             await self._execute_paper_order(order, stop_loss, take_profit)
     
     def _update_position_from_fill(
@@ -911,6 +1075,11 @@ class ExecutionEngine:
                 take_profit=take_profit or self._calculate_default_target(
                     order.filled_price, side
                 ),
+                metadata={
+                    "strategy_id": order.metadata.get("strategy_id"),
+                    "sentiment_score": order.metadata.get("sentiment_score"),
+                    "portfolio_value": order.metadata.get("portfolio_value"),
+                },
             )
             
             self._positions[symbol] = position

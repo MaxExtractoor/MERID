@@ -94,23 +94,39 @@ class AuditTrail:
         if audit_file.exists():
             try:
                 with open(audit_file, "r") as f:
-                    for line in f:
-                        data = json.loads(line.strip())
-                        entry = AuditEntry(
-                            sequence=data["sequence"],
-                            timestamp=data["timestamp"],
-                            event_type=data["event_type"],
-                            source=data["source"],
-                            data=data["data"],
-                            previous_hash=data["previous_hash"],
-                            entry_hash=data["entry_hash"]
-                        )
+                    for idx, raw_line in enumerate(f, start=1):
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            entry = AuditEntry(
+                                sequence=data["sequence"],
+                                timestamp=data["timestamp"],
+                                event_type=data["event_type"],
+                                source=data["source"],
+                                data=data["data"],
+                                previous_hash=data["previous_hash"],
+                                entry_hash=data["entry_hash"]
+                            )
+                        except Exception as parse_err:
+                            logger.warning("Skipping corrupt audit entry at line %d: %s", idx, parse_err)
+                            continue
+
                         self.entries.append(entry)
                         self.sequence = entry.sequence
                         self.last_hash = entry.entry_hash
-                logger.info(f"Loaded {len(self.entries)} audit entries")
+
+                if self.entries:
+                    logger.info(f"Loaded {len(self.entries)} audit entries")
+                else:
+                    logger.info("Audit log file present but no valid entries found")
             except Exception as e:
                 logger.error(f"Failed to load audit entries: {e}")
+                # Fallback to empty chain if file is unrecoverable
+                self.entries = []
+                self.sequence = 0
+                self.last_hash = "genesis"
                 
     async def start(self):
         """Start the audit trail."""

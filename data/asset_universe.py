@@ -19,25 +19,46 @@ class Asset:
     is_layer2: bool = False
 
 
-# Institutional-grade asset universe - Top 50+ cryptocurrencies
 ASSET_UNIVERSE: Dict[str, Asset] = {
-    # Layer 1 Blockchains
+    # Layer 1 Blockchains / Primary listings
     'BTC': Asset('BTC/USDT', 'Bitcoin', 'Layer1', 'bitcoin', 1, is_layer1=True),
+    'BTC-PERP': Asset('BTC/USDT:USDT', 'Bitcoin Perp', 'Perp', 'bitcoin', 1, is_layer1=True),
     'ETH': Asset('ETH/USDT', 'Ethereum', 'Layer1', 'ethereum', 2, is_layer1=True),
+    'ETH-PERP': Asset('ETH/USDT:USDT', 'Ethereum Perp', 'Perp', 'ethereum', 2, is_layer1=True),
     'BNB': Asset('BNB/USDT', 'BNB', 'Layer1', 'binancecoin', 4, is_layer1=True),
+    'BNBUS': Asset('BNB/USD', 'BNB (US Spot)', 'Layer1', 'binancecoin', 4, is_layer1=True),
     'SOL': Asset('SOL/USDT', 'Solana', 'Layer1', 'solana', 5, is_layer1=True),
+    'SOL-PERP': Asset('SOL/USDT:USDT', 'Solana Perp', 'Perp', 'solana', 5, is_layer1=True),
     'XRP': Asset('XRP/USDT', 'Ripple', 'Layer1', 'ripple', 6, is_layer1=True),
     'ADA': Asset('ADA/USDT', 'Cardano', 'Layer1', 'cardano', 9, is_layer1=True),
     'AVAX': Asset('AVAX/USDT', 'Avalanche', 'Layer1', 'avalanche-2', 10, is_layer1=True),
     'DOT': Asset('DOT/USDT', 'Polkadot', 'Layer1', 'polkadot', 13, is_layer1=True),
-    'MATIC': Asset('MATIC/USDT', 'Polygon', 'Layer2', 'matic-network', 15, is_layer2=True),
     'ATOM': Asset('ATOM/USDT', 'Cosmos', 'Layer1', 'cosmos', 18, is_layer1=True),
     'NEAR': Asset('NEAR/USDT', 'NEAR Protocol', 'Layer1', 'near', 20, is_layer1=True),
     'APT': Asset('APT/USDT', 'Aptos', 'Layer1', 'aptos', 22, is_layer1=True),
     'SUI': Asset('SUI/USDT', 'Sui', 'Layer1', 'sui', 24, is_layer1=True),
     'INJ': Asset('INJ/USDT', 'Injective', 'Layer1', 'injective-protocol', 28, is_layer1=True),
     'SEI': Asset('SEI/USDT', 'Sei', 'Layer1', 'sei-network', 32, is_layer1=True),
-    
+    'TIA': Asset('TIA/USDT', 'Celestia', 'Layer1', 'celestia', 26, is_layer1=True),
+    'LTC': Asset('LTC/USDT', 'Litecoin', 'Layer1', 'litecoin', 19, is_layer1=True),
+    'BCH': Asset('BCH/USDT', 'Bitcoin Cash', 'Layer1', 'bitcoin-cash', 21, is_layer1=True),
+    'ALGO': Asset('ALGO/USDT', 'Algorand', 'Layer1', 'algorand', 33, is_layer1=True),
+    'VET': Asset('VET/USDT', 'VeChain', 'Layer1', 'vechain', 37, is_layer1=True),
+    'ICP': Asset('ICP/USDT', 'Internet Computer', 'Layer1', 'internet-computer', 39, is_layer1=True),
+
+    # Layer 2
+    'MATIC': Asset('MATIC/USDT', 'Polygon', 'Layer2', 'matic-network', 15, is_layer2=True),
+    'OP': Asset('OP/USDT', 'Optimism', 'Layer2', 'optimism', 27, is_layer2=True),
+    'ARB': Asset('ARB/USDT', 'Arbitrum', 'Layer2', 'arbitrum', 29, is_layer2=True),
+    'STRK': Asset('STRK/USDT', 'Starknet', 'Layer2', 'starknet', 41, is_layer2=True),
+    'BASE': Asset('BASE/USDT', 'Base', 'Layer2', 'base', 65, is_layer2=True),
+
+    # Perp-focused venues (extra markets)
+    'BTC-OKX-PERP': Asset('BTC/USDT:USDT', 'BTC Perp (OKX)', 'Perp', 'bitcoin', 1, is_layer1=True),
+    'ETH-OKX-PERP': Asset('ETH/USDT:USDT', 'ETH Perp (OKX)', 'Perp', 'ethereum', 2, is_layer1=True),
+    'SOL-OKX-PERP': Asset('SOL/USDT:USDT', 'SOL Perp (OKX)', 'Perp', 'solana', 5, is_layer1=True),
+    'DOGE-OKX-PERP': Asset('DOGE/USDT:USDT', 'DOGE Perp (OKX)', 'Perp', 'dogecoin', 8),
+
     # DeFi Protocols
     'UNI': Asset('UNI/USDT', 'Uniswap', 'DeFi', 'uniswap', 16, is_defi=True),
     'LINK': Asset('LINK/USDT', 'Chainlink', 'DeFi', 'chainlink', 14, is_defi=True),
@@ -47,53 +68,49 @@ ASSET_UNIVERSE: Dict[str, Asset] = {
     'COMP': Asset('COMP/USDT', 'Compound', 'DeFi', 'compound-governance-token', 50, is_defi=True),
     'SNX': Asset('SNX/USDT', 'Synthetix', 'DeFi', 'synthetix-network-token', 55, is_defi=True),
     'SUSHI': Asset('SUSHI/USDT', 'SushiSwap', 'DeFi', 'sushi', 60, is_defi=True),
-    
+    'GMX': Asset('GMX/USDT', 'GMX', 'DeFi', 'gmx', 43, is_defi=True),
+    'DYDX': Asset('DYDX/USDT', 'dYdX', 'DeFi', 'dydx', 34, is_defi=True),
+
     # Meme Coins
     'DOGE': Asset('DOGE/USDT', 'Dogecoin', 'Meme', 'dogecoin', 8, is_layer1=True),
     'SHIB': Asset('SHIB/USDT', 'Shiba Inu', 'Meme', 'shiba-inu', 11),
     'PEPE': Asset('PEPE/USDT', 'Pepe', 'Meme', 'pepe', 25),
     'FLOKI': Asset('FLOKI/USDT', 'Floki', 'Meme', 'floki', 48),
     'BONK': Asset('BONK/USDT', 'Bonk', 'Meme', 'bonk', 52),
-    
-    # Infrastructure
+
+    # Infrastructure / Storage / Data
     'FIL': Asset('FIL/USDT', 'Filecoin', 'Storage', 'filecoin', 30),
     'AR': Asset('AR/USDT', 'Arweave', 'Storage', 'arweave', 42),
     'GRT': Asset('GRT/USDT', 'The Graph', 'Indexing', 'the-graph', 44),
     'RNDR': Asset('RNDR/USDT', 'Render', 'Computing', 'render-token', 38),
-    
+    'TIA-PERP': Asset('TIA/USDT:USDT', 'Celestia Perp', 'Perp', 'celestia', 26, is_layer1=True),
+
     # Gaming & Metaverse
     'AXS': Asset('AXS/USDT', 'Axie Infinity', 'Gaming', 'axie-infinity', 46),
     'SAND': Asset('SAND/USDT', 'The Sandbox', 'Metaverse', 'the-sandbox', 49),
     'MANA': Asset('MANA/USDT', 'Decentraland', 'Metaverse', 'decentraland', 51),
     'IMX': Asset('IMX/USDT', 'Immutable X', 'Gaming', 'immutable-x', 47),
-    
+
     # AI & Data
     'FET': Asset('FET/USDT', 'Fetch.ai', 'AI', 'fetch-ai', 54),
     'OCEAN': Asset('OCEAN/USDT', 'Ocean Protocol', 'Data', 'ocean-protocol', 58),
     'AGIX': Asset('AGIX/USDT', 'SingularityNET', 'AI', 'singularitynet', 62),
-    
+    'TURBO': Asset('TURBO/USDT', 'Turbo', 'AI', 'turbo', 66),
+
     # Privacy
     'XMR': Asset('XMR/USDT', 'Monero', 'Privacy', 'monero', 36),
     'ZEC': Asset('ZEC/USDT', 'Zcash', 'Privacy', 'zcash', 64),
-    
-    # Stablecoins (for reference)
+
+    # Stablecoins (for reference / cross-venue checks)
     'USDT': Asset('USDT/USD', 'Tether', 'Stablecoin', 'tether', 3),
     'USDC': Asset('USDC/USD', 'USD Coin', 'Stablecoin', 'usd-coin', 7),
     'DAI': Asset('DAI/USD', 'Dai', 'Stablecoin', 'dai', 17),
-    
-    # Emerging Layer 1s
-    'TIA': Asset('TIA/USDT', 'Celestia', 'Layer1', 'celestia', 26, is_layer1=True),
-    'OP': Asset('OP/USDT', 'Optimism', 'Layer2', 'optimism', 27, is_layer2=True),
-    'ARB': Asset('ARB/USDT', 'Arbitrum', 'Layer2', 'arbitrum', 29, is_layer2=True),
-    'STRK': Asset('STRK/USDT', 'Starknet', 'Layer2', 'starknet', 41, is_layer2=True),
-    
-    # Additional Top Assets
-    'LTC': Asset('LTC/USDT', 'Litecoin', 'Layer1', 'litecoin', 19, is_layer1=True),
-    'BCH': Asset('BCH/USDT', 'Bitcoin Cash', 'Layer1', 'bitcoin-cash', 21, is_layer1=True),
-    'ETC': Asset('ETC/USDT', 'Ethereum Classic', 'Layer1', 'ethereum-classic', 31, is_layer1=True),
-    'ALGO': Asset('ALGO/USDT', 'Algorand', 'Layer1', 'algorand', 33, is_layer1=True),
-    'VET': Asset('VET/USDT', 'VeChain', 'Layer1', 'vechain', 37, is_layer1=True),
-    'ICP': Asset('ICP/USDT', 'Internet Computer', 'Layer1', 'internet-computer', 39, is_layer1=True),
+
+    # Emerging assets
+    'PYTH': Asset('PYTH/USDT', 'Pyth Network', 'Oracle', 'pyth-network', 59),
+    'JTO': Asset('JTO/USDT', 'Jito', 'DeFi', 'jito-governance-token', 63),
+    'BEAM': Asset('BEAM/USDT', 'Beam', 'Gaming', 'beam', 67),
+    'TIA-SPOT': Asset('TIA/USD', 'Celestia (USD)', 'Layer1', 'celestia', 26, is_layer1=True),
 }
 
 

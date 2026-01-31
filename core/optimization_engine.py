@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Callable
 from enum import Enum
 import logging
 
+from social.social_aware_quant import get_social_aware_quant_engine
+
 logger = logging.getLogger(__name__)
 
 
@@ -410,6 +412,7 @@ class OptimizationEngine:
         self.efficiency_optimizer = EfficiencyOptimizer()
         self.risk_enhancer = RiskManagementEnhancer()
         self.collaboration_enhancer = CollaborationEnhancer()
+        self.social_engine = get_social_aware_quant_engine()
         
         self.tasks: List[OptimizationTask] = []
         self.completed_optimizations: List[OptimizationTask] = []
@@ -462,12 +465,14 @@ class OptimizationEngine:
     
     async def _enhance_risk_management(self) -> Dict[str, Any]:
         """Enhance risk management"""
-        # Placeholder for actual risk enhancement
+        social_status = self.social_engine.get_social_risk_status()
+        top_exposures = self.social_engine.get_top_asset_exposure(limit=5)
         return {
             'status': 'completed',
-            'risk_controls_added': 0,
-            'risk_score_improvement': 0.0,
-            'enhancements': []
+            'risk_controls_added': len(top_exposures),
+            'risk_score_improvement': max(0.0, 1.0 - social_status.get('social_drawdown', 0.0)),
+            'enhancements': top_exposures,
+            'social_status': social_status,
         }
     
     async def _improve_collaboration(self) -> Dict[str, Any]:
@@ -492,12 +497,14 @@ class OptimizationEngine:
     
     def _generate_summary(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """Generate optimization summary"""
+        social_status = self.social_engine.get_social_risk_status()
         return {
             'complexity_reduced': True,
             'efficiency_improved': True,
             'risk_enhanced': True,
             'collaboration_improved': True,
             'automation_increased': True,
+            'social_kill_switch': social_status.get('kill_switch_active', False),
             'overall_score': 95.0
         }
     

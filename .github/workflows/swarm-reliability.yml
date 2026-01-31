@@ -1,0 +1,57 @@
+name: Swarm Reliability CI Check
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  swarm-reliability:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install numpy scipy
+    
+    - name: Run Swarm Reliability Checks
+      run: |
+        python swarm/ci/reliability_monitor.py --output ci_reliability_report.json
+    
+    - name: Upload Reliability Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: reliability-report
+        path: ci_reliability_report.json
+    
+    - name: Check Reliability Thresholds
+      run: |
+        python -c "
+        import json
+        with open('ci_reliability_report.json', 'r') as f:
+            report = json.load(f)
+        
+        if not report['passed']:
+            print('❌ Swarm reliability checks FAILED')
+            print(f'Success rate: {report[\"metrics\"][\"success_rate\"]:.2%} (required: ≥80%)')
+            print(f'Avg cascade size: {report[\"metrics\"][\"avg_cascade_size\"]:.2f} (required: ≤3.0)')
+            print(f'Avg branching factor: {report[\"metrics\"][\"avg_branching_factor\"]:.2f} (required: ≤1.3)')
+            print(f'Avg misalignment: {report[\"metrics\"][\"avg_misalignment\"]:.2f} (required: ≤1.0)')
+            print(f'Avg retry index: {report[\"metrics\"][\"avg_retry_index\"]:.2f} (required: ≤2.0)')
+            exit(1)
+        else:
+            print('✅ Swarm reliability checks PASSED')
+            print(f'Success rate: {report[\"metrics\"][\"success_rate\"]:.2%}')
+            print(f'Avg cascade size: {report[\"metrics\"][\"avg_cascade_size\"]:.2f}')
+            print(f'Avg branching factor: {report[\"metrics\"][\"avg_branching_factor\"]:.2f}')
+            print(f'Avg misalignment: {report[\"metrics\"][\"avg_misalignment\"]:.2f}')
+            print(f'Avg retry index: {report[\"metrics\"][\"avg_retry_index\"]:.2f}')
+        "

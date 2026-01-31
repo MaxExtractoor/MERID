@@ -19,6 +19,7 @@ from schemas.arbitrage import (
     ArbitrageOpportunity, ArbitrageType, ArbitrageStatus,
     ArbitrageLeg, VenueType, CostModel
 )
+from utils.deps import get_ccxt_async
 from utils.logger import get_logger
 
 logger = get_logger("arbitrage.dex_cex")
@@ -201,9 +202,12 @@ class DEXCEXScanner(ArbitrageScanner):
         """Fetch real prices from CEXs via CCXT."""
         prices = []
         
+        ccxt_async = get_ccxt_async()
+        if not ccxt_async:
+            logger.warning("CCXT not available; skipping CEX price sync")
+            return prices
+
         try:
-            import ccxt.async_support as ccxt_async
-            
             for cex in self._cex_fees.keys():
                 try:
                     exchange_class = getattr(ccxt_async, cex, None)

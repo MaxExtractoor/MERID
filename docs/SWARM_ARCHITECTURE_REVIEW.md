@@ -245,7 +245,7 @@ FIREWALL = {
 
 ### Phase 2: Service Separation (Next Sprint)
 
-```
+```text
 services/
 ├── user_ui/          # Port 3000 - FastAPI app for UI
 ├── agent_mesh/       # Port 8080 - Agent communication service
@@ -259,7 +259,7 @@ services/
 
 ### Rule 1: One-Way Dependency
 
-```
+```text
 UI → Swarm (read-only queries)
 Swarm → UI (event-driven updates)
 Swarm ↔ Swarm (internal mesh)

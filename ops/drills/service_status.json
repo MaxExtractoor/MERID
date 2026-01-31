@@ -1,0 +1,26 @@
+{
+  "services_running": true,
+  "startup_time": 1769486585.7477455,
+  "services": {
+    "prometheus": {
+      "url": "http://localhost:9090",
+      "status": "healthy"
+    },
+    "grafana": {
+      "url": "http://localhost:3000",
+      "status": "healthy"
+    },
+    "merid_api": {
+      "url": "http://localhost:8000",
+      "status": "healthy"
+    },
+    "neo4j": {
+      "url": "bolt://localhost:7687",
+      "status": "healthy"
+    },
+    "redis": {
+      "url": "redis://localhost:6379",
+      "status": "healthy"
+    }
+  }
+}

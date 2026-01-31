@@ -1,0 +1,42 @@
+guardrails:
+  - id: Secrets-001
+    surface: secrets
+    prohibited_actions:
+      - edit_real_env
+      - print_secret
+    default_decision: deny
+    escalation: security_lead
+    rationale: "Editing or printing real secrets is forbidden; use sanitized templates only."
+  - id: Treasury-001
+    surface: databases_treasury
+    prohibited_actions:
+      - direct_db_write
+      - migration_execute
+      - key_export
+    default_decision: require_approval
+    escalation: finance_owner
+    rationale: "Financial/stateful operations require human approval and dry-run evidence."
+  - id: Infra-001
+    surface: infra_ci
+    prohibited_actions:
+      - destroy_runner
+      - modify_prod_pipeline
+    default_decision: require_approval
+    escalation: devops_owner
+    rationale: "CI/CD changes must go through review with rollback plans."
+  - id: Telemetry-001
+    surface: telemetry
+    prohibited_actions:
+      - disable_monitoring
+      - delete_logs
+    default_decision: deny
+    escalation: observability_lead
+    rationale: "Telemetry must remain intact; configuration edits need change board approval."
+  - id: External-001
+    surface: external_api
+    prohibited_actions:
+      - live_trade
+      - live_campaign
+    default_decision: require_approval
+    escalation: business_owner
+    rationale: "Live trading/marketing actions need business sign-off and sandbox validation."
