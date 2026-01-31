@@ -11,6 +11,7 @@
 MERID's **Swarm Lab** is a permanent, autonomous R&D system that continuously invents tools, features, and improvements while maintaining strict safety invariants. It combines secure yield contracts, exfiltration defense, HSM-based key management, and invariants enforcement to enable safe, continuous evolution.
 
 **Core Principles:**
+
 - ✅ **Autonomous R&D** - Never stops researching and improving
 - ✅ **Secure yield contracts** - Hardened architecture with safety states
 - ✅ **Exfiltration defense** - SIEM, DLP, behavioral anomaly detection
@@ -38,6 +39,7 @@ MERID's **Swarm Lab** is a permanent, autonomous R&D system that continuously in
 ### 1.2 Idea Pipeline
 
 **Example Usage:**
+
 ```python
 from swarm.swarm_lab import get_swarm_lab_orchestrator
 
@@ -66,6 +68,7 @@ idea = lab.prioritize_idea(
 ```
 
 **Idea Status Flow:**
+
 ```
 DISCOVERED → PRIORITIZED → DESIGNING → IMPLEMENTING → TESTING → STAGING → APPROVED → DEPLOYED
 ```
@@ -73,6 +76,7 @@ DISCOVERED → PRIORITIZED → DESIGNING → IMPLEMENTING → TESTING → STAGIN
 ### 1.3 Design and Implementation
 
 **Create Design:**
+
 ```python
 # Create design
 design = lab.create_design(
@@ -114,6 +118,7 @@ impl = lab.mark_implementation_complete(
 ### 1.4 Multi-Stage Testing
 
 **Test Stages:**
+
 ```python
 # Static checks
 result = lab.run_test_stage(impl.implementation_id, TestStage.STATIC_CHECKS)
@@ -134,6 +139,7 @@ result = lab.run_test_stage(impl.implementation_id, TestStage.PRODUCTION)
 ### 1.5 Governance-Integrated Rollout
 
 **Create Rollout:**
+
 ```python
 # Create rollout plan
 rollout = lab.create_rollout(
@@ -162,6 +168,7 @@ rollout = lab.rollback_rollout(
 **Location:** `swarm/secure_yield_contracts.py`
 
 **Contract Specification:**
+
 ```python
 from swarm.secure_yield_contracts import get_secure_yield_contract_designer
 
@@ -190,6 +197,7 @@ spec = designer.create_contract_spec(
 ### 2.2 Solidity Security Checklist
 
 **Run Security Checks:**
+
 ```python
 # Run comprehensive security checklist
 checks = designer.run_security_checklist(
@@ -207,6 +215,7 @@ checks = designer.run_security_checklist(
 ```
 
 **Security Check Results:**
+
 ```python
 for check in checks:
     if not check.passed:
@@ -220,6 +229,7 @@ for check in checks:
 ### 2.3 Circuit Breakers and Rate Limits
 
 **Add Circuit Breakers:**
+
 ```python
 # Slippage circuit breaker
 breaker = designer.add_circuit_breaker(
@@ -242,6 +252,7 @@ designer.trigger_circuit_breaker(breaker.breaker_id)
 ```
 
 **Add Rate Limits:**
+
 ```python
 # Withdrawal rate limit
 limit = designer.add_rate_limit(
@@ -256,6 +267,7 @@ limit = designer.add_rate_limit(
 ### 2.4 Security Report
 
 **Get Comprehensive Report:**
+
 ```python
 report = designer.get_contract_security_report(spec.contract_id)
 
@@ -291,6 +303,7 @@ report = designer.get_contract_security_report(spec.contract_id)
 **Location:** `swarm/exfiltration_defense.py`
 
 **Ingest Log Events:**
+
 ```python
 from swarm.exfiltration_defense import get_exfiltration_defense_system
 
@@ -317,6 +330,7 @@ event = defense.ingest_log_event(
 ### 3.2 DLP (Data Loss Prevention) Rules
 
 **Pre-Configured DLP Rules:**
+
 ```python
 # Automatically initialized:
 # 1. Private Key Export - BLOCKS export of private keys
@@ -336,6 +350,7 @@ rule = defense.add_dlp_rule(
 ### 3.3 Correlation Rules
 
 **Pre-Configured Correlation Rules:**
+
 ```python
 # 1. Suspicious Admin Activity
 #    - Admin login + large withdrawal within 5 min → ALERT
@@ -364,6 +379,7 @@ rule = defense.add_correlation_rule(
 ### 3.4 Behavioral Anomaly Detection
 
 **Automatic Profile Building:**
+
 ```python
 # System automatically builds behavioral profiles:
 # - Typical withdrawal amounts
@@ -382,6 +398,7 @@ rule = defense.add_correlation_rule(
 ### 3.5 Network Traffic Analysis
 
 **Record Network Flows:**
+
 ```python
 # Record outbound transfer
 flow = defense.record_network_flow(
@@ -399,6 +416,7 @@ flow = defense.record_network_flow(
 ### 3.6 Security Dashboard
 
 **Get Real-Time Status:**
+
 ```python
 dashboard = defense.get_security_dashboard()
 
@@ -430,6 +448,7 @@ dashboard = defense.get_security_dashboard()
 **Location:** `swarm/hsm_key_management.py`
 
 **Register HSM Cluster:**
+
 ```python
 from swarm.hsm_key_management import get_hsm_key_management_system
 
@@ -454,6 +473,7 @@ backup = hsm.register_hsm(
 ### 4.2 Key Lifecycle Management
 
 **Generate and Manage Keys:**
+
 ```python
 # Generate signing key
 key = hsm.generate_key(
@@ -483,6 +503,7 @@ new_key = hsm.rotate_key(
 ### 4.3 Agent Signing Requests (Zero Key Exposure)
 
 **Agents Submit Intents, Never See Keys:**
+
 ```python
 # Agent creates signing request
 request = hsm.create_signing_request(
@@ -526,6 +547,7 @@ request = hsm.approve_signing_request(
 ### 4.4 Disaster Recovery
 
 **Create DR Plan:**
+
 ```python
 # Create disaster recovery plan
 dr_plan = hsm.create_disaster_recovery_plan(
@@ -546,6 +568,7 @@ success = hsm.test_disaster_recovery(
 ### 4.5 Audit Logging
 
 **All HSM Operations Logged:**
+
 ```python
 # Automatic audit logs for:
 # - Key generation
@@ -591,6 +614,7 @@ status = hsm.get_hsm_status()
 | **ETHICS_MEV** | No market abuse, MEV policy-constrained |
 
 **Example Usage:**
+
 ```python
 from swarm.invariants_enforcement import get_invariants_enforcement_system
 
@@ -622,6 +646,7 @@ violations = enforcement.validate_change(
 | **SWARM_LAB_UI** | Features/tools, UI flows |
 
 **Example:**
+
 ```python
 # Get variants for a domain
 variants = enforcement.get_variants_by_domain(
@@ -638,6 +663,7 @@ variants = enforcement.get_variants_by_domain(
 ### 5.3 Meta-Invariants (How Evolution Must Behave)
 
 **Evolution Checks:**
+
 ```python
 # Check evolution meta-invariants
 check = enforcement.check_evolution_meta_invariants(
@@ -654,6 +680,7 @@ check = enforcement.check_evolution_meta_invariants(
 ```
 
 **Meta-Invariants:**
+
 1. **Tested evolution** - Must pass sim → paper → canary → production
 2. **Governed evolution** - High-impact changes require governance
 3. **Observable evolution** - Must have logs, metrics, traces
@@ -662,6 +689,7 @@ check = enforcement.check_evolution_meta_invariants(
 ### 5.4 Invariant Status Dashboard
 
 **Get Enforcement Status:**
+
 ```python
 status = enforcement.get_invariant_status()
 
@@ -703,6 +731,7 @@ status = enforcement.get_invariant_status()
 ### 6.1 Swarm Lab Workflow
 
 **Complete R&D Cycle:**
+
 ```python
 from swarm.swarm_lab import get_swarm_lab_orchestrator
 from swarm.secure_yield_contracts import get_secure_yield_contract_designer
@@ -781,6 +810,7 @@ while rollout.current_stage != "full":
 ### 6.2 Continuous Monitoring
 
 **Lab Metrics:**
+
 ```python
 metrics = lab.get_lab_metrics()
 

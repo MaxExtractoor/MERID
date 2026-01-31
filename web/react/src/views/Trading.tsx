@@ -8,6 +8,7 @@ import DataTableEnhanced from "../components/DataTableEnhanced";
 import StatusIndicator from "../components/StatusIndicator";
 import PriceTicker from "../components/PriceTicker";
 import { OpenOrdersPanel } from "./OpenOrdersPanel";
+import { LiveRiskStrip } from "./LiveRiskStrip";
 
 interface Position {
   id: string;
@@ -299,6 +300,9 @@ export default function Trading() {
           />
         ))}
       </div>
+
+      {/* Live Risk Strip */}
+      <LiveRiskStrip />
 
       {/* Order Ticket */}
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">

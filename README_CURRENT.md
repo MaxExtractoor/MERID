@@ -16,12 +16,14 @@ http://localhost:8000
 ## 📊 Current Status (30% Complete)
 
 **Working Features:**
+
 - ✅ 54 cryptocurrency assets with real-time data
 - ✅ Bloomberg-style market terminal
 - ✅ Multi-source intelligence feed with sentiment analysis
 - ✅ 100+ prediction markets from Polymarket
 
 **In Development:**
+
 - 🔄 Trading execution interface
 - 🔄 Portfolio analytics dashboard
 - 🔄 Risk monitoring interface
@@ -29,27 +31,31 @@ http://localhost:8000
 ## 📁 Key Files
 
 **Main Documentation:**
+
 - `MASTER_DOCUMENTATION.md` - Complete system documentation
 - `COMPREHENSIVE_GAP_ANALYSIS.md` - Detailed gap analysis
 - `CURRENT_STATUS_AND_PRIORITIES.md` - Current priorities
 
 **Configuration:**
+
 - `.env` - Environment variables (Neo4j credentials, API keys)
 - `requirements.txt` - Python dependencies
 
 **Access Dashboard:**
-- http://localhost:8000
+
+- <http://localhost:8000>
 
 ## 🔗 Quick Links
 
-- Dashboard: http://localhost:8000
-- Market Terminal: http://localhost:8000#dashboard
-- Intelligence Feed: http://localhost:8000#intelligence
-- Prediction Markets: http://localhost:8000#predictions
+- Dashboard: <http://localhost:8000>
+- Market Terminal: <http://localhost:8000#dashboard>
+- Intelligence Feed: <http://localhost:8000#intelligence>
+- Prediction Markets: <http://localhost:8000#predictions>
 
 ## 📚 Documentation
 
 All documentation has been consolidated into:
+
 - `MASTER_DOCUMENTATION.md` - Single source of truth
 - Old documentation archived in `docs_archive/`
 

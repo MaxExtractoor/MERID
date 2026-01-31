@@ -21,11 +21,11 @@
 
 ---
 
-## 1. Divergence & Entropy Principles 
+## 1. Divergence & Entropy Principles
 
 ### Requirement: Baseline Distributions
 
-**Status:** 
+**Status:**
 
 **Implementation:** `InformationTheoryMetrics.register_baseline()`
 
