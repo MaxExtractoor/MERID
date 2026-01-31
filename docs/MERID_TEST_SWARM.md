@@ -1,11 +1,13 @@
 # MERID Test Swarm Specification
 
 ## 1. Objectives
+
 - Treat automated testing as a first-class swarm with the same autonomy and guardrails as build/runtime swarms.
 - Increase coverage, mutation score, and incident-derived regression depth across all modules.
 - Reduce human toil for boilerplate tests while keeping human approval for merges and critical risk/execution code.
 
 ## 2. Swarm Topology
+
 | Layer | Purpose | Notes |
 | --- | --- | --- |
 | **ReAct Planner** | Plans design → code → tests → docs loops, breaks tickets into subtasks, assigns agents, monitors status. | Extends `swarm.dev_swarm_orchestrator.DevSwarmOrchestrator` with planner/thinking states and explicit hooks for testing subtasks before merge. |
@@ -15,6 +17,7 @@
 | **Telemetry & Risk Monitors** | Track coverage %, mutation scores, defect density; feed priorities back into planner. | Persist metrics into MetaAudit telemetry stream for governance visibility. |
 
 ## 3. Agent Roles & Capabilities
+
 1. **Planner (ReAct)**
    - Inputs: ticket description, diff, coverage gaps, guardrail policies.
    - Loop: `THOUGHT → ACTION (call coder/tester/docs agents) → OBSERVATION (build/test results)`.
@@ -39,12 +42,14 @@
    - Produces scenario specs stored under `tests/incidents/<incident_id>.py` with metadata linking back to source incident.
 
 ## 4. Guardrails & Autonomy Constraints
+
 - **Command Execution**: all shell/file actions go through `swarm.command_runner` + policy engine. Planner may create branches, run `pytest`, `coverage`, `mutmut`, but cannot push/merge without human approval.
 - **Critical Paths**: edits to `core/execution`, `risk`, `governance`, `hardening`, `reality` require explicit reviewer approval and MetaAudit notification.
 - **Telemetry Binding**: every agent emits structured events (`test_swarm:*`) via TelemetryManager `meta_audit` stream for auditability.
 - **Incident Hooks**: when MetaAudit issues directives referencing lack of tests, planner auto-creates tasks to remediate before promotions.
 
 ## 5. CI / Runtime Wiring
+
 1. **Triggers**
    - Pre-PR: diff analyzer invokes unit agents for touched modules.
    - Nightly: coverage+mutation scan; integration agents replay top traffic flows.
@@ -60,6 +65,7 @@
    - Published to observability dashboards and MAS KPI board for governance review.
 
 ## 6. Implementation Steps
+
 1. **Scaffold Planner**
    - Extend `DevSwarmOrchestrator` with ReAct loop + task phases.
    - Add new TaskTypes (`UNIT_TEST`, `INTEGRATION_TEST`, `TEST_SELF_HEAL`).
@@ -77,6 +83,7 @@
    - Document procedures in `docs/TESTING_AUTONOMY.md` (link to this spec).
 
 ## 7. Autonomy & Human Workflow
+
 - Humans focus on high-level design and reviewing swarm outputs (diffs, rationale, telemetry).
 - Swarm handles repetitive scaffolding, regression maintenance, and risk-driven coverage improvements.
 - All outputs are explainable via structured logs and MAS oversight, ensuring compliance and trust.
