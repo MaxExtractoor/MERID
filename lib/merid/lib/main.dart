@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -66,7 +67,9 @@ class _ControlStationState extends State<ControlStation> {
 
   Future<void> _fetchLockdownStatus() async {
     try {
-      final r = await _client.get(Uri.parse('http://localhost:8000/admin/lockdown'));
+      final r = await _client.get(
+        Uri.parse('http://localhost:8000/admin/lockdown'),
+      );
       if (r.statusCode == 200) {
         final body = r.body;
         setState(() {
@@ -93,18 +96,21 @@ class _ControlStationState extends State<ControlStation> {
         setState(() {
           _isLockdown = lock;
           if (_isLockdown) {
-            _distilledOutput = "!!! SYSTEM CONTAINED — ALL EXECUTION FROZEN !!!";
+            _distilledOutput =
+                "!!! SYSTEM CONTAINED — ALL EXECUTION FROZEN !!!";
           }
         });
       } else if (r.statusCode == 401 || r.statusCode == 403) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Admin auth failed — set a valid token'),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Admin auth failed — set a valid token'),
+          ),
+        );
       }
     } catch (_) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Network error while toggling lockdown'),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Network error while toggling lockdown')),
+      );
     }
   }
 
@@ -218,9 +224,7 @@ Recommendation: Quantum advantage confirmed — human review advised
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        border: Border.all(
-          color: const Color(0xFF10B981).withValues(alpha: 0.5),
-        ),
+        border: Border.all(color: const Color(0xFF10B981).withOpacity(0.5)),
         color: const Color(0xFF0F172A),
       ),
       child: Row(
@@ -270,7 +274,7 @@ Recommendation: Quantum advantage confirmed — human review advised
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         border: Border.all(color: Colors.white24),
-        color: const Color(0xFF0F172A).withValues(alpha: 0.5),
+        color: const Color(0xFF0F172A).withOpacity(0.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

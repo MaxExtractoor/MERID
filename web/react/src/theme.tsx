@@ -21,7 +21,9 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     <ThemeContext.Provider
       value={{ theme, toggleTheme: () => setTheme(t => (t === "dark" ? "light" : "dark")) }}
     >
-      {children}
+      <div className={`min-h-screen ${theme === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-white text-slate-900'}`}>
+        {children}
+      </div>
     </ThemeContext.Provider>
   );
 };

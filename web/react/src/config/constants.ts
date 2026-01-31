@@ -18,15 +18,19 @@ export const API_ENDPOINTS = {
   // Portfolio & Positions
   PORTFOLIO_SUMMARY: "/api/v1/portfolio/summary",
   POSITIONS: "/api/v1/positions",
+  POSITIONS_SUMMARY: "/api/v1/positions/summary",
   ORDERS: "/api/v1/orders",
+  ORDERS_SUMMARY: "/api/v1/orders/summary",
   FILLS: "/api/v1/fills",
   
   // Trading
   SUBMIT_ORDER: "/api/v1/orders/submit",
   CANCEL_ORDER: "/api/v1/orders/cancel",
+  TRADING_SUMMARY: "/api/trading/summary",
   
   // Agents
   AGENTS: "/api/v1/agents",
+  AGENTS_SUMMARY: "/api/agents/summary",
   AGENT_DETAIL: (id: string) => `/api/v1/agents/${id}`,
   AGENT_CHARTERS: "/api/v1/charters",
   
@@ -36,7 +40,17 @@ export const API_ENDPOINTS = {
   
   // Risk & Health
   RISK_METRICS: "/api/v1/risk/metrics",
+  RISK_PNL_SUMMARY: "/api/risk/pnl-summary",
+  RISK_EXPOSURE: "/api/risk/exposure",
+  RISK_LIMITS: "/api/risk/limits",
+  RISK_PROTECTIONS: "/api/risk/protections",
   SYSTEM_HEALTH: "/api/v1/system/health",
+  SYSTEM_HEALTH_V2: "/api/system/health",
+  SYSTEM_VERSION: "/api/system/version",
+  SYSTEM_COMPONENTS: "/api/system/components",
+  
+  // Prime Screen
+  PRIME_STATUS: "/api/prime/status",
   
   // API Status
   API_STATUS: "/api/v1/api/status",

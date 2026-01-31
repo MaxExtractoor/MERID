@@ -1114,7 +1114,7 @@ class _DecisionDetailBody extends StatelessWidget {
                           Text('@${order.avgFillPrice!.toStringAsFixed(2)}'),
                         const SizedBox(width: 8),
                         if (order.filledQty != null)
-                          Text('${order.filledQty!.toStringAsFixed(2)}'),
+                          Text(order.filledQty!.toStringAsFixed(2)),
                       ],
                     ),
                   ),
