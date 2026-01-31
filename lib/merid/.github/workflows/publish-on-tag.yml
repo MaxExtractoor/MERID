@@ -58,10 +58,31 @@ jobs:
           cosign verify --key cosign.key ghcr.io/${{ github.repository_owner }}/merid:${{ github.ref_name }}
           # If desired, add steps here to attach the signature or provenance to the release.
 
-      - name: Create release note comment
+      - name: Create release and attach SBOM
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs = require('fs')
             const tag = context.ref.replace('refs/tags/', '')
-            await github.rest.repos.createRelease({ owner: context.repo.owner, repo: context.repo.repo, tag_name: tag, name: tag, body: `Docker image published to GHCR: ghcr.io/${context.repo.owner}/merid:${tag}` })
+            // Create or update the release with the tag
+            const release = await github.rest.repos.createRelease({ owner: context.repo.owner, repo: context.repo.repo, tag_name: tag, name: tag, body: `Docker image published to GHCR: ghcr.io/${context.repo.owner}/merid:${tag}` })
+
+            // If SBOM artifact exists, upload it as a release asset
+            try {
+              if (fs.existsSync('sbom.json')) {
+                const sbomData = fs.readFileSync('sbom.json')
+                await github.rest.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release.data.id,
+                  name: `sbom-${tag}.json`,
+                  data: sbomData,
+                })
+                console.log('SBOM uploaded to release')
+              } else {
+                console.log('SBOM not found; skipping release attachment')
+              }
+            } catch (err) {
+              console.warn('Failed to attach SBOM to release:', err)
+            }
