@@ -66,4 +66,21 @@ export function LiveAgentHealthPanel() {
       {/* Last Updated Indicator */}
       {lastUpdated && (
         <div className="flex items-center gap-2 text-sm text-slate-400 px-1">
-          <RefreshCw className="w-3 h
+          <RefreshCw className="w-3 h-3" />
+          <span>Last updated: {formatTime(lastUpdated.toISOString())}</span>
+        </div>
+      )}
+
+      {/* Agent Data Table */}
+      {loading ? (
+        <div className="p-8 text-center text-slate-400">Loading agents...</div>
+      ) : (
+        <DataTableEnhanced
+          data={rows}
+          columns={columns}
+          pageSize={10}
+        />
+      )}
+    </div>
+  );
+}

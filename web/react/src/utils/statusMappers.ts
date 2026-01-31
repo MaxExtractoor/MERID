@@ -13,4 +13,27 @@ export function agentStatusToStatusType(status: AgentStatus): keyof typeof STATU
     case 'DEGRADED':
       return 'WARNING';
     case 'OFFLINE':
-      return 'BA
+      return 'BAD';
+    default:
+      return 'OFFLINE';
+  }
+}
+
+/**
+ * Maps OrderStatus to STATUS_TYPES for UI components
+ */
+export function orderStatusToStatusType(status: OrderStatus): keyof typeof STATUS_TYPES {
+  switch (status) {
+    case 'PENDING':
+      return 'ONLINE'; // Active/working state
+    case 'PARTIALLY_FILLED':
+      return 'WARNING';
+    case 'FILLED':
+      return 'GOOD';
+    case 'CANCELED':
+    case 'REJECTED':
+      return 'BAD';
+    default:
+      return 'OFFLINE';
+  }
+}
