@@ -138,4 +138,7 @@ describe('LiveAgentHealthPanel', () => {
     render(<LiveAgentHealthPanel />);
 
     expect(screen.getByText('Total Agents')).toBeInTheDocument();
-    // All counts are 0 
+    // All counts are 0 - there should be 4 zeros (total, online, degraded, offline)
+    expect(screen.getAllByText('0')).toHaveLength(4);
+  });
+});

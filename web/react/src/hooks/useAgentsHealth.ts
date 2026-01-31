@@ -150,4 +150,51 @@ export function useAgentsHealth() {
           [payload.id]: { ...existing, status: 'OFFLINE' as const },
         };
       });
-   
+    };
+
+    const handleError = (error: Error) => {
+      console.error('[useAgentsHealth] WebSocket error:', error);
+    };
+
+    socket.on('agent:heartbeat', handleHeartbeat);
+    socket.on('agent:status_changed', handleStatusChanged);
+    socket.on('agent:connected', handleConnected);
+    socket.on('agent:disconnected', handleDisconnected);
+    socket.on('error', handleError);
+
+    return () => {
+      socket.off('agent:heartbeat', handleHeartbeat);
+      socket.off('agent:status_changed', handleStatusChanged);
+      socket.off('agent:connected', handleConnected);
+      socket.off('agent:disconnected', handleDisconnected);
+      socket.off('error', handleError);
+    };
+  }, [socket]);
+
+  // Convert map to sorted array
+  const rows: AgentRow[] = useMemo(() => {
+    return Object.values(agents).sort((a, b) => {
+      // Sort by status priority, then by name
+      const statusOrder = { ONLINE: 0, DEGRADED: 1, OFFLINE: 2, UNKNOWN: 3 };
+      const aOrder = statusOrder[a.status] ?? 3;
+      const bOrder = statusOrder[b.status] ?? 3;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return a.name.localeCompare(b.name);
+    });
+  }, [agents]);
+
+  // Compute meta from current state (fallback to REST meta if no local updates)
+  const meta = useMemo(() => {
+    if (data?.meta && Object.keys(agents).length === 0) {
+      return data.meta;
+    }
+    return {
+      total: rows.length,
+      online: rows.filter((a) => a.status === 'ONLINE').length,
+      degraded: rows.filter((a) => a.status === 'DEGRADED').length,
+      offline: rows.filter((a) => a.status === 'OFFLINE').length,
+    };
+  }, [rows, data?.meta, agents]);
+
+  return { rows, meta, loading, error, lastUpdated };
+}

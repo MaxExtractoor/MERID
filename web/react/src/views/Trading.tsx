@@ -449,3 +449,11 @@ export default function Trading() {
         <DataTableEnhanced
           data={fills || []}
           columns={fillColumns}
+          pageSize={10}
+          showPagination
+          showFilter
+        />
+      </div>
+    </div>
+  );
+}
