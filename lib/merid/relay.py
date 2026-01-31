@@ -30,6 +30,9 @@ except ImportError:  # pragma: no cover
 
 load_dotenv()
 
+from merid_core import ExternalServiceError
+import logging
+
 
 def _build_openai_clients() -> tuple:
     local_api_key = os.getenv("OLLAMA_API_KEY", "ollama")
@@ -65,7 +68,10 @@ def save_report(supabase_client, query: str, summary: str, tweets: Union[str, Li
     supabase_client.table("sentiment_reports").insert(payload).execute()
 
 
+import logging
+
 def run_relay(user_query: str) -> str:
+    logger = logging.getLogger(__name__)
     try:
         local_client, cloud_client = _build_openai_clients()
         twitter = MERIDTwitterAgent() if MERIDTwitterAgent else None
@@ -84,7 +90,8 @@ def run_relay(user_query: str) -> str:
             return f"\n[MERID-LOCAL]: {decision}"
 
         if not twitter or not cloud_client:
-            return "[MERID-RELAY]: Live relay unavailable (missing dependencies)"
+            logger.warning("Live relay called but dependencies missing: twitter=%s cloud=%s", bool(twitter), bool(cloud_client))
+            raise ExternalServiceError("Live relay unavailable (missing dependencies)")
 
         tweets = twitter.get_market_sentiment(user_query)
         context = "\n".join(tweets) if isinstance(tweets, list) else str(tweets)
@@ -100,8 +107,13 @@ def run_relay(user_query: str) -> str:
         save_report(supabase_client, user_query, summary, tweets)
         return f"\n[MERID-X-RELAY]: {summary}"
 
+    except ExternalServiceError:
+        # re-raise known external errors after logging
+        logger.exception("External service failure while running relay")
+        raise
     except Exception as exc:
-        return f"Error: {exc}"
+        logger.exception("Unexpected error in run_relay")
+        raise ExternalServiceError(str(exc)) from exc
 
 
 if __name__ == "__main__":

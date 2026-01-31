@@ -37,8 +37,11 @@ class MeridApp extends StatelessWidget {
   }
 }
 
+import 'package:http/http.dart' as http;
+
 class ControlStation extends StatefulWidget {
-  const ControlStation({super.key});
+  final http.Client? httpClient;
+  const ControlStation({super.key, this.httpClient});
 
   @override
   State<ControlStation> createState() => _ControlStationState();
@@ -51,7 +54,61 @@ class _ControlStationState extends State<ControlStation> {
   String _rawCognition = "";
   String _distilledOutput = "SYSTEM NOMINAL // WAITING FOR INPUT";
   bool _isLockdown = false;
+  String? _adminToken;
   final TextEditingController _inputController = TextEditingController();
+
+  http.Client get _client => widget.httpClient ?? http.Client();
+
+  @override
+  void initState() {
+    super.initState();
+    // Load current lockdown state from backend
+    _fetchLockdownStatus();
+  }
+
+  Future<void> _fetchLockdownStatus() async {
+    try {
+      final r = await _client.get(Uri.parse('http://localhost:8000/admin/lockdown'));
+      if (r.statusCode == 200) {
+        final body = r.body;
+        setState(() {
+          _isLockdown = body.contains('true');
+        });
+      }
+    } catch (_) {
+      // ignore network errors in local dev
+    }
+  }
+
+  Future<void> _setLockdown(bool lock) async {
+    try {
+      final headers = <String, String>{};
+      if (_adminToken != null && _adminToken!.isNotEmpty) {
+        headers['Authorization'] = 'Bearer ${_adminToken!}';
+      }
+      final r = await _client.post(
+        Uri.parse('http://localhost:8000/admin/lockdown'),
+        headers: headers,
+        body: '{"lock": ${lock ? 'true' : 'false'}}',
+      );
+      if (r.statusCode == 204) {
+        setState(() {
+          _isLockdown = lock;
+          if (_isLockdown) {
+            _distilledOutput = "!!! SYSTEM CONTAINED — ALL EXECUTION FROZEN !!!";
+          }
+        });
+      } else if (r.statusCode == 401 || r.statusCode == 403) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Admin auth failed — set a valid token'),
+        ));
+      }
+    } catch (_) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Network error while toggling lockdown'),
+      ));
+    }
+  }
 
   void _processInput(String input) {
     setState(() {
@@ -127,14 +184,29 @@ Recommendation: Quantum advantage confirmed — human review advised
         backgroundColor: _isLockdown
             ? const Color(0xFFF43F5E)
             : Colors.transparent,
-        onPressed: () {
-          setState(() {
-            _isLockdown = !_isLockdown;
-            if (_isLockdown) {
-              _distilledOutput =
-                  "!!! SYSTEM CONTAINED — ALL EXECUTION FROZEN !!!";
+        onPressed: () async {
+          // if user hasn't entered an admin token yet, prompt for one
+          if (_adminToken == null) {
+            final token = await showDialog<String>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('Enter Admin Token'),
+                content: TextField(
+                  autofocus: true,
+                  onChanged: (v) {},
+                  onSubmitted: (v) => Navigator.of(ctx).pop(v),
+                  decoration: const InputDecoration(hintText: 'Token...'),
+                ),
+              ),
+            );
+            if (token != null && token.isNotEmpty) {
+              setState(() => _adminToken = token);
             }
-          });
+          }
+
+          // attempt to set lockdown via backend
+          final shouldLock = !_isLockdown;
+          await _setLockdown(shouldLock);
         },
         child: Text(
           _isLockdown ? "UNLOCK" : "LOCKDOWN",

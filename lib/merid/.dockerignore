@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.build/
+.build/
+.pytest_cache/
+dist/
+build/
+generated/schemas_ci/

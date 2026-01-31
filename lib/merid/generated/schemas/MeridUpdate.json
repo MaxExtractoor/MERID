@@ -1,0 +1,56 @@
+{
+  "properties": {
+    "status": {
+      "enum": [
+        "started",
+        "processing",
+        "done"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "energy": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Energy"
+    },
+    "progress": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Progress"
+    },
+    "result": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Result"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "MeridUpdate",
+  "type": "object"
+}

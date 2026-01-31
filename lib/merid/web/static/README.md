@@ -1,0 +1,1 @@
+Static assets placeholder for tests. This directory exists to satisfy FastAPI StaticFiles during unit tests.

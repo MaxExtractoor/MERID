@@ -24,13 +24,18 @@ class MERIDTwitterAgent:
             wait_on_rate_limit=True,
         )
 
-    def get_market_sentiment(self, query: str) -> Union[str, List[str]]:
-        """Return recent tweet text for a query or a human-readable error."""
+    def get_market_sentiment(self, query: str) -> List[str]:
+        """Return recent tweet text for a query or raise ExternalServiceError on failure."""
+        import logging
+        from core.error_handling import ExternalServiceError
+
+        logger = logging.getLogger(__name__)
         try:
             search_query = f"{query} -is:retweet lang:en"
             response = self.client.search_recent_tweets(query=search_query, max_results=10)
             if not response.data:
-                return "No recent discussions found."
+                return []
             return [tweet.text for tweet in response.data]
         except Exception as exc:  # pragma: no cover - network code
-            return f"X API Error: {exc}"
+            logger.exception("Twitter API error for query: %s", query)
+            raise ExternalServiceError(str(exc)) from exc
