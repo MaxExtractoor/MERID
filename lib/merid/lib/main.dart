@@ -37,8 +37,6 @@ class MeridApp extends StatelessWidget {
   }
 }
 
-import 'package:http/http.dart' as http;
-
 class ControlStation extends StatefulWidget {
   final http.Client? httpClient;
   const ControlStation({super.key, this.httpClient});
