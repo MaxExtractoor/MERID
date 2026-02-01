@@ -252,10 +252,10 @@ class BrierMetricsDB:
                 WHERE forecast_id = ?
             """, (outcome, datetime.now(), brier_event, forecast_id))
             
-            conn.commit()
-            
-            # Update streaming metrics
+            # Update streaming metrics (before commit)
             self._update_streaming_metrics(cursor, forecast_id, prob, outcome, weight)
+            
+            conn.commit()
             
             logger.debug(f"Resolved forecast {forecast_id} with outcome {outcome}")
     

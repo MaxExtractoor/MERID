@@ -5,28 +5,39 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-import httpx
-from merid.execution.base import Quote, Position, TradeExecutor, TradeResult, TradeSideLiteral
+from merid.execution.base import Quote, Position, TradeResult, TradeSideLiteral
+from merid.execution.http_base import HTTPExecutor
 
 
-class AlpacaExecutor(TradeExecutor):
+class AlpacaExecutor(HTTPExecutor):
+    """Alpaca API executor with async HTTP support."""
+    
     venue = "alpaca"
-
-    def __init__(self) -> None:
+    base_url = os.getenv("ALPACA_API_URL", "https://paper-api.alpaca.markets")
+    default_timeout = 10.0
+    
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self.api_key = os.getenv("ALPACA_API_KEY")
         self.api_secret = os.getenv("ALPACA_API_SECRET")
-        self.base_url = os.getenv("ALPACA_API_URL", "https://paper-api.alpaca.markets")
-        self._client = httpx.Client(timeout=10.0)
+    
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Alpaca API authentication headers."""
+        return {
+            "APCA-API-KEY-ID": self.api_key or "",
+            "APCA-API-SECRET-KEY": self.api_secret or "",
+        }
 
     async def get_quote(self, symbol: str, side: TradeSideLiteral, amount: float) -> Quote:
-        resp = self._client.get(
-            f"{self.base_url}/v2/stocks/{symbol}/quotes/latest",
-            headers=self._headers(),
+        """Get latest quote for symbol."""
+        response = await self._request(
+            "GET",
+            f"/v2/stocks/{symbol}/quotes/latest"
         )
-        resp.raise_for_status()
-        data = resp.json()
+        data = response.json()
         quote = data["quote"]
         price = float(quote["ap"]) if side == "buy" else float(quote["bp"])
+        
         return Quote(
             symbol=symbol,
             side=side,
@@ -47,7 +58,8 @@ class AlpacaExecutor(TradeExecutor):
         price: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeResult:
-        payload = {
+        """Execute trade via Alpaca API."""
+        payload: Dict[str, Any] = {
             "symbol": symbol,
             "qty": str(amount),
             "side": side,
@@ -57,8 +69,26 @@ class AlpacaExecutor(TradeExecutor):
         if order_type == "limit" and price is not None:
             payload["limit_price"] = str(price)
 
-        resp = self._client.post(f"{self.base_url}/v2/orders", json=payload, headers=self._headers())
-        if resp.status_code not in {200, 201}:
+        try:
+            response = await self._request(
+                "POST",
+                "/v2/orders",
+                json_data=payload,
+                idempotent=True,
+            )
+            data = response.json()
+            
+            return TradeResult(
+                success=True,
+                venue=self.venue,
+                symbol=symbol,
+                side=side,
+                size=amount,
+                price=float(data.get("filled_avg_price", price or 0)),
+                tx_id=data.get("id"),
+                metadata={"order_id": data.get("id")},
+            )
+        except (ConnectionError, RuntimeError, ValueError) as e:
             return TradeResult(
                 success=False,
                 venue=self.venue,
@@ -66,24 +96,14 @@ class AlpacaExecutor(TradeExecutor):
                 side=side,
                 size=amount,
                 price=price or 0.0,
-                error=f"Alpaca API error {resp.status_code}: {resp.text}",
+                error=f"Alpaca API error: {e}",
             )
-        data = resp.json()
-        return TradeResult(
-            success=True,
-            venue=self.venue,
-            symbol=symbol,
-            side=side,
-            size=amount,
-            price=float(data.get("filled_avg_price", price or 0)),
-            tx_id=data.get("id"),
-            metadata={"order_id": data.get("id")},
-        )
 
     async def get_positions(self) -> List[Position]:
-        resp = self._client.get(f"{self.base_url}/v2/positions", headers=self._headers())
-        resp.raise_for_status()
-        data = resp.json()
+        """Fetch open positions from Alpaca."""
+        response = await self._request("GET", "/v2/positions")
+        data = response.json()
+        
         positions = []
         for pos in data:
             positions.append(
@@ -91,15 +111,9 @@ class AlpacaExecutor(TradeExecutor):
                     symbol=pos["symbol"],
                     size=float(pos["qty"]),
                     entry_price=float(pos["avg_entry_price"]),
-                    pnl=float(pos["unrealized_plpc"]) / 10000.0,  # convert basis points
+                    pnl=float(pos["unrealized_plpc"]) / 10000.0,
                     venue=self.venue,
                     metadata={"asset_id": pos["asset_id"]},
                 )
             )
         return positions
-
-    def _headers(self) -> Dict[str, str]:
-        return {
-            "APCA-API-KEY-ID": self.api_key,
-            "APCA-API-SECRET-KEY": self.api_secret,
-        }

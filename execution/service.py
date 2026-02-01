@@ -76,7 +76,7 @@ class ExecutionService:
                     "cash": account.cash,
                     "buying_power": account.buying_power
                 }
-            except Exception as e:
+            except (ValueError, TypeError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
         
         @self.app.get("/accounts/{account_id}")
@@ -85,7 +85,7 @@ class ExecutionService:
             try:
                 summary = self.simulator.get_account_summary(account_id)
                 return summary
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 raise HTTPException(status_code=404, detail=str(e))
         
         @self.app.post("/orders")
@@ -111,7 +111,7 @@ class ExecutionService:
                 )
                 
                 return result
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
         
         @self.app.delete("/orders/{order_id}")
@@ -130,7 +130,7 @@ class ExecutionService:
                 
                 result = self.simulator.cancel_order(account_id, order_id)
                 return result
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
         
         @self.app.get("/orders")
@@ -139,7 +139,7 @@ class ExecutionService:
             try:
                 orders = self.simulator.get_orders(account_id, status)
                 return {"orders": orders}
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 raise HTTPException(status_code=404, detail=str(e))
         
         @self.app.get("/positions")
@@ -148,7 +148,7 @@ class ExecutionService:
             try:
                 positions = self.simulator.get_positions(account_id)
                 return {"positions": positions}
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 raise HTTPException(status_code=404, detail=str(e))
         
         @self.app.post("/market-data")
@@ -167,7 +167,7 @@ class ExecutionService:
                 )
                 self.simulator.update_market_data(data)
                 return {"status": "updated"}
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
         
         @self.app.websocket("/ws/market-data/{account_id}")
@@ -182,7 +182,7 @@ class ExecutionService:
                         "type": "order_update",
                         "data": order.__dict__
                     })))
-                except:
+                except (ConnectionError, RuntimeError):
                     pass
             
             def on_market_data(data):
@@ -197,7 +197,7 @@ class ExecutionService:
                             "ask_price": data.ask_price
                         }
                     })))
-                except:
+                except (ConnectionError, RuntimeError):
                     pass
             
             # Get account and subscribe to orders
@@ -248,7 +248,7 @@ class ExecutionService:
             self._running = True
             logger.info("ExecutionService started successfully")
             
-        except Exception as e:
+        except (ConnectionError, RuntimeError, ValueError) as e:
             logger.error(f"Failed to start ExecutionService: {e}")
             raise
     
@@ -265,7 +265,7 @@ class ExecutionService:
             self._running = False
             logger.info("ExecutionService stopped")
             
-        except Exception as e:
+        except (ConnectionError, RuntimeError) as e:
             logger.error(f"Error stopping ExecutionService: {e}")
     
     def run(self, host: str = "127.0.0.1", port: int = 8012) -> None:

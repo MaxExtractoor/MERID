@@ -3,6 +3,7 @@ from __future__ import annotations
 # Stage 2 Agents: async reasoning pipeline, research tools, and structured outputs.
 
 import asyncio
+import enum
 import json
 from typing import Any, Dict, List
 
@@ -19,6 +20,38 @@ from agents.explainability import (
 )
 
 _OLLAMA_URL = f"{OLLAMA_BASE_URL.rstrip('/')}{OLLAMA_GENERATE_ENDPOINT}"
+
+
+class AgentErrorType(enum.Enum):
+    """Types of agent errors for classification and handling."""
+    NETWORK = "network"
+    TIMEOUT = "timeout"
+    RATE_LIMIT = "rate_limit"
+    VALIDATION = "validation"
+    MODEL_ERROR = "model_error"
+    UNKNOWN = "unknown"
+
+
+class AgentErrorResponse:
+    """Standardized error response from agent processing."""
+    
+    def __init__(
+        self,
+        error_type: AgentErrorType,
+        message: str,
+        details: Dict[str, Any] | None = None,
+    ) -> None:
+        self.error_type = error_type
+        self.message = message
+        self.details = details or {}
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "error": True,
+            "error_type": self.error_type.value,
+            "message": self.message,
+            "details": self.details,
+        }
 
 
 class BaseAgent:

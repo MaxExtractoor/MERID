@@ -293,7 +293,7 @@ class AlertManager:
         for callback in self._callbacks:
             try:
                 callback(notification)
-            except Exception as e:
+            except (TypeError, ValueError, RuntimeError) as e:
                 logger.error(f"Alert callback error: {e}")
     
     async def _monitor_loop(self) -> None:
@@ -309,8 +309,11 @@ class AlertManager:
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except (RuntimeError, ConnectionError) as e:
                 logger.error(f"Alert monitor error: {e}")
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.exception(f"Unexpected alert monitor error: {e}")
                 await asyncio.sleep(5)
     
     def get_summary(self) -> Dict[str, Any]:

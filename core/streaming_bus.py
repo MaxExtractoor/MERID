@@ -150,7 +150,7 @@ class StreamingBus:
                     queue.put_nowait(event)
                     delivered += 1
                     
-                except Exception as exc:
+                except (asyncio.QueueFull, asyncio.QueueEmpty, RuntimeError) as exc:
                     logger.warning(f"Failed to deliver event: {exc}")
                     stale_queues.add(queue)
             
@@ -253,7 +253,7 @@ async def get_event_by_id(subscriber_id: str) -> Optional[StreamEvent]:
     queue = _subscriber_queues[subscriber_id]
     try:
         return await queue.get()
-    except Exception:
+    except (asyncio.CancelledError, asyncio.QueueEmpty):
         return None
 
 

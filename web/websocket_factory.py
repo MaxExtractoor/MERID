@@ -29,6 +29,27 @@ _connection_tracker: Dict[str, Tuple[int, float]] = defaultdict(lambda: (0, 0.0)
 MAX_WS_CONNECTIONS_PER_IP = 10  # Max concurrent connections per IP
 WS_CONNECTION_WINDOW = 60  # Time window in seconds
 
+# Global connection cap
+_total_ws_connections: int = 0
+MAX_TOTAL_WS_CONNECTIONS: int = 100  # Global max across all IPs
+
+
+def _check_global_connection_cap() -> bool:
+    """Check if global WebSocket connection cap has been reached."""
+    global _total_ws_connections
+    if _total_ws_connections >= MAX_TOTAL_WS_CONNECTIONS:
+        logger.warning(f"Global WebSocket cap reached: {_total_ws_connections}/{MAX_TOTAL_WS_CONNECTIONS}")
+        return False
+    _total_ws_connections += 1
+    return True
+
+
+def _release_global_connection() -> None:
+    """Release a global connection slot."""
+    global _total_ws_connections
+    if _total_ws_connections > 0:
+        _total_ws_connections -= 1
+
 
 def _check_rate_limit(client_ip: str) -> bool:
     """
@@ -90,6 +111,15 @@ async def handle_topic_websocket(
         await websocket.close(code=1008, reason="Rate limit exceeded")
         return
     
+    # Check global connection cap
+    if not _check_global_connection_cap():
+        await websocket.send_json({
+            "type": "error",
+            "detail": "Server at capacity - try again later"
+        })
+        await websocket.close(code=1008, reason="Server at capacity")
+        return
+    
     try:
         # Check dev mode (safely via settings)
         dev_mode = settings.allow_websocket_dev_mode
@@ -149,6 +179,7 @@ async def handle_topic_websocket(
         pass
     finally:
         _release_connection(client_ip)
+        _release_global_connection()
 
 
 def create_websocket_endpoint(

@@ -306,10 +306,10 @@ class BookBuilder:
             for callback in self._book_update_callbacks:
                 try:
                     callback(symbol, book.get_snapshot())
-                except Exception as e:
+                except (TypeError, ValueError, RuntimeError) as e:
                     logger.error(f"Error in book update callback: {e}")
         
-        except Exception as e:
+        except (ValueError, KeyError, RuntimeError) as e:
             logger.error(f"Error processing market data: {e}")
     
     async def _process_order_book_update(self, book: OrderBook, market_data: Dict[str, Any]) -> None:
@@ -403,7 +403,7 @@ class BookBuilder:
             
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except (RuntimeError, ConnectionError) as e:
                 logger.error(f"Error in event processing loop: {e}")
                 await asyncio.sleep(0.1)
     

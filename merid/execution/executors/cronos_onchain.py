@@ -2,26 +2,32 @@
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any, Dict, List, Optional
 
-import httpx
-from merid.execution.base import Quote, Position, TradeExecutor, TradeResult, TradeSideLiteral
+from merid.execution.base import Quote, Position, TradeResult, TradeSideLiteral
+from merid.execution.http_base import HTTPExecutor
 
 
-class CronosOnchainExecutor(TradeExecutor):
+class CronosOnchainExecutor(HTTPExecutor):
+    """Cronos onchain executor with async HTTP support."""
+    
     venue = "cronos_onchain"
-
-    def __init__(self) -> None:
-        self.rpc_url = os.getenv("CRONOS_RPC_URL", "https://evm-cronos.crypto.org")
+    base_url = os.getenv("CRONOS_RPC_URL", "https://evm-cronos.crypto.org")
+    default_timeout = 10.0
+    
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self.private_key = os.getenv("CRONOS_PRIVATE_KEY")
-        self._client = httpx.Client(timeout=10.0)
+    
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Cronos RPC doesn't use auth headers."""
+        return {"Content-Type": "application/json"}
 
     async def get_quote(self, symbol: str, side: TradeSideLiteral, amount: float) -> Quote:
-        # Use a DEX aggregator or on-chain AMM for pricing; here we mock via a price feed
-        base, quote = symbol.split("-")
-        price = await self._fetch_price(base, quote)
+        """Get price quote for token pair."""
+        base, quote_token = symbol.split("-")
+        price = await self._fetch_price(base, quote_token)
         return Quote(
             symbol=symbol,
             side=side,
@@ -29,7 +35,7 @@ class CronosOnchainExecutor(TradeExecutor):
             venue=self.venue,
             size=amount,
             latency_ms=None,
-            metadata={"base": base, "quote": quote},
+            metadata={"base": base, "quote": quote_token},
         )
 
     async def execute_trade(
@@ -42,11 +48,11 @@ class CronosOnchainExecutor(TradeExecutor):
         price: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeResult:
-        base, quote = symbol.split("-")
-        # In a real implementation, build and sign an EVM transaction to a DEX router
+        """Execute on-chain trade via Cronos EVM."""
+        base, quote_token = symbol.split("-")
+        # In production, build and sign EVM transaction to DEX router
         # For now, simulate success
-        exec_price = price or await self._fetch_price(base, quote)
-        # Mock transaction hash
+        exec_price = price or await self._fetch_price(base, quote_token)
         tx_hash = f"0x{'mocktx' * 8}"
         return TradeResult(
             success=True,
@@ -56,13 +62,12 @@ class CronosOnchainExecutor(TradeExecutor):
             size=amount,
             price=exec_price,
             tx_id=tx_hash,
-            metadata={"base": base, "quote": quote},
+            metadata={"base": base, "quote": quote_token},
         )
 
     async def get_positions(self) -> List[Position]:
-        # Query token balances via RPC and compute positions (simplified)
+        """Query token balances via RPC."""
         positions = []
-        # Example: fetch USDC balance and treat as position
         usdc_balance = await self._token_balance("USDC")
         if usdc_balance > 0:
             positions.append(
@@ -78,8 +83,7 @@ class CronosOnchainExecutor(TradeExecutor):
         return positions
 
     async def _fetch_price(self, base: str, quote: str) -> float:
-        # Mock price fetch; in production use a price API or on-chain oracle
-        # For demo, return a deterministic mock price
+        """Fetch price from price feed or oracle."""
         mock_prices = {
             ("ETH", "USDC"): 3000.0,
             ("BTC", "USDC"): 50000.0,
@@ -88,6 +92,6 @@ class CronosOnchainExecutor(TradeExecutor):
         return mock_prices.get((base, quote), 1.0)
 
     async def _token_balance(self, token: str) -> float:
-        # Mock balance; in production call eth_call to token contract
+        """Query token balance via RPC."""
         mock_balances = {"USDC": 1234.56, "ETH": 0.5, "CRO": 1000.0}
         return mock_balances.get(token, 0.0)

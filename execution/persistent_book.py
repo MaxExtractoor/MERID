@@ -179,7 +179,7 @@ class PersistentOrderBook:
                 
                 logger.info(f"Replayed {len(journal)} journal events for {self.symbol}")
         
-        except Exception as e:
+        except (IOError, OSError, pickle.PickleError, ValueError) as e:
             logger.error(f"Error loading order book from disk: {e}")
             # Start with empty book
             self._clear_book()
@@ -254,7 +254,7 @@ class PersistentOrderBook:
             
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except (IOError, OSError, RuntimeError) as e:
                 logger.error(f"Error in snapshot loop: {e}")
                 await asyncio.sleep(1)
     
@@ -297,7 +297,7 @@ class PersistentOrderBook:
             
             logger.info(f"Saved snapshot for {self.symbol} at seq {self._sequence_number}")
         
-        except Exception as e:
+        except (IOError, OSError, sqlite3.Error, pickle.PickleError) as e:
             logger.error(f"Error saving snapshot: {e}")
     
     def add_order(self, order_id: str, side: str, price: float, quantity: int, metadata: Dict[str, Any] = None) -> None:

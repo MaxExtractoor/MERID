@@ -47,7 +47,7 @@ class SimulatorVenueAdapter(VenueAdapter):
             self._connected = True
             logger.info(f"Connected to simulator for account: {self.account_id}")
             
-        except Exception as e:
+        except (ConnectionError, RuntimeError, ValueError) as e:
             logger.error(f"Failed to connect to simulator: {e}")
             raise
     
@@ -58,7 +58,7 @@ class SimulatorVenueAdapter(VenueAdapter):
                 await self.simulator.stop()
             self._connected = False
             logger.info("Disconnected from simulator")
-        except Exception as e:
+        except (ConnectionError, RuntimeError) as e:
             logger.error(f"Error disconnecting from simulator: {e}")
     
     async def submit_order(self, order: VenueOrder) -> VenueOrder:
@@ -98,7 +98,7 @@ class SimulatorVenueAdapter(VenueAdapter):
             
             return order
             
-        except Exception as e:
+        except (ValueError, TypeError, RuntimeError) as e:
             logger.error(f"Failed to submit order: {e}")
             order.status = OrderStatus.REJECTED
             order.venue_metadata["error"] = str(e)
@@ -128,7 +128,7 @@ class SimulatorVenueAdapter(VenueAdapter):
                 logger.warning(f"Failed to cancel order {venue_order_id}: {result}")
                 return False
                 
-        except Exception as e:
+        except (ValueError, TypeError, RuntimeError) as e:
             logger.error(f"Error cancelling order {venue_order_id}: {e}")
             return False
     
@@ -147,7 +147,7 @@ class SimulatorVenueAdapter(VenueAdapter):
             
             return venue_orders
             
-        except Exception as e:
+        except (ValueError, TypeError, RuntimeError) as e:
             logger.error(f"Failed to get orders: {e}")
             return []
     
@@ -172,7 +172,7 @@ class SimulatorVenueAdapter(VenueAdapter):
             
             return venue_positions
             
-        except Exception as e:
+        except (ValueError, TypeError, RuntimeError) as e:
             logger.error(f"Failed to get positions: {e}")
             return {}
     
@@ -197,7 +197,7 @@ class SimulatorVenueAdapter(VenueAdapter):
             
             return account
             
-        except Exception as e:
+        except (ValueError, TypeError, RuntimeError) as e:
             logger.error(f"Failed to get account: {e}")
             raise
     
