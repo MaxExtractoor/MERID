@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -27,6 +28,8 @@ from core.explainability import (
 )
 from observability.event_stream import publish_event
 from trading.spectator import get_spectator_log
+
+logger = logging.getLogger("merid.execution.router")
 
 
 @dataclass(slots=True)
@@ -217,6 +220,7 @@ class ExecutionRouter:
         return decision
 
     def _record_explanation(self, intent: TradeIntent, guard_decision: GuardDecision) -> Optional[str]:
+        """Record explanation for the trade intent. Logs errors but doesn't fail the trade."""
         try:
             inputs = {
                 "symbol": intent.symbol,
@@ -248,7 +252,13 @@ class ExecutionRouter:
                 guardrail_decision=guard_decision.status.value,
             )
             return record.record_id
-        except Exception:
+        except (AttributeError, TypeError, ValueError) as e:
+            # Specific errors from explainability service - log but don't fail trade
+            logger.warning(f"Failed to record explanation: {e}")
+            return None
+        except (RuntimeError, KeyError) as e:
+            # Unexpected error - log with full traceback for investigation
+            logger.exception(f"Unexpected error recording explanation for intent {intent.intent_id}: {e}")
             return None
 
     def _blocked_result(self, intent: TradeIntent, reason: str, guard_decision: GuardDecision) -> TradeResult:
@@ -290,15 +300,26 @@ class ExecutionRouter:
         for venue, executor in self._executors.items():
             try:
                 venue_positions[venue] = await executor.get_positions()
-            except Exception:
+            except (AttributeError, RuntimeError, ConnectionError) as e:
+                # Expected executor errors - log and continue with empty positions
+                logger.warning(f"Failed to get positions from {venue}: {e}")
+                venue_positions[venue] = []
+            except (TypeError, ValueError, KeyError) as e:
+                # Unexpected error - log with traceback but don't break portfolio aggregation
+                logger.exception(f"Unexpected error getting positions from {venue}: {e}")
                 venue_positions[venue] = []
         return await self._portfolio_aggregator.aggregate(venue_positions)
 
     def _publish_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Publish event to event stream. Logs errors but doesn't fail the operation."""
         try:
             publish_event(event_type, payload)
-        except Exception:
-            pass
+        except (ConnectionError, TimeoutError) as e:
+            # Network errors - log warning
+            logger.warning(f"Failed to publish event {event_type}: {e}")
+        except (RuntimeError, TypeError, ValueError) as e:
+            # Other errors - log with traceback for investigation
+            logger.exception(f"Unexpected error publishing event {event_type}: {e}")
 
 
 # Global singleton instance

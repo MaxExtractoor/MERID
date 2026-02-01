@@ -5,35 +5,44 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-import httpx
-from merid.execution.base import Quote, Position, TradeExecutor, TradeResult, TradeSideLiteral
+from merid.execution.base import Quote, Position, TradeResult, TradeSideLiteral
+from merid.execution.http_base import HTTPExecutor
 
 
-class WebullExecutor(TradeExecutor):
+class WebullExecutor(HTTPExecutor):
+    """Webull API executor with async HTTP support."""
+    
     venue = "webull"
-
-    def __init__(self) -> None:
+    base_url = os.getenv("WEBULL_API_URL", "https://api.webull.com")
+    default_timeout = 10.0
+    
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self.username = os.getenv("WEBULL_USERNAME")
         self.password = os.getenv("WEBULL_PASSWORD")
         self.did = os.getenv("WEBULL_DID")
-        self.base_url = os.getenv("WEBULL_API_URL", "https://api.webull.com")
-        self._client = httpx.Client(timeout=10.0)
         self._access_token: Optional[str] = None
 
     async def _ensure_auth(self) -> None:
+        """Ensure authentication token is available."""
         if self._access_token:
             return
         # Simplified: assume token already available via env in demo
         self._access_token = os.getenv("WEBULL_ACCESS_TOKEN")
 
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Webull authentication headers."""
+        return {"Authorization": f"Bearer {self._access_token or ''}"}
+
     async def get_quote(self, symbol: str, side: TradeSideLiteral, amount: float) -> Quote:
+        """Get latest quote for symbol."""
         await self._ensure_auth()
-        resp = self._client.get(
-            f"{self.base_url}/quote/realTime/{symbol}",
-            headers={"Authorization": f"Bearer {self._access_token}"},
+        response = await self._request(
+            "GET",
+            f"/quote/realTime/{symbol}",
+            headers=self._get_auth_headers(),
         )
-        resp.raise_for_status()
-        data = resp.json()
+        data = response.json()
         price = float(data["latestPrice"])
         return Quote(
             symbol=symbol,
@@ -55,6 +64,7 @@ class WebullExecutor(TradeExecutor):
         price: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeResult:
+        """Execute trade via Webull API."""
         await self._ensure_auth()
         payload = {
             "securityId": symbol,
@@ -66,12 +76,26 @@ class WebullExecutor(TradeExecutor):
         if order_type == "limit" and price is not None:
             payload["limitPrice"] = str(price)
 
-        resp = self._client.post(
-            f"{self.base_url}/trade/v2/order/place",
-            json=payload,
-            headers={"Authorization": f"Bearer {self._access_token}"},
-        )
-        if resp.status_code not in {200, 201}:
+        try:
+            response = await self._request(
+                "POST",
+                "/trade/v2/order/place",
+                json_data=payload,
+                headers=self._get_auth_headers(),
+                idempotent=True,
+            )
+            data = response.json()
+            return TradeResult(
+                success=True,
+                venue=self.venue,
+                symbol=symbol,
+                side=side,
+                size=amount,
+                price=float(data.get("avgPrice", price or 0)),
+                tx_id=data.get("orderId"),
+                metadata={"order_id": data.get("orderId")},
+            )
+        except (ConnectionError, RuntimeError, ValueError) as e:
             return TradeResult(
                 success=False,
                 venue=self.venue,
@@ -79,28 +103,18 @@ class WebullExecutor(TradeExecutor):
                 side=side,
                 size=amount,
                 price=price or 0.0,
-                error=f"Webull API error {resp.status_code}: {resp.text}",
+                error=f"Webull API error: {e}",
             )
-        data = resp.json()
-        return TradeResult(
-            success=True,
-            venue=self.venue,
-            symbol=symbol,
-            side=side,
-            size=amount,
-            price=float(data.get("avgPrice", price or 0)),
-            tx_id=data.get("orderId"),
-            metadata={"order_id": data.get("orderId")},
-        )
 
     async def get_positions(self) -> List[Position]:
+        """Fetch open positions from Webull."""
         await self._ensure_auth()
-        resp = self._client.get(
-            f"{self.base_url}/account/v5/positions",
-            headers={"Authorization": f"Bearer {self._access_token}"},
+        response = await self._request(
+            "GET",
+            "/account/v5/positions",
+            headers=self._get_auth_headers(),
         )
-        resp.raise_for_status()
-        data = resp.json()
+        data = response.json()
         positions = []
         for pos in data.get("positions", []):
             positions.append(

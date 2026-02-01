@@ -122,7 +122,7 @@ class HealthMonitor:
                     "subscribers": metrics.get("total_subscribers", 0),
                 },
             )
-        except Exception as e:
+        except (ImportError, AttributeError, RuntimeError) as e:
             self._components["event_bus"] = ComponentHealth(
                 name="Event Bus",
                 status=HealthStatus.UNHEALTHY,
@@ -151,7 +151,7 @@ class HealthMonitor:
                     "pending_votes": len(pending) if isinstance(pending, dict) else 0,
                 },
             )
-        except Exception as e:
+        except (ImportError, AttributeError, RuntimeError) as e:
             self._components["consensus"] = ComponentHealth(
                 name="Consensus Engine",
                 status=HealthStatus.UNHEALTHY,
@@ -183,7 +183,7 @@ class HealthMonitor:
                     "positions": len(getattr(engine, '_positions', {})),
                 },
             )
-        except Exception as e:
+        except (ImportError, AttributeError, RuntimeError) as e:
             self._components["execution"] = ComponentHealth(
                 name="Execution Engine",
                 status=HealthStatus.UNHEALTHY,
@@ -218,7 +218,7 @@ class HealthMonitor:
                     "running_agents": running_agents,
                 },
             )
-        except Exception as e:
+        except (ImportError, AttributeError, RuntimeError) as e:
             self._components["agent_mesh"] = ComponentHealth(
                 name="Agent Mesh",
                 status=HealthStatus.UNHEALTHY,
@@ -244,7 +244,7 @@ class HealthMonitor:
                     "current_block": miner.current_block,
                 },
             )
-        except Exception as e:
+        except (ImportError, AttributeError, RuntimeError) as e:
             self._components["simulation"] = ComponentHealth(
                 name="Simulation Miner",
                 status=HealthStatus.UNHEALTHY,
@@ -273,7 +273,7 @@ class HealthMonitor:
                     "entries": sequence,
                 },
             )
-        except Exception as e:
+        except (ImportError, AttributeError, RuntimeError) as e:
             self._components["audit"] = ComponentHealth(
                 name="Audit Trail",
                 status=HealthStatus.UNHEALTHY,
@@ -307,7 +307,7 @@ class HealthMonitor:
                     "memory_total_gb": memory.total / (1024**3),
                 },
             )
-        except Exception as e:
+        except (IOError, OSError, RuntimeError) as e:
             self._components["system"] = ComponentHealth(
                 name="System Resources",
                 status=HealthStatus.UNKNOWN,
@@ -354,8 +354,11 @@ class HealthMonitor:
                 await asyncio.sleep(30)  # Check every 30 seconds
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except (RuntimeError, ConnectionError) as e:
                 logger.error(f"Health monitor error: {e}")
+                await asyncio.sleep(10)
+            except Exception as e:
+                logger.exception(f"Unexpected health monitor error: {e}")
                 await asyncio.sleep(10)
 
 

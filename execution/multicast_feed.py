@@ -122,7 +122,7 @@ class MulticastFeedHandler:
             # Start processing loop
             await self._process_messages()
             
-        except Exception as e:
+        except (socket.error, IOError, OSError) as e:
             logger.error(f"Failed to start multicast feed: {e}")
             raise
     
@@ -140,7 +140,7 @@ class MulticastFeedHandler:
                 mreq = struct.pack('4sl', group, socket.inet_aton(self.config.interface))
                 self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
                 self.socket.close()
-            except:
+            except (socket.error, OSError):
                 pass
         
         logger.info(f"Stopped multicast feed: {self.config.feed_type.value}")
@@ -171,7 +171,7 @@ class MulticastFeedHandler:
                 
             except socket.timeout:
                 continue
-            except Exception as e:
+            except (socket.error, RuntimeError, ValueError) as e:
                 logger.error(f"Error processing multicast message: {e}")
                 if self._running:
                     await asyncio.sleep(0.1)
@@ -319,7 +319,7 @@ class MulticastFeedHandler:
         for callback in self._callbacks:
             try:
                 callback(market_data)
-            except Exception as e:
+            except (TypeError, ValueError, RuntimeError) as e:
                 logger.error(f"Error in market data callback: {e}")
     
     def get_order_book(self, symbol: str) -> Dict[str, float]:

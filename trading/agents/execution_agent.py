@@ -14,9 +14,11 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
-from merid.execution.router import ExecutionRouter, TraderIdentity
+if TYPE_CHECKING:
+    from merid.execution.router import ExecutionRouter, TraderIdentity
+
 from utils.logger import get_logger
 
 logger = get_logger("trading.agents.execution")

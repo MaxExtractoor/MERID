@@ -441,7 +441,7 @@ class ObservabilityManager:
                 hours = int((uptime_seconds % 86400) // 3600)
                 minutes = int((uptime_seconds % 3600) // 60)
                 return f"{days}d {hours}h {minutes}m"
-        except:
+        except (FileNotFoundError, PermissionError, ValueError, OSError):
             return "Unknown"
     
     def _get_memory_usage(self) -> Dict[str, Any]:
@@ -455,7 +455,7 @@ class ObservabilityManager:
                 "percent": memory.percent,
                 "used": memory.used
             }
-        except:
+        except (ImportError, AttributeError, OSError):
             return {"percent": 0, "used": 0, "total": 0, "available": 0}
     
     def _get_disk_usage(self) -> Dict[str, Any]:
@@ -469,7 +469,7 @@ class ObservabilityManager:
                 "free": disk.free,
                 "percent": disk.percent
             }
-        except:
+        except (ImportError, AttributeError, OSError):
             return {"percent": 0, "used": 0, "total": 0, "free": 0}
     
     def _metrics_collector(self):

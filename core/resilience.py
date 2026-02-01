@@ -76,7 +76,7 @@ class ResilientAPIClient:
         except CircuitBreakerError:
             logger.error(f"Circuit breaker open for: {func.__name__}")
             raise
-        except Exception as e:
+        except (ConnectionError, RuntimeError, ValueError) as e:
             logger.error(f"API call failed: {func.__name__} - {str(e)}")
             raise
 
@@ -105,7 +105,7 @@ class FallbackManager:
         """
         try:
             return await primary_func(*args, **kwargs)
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError) as e:
             logger.warning(f"Primary service {service_name} failed: {str(e)}")
             if service_name in self.fallback_strategies:
                 logger.info(f"Executing fallback for {service_name}")

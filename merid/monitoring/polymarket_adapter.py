@@ -19,7 +19,7 @@ import time
 from typing import List, Optional, Dict, Any
 from decimal import Decimal
 
-from merid.polymarket_client import PolymarketClient, Market, MarketOutcome
+from merid.event_venues.polymarket import PolymarketVenueClient, Market, MarketOutcome
 from monitoring.prediction_markets import PredictionMarket, PredictionPlatform
 from utils.logger import get_logger
 
@@ -27,10 +27,10 @@ logger = get_logger("monitoring.polymarket_adapter")
 
 
 class PolymarketAdapter:
-    """Adapter for integrating PolymarketClient with MERID aggregator."""
+    """Adapter for integrating PolymarketVenueClient with MERID aggregator."""
     
     def __init__(self):
-        self._client = PolymarketClient()
+        self._client = PolymarketVenueClient()
         self._last_fetch = 0
         self._fetch_interval = 300  # 5 minutes
         
@@ -65,9 +65,14 @@ class PolymarketAdapter:
                 logger.info(f"Fetched {len(prediction_markets)} markets via PolymarketClient")
                 return prediction_markets
                 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, asyncio.TimeoutError, RuntimeError) as e:
             logger.error(f"Failed to fetch markets via PolymarketClient: {e}")
-            # Return empty list to maintain compatibility
+            return []
+        except (ValueError, TypeError) as e:
+            logger.error(f"Data error fetching markets via PolymarketClient: {e}")
+            return []
+        except (AttributeError, KeyError, RuntimeError) as e:
+            logger.exception(f"Unexpected error fetching markets: {e}")
             return []
     
     def _convert_to_prediction_market(self, market: Market) -> Optional[PredictionMarket]:
@@ -105,8 +110,11 @@ class PolymarketAdapter:
             
             return pred_market
             
-        except Exception as e:
+        except (ValueError, KeyError, TypeError) as e:
             logger.error(f"Failed to convert market {market.id}: {e}")
+            return None
+        except (AttributeError, RuntimeError) as e:
+            logger.exception(f"Unexpected error converting market {market.id}: {e}")
             return None
     
     async def get_market_details(self, market_id: str) -> Optional[PredictionMarket]:
@@ -126,8 +134,11 @@ class PolymarketAdapter:
                     return self._convert_to_prediction_market(market)
                 return None
                 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError) as e:
             logger.error(f"Failed to get market details {market_id}: {e}")
+            return None
+        except (AttributeError, KeyError, ValueError) as e:
+            logger.exception(f"Unexpected error getting market details {market_id}: {e}")
             return None
     
     async def get_orderbook(self, market_id: str) -> Optional[Dict[str, Any]]:
@@ -153,8 +164,11 @@ class PolymarketAdapter:
                     }
                 return None
                 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError) as e:
             logger.error(f"Failed to get orderbook {market_id}: {e}")
+            return None
+        except (AttributeError, KeyError, ValueError) as e:
+            logger.exception(f"Unexpected error getting orderbook {market_id}: {e}")
             return None
     
     async def get_user_positions(self, wallet_address: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -183,8 +197,11 @@ class PolymarketAdapter:
                     for pos in positions
                 ]
                 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError) as e:
             logger.error(f"Failed to get positions: {e}")
+            return []
+        except (AttributeError, KeyError, ValueError) as e:
+            logger.exception(f"Unexpected error getting positions: {e}")
             return []
     
     async def get_trade_history(self, wallet_address: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
@@ -215,8 +232,11 @@ class PolymarketAdapter:
                     for trade in trades
                 ]
                 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError) as e:
             logger.error(f"Failed to get trade history: {e}")
+            return []
+        except (AttributeError, KeyError, ValueError) as e:
+            logger.exception(f"Unexpected error getting trade history: {e}")
             return []
     
     async def place_order(
@@ -260,8 +280,11 @@ class PolymarketAdapter:
                     }
                 return None
                 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError) as e:
             logger.error(f"Failed to place order: {e}")
+            return None
+        except (AttributeError, KeyError, ValueError) as e:
+            logger.exception(f"Unexpected error placing order: {e}")
             return None
     
     async def cancel_order(self, order_id: str) -> bool:
@@ -278,8 +301,11 @@ class PolymarketAdapter:
             async with self._client as client:
                 return await client.cancel_order(order_id)
                 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError) as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
+            return False
+        except (AttributeError, ValueError) as e:
+            logger.exception(f"Unexpected error canceling order {order_id}: {e}")
             return False
     
     async def get_open_orders(self, wallet_address: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -311,8 +337,11 @@ class PolymarketAdapter:
                     for order in orders
                 ]
                 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError) as e:
             logger.error(f"Failed to get open orders: {e}")
+            return []
+        except (AttributeError, KeyError, ValueError) as e:
+            logger.exception(f"Unexpected error getting open orders: {e}")
             return []
 
 
@@ -361,17 +390,17 @@ async def example_usage():
     
     # Fetch markets
     markets = await adapter.fetch_polymarket_markets(limit=10)
-    print(f"Fetched {len(markets)} markets")
+    logger.info(f"Fetched {len(markets)} markets")
     
     # Get market details
     if markets:
         details = await adapter.get_market_details(markets[0].market_id)
-        print(f"Market details: {details.question if details else 'Not found'}")
+        logger.info(f"Market details: {details.question if details else 'Not found'}")
     
     # Get orderbook
     if markets:
         orderbook = await adapter.get_orderbook(markets[0].market_id)
-        print(f"Orderbook: {len(orderbook['bids']) if orderbook else 0} bids")
+        logger.info(f"Orderbook: {len(orderbook['bids']) if orderbook else 0} bids")
     
     # Note: Trading operations require proper API keys
     # positions = await adapter.get_user_positions()

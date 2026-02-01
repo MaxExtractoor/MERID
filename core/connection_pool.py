@@ -111,7 +111,7 @@ class ConnectionPool(Generic[T]):
                 try:
                     conn = self._create_new_connection()
                     self._available.append(conn)
-                except Exception as exc:
+                except (ConnectionError, TimeoutError, RuntimeError) as exc:
                     logger.error(f"Failed to create initial connection for pool '{self.name}': {exc}")
     
     def _create_new_connection(self) -> PooledConnection[T]:
@@ -130,7 +130,7 @@ class ConnectionPool(Generic[T]):
             
             logger.debug(f"Created new connection for pool '{self.name}' (total: {self._total_created})")
             return pooled
-        except Exception as exc:
+        except (ConnectionError, TimeoutError, RuntimeError) as exc:
             logger.error(f"Failed to create connection for pool '{self.name}': {exc}")
             raise
     
@@ -140,7 +140,7 @@ class ConnectionPool(Generic[T]):
             self._close_connection(pooled.connection)
             self._total_closed += 1
             logger.debug(f"Closed connection for pool '{self.name}' (total: {self._total_closed})")
-        except Exception as exc:
+        except (IOError, OSError) as exc:
             logger.error(f"Error closing connection for pool '{self.name}': {exc}")
     
     def _validate_pooled_connection(self, pooled: PooledConnection[T]) -> bool:
@@ -168,8 +168,12 @@ class ConnectionPool(Generic[T]):
                 logger.debug("Connection failed health check")
                 self._total_validation_failures += 1
                 return False
-        except Exception as exc:
+        except (ConnectionError, TimeoutError) as exc:
             logger.warning(f"Connection validation error: {exc}")
+            self._total_validation_failures += 1
+            return False
+        except Exception as exc:
+            logger.exception(f"Unexpected connection validation error: {exc}")
             self._total_validation_failures += 1
             return False
         
@@ -230,8 +234,11 @@ class ConnectionPool(Generic[T]):
                         self._in_use[id(pooled)] = pooled
                         self._total_acquired += 1
                         return pooled
-                    except Exception as exc:
+                    except (ConnectionError, TimeoutError, RuntimeError) as exc:
                         logger.error(f"Failed to create connection: {exc}")
+                        # Fall through to wait
+                    except Exception as exc:
+                        logger.exception(f"Unexpected error creating connection: {exc}")
                         # Fall through to wait
                 
                 # Pool exhausted, wait for connection to be released
@@ -267,8 +274,10 @@ class ConnectionPool(Generic[T]):
                     try:
                         new_conn = self._create_new_connection()
                         self._available.append(new_conn)
-                    except Exception as exc:
+                    except (ConnectionError, TimeoutError, RuntimeError) as exc:
                         logger.error(f"Failed to maintain minimum pool size: {exc}")
+                    except Exception as exc:
+                        logger.exception(f"Unexpected error maintaining pool size: {exc}")
             
             # Notify waiting threads
             self._condition.notify()

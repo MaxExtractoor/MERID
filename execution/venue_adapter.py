@@ -194,7 +194,7 @@ class VenueAdapter(ABC):
         for callback in self._order_callbacks:
             try:
                 callback(order)
-            except Exception as e:
+            except (TypeError, ValueError, RuntimeError) as e:
                 logger.error(f"Error in order callback: {e}")
     
     def _notify_position_update(self, positions: Dict[str, VenuePosition]) -> None:
@@ -202,7 +202,7 @@ class VenueAdapter(ABC):
         for callback in self._position_callbacks:
             try:
                 callback(positions)
-            except Exception as e:
+            except (TypeError, ValueError, RuntimeError) as e:
                 logger.error(f"Error in position callback: {e}")
     
     def _notify_account_update(self, account: VenueAccount) -> None:
@@ -210,7 +210,7 @@ class VenueAdapter(ABC):
         for callback in self._account_callbacks:
             try:
                 callback(account)
-            except Exception as e:
+            except (TypeError, ValueError, RuntimeError) as e:
                 logger.error(f"Error in account callback: {e}")
 
 
@@ -265,7 +265,7 @@ class VenueManager:
         try:
             await adapter.connect()
             logger.info(f"Connected to venue: {venue_id}")
-        except Exception as e:
+        except (ConnectionError, RuntimeError) as e:
             logger.error(f"Failed to connect to venue {venue_id}: {e}")
     
     def get_adapter(self, venue_id: Optional[str] = None) -> Optional[VenueAdapter]:

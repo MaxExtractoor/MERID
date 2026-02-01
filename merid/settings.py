@@ -11,10 +11,13 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger("merid.settings")
 
 
 class Settings(BaseSettings):
@@ -142,9 +145,9 @@ class Settings(BaseSettings):
         if hasattr(self.model_config, 'env_file') and self.model_config.env_file:
             env_file = self.model_config.env_file
             if os.path.exists(env_file):
-                print(f"✅ Settings loaded from: {env_file}")
+                logger.info(f"Settings loaded from: {env_file}")
             else:
-                print(f"⚠️  Environment file not found: {env_file}")
+                logger.warning(f"Environment file not found: {env_file}")
     
     @property
     def is_development(self) -> bool:

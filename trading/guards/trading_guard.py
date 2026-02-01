@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -28,6 +29,18 @@ except Exception:  # pragma: no cover - fallback when module not present
         RUGPULL = "rugpull"
 
 
+def _safe_global_mode(mode: Any) -> GlobalTradingMode:
+    """Safely convert mode value to GlobalTradingMode enum."""
+    if isinstance(mode, GlobalTradingMode):
+        return mode
+    if isinstance(mode, str):
+        try:
+            return GlobalTradingMode(mode)
+        except ValueError:
+            pass
+    return GlobalTradingMode.SIM  # Default fallback
+
+
 class GuardDecisionStatus(str, Enum):
     """Possible guard decision outcomes."""
 
@@ -35,6 +48,14 @@ class GuardDecisionStatus(str, Enum):
     SIMULATE = "simulate"
     REQUIRE_CONFIRMATION = "require_confirmation"
     BLOCK = "block"
+
+
+class CircuitBreakerState(str, Enum):
+    """Circuit breaker states."""
+
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Blocking all requests
+    HALF_OPEN = "half_open"  # Testing if service recovered
 
 
 @dataclass(frozen=True)
@@ -55,7 +76,15 @@ class TradingGuardConfig:
     vpn_only: bool = True
     max_notional_usd: float = 25_000.0
     max_memecoin_notional_usd: float = 2_500.0
+    max_daily_loss_usd: float = 25_000.0
+    max_per_symbol_exposure_usd: float = 10_000.0
+    max_open_orders: int = 100
     allowed_venues: Optional[frozenset[str]] = None
+    # Circuit breaker settings
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_window_seconds: float = 60.0
+    circuit_breaker_cooldown_seconds: float = 300.0
+    circuit_breaker_half_open_max: int = 3
 
     @classmethod
     def from_env(cls) -> "TradingGuardConfig":
@@ -94,20 +123,108 @@ class TradingGuard:
     ) -> None:
         self.config = config or TradingGuardConfig.from_env()
         self.runtime_config = runtime_config or get_runtime_config()
+        # Circuit breaker state
+        self._circuit_state = CircuitBreakerState.CLOSED
+        self._error_timestamps: list[float] = []
+        self._circuit_opened_at: Optional[float] = None
+        self._half_open_successes = 0
 
-    def evaluate(self, request: TradeRequest, *, vpn_connected: bool = True) -> GuardDecision:
+    @property
+    def circuit_state(self) -> CircuitBreakerState:
+        """Get current circuit breaker state."""
+        return self._circuit_state
+
+    def record_error(self, timestamp: Optional[float] = None) -> None:
+        """Record an error for circuit breaker tracking."""
+        now = timestamp or time.time()
+        self._error_timestamps.append(now)
+        self._cleanup_old_errors(now)
+        self._check_circuit_breaker(now)
+
+    def _cleanup_old_errors(self, now: float) -> None:
+        """Remove errors outside the window."""
+        window = self.config.circuit_breaker_window_seconds
+        cutoff = now - window
+        self._error_timestamps = [ts for ts in self._error_timestamps if ts > cutoff]
+
+    def _check_circuit_breaker(self, now: float) -> None:
+        """Check if circuit breaker should trip."""
         cfg = self.config
+        error_count = len(self._error_timestamps)
+
+        if self._circuit_state == CircuitBreakerState.CLOSED:
+            if error_count >= cfg.circuit_breaker_threshold:
+                self._circuit_state = CircuitBreakerState.OPEN
+                self._circuit_opened_at = now
+        elif self._circuit_state == CircuitBreakerState.HALF_OPEN:
+            if error_count > 0:
+                # Failed in half-open, go back to open
+                self._circuit_state = CircuitBreakerState.OPEN
+                self._circuit_opened_at = now
+                self._half_open_successes = 0
+
+    def _check_circuit_for_request(self, now: float) -> Optional[GuardDecision]:
+        """Check circuit breaker state and return decision if blocked."""
+        cfg = self.config
+
+        if self._circuit_state == CircuitBreakerState.OPEN:
+            # Check if cooldown period has passed
+            if self._circuit_opened_at and (now - self._circuit_opened_at) >= cfg.circuit_breaker_cooldown_seconds:
+                self._circuit_state = CircuitBreakerState.HALF_OPEN
+                self._half_open_successes = 0
+                return None  # Allow request in half-open state
+            return GuardDecision(
+                GuardDecisionStatus.BLOCK,
+                "Circuit breaker open - too many recent errors",
+                {"circuit_state": "open", "errors_in_window": len(self._error_timestamps)},
+            )
+
+        if self._circuit_state == CircuitBreakerState.HALF_OPEN:
+            if self._half_open_successes >= cfg.circuit_breaker_half_open_max:
+                self._circuit_state = CircuitBreakerState.CLOSED
+                self._error_timestamps.clear()
+                self._half_open_successes = 0
+            return None  # Allow request
+
+        return None  # Circuit closed, allow request
+
+    def record_success(self) -> None:
+        """Record a successful request for half-open tracking."""
+        if self._circuit_state == CircuitBreakerState.HALF_OPEN:
+            self._half_open_successes += 1
+            if self._half_open_successes >= self.config.circuit_breaker_half_open_max:
+                self._circuit_state = CircuitBreakerState.CLOSED
+                self._error_timestamps.clear()
+                self._half_open_successes = 0
+
+    def evaluate(
+        self,
+        request: TradeRequest,
+        *,
+        vpn_connected: bool = True,
+        portfolio_aggregator: Any = None,
+    ) -> GuardDecision:
+        cfg = self.config
+
+        # Check circuit breaker first
+        now = time.time()
+        circuit_decision = self._check_circuit_for_request(now)
+        if circuit_decision:
+            return circuit_decision
+
         state = self.runtime_config.snapshot()
         global_mode = _safe_global_mode(state.get("mode"))
         spectator_mode = bool(state.get("spectator_mode", True))
         runtime_allow_live = bool(state.get("allow_live_trades", False))
         venue_cfg = self.runtime_config.get_venue(request.venue)
 
+        notional = self._estimate_notional(request)
+
         metadata: Dict[str, Any] = {
             "venue": request.venue,
             "symbol": request.symbol,
             "live": request.live,
-            "notional_usd": self._estimate_notional(request),
+            "notional_usd": notional,
             "global_mode": global_mode.value,
             "spectator_mode": spectator_mode,
             "runtime_allow_live": runtime_allow_live,
@@ -125,6 +242,28 @@ class TradingGuard:
 
         if not venue_cfg or not venue_cfg.enabled:
             return GuardDecision(GuardDecisionStatus.BLOCK, f"Venue {request.venue} disabled", metadata)
+
+        # Risk limits check (requires portfolio_aggregator)
+        if portfolio_aggregator is not None:
+            # Daily loss limit
+            daily_pnl = getattr(portfolio_aggregator, 'daily_pnl', 0)
+            if daily_pnl < -cfg.max_daily_loss_usd:
+                metadata["daily_loss"] = daily_pnl
+                metadata["max_daily_loss"] = cfg.max_daily_loss_usd
+                return GuardDecision(GuardDecisionStatus.BLOCK, "Daily loss limit exceeded", metadata)
+
+            # Per-symbol exposure limit
+            symbol_exposure = portfolio_aggregator.get_symbol_exposure(request.symbol)
+            if notional and (symbol_exposure + notional) > cfg.max_per_symbol_exposure_usd:
+                metadata["symbol_exposure"] = symbol_exposure
+                metadata["max_symbol_exposure"] = cfg.max_per_symbol_exposure_usd
+                return GuardDecision(GuardDecisionStatus.BLOCK, "Per-symbol exposure limit exceeded", metadata)
+
+            # Max open orders limit
+            if portfolio_aggregator.open_orders_count >= cfg.max_open_orders:
+                metadata["open_orders"] = portfolio_aggregator.open_orders_count
+                metadata["max_open_orders"] = cfg.max_open_orders
+                return GuardDecision(GuardDecisionStatus.BLOCK, "Max open orders limit reached", metadata)
 
         # Mode semantics -------------------------------------------------
         if global_mode in {GlobalTradingMode.OFFLINE, GlobalTradingMode.SIM}:
@@ -153,7 +292,6 @@ class TradingGuard:
                 )
 
         # Limits ---------------------------------------------------------
-        notional = metadata["notional_usd"]
         if notional and notional > cfg.max_notional_usd:
             metadata["limit"] = cfg.max_notional_usd
             return GuardDecision(GuardDecisionStatus.BLOCK, "Notional exceeds global limit", metadata)

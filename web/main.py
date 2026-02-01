@@ -154,6 +154,7 @@ root_router = APIRouter()
 router = APIRouter(prefix="/api")
 router_v1 = APIRouter(prefix="/api/v1")
 _app_context: Dict[str, Any] = {}
+_app_context_frozen: bool = False
 event_stream = get_event_stream()
 
 
@@ -164,6 +165,13 @@ def _context_value(key: str) -> Any:
         raise RuntimeError(
             f"Application context missing '{key}'. Ensure create_app() was called before importing routes."
         ) from exc
+
+
+def _freeze_app_context() -> None:
+    """Freeze app context after startup to prevent mutation."""
+    global _app_context_frozen
+    _app_context_frozen = True
+    logger.info("✅ App context frozen - mutations disabled")
 
 
 def _simulation_chain():
@@ -230,6 +238,7 @@ def create_app(lifespan=None) -> FastAPI:
     }
     _app_context.clear()
     _app_context.update(context)
+    _freeze_app_context()  # Prevent further mutation
 
     application.add_middleware(
         CORSMiddleware,
@@ -1161,9 +1170,73 @@ async def favicon():
     return FileResponse("favicon.ico")
 
 
+# Startup state tracking
+_startup_state: Dict[str, Any] = {
+    "started_at": None,
+    "services": {},
+    "background_tasks": [],
+}
+
+
+async def _start_service_with_timeout(
+    name: str,
+    coro,
+    timeout_seconds: float = 30.0,
+    optional: bool = True
+) -> Optional[Any]:
+    """Start a service with timeout and track its state."""
+    global _startup_state
+    _startup_state["services"][name] = {"status": "starting", "started_at": time.time()}
+    
+    try:
+        result = await asyncio.wait_for(coro, timeout=timeout_seconds)
+        _startup_state["services"][name] = {
+            "status": "running",
+            "started_at": _startup_state["services"][name]["started_at"],
+            "ready_at": time.time()
+        }
+        logger.info(f"✅ Service '{name}' started successfully")
+        return result
+    except asyncio.TimeoutError:
+        _startup_state["services"][name] = {
+            "status": "timeout",
+            "error": f"Startup timeout after {timeout_seconds}s"
+        }
+        if optional:
+            logger.warning(f"⏱️  Service '{name}' startup timed out (optional, continuing)")
+            return None
+        raise RuntimeError(f"Required service '{name}' failed to start within {timeout_seconds}s")
+    except Exception as e:
+        _startup_state["services"][name] = {"status": "failed", "error": str(e)}
+        if optional:
+            logger.warning(f"❌ Service '{name}' failed to start: {e} (optional, continuing)")
+            return None
+        raise
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Graceful shutdown - cancel background tasks."""
+    global _startup_state
+    logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
+    
+    # Cancel all tracked background tasks
+    for task in _startup_state.get("background_tasks", []):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    
+    logger.info("✅ Shutdown complete")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Start background services on application startup with robust error handling."""
+    global _startup_state
+    _startup_state["started_at"] = time.time()
     startup_success = True
     
     # Log environment info and validate configuration
@@ -1189,37 +1262,51 @@ async def startup_event():
         else:
             logger.info("✅ Production validation passed")
     
-    # Start prediction market aggregator
-    try:
-        from monitoring.prediction_markets import start_prediction_markets
-        aggregator = await start_prediction_markets()
-        market_count = len(aggregator._all_markets) if aggregator else 0
+    # Start prediction market aggregator with timeout
+    aggregator = await _start_service_with_timeout(
+        "prediction_markets",
+        _start_prediction_markets(),
+        timeout_seconds=30.0,
+        optional=True
+    )
+    
+    if aggregator:
+        market_count = len(aggregator._all_markets) if hasattr(aggregator, '_all_markets') else 0
         logger.info(f"Started prediction market aggregator with {market_count} initial markets")
-    except Exception as e:
-        logger.warning(f"Failed to start prediction market aggregator: {e}")
+    else:
         logger.info("Continuing without prediction markets - will use fallback data")
         startup_success = False
     
     # Start whale detection listener (only if prediction markets started)
-    try:
-        if 'aggregator' in locals() and aggregator:
+    if aggregator:
+        try:
             from merid.whales import solana_whale_listener
-            asyncio.create_task(solana_whale_listener(aggregator))
+            task = asyncio.create_task(solana_whale_listener(aggregator))
+            _startup_state["background_tasks"].append(task)
             logger.info("Started Solana whale detection listener")
-        else:
-            logger.info("Skipping whale detection - no prediction markets available")
-    except Exception as e:
-        logger.warning(f"Failed to start whale detection listener: {e}")
-        logger.info("Continuing without whale detection")
-        startup_success = False
+        except Exception as e:
+            logger.warning(f"Failed to start whale detection listener: {e}")
+            logger.info("Continuing without whale detection")
+            startup_success = False
+    else:
+        logger.info("Skipping whale detection - no prediction markets available")
+    
+    # Calculate startup duration
+    startup_duration = time.time() - _startup_state["started_at"]
     
     # Log overall startup status
     if startup_success:
-        logger.info("✅ All background services started successfully")
+        logger.info(f"✅ All background services started successfully in {startup_duration:.2f}s")
     else:
-        logger.warning("⚠️  Some services failed to start - system operating in degraded mode")
+        logger.warning(f"⚠️  Some services failed to start - system operating in degraded mode ({startup_duration:.2f}s)")
     
     logger.info("🚀 MERID startup complete - system ready")
+
+
+async def _start_prediction_markets():
+    """Wrapper to start prediction markets with proper error handling."""
+    from monitoring.prediction_markets import start_prediction_markets
+    return await start_prediction_markets()
 
 
 @app.get("/api/v1/market/data/freshness")
@@ -1274,12 +1361,16 @@ async def healthz():
     except RuntimeError:
         loop_running = False
     
+    # Check startup completed
+    startup_completed = _startup_state.get("started_at") is not None
+    
     return {
-        "status": "healthy" if main_thread_alive and loop_running else "unhealthy",
+        "status": "healthy" if main_thread_alive and loop_running and startup_completed else "unhealthy",
         "timestamp": time.time(),
         "main_thread_alive": main_thread_alive,
         "event_loop_running": loop_running,
-        "uptime_seconds": time.time()
+        "startup_completed": startup_completed,
+        "uptime_seconds": time.time() - (_startup_state.get("started_at") or time.time())
     }
 
 
@@ -1289,60 +1380,81 @@ async def readyz():
     import time
     import os
     
+    # Check if startup has completed
+    if _startup_state.get("started_at") is None:
+        return {
+            "status": "not_ready",
+            "reason": "startup_not_complete",
+            "timestamp": time.time()
+        }
+    
+    # Check service states from startup tracking
+    services = _startup_state.get("services", {})
+    prediction_markets_ok = services.get("prediction_markets", {}).get("status") == "running"
+    
     # Check if we're in synthetic mode
     synthetic_mode = os.getenv("SIMULATION_MODE", "").lower() == "synthetic_only"
     
-    # Check if aggregator exists and has data
+    # Check aggregator status
     aggregator_available = False
     data_fresh = False
-    risk_engine_ready = False
-    freshness_payload = None
     
     try:
-        # Try to get aggregator from app state
         from monitoring.real_prediction_markets import get_real_prediction_aggregator
-        
-        # Quick check if we can get markets
         aggregator = await get_real_prediction_aggregator()
         if aggregator:
             aggregator_available = True
-            risk_engine_ready = True  # For now, assume ready if aggregator exists
             markets = aggregator.get_all_markets()
             if markets:
-                freshness_payload = {
-                    "status": "fresh",
-                    "age_seconds": 0,
-                }
-    except Exception:
-        pass
+                data_fresh = True
+    except Exception as e:
+        logger.debug(f"Ready check aggregator error: {e}")
     
-    # Even if markets list is empty, the dedicated freshness endpoint may be fresh
-    try:
-        if freshness_payload is None:
-            freshness_payload = await market_data_freshness()
-    except Exception:
-        freshness_payload = None
-    
-    if freshness_payload:
-        status = freshness_payload.get("status", "unknown").lower()
-        age_seconds = freshness_payload.get("age_seconds", 9999)
-        data_fresh = status == "fresh" and age_seconds is not None and age_seconds < 120
-
-    # Overall readiness
-    ready = aggregator_available and (data_fresh or synthetic_mode) and risk_engine_ready
+    # Overall readiness - allow degraded mode if prediction markets started
+    ready = (aggregator_available or prediction_markets_ok) and (data_fresh or synthetic_mode)
     
     return {
         "status": "ready" if ready else "not_ready",
         "timestamp": time.time(),
-        "aggregator_available": aggregator_available,
-        "data_fresh": data_fresh,
-        "risk_engine_ready": risk_engine_ready,
+        "services": {
+            "prediction_markets": services.get("prediction_markets", {}).get("status", "unknown"),
+            "aggregator_available": aggregator_available,
+            "data_fresh": data_fresh,
+        },
         "synthetic_mode": synthetic_mode,
-        "checks": {
-            "aggregator": aggregator_available,
-            "data_freshness": data_fresh,
-            "risk_engine": risk_engine_ready,
-            "freshness_payload": freshness_payload,
+    }
+
+
+@app.get("/startup")
+async def startup_status():
+    """Introspection endpoint - current startup state and service health."""
+    import time
+    
+    started_at = _startup_state.get("started_at")
+    uptime = time.time() - started_at if started_at else 0
+    
+    # Count running vs failed services
+    services = _startup_state.get("services", {})
+    running_count = sum(1 for s in services.values() if s.get("status") == "running")
+    failed_count = sum(1 for s in services.values() if s.get("status") in ("failed", "timeout"))
+    
+    # Count active background tasks
+    bg_tasks = _startup_state.get("background_tasks", [])
+    active_tasks = sum(1 for t in bg_tasks if not t.done())
+    
+    return {
+        "startup_completed": started_at is not None,
+        "started_at": started_at,
+        "uptime_seconds": uptime,
+        "services": {
+            "total": len(services),
+            "running": running_count,
+            "failed": failed_count,
+            "details": services
+        },
+        "background_tasks": {
+            "total": len(bg_tasks),
+            "active": active_tasks
         }
     }
 

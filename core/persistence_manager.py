@@ -302,8 +302,10 @@ class PersistenceManager:
                         if elapsed >= self.batch_interval:
                             self._flush_batch()
                             
-            except Exception as exc:
+            except (IOError, OSError, PermissionError) as exc:
                 logger.error(f"Error in flush loop: {exc}")
+            except Exception as exc:
+                logger.exception(f"Unexpected error in flush loop: {exc}")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get persistence statistics."""
@@ -343,8 +345,11 @@ class PersistenceManager:
             shutil.copy2(backup_path, path)
             logger.info(f"Recovered {path} from backup {backup_number}")
             return True
-        except Exception as exc:
+        except (IOError, OSError, shutil.Error) as exc:
             logger.error(f"Failed to recover from backup: {exc}")
+            return False
+        except Exception as exc:
+            logger.exception(f"Unexpected error recovering from backup: {exc}")
             return False
 
 

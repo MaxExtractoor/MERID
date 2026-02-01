@@ -177,7 +177,7 @@ class FIXMarketDataFeed:
             self._running = True
             await self._process_messages()
             
-        except Exception as e:
+        except (ConnectionError, TimeoutError, socket.error) as e:
             logger.error(f"Failed to connect to FIX server: {e}")
             raise
     
@@ -249,7 +249,7 @@ class FIXMarketDataFeed:
                 if time.time() - self._last_heartbeat > self.config.heartbeat_interval * 2:
                     logger.warning("Heartbeat timeout, sending test request")
                     await self._send_test_request()
-            except Exception as e:
+            except (ConnectionError, RuntimeError, ValueError) as e:
                 logger.error(f"Error processing FIX message: {e}")
                 if self._running:
                     await asyncio.sleep(0.1)
@@ -281,7 +281,7 @@ class FIXMarketDataFeed:
             else:
                 logger.debug(f"Received unhandled message type: {message.msg_type}")
         
-        except Exception as e:
+        except (ValueError, KeyError, RuntimeError) as e:
             logger.error(f"Error handling FIX message: {e}")
     
     async def _handle_logon(self, message: FIXMessage) -> None:
@@ -321,7 +321,7 @@ class FIXMarketDataFeed:
             for entry in md_entries:
                 await self._process_md_entry(symbol, entry)
         
-        except Exception as e:
+        except (ValueError, KeyError, RuntimeError) as e:
             logger.error(f"Error handling snapshot refresh: {e}")
     
     async def _handle_incremental_refresh(self, message: FIXMessage) -> None:
@@ -343,7 +343,7 @@ class FIXMarketDataFeed:
                 symbol = entry.get(55, '')
                 await self._process_md_entry(symbol, entry)
         
-        except Exception as e:
+        except (ValueError, KeyError, RuntimeError) as e:
             logger.error(f"Error handling incremental refresh: {e}")
     
     async def _process_md_entry(self, symbol: str, entry: Dict[str, str]) -> None:
@@ -374,7 +374,7 @@ class FIXMarketDataFeed:
             # Publish order book data
             await self._publish_order_book(symbol)
         
-        except Exception as e:
+        except (ValueError, KeyError, RuntimeError) as e:
             logger.error(f"Error processing MD entry: {e}")
     
     async def _publish_order_book(self, symbol: str) -> None:
@@ -423,7 +423,7 @@ class FIXMarketDataFeed:
         for callback in self._callbacks:
             try:
                 callback(market_data)
-            except Exception as e:
+            except (TypeError, ValueError, RuntimeError) as e:
                 logger.error(f"Error in market data callback: {e}")
     
     async def _send_logon(self) -> None:

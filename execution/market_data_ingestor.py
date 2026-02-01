@@ -180,13 +180,13 @@ class MarketDataIngestor:
                             # Send ping to keep connection alive
                             try:
                                 await websocket.ping()
-                            except:
+                            except (ConnectionError, RuntimeError):
                                 break
-                        except Exception as e:
+                        except (ConnectionError, RuntimeError, ValueError) as e:
                             logger.error(f"Error processing WebSocket message: {e}")
                             break
             
-            except Exception as e:
+            except (ConnectionError, RuntimeError) as e:
                 logger.error(f"WebSocket connection error for {source_id}: {e}")
                 if self._running:
                     await asyncio.sleep(5)  # Wait before reconnecting
@@ -208,7 +208,7 @@ class MarketDataIngestor:
                 
                 await asyncio.sleep(poll_interval)
             
-            except Exception as e:
+            except (ConnectionError, RuntimeError, ValueError) as e:
                 logger.error(f"REST polling error for {source_id}: {e}")
                 await asyncio.sleep(5)
     
@@ -258,7 +258,7 @@ class MarketDataIngestor:
                 
                 self._publish_market_data(market_data)
         
-        except Exception as e:
+        except (IOError, OSError, ValueError) as e:
             logger.error(f"File replay error for {source_id}: {e}")
     
     async def _fetch_rest_ticker(self, exchange: str, symbol: str) -> Optional[MarketData]:
@@ -298,7 +298,7 @@ class MarketDataIngestor:
                                 last_size=float(result['v'][1])
                             )
         
-        except Exception as e:
+        except (ConnectionError, TimeoutError, ValueError) as e:
             logger.error(f"Error fetching REST ticker for {symbol}: {e}")
         
         return None
@@ -344,7 +344,7 @@ class MarketDataIngestor:
                         last_size=float(data.get('volume_24h', 0))
                     )
         
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
             logger.error(f"Error parsing WebSocket message: {e}")
         
         return None
@@ -359,7 +359,7 @@ class MarketDataIngestor:
         for callback in self._callbacks:
             try:
                 callback(market_data)
-            except Exception as e:
+            except (TypeError, ValueError, RuntimeError) as e:
                 logger.error(f"Error in market data callback: {e}")
     
     def add_symbol_subscription(self, source_id: str, symbol: str) -> None:
