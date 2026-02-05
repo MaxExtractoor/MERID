@@ -4,6 +4,7 @@ import { API_ENDPOINTS, STATUS_TYPES } from "../config/constants";
 import { formatCurrency, formatPercent, formatDateTime } from "../utils/formatters";
 import MetricCard from "../components/MetricCard";
 import DataTableEnhanced from "../components/DataTableEnhanced";
+import AnalyticsCharts from "../components/AnalyticsCharts";
 import { RiskStatus } from "../types/risk";
 
 interface BacktestConfig {
@@ -340,6 +341,9 @@ export default function Research() {
         </button>
       </div>
 
+      {/* Analytics Charts */}
+      <AnalyticsCharts />
+
       {/* Backtest Form Modal */}
       {showBacktestForm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -371,8 +375,10 @@ export default function Research() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">Initial Capital</label>
+                  <label htmlFor="initial-capital" className="block text-sm font-medium text-slate-400 mb-1">Initial Capital</label>
                   <input
+                    id="initial-capital"
+                    name="initialCapital"
                     type="number"
                     value={backtestConfig.initialCapital}
                     onChange={(e) => setBacktestConfig({ ...backtestConfig, initialCapital: Number(e.target.value) })}
@@ -381,8 +387,10 @@ export default function Research() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">Start Date</label>
+                  <label htmlFor="start-date" className="block text-sm font-medium text-slate-400 mb-1">Start Date</label>
                   <input
+                    id="start-date"
+                    name="startDate"
                     type="date"
                     value={backtestConfig.startDate}
                     onChange={(e) => setBacktestConfig({ ...backtestConfig, startDate: e.target.value })}
@@ -391,8 +399,10 @@ export default function Research() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">End Date</label>
+                  <label htmlFor="end-date" className="block text-sm font-medium text-slate-400 mb-1">End Date</label>
                   <input
+                    id="end-date"
+                    name="endDate"
                     type="date"
                     value={backtestConfig.endDate}
                     onChange={(e) => setBacktestConfig({ ...backtestConfig, endDate: e.target.value })}
@@ -403,8 +413,10 @@ export default function Research() {
 
               <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">Commission (%)</label>
+                  <label htmlFor="commission" className="block text-sm font-medium text-slate-400 mb-1">Commission (%)</label>
                   <input
+                    id="commission"
+                    name="commission"
                     type="number"
                     value={backtestConfig.commission}
                     onChange={(e) => setBacktestConfig({ ...backtestConfig, commission: Number(e.target.value) })}
@@ -416,8 +428,10 @@ export default function Research() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">Slippage (%)</label>
+                  <label htmlFor="slippage" className="block text-sm font-medium text-slate-400 mb-1">Slippage (%)</label>
                   <input
+                    id="slippage"
+                    name="slippage"
                     type="number"
                     value={backtestConfig.slippage}
                     onChange={(e) => setBacktestConfig({ ...backtestConfig, slippage: Number(e.target.value) })}
@@ -434,6 +448,8 @@ export default function Research() {
                     {backtestConfig.symbols.map((symbol, index) => (
                       <div key={index} className="flex items-center gap-2">
                         <input
+                          id={`symbol-${index}`}
+                          name={`symbol-${index}`}
                           type="text"
                           value={symbol}
                           onChange={(e) => {

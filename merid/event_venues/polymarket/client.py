@@ -1,10 +1,17 @@
-"""Polymarket REST client - Implements EventVenueClient interface."""
+"""Polymarket REST client - Implements EventVenueClient interface.
+
+This is a **resilient venue client** implementation.
+Pattern: circuit breaker per venue, retry with backoff on I/O,
+explicit OperationResult returns instead of silent fallbacks.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypeVar
 
 import aiohttp
 
@@ -28,9 +35,26 @@ from merid.event_venues.polymarket.models import (
     Position,
     Trade,
 )
+from merid.resilience import (
+    CircuitBreaker,
+    CircuitOpenError,
+    OperationResult,
+    get_circuit_breaker,
+    get_bulkhead,
+    BulkheadFullError,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.polymarket.client")
+
+T = TypeVar("T")
+
+# Retry configuration for Polymarket
+POLYMARKET_MAX_RETRIES = 3
+POLYMARKET_BACKOFF_BASE = 2.0
+POLYMARKET_RETRY_STATUSES = {429, 500, 502, 503, 504}
+POLYMARKET_CIRCUIT_FAILURE_THRESHOLD = 5
+POLYMARKET_CIRCUIT_RECOVERY_TIMEOUT = 30.0
 
 
 class PolymarketVenueClient(EventVenueClient):
@@ -44,6 +68,21 @@ class PolymarketVenueClient(EventVenueClient):
         self.config = config or PolymarketConfig()
         self._http_client: Optional[aiohttp.ClientSession] = None
         self._clob_client = None
+        
+        # Resilience: circuit breaker for this venue
+        self._circuit_breaker = get_circuit_breaker(
+            "polymarket",
+            failure_threshold=POLYMARKET_CIRCUIT_FAILURE_THRESHOLD,
+            recovery_timeout=POLYMARKET_CIRCUIT_RECOVERY_TIMEOUT,
+        )
+        
+        # Resilience: bulkhead for concurrency isolation
+        self._bulkhead = get_bulkhead(
+            "polymarket",
+            max_concurrent=10,
+            max_queued=50,
+            timeout=30.0,
+        )
         
     @property
     def venue_name(self) -> str:
@@ -76,8 +115,277 @@ class PolymarketVenueClient(EventVenueClient):
         if self._http_client:
             await self._http_client.close()
     
+    def get_circuit_status(self) -> dict:
+        """Get circuit breaker status for this venue."""
+        return self._circuit_breaker.get_stats()
+    
     # ------------------------------------------------------------------------
-    # Market Data
+    # Resilience: Request wrapper with circuit breaker and retry
+    # ------------------------------------------------------------------------
+    
+    async def _request_with_resilience(
+        self,
+        method: str,
+        url: str,
+        operation: str,
+        params: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+    ) -> OperationResult[Dict[str, Any]]:
+        """
+        Execute HTTP request with circuit breaker and retry logic.
+        
+        Returns OperationResult instead of raising exceptions.
+        """
+        start_time = time.time()
+        last_error: Optional[Exception] = None
+        retries = 0
+        
+        for attempt in range(POLYMARKET_MAX_RETRIES + 1):
+            try:
+                async with self._bulkhead:
+                  async with self._circuit_breaker:
+                    if method.upper() == "GET":
+                        async with self._http_client.get(url, params=params) as response:
+                            latency_ms = (time.time() - start_time) * 1000
+                            
+                            if response.status in POLYMARKET_RETRY_STATUSES:
+                                raise aiohttp.ClientResponseError(
+                                    response.request_info,
+                                    response.history,
+                                    status=response.status,
+                                )
+                            
+                            if response.status != 200:
+                                return OperationResult.fail(
+                                    ValueError(f"HTTP {response.status}"),
+                                    latency_ms=latency_ms,
+                                    retries=retries,
+                                    operation=operation,
+                                )
+                            
+                            data = await response.json()
+                            return OperationResult.ok(
+                                data,
+                                latency_ms=latency_ms,
+                                retries=retries,
+                                operation=operation,
+                            )
+                    else:  # POST
+                        async with self._http_client.post(url, json=json_data) as response:
+                            latency_ms = (time.time() - start_time) * 1000
+                            
+                            if response.status in POLYMARKET_RETRY_STATUSES:
+                                raise aiohttp.ClientResponseError(
+                                    response.request_info,
+                                    response.history,
+                                    status=response.status,
+                                )
+                            
+                            if response.status != 200:
+                                return OperationResult.fail(
+                                    ValueError(f"HTTP {response.status}"),
+                                    latency_ms=latency_ms,
+                                    retries=retries,
+                                    operation=operation,
+                                )
+                            
+                            data = await response.json()
+                            return OperationResult.ok(
+                                data,
+                                latency_ms=latency_ms,
+                                retries=retries,
+                                operation=operation,
+                            )
+                            
+            except CircuitOpenError as e:
+                return OperationResult.fail(
+                    e,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    retries=retries,
+                    operation=operation,
+                )
+            except BulkheadFullError as e:
+                return OperationResult.fail(
+                    e,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    retries=retries,
+                    operation=operation,
+                )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_error = e
+                retries = attempt
+                if attempt < POLYMARKET_MAX_RETRIES:
+                    backoff = POLYMARKET_BACKOFF_BASE ** attempt
+                    logger.warning(
+                        f"Polymarket {operation} failed (attempt {attempt + 1}), "
+                        f"retrying in {backoff:.1f}s: {e}"
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                break
+            except Exception as e:
+                return OperationResult.fail(
+                    e,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    retries=retries,
+                    operation=operation,
+                )
+        
+        return OperationResult.fail(
+            last_error or RuntimeError("Unknown error"),
+            latency_ms=(time.time() - start_time) * 1000,
+            retries=retries,
+            operation=operation,
+        )
+    
+    # ------------------------------------------------------------------------
+    # Market Data (with _result suffix for explicit error handling)
+    # ------------------------------------------------------------------------
+    
+    async def list_markets_result(
+        self, filter_params: Optional[MarketFilter] = None
+    ) -> OperationResult[List[EventMarket]]:
+        """List markets with explicit OperationResult return."""
+        filter_params = filter_params or MarketFilter()
+        url = f"{self.config.gamma_api_base}/markets"
+        params = {"limit": filter_params.limit}
+        
+        if filter_params.active_only:
+            params["active"] = "true"
+        if filter_params.category:
+            params["category"] = filter_params.category
+        if filter_params.search:
+            params["search"] = filter_params.search
+        
+        result = await self._request_with_resilience("GET", url, "list_markets", params=params)
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+                operation="list_markets",
+            )
+        
+        # Parse markets
+        data = result.data
+        items = data if isinstance(data, list) else data.get("data", data.get("markets", []))
+        
+        markets = []
+        for item in items:
+            if isinstance(item, str):
+                try:
+                    item = json.loads(item)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if not isinstance(item, dict):
+                continue
+            
+            market = self._parse_market(item)
+            if market:
+                markets.append(self._to_event_market(market))
+        
+        return OperationResult.ok(
+            markets,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+            operation="list_markets",
+        )
+    
+    async def get_market_result(self, market_id: str) -> OperationResult[Optional[EventMarket]]:
+        """Get market with explicit OperationResult return."""
+        url = f"{self.config.gamma_api_base}/markets/{market_id}"
+        
+        result = await self._request_with_resilience("GET", url, "get_market")
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+                operation="get_market",
+            )
+        
+        market = self._parse_market(result.data)
+        return OperationResult.ok(
+            self._to_event_market(market) if market else None,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+            operation="get_market",
+        )
+    
+    async def get_orderbook_result(
+        self, market_id: str, outcome_id: Optional[str] = None
+    ) -> OperationResult[Optional[VenueOrderBook]]:
+        """Get orderbook with explicit OperationResult return."""
+        url = f"{self.config.gamma_api_base}/markets/{market_id}/orderbook"
+        
+        result = await self._request_with_resilience("GET", url, "get_orderbook")
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+                operation="get_orderbook",
+            )
+        
+        return OperationResult.ok(
+            self._to_venue_orderbook(result.data, market_id, outcome_id),
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+            operation="get_orderbook",
+        )
+    
+    async def get_positions_result(self) -> OperationResult[List[VenuePosition]]:
+        """Get positions with explicit OperationResult return."""
+        if not self.config.wallet_address:
+            return OperationResult.fail(
+                ValueError("No wallet address configured"),
+                operation="get_positions",
+            )
+        
+        query = """
+        query GetPositions($address: String!) {
+            user(address: $address) {
+                positions {
+                    id
+                    market { id question }
+                    outcome
+                    size
+                    averagePrice
+                    unrealizedPnl
+                    realizedPnl
+                    createdAt
+                }
+            }
+        }
+        """
+        
+        result = await self._request_with_resilience(
+            "POST",
+            self.config.graphql_url,
+            "get_positions",
+            json_data={"query": query, "variables": {"address": self.config.wallet_address}},
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+                operation="get_positions",
+            )
+        
+        return OperationResult.ok(
+            self._parse_positions(result.data),
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+            operation="get_positions",
+        )
+    
+    # ------------------------------------------------------------------------
+    # Market Data (backward-compatible methods)
     # ------------------------------------------------------------------------
     
     async def list_markets(self, filter_params: Optional[MarketFilter] = None) -> List[EventMarket]:
@@ -289,7 +597,7 @@ class PolymarketVenueClient(EventVenueClient):
     
     def _parse_market(self, data: Dict[str, Any]) -> Optional[Market]:
         """Parse market from API."""
-        from datetime import timezone
+        from datetime import datetime, timezone
         
         try:
             outcomes = []
@@ -364,7 +672,7 @@ class PolymarketVenueClient(EventVenueClient):
     
     def _to_venue_orderbook(self, data: Dict[str, Any], market_id: str, outcome_id: Optional[str]) -> VenueOrderBook:
         """Convert to VenueOrderBook."""
-        from datetime import timezone
+        from datetime import datetime, timezone
         
         bids = [(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get("bids", [])]
         asks = [(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get("asks", [])]
@@ -380,7 +688,7 @@ class PolymarketVenueClient(EventVenueClient):
     
     def _to_placed_order(self, data: Dict[str, Any]) -> PlacedOrder:
         """Convert to PlacedOrder."""
-        from datetime import timezone
+        from datetime import datetime, timezone
         
         return PlacedOrder(
             order_id=data.get("id", ""),
@@ -397,6 +705,7 @@ class PolymarketVenueClient(EventVenueClient):
     
     def _parse_positions(self, data: Dict[str, Any]) -> List[VenuePosition]:
         """Parse positions from GraphQL."""
+        from datetime import datetime
         positions = []
         for pos_data in data.get("data", {}).get("user", {}).get("positions", []):
             positions.append(VenuePosition(
@@ -413,6 +722,7 @@ class PolymarketVenueClient(EventVenueClient):
     
     def _parse_trades(self, data: Dict[str, Any]) -> List[VenueTrade]:
         """Parse trades from Data API."""
+        from datetime import datetime
         trades = []
         for trade_data in data.get("trades", []):
             trades.append(VenueTrade(

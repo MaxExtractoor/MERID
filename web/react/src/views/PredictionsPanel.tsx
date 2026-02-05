@@ -160,33 +160,33 @@ export function PredictionsPanel() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <MetricCard
           label="Total Markets"
-          value={meta.total.toString()}
+          value={(meta?.total || 0).toString()}
           status="ONLINE"
         />
         <MetricCard
           label="Open Markets"
-          value={meta.open.toString()}
-          status={meta.open > 0 ? 'GOOD' : 'WARNING'}
+          value={(meta?.open || 0).toString()}
+          status={(meta?.open || 0) > 0 ? 'GOOD' : 'WARNING'}
         />
         <MetricCard
           label="Total Volume"
-          value={formatCurrency(meta.totalVolume)}
+          value={formatCurrency(meta?.totalVolume || 0)}
           status="ONLINE"
         />
         <MetricCard
           label="Total P&L"
-          value={formatCurrency(meta.totalPnl)}
-          status={meta.totalPnl >= 0 ? 'GOOD' : 'BAD'}
-          delta={meta.totalPnl}
+          value={formatCurrency(meta?.totalPnl || 0)}
+          status={(meta?.totalPnl || 0) >= 0 ? 'GOOD' : 'BAD'}
+          delta={meta?.totalPnl || 0}
         />
       </div>
 
       {/* Top Markets Mini Cards */}
       {topMarkets.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {topMarkets.map((market) => (
+          {topMarkets.map((market, index) => (
             <div
-              key={market.id}
+              key={market.id || `market-${index}`}
               className="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50"
             >
               <div className="flex items-center justify-between mb-2">

@@ -32,7 +32,7 @@ def _adapter_executor_factory(venue: str) -> Optional[TradeExecutor]:
             request = TradeRequest(
                 venue=self._adapter.venue,
                 symbol=symbol,
-                side=TradeSide(side.upper()),
+                side=TradeSide(side.lower()),
                 quantity=amount,
                 order_type=TradeRequest.__dataclass_fields__["order_type"].default,
                 price=price,

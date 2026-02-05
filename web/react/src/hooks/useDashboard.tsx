@@ -1,13 +1,7 @@
 import { useState, useEffect } from 'react';
-import { Activity, AlertCircle, CheckCircle, PauseCircle, TrendingUp, Shield, Server, Cpu } from 'lucide-react';
-
-interface SystemHealth {
-  status: 'healthy' | 'degraded' | 'unhealthy';
-  timestamp: number;
-  environment: string;
-  incident_flag: boolean;
-  services: Record<string, { status: string; last_check: number }>;
-}
+import { Activity, AlertCircle, CheckCircle, TrendingUp, Server, Cpu } from 'lucide-react';
+import { api } from '../services/api';
+import type { SystemHealth } from '../services/api';
 
 interface PnLSummary {
   today_pnl: number;
@@ -66,20 +60,19 @@ export function useSystemHealth() {
   useEffect(() => {
     async function fetchHealth() {
       try {
-        const response = await fetch('/api/system/health');
-        if (response.ok) {
-          const data = await response.json();
-          setHealth(data);
-        }
+        const data = await api.getSystemHealth();
+        setHealth(data);
+        setError(null);
       } catch (e) {
-        setError('Failed to fetch health');
+        setError(e instanceof Error ? e.message : 'Failed to fetch health');
+        console.error('System health fetch error:', e);
       } finally {
         setLoading(false);
       }
     }
 
     fetchHealth();
-    const interval = setInterval(fetchHealth, 10000);
+    const interval = setInterval(fetchHealth, 5000); // Update every 5s for live data
     return () => clearInterval(interval);
   }, []);
 
@@ -93,11 +86,8 @@ export function usePnLSummary() {
   useEffect(() => {
     async function fetchPnL() {
       try {
-        const response = await fetch('/api/risk/pnl-summary');
-        if (response.ok) {
-          const data = await response.json();
-          setPnL(data);
-        }
+        const data = await api.getPnLSummary();
+        setPnL(data as any);
       } catch (e) {
         console.error('Failed to fetch P&L:', e);
       } finally {
@@ -106,7 +96,7 @@ export function usePnLSummary() {
     }
 
     fetchPnL();
-    const interval = setInterval(fetchPnL, 30000);
+    const interval = setInterval(fetchPnL, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -120,11 +110,8 @@ export function useAgentsSummary() {
   useEffect(() => {
     async function fetchAgents() {
       try {
-        const response = await fetch('/api/agents/summary');
-        if (response.ok) {
-          const data = await response.json();
-          setAgents(data);
-        }
+        const data = await api.getAgentSummary();
+        setAgents(data as any);
       } catch (e) {
         console.error('Failed to fetch agents:', e);
       } finally {
@@ -133,7 +120,7 @@ export function useAgentsSummary() {
     }
 
     fetchAgents();
-    const interval = setInterval(fetchAgents, 15000);
+    const interval = setInterval(fetchAgents, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -147,11 +134,8 @@ export function useTradingSummary() {
   useEffect(() => {
     async function fetchTrading() {
       try {
-        const response = await fetch('/api/trading/summary');
-        if (response.ok) {
-          const data = await response.json();
-          setTrading(data);
-        }
+        const data = await api.getTradingSummary();
+        setTrading(data as any);
       } catch (e) {
         console.error('Failed to fetch trading:', e);
       } finally {
@@ -160,7 +144,7 @@ export function useTradingSummary() {
     }
 
     fetchTrading();
-    const interval = setInterval(fetchTrading, 30000);
+    const interval = setInterval(fetchTrading, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -174,11 +158,8 @@ export function usePrimeStatus() {
   useEffect(() => {
     async function fetchPrime() {
       try {
-        const response = await fetch('/api/prime/status');
-        if (response.ok) {
-          const data = await response.json();
-          setPrime(data);
-        }
+        const data = await api.getPrimeStatus();
+        setPrime(data as any);
       } catch (e) {
         console.error('Failed to fetch prime status:', e);
       } finally {
@@ -187,7 +168,7 @@ export function usePrimeStatus() {
     }
 
     fetchPrime();
-    const interval = setInterval(fetchPrime, 10000);
+    const interval = setInterval(fetchPrime, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -427,6 +408,18 @@ export function AgentStatusCard() {
     );
   }
 
+  if (!agents || !agents.agents || agents.agents.length === 0) {
+    return (
+      <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800">
+        <div className="flex items-center gap-2 mb-3">
+          <Cpu className="w-5 h-5 text-cyan-400" />
+          <h3 className="text-sm font-medium text-slate-400">Agent Status</h3>
+        </div>
+        <div className="text-sm text-slate-500">No agents available</div>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800">
       <div className="flex items-center gap-2 mb-3">
@@ -450,16 +443,16 @@ export function AgentStatusCard() {
       </div>
       
       <div className="space-y-2">
-        {agents?.agents?.slice(0, 3).map((agent) => (
+        {agents.agents.slice(0, 3).map((agent) => (
           <div key={agent.id} className="flex items-center justify-between py-1.5 border-b border-slate-800/50 last:border-0">
             <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${agent.status === 'healthy' ? 'bg-emerald-400' : agent.status === 'paused' ? 'bg-amber-400' : 'bg-rose-400'}`}></div>
+              <div className={`w-2 h-2 rounded-full ${agent.status === 'active' ? 'bg-emerald-400' : agent.status === 'paused' ? 'bg-amber-400' : 'bg-rose-400'}`}></div>
               <span className="text-sm">{agent.name}</span>
             </div>
             <div className="flex items-center gap-3 text-xs">
-              <span className="text-slate-500">{agent.positions_count} pos</span>
-              <span className={agent.today_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                {agent.today_pnl >= 0 ? '+' : ''}${agent.today_pnl.toFixed(0)}
+              <span className="text-slate-500">{(agent as any).tasks_completed || 0} tasks</span>
+              <span className="text-emerald-400">
+                {(agent as any).uptime ? `${(agent as any).uptime.toFixed(1)}%` : 'N/A'}
               </span>
             </div>
           </div>
@@ -469,76 +462,5 @@ export function AgentStatusCard() {
   );
 }
 
-// Risk Protection Card (Kill Switch)
-export function RiskProtectionCard() {
-  const [protections, setProtections] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    async function fetchProtections() {
-      try {
-        const response = await fetch('/api/risk/protections');
-        if (response.ok) {
-          const data = await response.json();
-          setProtections(data);
-        }
-      } catch (e) {
-        console.error('Failed to fetch protections:', e);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchProtections();
-    const interval = setInterval(fetchProtections, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800 animate-pulse">
-        <div className="h-4 bg-slate-700 rounded mb-2"></div>
-        <div className="h-8 bg-slate-700 rounded"></div>
-      </div>
-    );
-  }
-
-  const isLocked = protections?.locked_down;
-  const isTripped = protections?.breaker_tripped;
-
-  return (
-    <div className={`bg-slate-900/70 rounded-xl p-4 border ${isLocked ? 'border-rose-500' : isTripped ? 'border-amber-500' : 'border-slate-800'}`}>
-      <div className="flex items-center gap-2 mb-3">
-        <Shield className={`w-5 h-5 ${isLocked ? 'text-rose-400' : 'text-emerald-400'}`} />
-        <h3 className="text-sm font-medium text-slate-400">Risk Protection</h3>
-      </div>
-      
-      {isLocked ? (
-        <div className="text-center py-2">
-          <div className="text-rose-400 font-bold text-lg">🔒 LOCKED DOWN</div>
-          <div className="text-xs text-rose-400/70 mt-1">{protections?.reason}</div>
-        </div>
-      ) : isTripped ? (
-        <div className="text-center py-2">
-          <div className="text-amber-400 font-bold text-lg">⚠️ BREAKER TRIPPED</div>
-          <div className="text-xs text-amber-400/70 mt-1">Auto-trading paused</div>
-        </div>
-      ) : (
-        <div className="text-center py-2">
-          <div className="text-emerald-400 font-semibold">✓ All Protections Active</div>
-        </div>
-      )}
-      
-      <button 
-        className={`w-full mt-3 py-2 rounded-lg font-semibold transition-all ${
-          isLocked 
-            ? 'bg-emerald-600 hover:bg-emerald-700 text-white' 
-            : 'bg-rose-600 hover:bg-rose-700 text-white'
-        }`}
-        onClick={() => {/* TODO: Implement kill switch toggle */}}
-      >
-        {isLocked ? 'UNLOCK SYSTEM' : 'EMERGENCY LOCKDOWN'}
-      </button>
-    </div>
-  );
-}
+// Risk Protection Card - uses real risk protections API
+export { RiskProtectionsCard as RiskProtectionCard } from '../components/RiskProtectionsPanel';

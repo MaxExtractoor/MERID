@@ -57,7 +57,7 @@ class RegimeClassifier:
         
         logger.info("RegimeClassifier initialized with Reality Enforcement integration")
     
-    def classify_regime(
+    async def classify_regime(
         self,
         price_data: Dict,
         volume_data: Dict,
@@ -199,8 +199,8 @@ class RegimeClassifier:
         # Update Reality Auditor with regime entropy
         self.auditor.update_regime_entropy(entropy)
         
-        # Register assertion with Reality Registry
-        self._register_regime_assertion(classification)
+        # Register assertion with Reality Registry (async to prevent blocking)
+        await self._register_regime_assertion(classification)
         
         # Store classification
         self.last_classification = classification
@@ -215,7 +215,7 @@ class RegimeClassifier:
         
         return classification
     
-    def _register_regime_assertion(self, classification: RegimeClassification):
+    async def _register_regime_assertion(self, classification: RegimeClassification):
         """Register regime classification as assertion in Reality Registry."""
         try:
             # Calculate provenance score based on indicator agreement
@@ -252,6 +252,10 @@ class RegimeClassifier:
                 validity_window=validity_window,
                 sources=sources,
             )
+            
+            # Yield to event loop to prevent blocking
+            import asyncio
+            await asyncio.sleep(0)
             
             logger.debug(f"Regime assertion registered: {assertion_id}")
             

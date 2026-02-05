@@ -144,7 +144,7 @@ class RealityAuditor:
         
         if context.severity == BlindnessSeverity.CRITICAL:
             logger.error(f"CRITICAL BLINDNESS INCIDENT", extra=log_data)
-        elif context.severity == BlindnessSeverity.CONCERNING:
+        elif context.severity == BlindnessSeverity.HIGH:
             logger.warning(f"BLINDNESS INCIDENT", extra=log_data)
         else:
             logger.info(f"Blindness mode active", extra=log_data)

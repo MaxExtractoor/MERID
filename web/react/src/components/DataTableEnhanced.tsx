@@ -161,13 +161,16 @@ export default function DataTableEnhanced<T>({
             </tr>
           </thead>
           <tbody>
-            {paginatedData.map((row, index) => (
-              <tr
-                key={index}
-                className={`border-t border-slate-800/60 hover:bg-slate-800/60 ${
-                  selectedRows.has(index) ? "bg-slate-700/40" : ""
-                }`}
-              >
+            {paginatedData.map((row, index) => {
+              // Try to use a unique identifier from the row if available
+              const rowKey = (row as any).id || (row as any).symbol || `row-${index}`;
+              return (
+                <tr
+                  key={rowKey}
+                  className={`border-t border-slate-800/60 hover:bg-slate-800/60 ${
+                    selectedRows.has(index) ? "bg-slate-700/40" : ""
+                  }`}
+                >
                 {showSelection && (
                   <td className="px-3 py-2">
                     <input
@@ -185,7 +188,8 @@ export default function DataTableEnhanced<T>({
                   </td>
                 ))}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

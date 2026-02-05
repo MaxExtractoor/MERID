@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Search, Filter, ArrowUpDown, RefreshCw } from 'lucide-react';
+import { Search, RefreshCw } from 'lucide-react';
 
 interface Order {
   id: string;
@@ -68,6 +68,8 @@ export default function Orders() {
         <div className="relative">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
+            id="order-search"
+            name="orderSearch"
             type="text"
             placeholder="Search symbol..."
             value={searchTerm}

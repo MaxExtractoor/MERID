@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 from dataclasses import dataclass
 from functools import wraps
 import tenacity
-from circuit_breaker import CircuitBreaker, CircuitBreakerError
+from pybreaker import CircuitBreaker, CircuitBreakerError
 
 logger = logging.getLogger(__name__)
 
@@ -42,43 +42,45 @@ class ResilientAPIClient:
     def __init__(self, config: Optional[ResilienceConfig] = None):
         self.config = config or ResilienceConfig()
         self.circuit_breaker = CircuitBreaker(
-            failure_threshold=self.config.circuit_breaker_threshold,
-            recovery_timeout=self.config.circuit_breaker_timeout,
-            expected_exception=Exception
+            fail_max=self.config.circuit_breaker_threshold,
+            reset_timeout=self.config.circuit_breaker_timeout,
+            exclude=[KeyboardInterrupt, SystemExit]
         )
         
-    @tenacity.retry(
-        stop=tenacity.stop_after_attempt(3),
-        wait=tenacity.wait_exponential(
-            multiplier=self.config.retry_multiplier,
-            min=self.config.retry_delay,
-            max=self.config.retry_max_delay
-        ),
-        retry=tenacity.retry_if_exception_type((ConnectionError, TimeoutError)),
-        before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
-        after=tenacity.after_log(logger, logging.INFO)
-    )
-    @circuit_breaker
     async def call_api(self, func: Callable[..., T], *args, **kwargs) -> T:
         """
         Execute API call with retries and circuit breaker protection.
         """
-        try:
-            result = await asyncio.wait_for(
-                func(*args, **kwargs),
-                timeout=self.config.timeout
-            )
-            logger.info(f"API call successful: {func.__name__}")
-            return result
-        except asyncio.TimeoutError:
-            logger.error(f"API call timeout: {func.__name__}")
-            raise
-        except CircuitBreakerError:
-            logger.error(f"Circuit breaker open for: {func.__name__}")
-            raise
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"API call failed: {func.__name__} - {str(e)}")
-            raise
+        @tenacity.retry(
+            stop=tenacity.stop_after_attempt(self.config.max_retries),
+            wait=tenacity.wait_exponential(
+                multiplier=self.config.retry_multiplier,
+                min=self.config.retry_delay,
+                max=self.config.retry_max_delay
+            ),
+            retry=tenacity.retry_if_exception_type((ConnectionError, TimeoutError)),
+            before_sleep=tenacity.before_sleep_log(logger, logging.WARNING),
+            after=tenacity.after_log(logger, logging.INFO)
+        )
+        async def _retry_wrapper():
+            try:
+                result = await asyncio.wait_for(
+                    func(*args, **kwargs),
+                    timeout=self.config.timeout
+                )
+                logger.info(f"API call successful: {func.__name__}")
+                return result
+            except asyncio.TimeoutError:
+                logger.error(f"API call timeout: {func.__name__}")
+                raise
+            except CircuitBreakerError:
+                logger.error(f"Circuit breaker open for: {func.__name__}")
+                raise
+            except Exception as e:
+                logger.error(f"API call failed: {func.__name__}: {e}")
+                raise
+        
+        return await _retry_wrapper()
 
 
 class FallbackManager:

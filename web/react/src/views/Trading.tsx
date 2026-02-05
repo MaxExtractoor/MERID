@@ -7,6 +7,8 @@ import { validateOrderTicket } from "../utils/validators";
 import DataTableEnhanced from "../components/DataTableEnhanced";
 import StatusIndicator from "../components/StatusIndicator";
 import PriceTicker from "../components/PriceTicker";
+import VenueSelector from "../components/VenueSelector";
+import ArbitragePanel from "../components/ArbitragePanel";
 import { OpenOrdersPanel } from "./OpenOrdersPanel";
 import { LiveRiskStrip } from "./LiveRiskStrip";
 
@@ -304,9 +306,18 @@ export default function Trading() {
       {/* Live Risk Strip */}
       <LiveRiskStrip />
 
+      {/* Arbitrage Opportunities */}
+      <ArbitragePanel />
+
       {/* Order Ticket */}
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Order Ticket</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-white">Order Ticket</h2>
+          <VenueSelector 
+            selected={orderForm.venue}
+            onChange={(venueId) => setOrderForm({ ...orderForm, venue: venueId as typeof DEFAULTS.VENUES[number] })}
+          />
+        </div>
         
         {orderErrors.length > 0 && (
           <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
@@ -360,8 +371,10 @@ export default function Trading() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-400 mb-1">Size</label>
+            <label htmlFor="order-size" className="block text-sm font-medium text-slate-400 mb-1">Size</label>
             <input
+              id="order-size"
+              name="orderSize"
               type="number"
               title="Enter order size"
               placeholder="Order size"
@@ -375,8 +388,10 @@ export default function Trading() {
 
           {orderForm.orderType !== "MARKET" && (
             <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">Price</label>
+              <label htmlFor="order-price" className="block text-sm font-medium text-slate-400 mb-1">Price</label>
               <input
+                id="order-price"
+                name="orderPrice"
                 type="number"
                 title="Enter limit price"
                 value={orderForm.price}

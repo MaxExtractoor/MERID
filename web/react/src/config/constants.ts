@@ -35,7 +35,7 @@ export const API_ENDPOINTS = {
   AGENT_CHARTERS: "/api/v1/charters",
   
   // Prediction Markets
-  PREDICTION_MARKETS: "/api/v1/prediction-markets/markets",
+  PREDICTION_MARKETS: "/api/v1/us-compliant/prediction-markets",
   PREDICTION_POSITIONS: "/api/v1/prediction-markets/positions",
   
   // Risk & Health

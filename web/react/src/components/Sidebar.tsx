@@ -9,10 +9,17 @@ import {
   BarChart3,
   Database,
   Terminal,
-  HeartPulse
+  HeartPulse,
+  Wallet,
+  Coins,
+  Twitter,
+  Trophy,
+  Cpu,
+  Building2,
+  Package
 } from 'lucide-react';
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins";
 
 interface SidebarProps {
   current: View;
@@ -22,14 +29,21 @@ interface SidebarProps {
 
 const navigation = [
   { name: 'Overview', href: 'overview', icon: LayoutDashboard, color: 'text-blue-400' },
+  { name: 'Wallet', href: 'wallet', icon: Wallet, color: 'text-yellow-400' },
+  { name: 'Treasury', href: 'treasury', icon: Coins, color: 'text-amber-400' },
   { name: 'Live Trading', href: 'trading', icon: Activity, color: 'text-green-400' },
   { name: 'Research', href: 'research', icon: Search, color: 'text-purple-400' },
   { name: 'Prediction Markets', href: 'predictions', icon: TrendingUp, color: 'text-orange-400' },
+  { name: 'Betting Markets', href: 'betting', icon: Trophy, color: 'text-yellow-500' },
+  { name: 'Social Feed', href: 'social', icon: Twitter, color: 'text-sky-400' },
 ];
 
 const management = [
   { name: 'Risk & Health', href: 'risk', icon: Shield, color: 'text-red-400' },
   { name: 'Bots/Agents', href: 'agents', icon: Bot, color: 'text-cyan-400' },
+  { name: 'Mining', href: 'mining', icon: Cpu, color: 'text-purple-400' },
+  { name: 'Institutional', href: 'institutional', icon: Building2, color: 'text-blue-500' },
+  { name: 'Plugins', href: 'plugins', icon: Package, color: 'text-indigo-500' },
   { name: 'API Dashboard', href: 'api', icon: Database, color: 'text-indigo-400' },
   { name: 'Analytics', href: 'analytics', icon: BarChart3, color: 'text-pink-400' },
   { name: 'Settings', href: 'settings', icon: Settings, color: 'text-gray-400' },

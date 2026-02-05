@@ -1,0 +1,70 @@
+[run]
+omit =
+    IMPLEMENTATION-OPTION-B-SERVICE.py
+    agents/prediction_arbitrage_analyst.py
+    analytics/market_regimes.py
+    analytics/time_series.py
+    core/brier_metrics_db_broken.py
+    core/merid_governance_cadence.py
+    monitoring/real_prediction_markets.py
+    robustness_validation_test.py
+    # Deprecated/orphaned lib modules - not integrated into main system
+    lib/merid/*.py
+    lib/agents/*.py
+    lib/streams/*.py
+    # Additional experimental/temporary files
+    phase0_*.py
+    drift_*.py
+    training/*.py
+    social_sentiment/*.py
+    memecoin_safety/*.py
+    treasury/*.py
+    wallet/*.py
+    weekly_review*.py
+    validate_*.py
+    verify_*.py
+    fix_*.py
+    check_*.py
+    test_*.py
+    run_*.py
+    start_*.py
+    *_test.py
+    *_tests.py
+    # Experimental core modules - swarm/workflow frameworks not in production
+    core/swarm_*.py
+    core/streaming_*.py
+    core/workflows_*.py
+    core/structured_prompts.py
+    core/telegram_bot.py
+    core/tracing.py
+    core/training_pipeline.py
+    core/trust_transparency.py
+    core/universal_router.py
+    core/us_compliance_config.py
+    core/venue_adapter.py
+
+# MERID Tier 2 enforcement - measure these packages
+source = trading/, core/, merid/
+branch = true
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    class .*AdapterExecutor.*:.*\n.*# pragma: no cover - shim
+    if TYPE_CHECKING:
+
+precision = 2
+show_missing = True
+# Coverage floor - prevents silent regression. Raise as coverage improves.
+# Any PR that lowers coverage must either add tests or justify a new exception block.
+# Updated 2026-02-04: Raised from 25% to 40% after coverage improvements
+fail_under = 40
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

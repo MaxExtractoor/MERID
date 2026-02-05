@@ -34,6 +34,28 @@ app.include_router(dev_chat_router)
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint for resilience monitoring."""
+    from fastapi.responses import PlainTextResponse
+    try:
+        from merid.resilience.metrics import get_metrics_text
+        return PlainTextResponse(get_metrics_text(), media_type="text/plain")
+    except ImportError:
+        return PlainTextResponse("# Metrics not available\n", media_type="text/plain")
+
+
+@app.get("/api/health/metrics")
+async def metrics_json():
+    """JSON metrics endpoint for internal monitoring."""
+    try:
+        from merid.resilience.metrics import get_metrics_json
+        return get_metrics_json()
+    except ImportError:
+        return {"error": "Metrics not available"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

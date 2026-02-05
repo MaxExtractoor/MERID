@@ -20,6 +20,7 @@ Implements:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -544,62 +545,172 @@ class PolymarketConnector(PredictionMarketConnector):
 
 
 class KalshiConnector(PredictionMarketConnector):
-    """Connector for Kalshi (CFTC-regulated)."""
+    """Connector for Kalshi (CFTC-regulated) using httpx for API calls."""
     
     def __init__(self):
         super().__init__(PredictionPlatform.KALSHI)
-        self._client = None
-        self._client_initialized = False
+        self._api_key_id = os.getenv("KALSHI_API_KEY_ID")
+        self._api_host = os.getenv("KALSHI_API_HOST", "https://api.elections.kalshi.com/trade-api/v2")
+        self._http_client = None
     
-    def _get_client(self):
-        """Get or create Kalshi client with robust error handling."""
-        if not self._client_initialized:
-            try:
-                from trading.integrations.kalshi_client import get_kalshi_client
-                self._client = get_kalshi_client()
-                self._client_initialized = True
-                logger.info("KalshiConnector: Successfully initialized client")
-            except Exception as e:
-                logger.warning(f"KalshiConnector: Failed to initialize client: {e}")
-                self._client = None
-                self._client_initialized = True
-        return self._client
+    def _get_http_client(self):
+        """Get or create httpx client for Kalshi API."""
+        if self._http_client is None:
+            import httpx
+            self._http_client = httpx.AsyncClient(
+                base_url=self._api_host,
+                timeout=30.0,
+                headers={"Content-Type": "application/json"}
+            )
+        return self._http_client
     
     async def fetch_markets(self, category: Optional[MarketCategory] = None) -> List[PredictionMarket]:
-        """Fetch markets from Kalshi API with robust error handling."""
+        """Fetch markets from Kalshi API using httpx."""
         try:
-            client = self._get_client()
-            if not client:
-                logger.info("KalshiConnector: No client available, using mock data")
+            if not self._api_key_id:
+                logger.warning("KalshiConnector: No API key configured, using mock data")
                 return self._get_mock_markets()
             
-            # Try to fetch real markets from Kalshi API
+            client = self._get_http_client()
+            
+            # Fetch markets from Kalshi public API (no auth required for market list)
             try:
-                # Fetch real markets using the Kalshi client
-                markets = client.get_markets()
-                logger.info(f"KalshiConnector: Successfully fetched {len(markets)} real markets")
+                response = await client.get("/markets", params={"limit": 100, "status": "open"})
                 
-                prediction_markets = []
-                for market in markets:
-                    # Convert Kalshi market to our PredictionMarket format
-                    prediction_market = self._convert_kalshi_market(market)
-                    if prediction_market:
-                        self._markets[prediction_market.market_id] = prediction_market
-                        self.record_price(prediction_market.market_id, prediction_market.yes_price)
-                        prediction_markets.append(prediction_market)
-                
-                self._last_fetch = time.time()
-                logger.info(f"KalshiConnector: Converted {len(prediction_markets)} markets to our format")
-                return prediction_markets
-                
+                if response.status_code == 200:
+                    data = response.json()
+                    markets_data = data.get("markets", [])
+                    logger.info(f"KalshiConnector: Successfully fetched {len(markets_data)} real markets")
+                    
+                    prediction_markets = []
+                    for market in markets_data:
+                        prediction_market = self._convert_kalshi_market_dict(market)
+                        if prediction_market:
+                            self._markets[prediction_market.market_id] = prediction_market
+                            self.record_price(prediction_market.market_id, prediction_market.yes_price)
+                            prediction_markets.append(prediction_market)
+                    
+                    self._last_fetch = time.time()
+                    if prediction_markets:
+                        logger.info(f"KalshiConnector: Converted {len(prediction_markets)} markets")
+                        return prediction_markets
+                    else:
+                        logger.info("KalshiConnector: No markets converted, using mock data")
+                        return self._get_mock_markets()
+                else:
+                    logger.warning(f"KalshiConnector: API returned {response.status_code}: {response.text[:200]}")
+                    return self._get_mock_markets()
+                    
             except Exception as api_error:
                 logger.warning(f"KalshiConnector: API call failed: {api_error}")
-                logger.info("KalshiConnector: Falling back to mock data")
                 return self._get_mock_markets()
                 
         except Exception as e:
             logger.error(f"Kalshi fetch error: {e}")
             return self._get_mock_markets()
+    
+    def _convert_kalshi_market_dict(self, market: dict) -> Optional[PredictionMarket]:
+        """Convert Kalshi market dict to our PredictionMarket format."""
+        try:
+            from datetime import datetime
+            
+            # Log first market to see actual API response structure
+            if not hasattr(self, '_logged_sample'):
+                logger.info(f"Sample Kalshi market keys: {list(market.keys())}")
+                logger.info(f"Sample market data: {market}")
+                self._logged_sample = True
+            
+            market_id = market.get('ticker', f"kalshi_{market.get('id', 'unknown')}")
+            question = market.get('title', market.get('subtitle', 'Kalshi Market'))
+            
+            # Determine category
+            question_lower = question.lower()
+            if any(word in question_lower for word in ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto']):
+                category = MarketCategory.CRYPTO
+            elif any(word in question_lower for word in ['election', 'president', 'politics', 'congress']):
+                category = MarketCategory.POLITICS
+            elif any(word in question_lower for word in ['fed', 'inflation', 'economy', 'gdp', 'rate']):
+                category = MarketCategory.ECONOMICS
+            else:
+                category = MarketCategory.OTHER
+            
+            # Extract prices (Kalshi API v2 field mappings)
+            # Kalshi returns prices in cents (0-100), convert to probability (0-1)
+            yes_price = 0.0
+            
+            # Try Kalshi API v2 field names in order of preference
+            price_fields = [
+                'yes_ask', 'yes_bid', 'last_price', 'yes_price',
+                'floor_strike', 'cap_strike',  # For ranged markets
+            ]
+            
+            for field in price_fields:
+                val = market.get(field)
+                if val is not None and val != 0:
+                    yes_price = float(val)
+                    break
+            
+            # Check nested 'yes' and 'no' objects (common in API responses)
+            if yes_price == 0 and 'yes' in market:
+                yes_data = market['yes']
+                if isinstance(yes_data, dict):
+                    yes_price = float(yes_data.get('price', yes_data.get('last_price', 0)))
+            
+            # Convert from cents to decimal if needed
+            if yes_price > 1:
+                yes_price = yes_price / 100.0
+            
+            # Default to 50% if no price available
+            if yes_price == 0:
+                yes_price = 0.5
+            
+            # Clamp to valid probability range
+            yes_price = max(0.01, min(0.99, yes_price))
+            no_price = 1.0 - yes_price
+            
+            # Try multiple field names for volume (Kalshi API v2)
+            volume_24h = 0.0
+            volume_fields = [
+                'volume_24h', 'volume', 'open_interest', 
+                'dollar_volume', 'notional_value', 'liquidity'
+            ]
+            
+            for field in volume_fields:
+                val = market.get(field)
+                if val is not None and val != 0:
+                    volume_24h = float(val)
+                    break
+            
+            # Get resolution date
+            resolution_date = None
+            if market.get('close_time'):
+                try:
+                    resolution_date = datetime.fromisoformat(market['close_time'].replace('Z', '+00:00'))
+                except:
+                    pass
+            
+            # Convert resolution_date to Unix timestamp if it's a datetime
+            resolution_timestamp = None
+            if resolution_date:
+                resolution_timestamp = resolution_date.timestamp() if hasattr(resolution_date, 'timestamp') else float(resolution_date)
+            
+            return PredictionMarket(
+                market_id=market_id,
+                platform=PredictionPlatform.KALSHI,
+                question=question,
+                category=category,
+                yes_price=yes_price,
+                no_price=no_price,
+                volume_24h=float(volume_24h),
+                total_volume=float(volume_24h) * 10,  # Estimate total from 24h
+                liquidity=float(volume_24h) * 0.5,
+                resolution_date=resolution_timestamp,
+                metadata={"url": f"https://kalshi.com/markets/{market_id}"}
+            )
+            
+        except Exception as e:
+            logger.warning(f"Failed to convert Kalshi market: {e}")
+            return None
     
     def _convert_kalshi_market(self, kalshi_market) -> Optional[PredictionMarket]:
         """Convert Kalshi market format to our PredictionMarket format."""
@@ -861,8 +972,11 @@ class PredictionMarketAggregator:
         while self._running:
             try:
                 await self._fetch_all_markets()
+                await asyncio.sleep(0)  # Yield to event loop
                 self._detect_odds_drift()
+                await asyncio.sleep(0)  # Yield to event loop
                 self._find_arbitrage_opportunities()
+                await asyncio.sleep(0)  # Yield to event loop
                 self._calculate_decay_metrics()
                 await asyncio.sleep(60)  # Update every minute
             except asyncio.CancelledError:

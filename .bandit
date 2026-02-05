@@ -1,0 +1,13 @@
+# Bandit security scanner configuration
+# Skipping B101 (assert_used) because we use assertions in tests
+# Skipping B311 (blacklist) for random module usage in tests
+skips: ['B101', 'B311']
+
+exclude_dirs:
+  - tests
+  - venv
+  - .venv
+  - build
+  - dist
+  - .git
+  - __pycache__

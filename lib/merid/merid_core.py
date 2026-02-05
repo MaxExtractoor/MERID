@@ -1,4 +1,6 @@
-"""Compatibility shim to expose local core modules under a stable import name.
+"""DEPRECATED / UNUSED - Not integrated into main system
+
+Compatibility shim to expose local core modules under a stable import name.
 
 Ensures tests and local scripts use the repo-local `core` implementations even when
 an unrelated top-level `core` package exists in the repo root.

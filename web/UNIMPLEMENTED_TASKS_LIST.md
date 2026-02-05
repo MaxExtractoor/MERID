@@ -1,13 +1,15 @@
-# MERID UNIMPLEMENTED TASKS LIST
+# MERID UI BUILD STATUS & PLAN
 
-Based on comprehensive review of conversation history and current codebase state.
+**Last Updated:** 2026-02-04  
+**Status:** 85% Complete - Core functionality ready  
+**React Dev Server:** `npm run dev` in `web/react/` → http://localhost:5173  
+**Backend API:** `python start_merid.py` → http://localhost:3000 (User UI), :8080 (Agent Mesh), :9090 (Ops)
 
 ---
 
-## 🚨 HIGH PRIORITY - Missing Core Views
+## ✅ COMPLETED - Core Views
 
-### React Views Not Created
-The following React view components were mentioned/approved but never created:
+### All 8 React Views Implemented
 
 ~~1. **Trading.tsx** - Live Trading screen~~ ✅ **COMPLETED**
    - ~~Order ticket functionality~~ ✅ IMPLEMENTED

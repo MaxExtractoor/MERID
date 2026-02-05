@@ -99,7 +99,22 @@ class Settings(BaseSettings):
     KALSHI_PRIVATE_KEY_PEM: Optional[str] = Field(default=None, description="Kalshi private key PEM")
     
     # =============================================================================
-    # LIVE-ONLY MODE SETTINGS
+    # TRADING MODE SETTINGS
+    # =============================================================================
+    # Trading mode: "paper" (simulated), "live" (real money)
+    MERID_TRADING_MODE: str = Field(default="paper", description="Trading mode: paper or live")
+    
+    # Safety interlocks for live trading
+    MERID_MAX_ORDER_SIZE_USD: float = Field(default=100.0, description="Maximum single order size in USD")
+    MERID_MAX_DAILY_LOSS_USD: float = Field(default=500.0, description="Maximum daily loss before halt")
+    MERID_MAX_POSITION_SIZE_USD: float = Field(default=1000.0, description="Maximum position size per market")
+    MERID_REQUIRE_CONFIRMATION: bool = Field(default=True, description="Require confirmation for live orders")
+    
+    # Live mode unlock (must be explicitly set to enable live trading)
+    MERID_LIVE_TRADING_UNLOCKED: bool = Field(default=False, description="Explicit unlock for live trading")
+    
+    # =============================================================================
+    # MOCK/SIMULATION SETTINGS
     # =============================================================================
     MERID_USE_MOCK_ARB_DATA: bool = Field(default=False, description="Use mock arbitrage data")
     MERID_USE_DEMO_TRADES: bool = Field(default=False, description="Use demo trades")
@@ -177,6 +192,19 @@ class Settings(BaseSettings):
         return self.MERID_ENV.lower() in ("testing", "test")
     
     @property
+    def is_paper_trading(self) -> bool:
+        """Check if running in paper trading mode."""
+        return self.MERID_TRADING_MODE.lower() == "paper"
+    
+    @property
+    def is_live_trading(self) -> bool:
+        """Check if running in live trading mode (requires explicit unlock)."""
+        return (
+            self.MERID_TRADING_MODE.lower() == "live" and
+            self.MERID_LIVE_TRADING_UNLOCKED
+        )
+    
+    @property
     def is_live_only_mode(self) -> bool:
         """Check if running in live-only mode."""
         return (
@@ -232,6 +260,94 @@ class Settings(BaseSettings):
                 missing.append(var)
         
         return missing
+    
+    def validate_trading_mode(self) -> list[str]:
+        """Validate trading mode configuration and safety interlocks."""
+        issues = []
+        
+        # Validate trading mode value
+        valid_modes = ("paper", "live")
+        if self.MERID_TRADING_MODE.lower() not in valid_modes:
+            issues.append(f"MERID_TRADING_MODE must be one of {valid_modes}, got: {self.MERID_TRADING_MODE}")
+        
+        # Live trading requires explicit unlock
+        if self.MERID_TRADING_MODE.lower() == "live":
+            if not self.MERID_LIVE_TRADING_UNLOCKED:
+                issues.append("Live trading requires MERID_LIVE_TRADING_UNLOCKED=true")
+            
+            # Validate safety interlocks for live trading
+            if self.MERID_MAX_ORDER_SIZE_USD <= 0:
+                issues.append("MERID_MAX_ORDER_SIZE_USD must be > 0 for live trading")
+            if self.MERID_MAX_DAILY_LOSS_USD <= 0:
+                issues.append("MERID_MAX_DAILY_LOSS_USD must be > 0 for live trading")
+            if self.MERID_MAX_POSITION_SIZE_USD <= 0:
+                issues.append("MERID_MAX_POSITION_SIZE_USD must be > 0 for live trading")
+        
+        return issues
+    
+    def validate_venue_credentials(self, venue: str) -> list[str]:
+        """Validate credentials for a specific venue."""
+        issues = []
+        
+        if venue.lower() == "kalshi":
+            if not self.KALSHI_API_KEY_ID:
+                issues.append("KALSHI_API_KEY_ID is required for Kalshi")
+            if not self.KALSHI_PRIVATE_KEY_PATH and not self.KALSHI_PRIVATE_KEY_PEM:
+                issues.append("KALSHI_PRIVATE_KEY_PATH or KALSHI_PRIVATE_KEY_PEM is required")
+        
+        elif venue.lower() == "polymarket":
+            if not self.POLYMARKET_API_KEY:
+                issues.append("POLYMARKET_API_KEY is required for Polymarket")
+            if not self.POLYMARKET_WALLET_ADDRESS:
+                issues.append("POLYMARKET_WALLET_ADDRESS is required for Polymarket")
+        
+        elif venue.lower() == "alpaca":
+            if not self.ALPACA_API_KEY:
+                issues.append("ALPACA_API_KEY is required for Alpaca")
+            if not self.ALPACA_API_SECRET:
+                issues.append("ALPACA_API_SECRET is required for Alpaca")
+        
+        return issues
+    
+    def validate_for_go_live(self, venues: list[str] = None) -> dict:
+        """
+        Comprehensive validation for going live.
+        
+        Returns dict with:
+            - ready: bool - True if all checks pass
+            - issues: list[str] - List of issues found
+            - warnings: list[str] - Non-blocking warnings
+        """
+        venues = venues or ["kalshi", "polymarket"]
+        issues = []
+        warnings = []
+        
+        # Check trading mode
+        issues.extend(self.validate_trading_mode())
+        
+        # Check venue credentials
+        for venue in venues:
+            issues.extend(self.validate_venue_credentials(venue))
+        
+        # Check production requirements
+        if self.is_production:
+            issues.extend(self.validate_required_for_production())
+        
+        # Warnings for recommended settings
+        if self.MERID_MAX_ORDER_SIZE_USD > 1000:
+            warnings.append(f"MERID_MAX_ORDER_SIZE_USD is high ({self.MERID_MAX_ORDER_SIZE_USD})")
+        if self.MERID_MAX_DAILY_LOSS_USD > 5000:
+            warnings.append(f"MERID_MAX_DAILY_LOSS_USD is high ({self.MERID_MAX_DAILY_LOSS_USD})")
+        if not self.MERID_REQUIRE_CONFIRMATION and self.is_live_trading:
+            warnings.append("MERID_REQUIRE_CONFIRMATION is disabled for live trading")
+        
+        return {
+            "ready": len(issues) == 0,
+            "issues": issues,
+            "warnings": warnings,
+            "mode": self.MERID_TRADING_MODE,
+            "env": self.MERID_ENV,
+        }
 
 
 # Create global settings instance

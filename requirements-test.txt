@@ -1,0 +1,54 @@
+# Additional test dependencies for coverage enforcement
+pytest-cov>=6.0.0
+pytest-xdist>=3.6.0
+pytest-asyncio>=0.25.0
+pytest-mock>=3.15.0
+coverage>=7.6.0
+pre-commit>=4.0.0
+
+# AI-assisted test generation
+pytestai-generator>=0.1.0
+
+# Advanced testing tools
+hypothesis>=6.0.0
+pytest-dependency>=0.6.0
+pytest-rerunfailures>=14.0
+diff-cover>=9.0.0
+pytest-html>=4.1.0
+allure-pytest>=2.13.0
+
+# Resilience and observability tools
+tenacity>=9.0.0
+aiobreaker>=1.0.0
+structlog>=24.0.0
+prometheus-client>=0.21.0
+
+# Code quality tools
+ruff>=0.6.0
+mypy>=1.11.0
+bandit>=1.8.0
+
+# Additional static analysis tools
+safety>=3.0.0
+pip-audit>=2.7.0
+vulture>=2.11.0
+pylint>=3.3.0
+codespell>=2.3.0
+pyre-check>=0.9.0
+
+# Integration testing tools
+pact-python>=2.0.0
+respx>=0.22.0
+pytest-httpx>=0.30.0
+aioresponses>=0.7.0
+
+# Data validation
+great-expectations>=0.18.0
+dependency-injector>=4.41.0
+
+# Dev Swarm Autonomous Tools
+aider-chat>=0.50.0
+codium>=0.1.0
+openhands-cli>=0.1.0
+gitpython>=3.1.0
+pygithub>=2.1.0

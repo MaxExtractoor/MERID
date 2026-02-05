@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { API_BASE_URL } from "../config/constants";
 
 interface UseApiDataOptions<T> {
   pollingInterval?: number;
@@ -48,7 +47,7 @@ export function useApiData<T>(
     setError(null);
 
     try {
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      const response = await fetch(endpoint, {
         signal: abortControllerRef.current.signal,
         headers: {
           "Content-Type": "application/json",
