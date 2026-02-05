@@ -53,6 +53,28 @@ async def lifespan(app: FastAPI):
     from web.api.intelligence import aggregate_news
     from web.api.live_data import fetch_live_prices as fetch_api_prices
     
+    # Start WebSocket data publishers FIRST (before any blocking initialization)
+    try:
+        logger.info("Starting WebSocket price publisher...")
+        from web.services.price_publisher import get_price_publisher
+        price_publisher = get_price_publisher()
+        asyncio.create_task(price_publisher.start())
+        logger.info("Price publisher task created")
+    except Exception as e:
+        logger.error(f"Failed to start price publisher: {e}", exc_info=True)
+    
+    try:
+        logger.info("Starting WebSocket portfolio publisher...")
+        from web.services.portfolio_publisher import get_portfolio_publisher
+        portfolio_publisher = get_portfolio_publisher()
+        asyncio.create_task(portfolio_publisher.start())
+        logger.info("Portfolio publisher task created")
+    except Exception as e:
+        logger.error(f"Failed to start portfolio publisher: {e}", exc_info=True)
+    
+    # Yield to event loop to allow publishers to start
+    await asyncio.sleep(0.1)
+    
     # Start agent orchestrator
     try:
         logger.info("Starting agent orchestrator...")
@@ -60,6 +82,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(orchestrator.start())
     except Exception as e:
         logger.error(f"Failed to start orchestrator: {e}")
+    
+    # Yield to event loop after each major component
+    await asyncio.sleep(0)
     
     # Start consensus engine
     try:
@@ -119,6 +144,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start prediction markets: {e}")
     
+    await asyncio.sleep(0)  # Yield to event loop
+    
     # Start live price feed streaming
     try:
         logger.info("Starting live price feed...")
@@ -127,6 +154,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start price feed: {e}")
     
+    await asyncio.sleep(0)  # Yield to event loop
+    
     # Start intelligence news aggregation
     try:
         logger.info("Starting intelligence news aggregation...")
@@ -134,12 +163,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start intelligence: {e}")
     
+    await asyncio.sleep(0)  # Yield to event loop
+    
     # Start API live data fetching
     try:
         logger.info("Starting API live data feed...")
         asyncio.create_task(fetch_api_prices())
     except Exception as e:
         logger.error(f"Failed to start API live data: {e}")
+    
+    await asyncio.sleep(0)  # Yield to event loop
     
     # Start alert manager
     try:
@@ -154,6 +187,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start alerts: {e}")
     
+    await asyncio.sleep(0)  # Yield to event loop
+    
     # Start health monitor
     try:
         logger.info("Starting health monitor...")
@@ -161,6 +196,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(health_mon.start())
     except Exception as e:
         logger.error(f"Failed to start health monitor: {e}")
+    
+    await asyncio.sleep(0)  # Final yield before completing startup
     
     logger.info("=" * 60)
     logger.info("MERID SYSTEM LIVE - All components operational")
@@ -172,6 +209,19 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("MERID SYSTEM SHUTTING DOWN")
     logger.info("=" * 60)
+    
+    # Stop WebSocket publishers
+    try:
+        from web.services.price_publisher import get_price_publisher
+        price_publisher = get_price_publisher()
+        await price_publisher.stop()
+    except: pass
+    
+    try:
+        from web.services.portfolio_publisher import get_portfolio_publisher
+        portfolio_publisher = get_portfolio_publisher()
+        await portfolio_publisher.stop()
+    except: pass
     
     try:
         health_mon = get_health_monitor()
@@ -225,8 +275,8 @@ async def lifespan(app: FastAPI):
     logger.info("All components stopped - shutdown complete")
 
 
-# Create app with lifespan
-app = create_app(lifespan=lifespan)
+# Create app WITHOUT lifespan - use startup events instead to avoid blocking
+app = create_app(lifespan=None)
 
 # Add test page router
 app.include_router(test_page.router, tags=["test"])

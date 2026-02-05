@@ -1,4 +1,6 @@
-"""Shim to load the repository-local `web/main.py` module and expose `app`.
+"""DEPRECATED / UNUSED - Not integrated into main system
+
+Shim to load the repository-local `web/main.py` module and expose `app`.
 
 This ensures tests import the lightweight app in this folder rather than a larger
 `web` package that may exist at the repo root.

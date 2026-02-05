@@ -375,7 +375,7 @@ class SolanaAntiRugGuard:
         liquidity = metadata["liquidity_usd"]
         if liquidity is None or liquidity < cfg.min_liquidity_usd:
             return GuardDecision(
-                GuardDecisionStatus.DENY,
+                GuardDecisionStatus.BLOCK,
                 "Liquidity below guard threshold",
                 metadata | {"required_liquidity_usd": cfg.min_liquidity_usd},
             )
@@ -383,7 +383,7 @@ class SolanaAntiRugGuard:
         # Token risk classification
         token_risk = metadata["token_risk"]
         if token_risk is None:
-            return GuardDecision(GuardDecisionStatus.REQUIRE_APPROVAL, "Missing token risk analysis", metadata)
+            return GuardDecision(GuardDecisionStatus.REQUIRE_CONFIRMATION, "Missing token risk analysis", metadata)
 
         try:
             token_risk_enum = token_risk if isinstance(token_risk, TokenRisk) else TokenRisk(token_risk)
@@ -391,29 +391,29 @@ class SolanaAntiRugGuard:
             token_risk_enum = TokenRisk.HIGH
 
         if token_risk_enum.value not in {TokenRisk.SAFE.value, TokenRisk.LOW.value, TokenRisk.MEDIUM.value}:
-            return GuardDecision(GuardDecisionStatus.DENY, f"Risk level {token_risk_enum.value} blocked", metadata)
+            return GuardDecision(GuardDecisionStatus.BLOCK, f"Risk level {token_risk_enum.value} blocked", metadata)
 
         ranking = [TokenRisk.SAFE, TokenRisk.LOW, TokenRisk.MEDIUM, TokenRisk.HIGH, TokenRisk.EXTREME]
         if ranking.index(token_risk_enum) > ranking.index(cfg.max_token_risk):
             return GuardDecision(
-                GuardDecisionStatus.DENY,
+                GuardDecisionStatus.BLOCK,
                 f"Risk level {token_risk_enum.value} exceeds max {cfg.max_token_risk.value}",
                 metadata,
             )
 
         # Honeypot checks
         if cfg.block_honeypots and token_context.get("honeypot"):
-            return GuardDecision(GuardDecisionStatus.DENY, "Honeypot detected", metadata)
+            return GuardDecision(GuardDecisionStatus.BLOCK, "Honeypot detected", metadata)
 
         # Liquidity lock
         if cfg.require_liquidity_lock and not token_context.get("liquidity_locked"):
-            return GuardDecision(GuardDecisionStatus.REQUIRE_APPROVAL, "Liquidity not locked", metadata)
+            return GuardDecision(GuardDecisionStatus.REQUIRE_CONFIRMATION, "Liquidity not locked", metadata)
 
         # Wallet bundle analysis (0-1 scale)
         bundle_score = metadata["bundle_score"]
         if bundle_score is not None and bundle_score > cfg.max_bundle_score:
             return GuardDecision(
-                GuardDecisionStatus.REQUIRE_APPROVAL,
+                GuardDecisionStatus.REQUIRE_CONFIRMATION,
                 "Insider bundle score above threshold",
                 metadata | {"max_bundle_score": cfg.max_bundle_score},
             )

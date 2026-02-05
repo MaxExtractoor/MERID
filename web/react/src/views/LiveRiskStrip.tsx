@@ -1,19 +1,22 @@
 import { useMemo } from 'react';
 import MetricCard from '../components/MetricCard';
 import { useRiskMetrics } from '../hooks/useRiskMetrics';
+import { useRiskProtections, getOverallRiskStatus } from '../hooks/useRiskProtections';
 import { formatCurrency, formatPercent, formatTime } from '../utils/formatters';
-import { RefreshCw, AlertTriangle } from 'lucide-react';
+import { RefreshCw, AlertTriangle, Shield, AlertOctagon } from 'lucide-react';
 
 /**
  * Live Risk Strip
  *
  * Displays real-time risk metrics with:
- * - Compact row of metric cards (P&L, Drawdown, Margin, Top Exposure)
+ * - Compact row of metric cards (P&L, Drawdown, Margin, Top Exposure, Circuit Breaker)
  * - Live WebSocket updates for threshold breaches and PnL changes
  * - Alert indicator for active risk alerts
+ * - Circuit breaker status integration
  */
 export function LiveRiskStrip() {
   const { metrics, alerts, loading, error, lastUpdated } = useRiskMetrics();
+  const { data: protections } = useRiskProtections();
 
   // Find top exposure symbol
   const topExposure = useMemo(() => {
@@ -35,10 +38,16 @@ export function LiveRiskStrip() {
     };
   }, [alerts]);
 
+  // Get circuit breaker status
+  const circuitStatus = useMemo(() => {
+    if (!protections) return null;
+    return getOverallRiskStatus(protections);
+  }, [protections]);
+
   if (loading) {
     return (
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 animate-pulse">
-        {[...Array(5)].map((_, i) => (
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-4 animate-pulse">
+        {[...Array(6)].map((_, i) => (
           <div key={i} className="bg-slate-800 rounded-lg p-4 h-20" />
         ))}
       </div>
@@ -56,7 +65,7 @@ export function LiveRiskStrip() {
   return (
     <div className="space-y-2">
       {/* Risk Metrics Row */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
         <MetricCard
           label="Total P&L"
           value={formatCurrency(metrics.totalPnL)}
@@ -83,21 +92,50 @@ export function LiveRiskStrip() {
           value={topExposure ? formatCurrency(topExposure[1].long + topExposure[1].short) : '-'}
           status="GOOD"
         />
+        {/* Circuit Breaker Status */}
+        <div 
+          className={`rounded-lg p-4 border cursor-pointer transition-all ${
+            circuitStatus?.status === 'critical' ? 'bg-red-900/30 border-red-500/50' :
+            circuitStatus?.status === 'warning' ? 'bg-amber-900/30 border-amber-500/50' :
+            'bg-emerald-900/30 border-emerald-500/50'
+          }`}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            {circuitStatus?.status === 'critical' ? (
+              <AlertOctagon className="w-4 h-4 text-red-400" />
+            ) : circuitStatus?.status === 'warning' ? (
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+            ) : (
+              <Shield className="w-4 h-4 text-emerald-400" />
+            )}
+            <span className="text-xs text-slate-400">Circuit Breaker</span>
+          </div>
+          <div className={`text-lg font-semibold ${
+            circuitStatus?.status === 'critical' ? 'text-red-400' :
+            circuitStatus?.status === 'warning' ? 'text-amber-400' :
+            'text-emerald-400'
+          }`}>
+            {protections?.circuit_breaker?.state || 'Unknown'}
+          </div>
+          <div className="text-xs text-slate-500">
+            {protections?.circuit_breaker?.error_count || 0} errors
+          </div>
+        </div>
       </div>
 
       {/* Alerts & Last Updated */}
       <div className="flex items-center justify-between px-1">
         {/* Alert Summary */}
-        {(alertCounts.critical > 0 || alertCounts.warning > 0) && (
+        {(alertCounts.critical > 0 || alertCounts.warning > 0 || circuitStatus?.status === 'critical') && (
           <div className="flex items-center gap-2">
             <AlertTriangle className={`w-4 h-4 ${
-              alertCounts.critical > 0 ? 'text-red-500' : 'text-amber-500'
+              alertCounts.critical > 0 || circuitStatus?.status === 'critical' ? 'text-red-500' : 'text-amber-500'
             }`} />
             <span className={`text-sm ${
-              alertCounts.critical > 0 ? 'text-red-400' : 'text-amber-400'
+              alertCounts.critical > 0 || circuitStatus?.status === 'critical' ? 'text-red-400' : 'text-amber-400'
             }`}>
-              {alertCounts.critical > 0
-                ? `${alertCounts.critical} critical alert${alertCounts.critical > 1 ? 's' : ''}`
+              {alertCounts.critical > 0 || circuitStatus?.status === 'critical'
+                ? `${alertCounts.critical + (circuitStatus?.status === 'critical' ? 1 : 0)} critical`
                 : `${alertCounts.warning} warning${alertCounts.warning > 1 ? 's' : ''}`}
             </span>
           </div>

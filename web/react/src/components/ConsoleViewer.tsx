@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, Pause, Trash, Copy, RefreshCw, Terminal } from 'lucide-react';
+import { Play, PauseCircle, Trash, Copy, RefreshCw, Terminal } from 'lucide-react';
 
 interface ConsoleMessage {
   id: string;
@@ -17,10 +17,16 @@ export default function ConsoleViewer() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom only when not paused and user is near bottom
   useEffect(() => {
     if (!isPaused && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      const container = messagesEndRef.current.parentElement;
+      if (container) {
+        const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+        if (isNearBottom) {
+          messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+      }
     }
   }, [messages, isPaused]);
 
@@ -69,7 +75,7 @@ export default function ConsoleViewer() {
         }
       };
 
-      wsRef.current.onerror = (error) => {
+      wsRef.current.onerror = () => {
         addMessage('error', 'WebSocket', { error: 'Connection failed' });
       };
 
@@ -79,11 +85,11 @@ export default function ConsoleViewer() {
     }
   }, [selectedMode]);
 
-  // Polling for Prime and Logs modes
+  // Polling for Prime and Logs modes - reduced frequency
   useEffect(() => {
     if (selectedMode === 'prime') {
       fetchPrimeData();
-      const interval = setInterval(fetchPrimeData, 5000);
+      const interval = setInterval(fetchPrimeData, 30000); // Poll every 30s instead of 5s
       return () => clearInterval(interval);
     }
   }, [selectedMode]);
@@ -96,13 +102,14 @@ export default function ConsoleViewer() {
   };
 
   const formatTimestamp = (date: Date) => {
-    return date.toLocaleTimeString('en-US', { 
+    const time = date.toLocaleTimeString('en-US', { 
       hour12: false, 
       hour: '2-digit', 
       minute: '2-digit', 
-      second: '2-digit',
-      fractionalSecondDigits: 3
+      second: '2-digit'
     });
+    const ms = date.getMilliseconds().toString().padStart(3, '0');
+    return `${time}.${ms}`;
   };
 
   const getTypeColor = (type: ConsoleMessage['type']) => {

@@ -61,6 +61,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 from web.api.reflection import router as reflection_router
+from web.api.consensus import router as consensus_router
 from web.api.mining import router as mining_router
 from web.api.auth import router as auth_router
 from web.api.referrals import router as referrals_router
@@ -116,6 +117,7 @@ from web.api.reality import router as reality_router
 from web.api.explainability import router as explainability_router
 from web.api.live_data import router as live_data_router
 from web.api.dashboard_data import router as dashboard_data_router
+from web.api.dashboard import router as dashboard_router
 from web.api.intelligence import router as intelligence_router
 from web.api.local_venue import router as local_venue_router
 from web.api.local_venue_validation import router as local_venue_validation_router
@@ -127,6 +129,8 @@ from web.api.simulation_assertions import router as simulation_assertions_router
 from web.api.agent_assertions import router as agent_assertions_router
 from web.api.domain_priority import router as domain_priority_router
 from web.api.predictions import router as predictions_router
+from web.api.simulation import router as simulation_router
+from web.api.neo4j_memory import router as neo4j_memory_router
 from web.api.dashboard_ws import router as dashboard_ws_router
 from web.api.x_bot import router as x_bot_router
 from web.api.swarm import router as swarm_router
@@ -140,6 +144,7 @@ from web.api.production_status import router as production_status_router
 from web.api.prime_screen import router as prime_screen_router
 from web.api.autonomy import router as autonomy_router
 from web.api.api_status import router as api_status_router
+from web.api.risk import router as risk_router
 # Skip governance cadence for Phase 0 trial
 # from web.api.governance_cadence import router as governance_cadence_router
 from web.api.minimal_scope import router as minimal_scope_router
@@ -147,6 +152,7 @@ from web.api.phase0_experiment import router as phase0_experiment_router
 from web.api.phase0_adapters import phase0_router
 from web.api.phase0_trial_api import router as phase0_trial_router
 from web.api.us_compliant_markets import router as us_compliant_markets_router
+from web.api.system_endpoints import router as system_endpoints_router
 
 from web.websocket_factory import create_websocket_endpoint
 
@@ -196,6 +202,72 @@ def _templates():
 
 def create_app(lifespan=None) -> FastAPI:
     application = FastAPI(title="MERID Core", version="2.0", lifespan=lifespan)
+    
+    # Startup event to start WebSocket publishers (bypasses blocking lifespan)
+    @application.on_event("startup")
+    async def start_websocket_publishers():
+        """Start WebSocket data publishers on application startup."""
+        import asyncio
+        print("=" * 80)
+        print("STARTUP EVENT EXECUTING - Starting WebSocket publishers")
+        print("=" * 80)
+        logger.info("=" * 80)
+        logger.info("STARTUP EVENT: Starting WebSocket publishers")
+        logger.info("=" * 80)
+        
+        try:
+            logger.info("Starting WebSocket price publisher via startup event...")
+            from web.services.price_publisher import get_price_publisher
+            price_publisher = get_price_publisher()
+            asyncio.create_task(price_publisher.start())
+            logger.info("Price publisher task created")
+            print("✓ Price publisher task created")
+        except Exception as e:
+            logger.error(f"Failed to start price publisher: {e}", exc_info=True)
+            print(f"✗ Failed to start price publisher: {e}")
+        
+        try:
+            logger.info("Starting WebSocket portfolio publisher via startup event...")
+            from web.services.portfolio_publisher import get_portfolio_publisher
+            portfolio_publisher = get_portfolio_publisher()
+            asyncio.create_task(portfolio_publisher.start())
+            logger.info("Portfolio publisher task created")
+            print("✓ Portfolio publisher task created")
+        except Exception as e:
+            logger.error(f"Failed to start portfolio publisher: {e}", exc_info=True)
+            print(f"✗ Failed to start portfolio publisher: {e}")
+        
+        try:
+            logger.info("Initializing prediction markets aggregator...")
+            from monitoring.prediction_markets import get_prediction_aggregator
+            aggregator = get_prediction_aggregator()
+            # Store in app state for persistence across requests
+            application.state.prediction_aggregator = aggregator
+            # Start background task to fetch markets
+            asyncio.create_task(aggregator.start())
+            logger.info("Prediction markets aggregator initialized")
+            print("✓ Prediction markets aggregator initialized")
+        except Exception as e:
+            logger.error(f"Failed to start prediction markets: {e}", exc_info=True)
+            print(f"✗ Failed to start prediction markets: {e}")
+        
+        try:
+            logger.info("Starting WebSocket prediction publisher...")
+            from web.services.prediction_publisher import get_prediction_publisher
+            prediction_publisher = get_prediction_publisher()
+            asyncio.create_task(prediction_publisher.start())
+            logger.info("Prediction publisher task created")
+            print("✓ Prediction publisher task created")
+        except Exception as e:
+            logger.error(f"Failed to start prediction publisher: {e}", exc_info=True)
+            print(f"✗ Failed to start prediction publisher: {e}")
+        
+        # Give tasks a moment to start
+        await asyncio.sleep(0.5)
+        logger.info("WebSocket publishers startup complete")
+        print("=" * 80)
+        print("STARTUP EVENT COMPLETE")
+        print("=" * 80)
     
     # Mount static files
     application.mount("/static", StaticFiles(directory="web/static"), name="static")
@@ -252,6 +324,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(router)
     application.include_router(router_v1)
     application.include_router(reflection_router)
+    application.include_router(consensus_router)
     application.include_router(mining_router)
     application.include_router(auth_router)
     application.include_router(referrals_router)
@@ -299,6 +372,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(explainability_router)
     application.include_router(live_data_router)
     application.include_router(dashboard_data_router)
+    application.include_router(dashboard_router)
     application.include_router(intelligence_router)
     application.include_router(local_venue_router)
     application.include_router(local_venue_validation_router)
@@ -316,6 +390,8 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(health_router)
     application.include_router(analytics_router)
     application.include_router(predictions_router)
+    application.include_router(simulation_router)
+    application.include_router(neo4j_memory_router)
     # Skip assertion registry for Phase 0 trial
     # application.include_router(assertion_router)
     application.include_router(brier_metrics_router)
@@ -324,10 +400,12 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(prime_screen_router)
     application.include_router(autonomy_router)
     application.include_router(api_status_router)
+    application.include_router(risk_router)
     # application.include_router(governance_cadence_router)
     application.include_router(minimal_scope_router)
     application.include_router(phase0_experiment_router)
     application.include_router(us_compliant_markets_router)
+    application.include_router(system_endpoints_router)
     # Phase 0 adapters - only mount if feature flags are enabled
     if phase0_router:
         application.include_router(phase0_router)
@@ -379,14 +457,31 @@ def _require_api_key(request: Request) -> None:
 @root_router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    logger.info("WebSocket /ws [accepted] - client connected")
     queue = await event_stream.subscribe()
+    logger.info(f"WebSocket client subscribed to EventStream (queue id: {id(queue)})")
+    
     try:
         while True:
             event = await queue.get()
-            await websocket.send_text(json.dumps(event))
+            logger.debug(f"WebSocket received event: type={event.event_type}, payload_keys={list(event.payload.keys())}")
+            
+            # Convert EventRecord to frontend-expected format
+            message = {
+                "type": event.event_type,
+                "data": event.payload
+            }
+            
+            message_json = json.dumps(message)
+            logger.debug(f"WebSocket sending message: {message_json[:200]}...")
+            await websocket.send_text(message_json)
+            logger.debug("WebSocket message sent successfully")
+            
     except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
         await event_stream.unsubscribe(queue)
-    except Exception:
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}", exc_info=True)
         await event_stream.unsubscribe(queue)
 
 
@@ -498,6 +593,67 @@ async def prediction_websocket_endpoint(
         token=token,
         welcome_message="Connected to prediction markets stream"
     )
+
+
+@root_router.websocket("/ws/paper-trading")
+async def paper_trading_websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time paper trading updates."""
+    await websocket.accept()
+    logger.info("Paper trading WebSocket client connected")
+    
+    try:
+        from trading.paper_trading import get_paper_trading_engine
+        engine = get_paper_trading_engine()
+        
+        # Subscribe to paper trading events
+        def on_trade(event):
+            try:
+                asyncio.create_task(websocket.send_json(event))
+            except Exception as e:
+                logger.error(f"Failed to send trade event: {e}")
+        
+        def on_position(event):
+            try:
+                asyncio.create_task(websocket.send_json(event))
+            except Exception as e:
+                logger.error(f"Failed to send position event: {e}")
+        
+        def on_summary(event):
+            try:
+                asyncio.create_task(websocket.send_json(event))
+            except Exception as e:
+                logger.error(f"Failed to send summary event: {e}")
+        
+        # Subscribe to all event types
+        unsubscribe_trade = engine._subscribe("trade", on_trade)
+        unsubscribe_position = engine._subscribe("position", on_position)
+        unsubscribe_summary = engine._subscribe("summary", on_summary)
+        
+        # Keep connection alive and listen for client messages
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                # Client can send commands if needed
+                logger.debug(f"Received from paper trading client: {data}")
+            except asyncio.TimeoutError:
+                # Send ping to keep connection alive
+                await websocket.send_json({"type": "ping", "ts": time.time()})
+            except Exception as e:
+                logger.error(f"Paper trading WebSocket error: {e}")
+                break
+                
+    except Exception as e:
+        logger.error(f"Paper trading WebSocket connection error: {e}")
+    finally:
+        # Cleanup subscriptions
+        try:
+            unsubscribe_trade()
+            unsubscribe_position()
+            unsubscribe_summary()
+        except:
+            pass
+        await websocket.close()
+        logger.info("Paper trading WebSocket client disconnected")
 
 
 @root_router.websocket("/ws/agents")
@@ -1239,6 +1395,10 @@ async def startup_event():
     _startup_state["started_at"] = time.time()
     startup_success = True
     
+    logger.info("=" * 80)
+    logger.info("🚀 MERID STARTUP INITIATED")
+    logger.info("=" * 80)
+    
     # Log environment info and validate configuration
     logger.info(f"🚀 MERID Environment: {settings.MERID_ENV}")
     logger.info(f"🌐 WebSocket Dev Mode: {settings.allow_websocket_dev_mode}")
@@ -1262,7 +1422,63 @@ async def startup_event():
         else:
             logger.info("✅ Production validation passed")
     
-    # Start prediction market aggregator with timeout
+    # Phase 1: Initialize core systems
+    logger.info("Phase 1: Initializing core systems...")
+    try:
+        from core.consensus_engine import get_consensus_engine
+        consensus = get_consensus_engine()
+        logger.info(f"✅ Consensus engine: {consensus.min_votes} min votes, {consensus.quorum_threshold:.2f} quorum")
+        _startup_state["services"]["consensus"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Consensus engine initialization failed: {e}")
+        _startup_state["services"]["consensus"] = {"status": "failed", "error": str(e)}
+    
+    try:
+        from trading.paper_trading import get_paper_trading_engine
+        paper_engine = get_paper_trading_engine()
+        portfolio_count = len(paper_engine.portfolios)
+        logger.info(f"✅ Paper trading engine: {portfolio_count} portfolios loaded")
+        _startup_state["services"]["paper_trading"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Paper trading engine initialization failed: {e}")
+        _startup_state["services"]["paper_trading"] = {"status": "failed", "error": str(e)}
+    
+    try:
+        from agents.reflection_layer import get_reflection_system
+        reflection = get_reflection_system()
+        reflection_count = len(reflection._reflections)
+        agent_count = len(reflection._agent_stats)
+        logger.info(f"✅ Reflection layer: {reflection_count} reflections, {agent_count} agents")
+        _startup_state["services"]["reflection"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Reflection layer initialization failed: {e}")
+        _startup_state["services"]["reflection"] = {"status": "failed", "error": str(e)}
+    
+    try:
+        from monitoring.brier_metrics import get_brier_tracker
+        brier = get_brier_tracker()
+        prediction_count = len(brier.predictions)
+        logger.info(f"✅ Brier metrics: {prediction_count} predictions tracked")
+        _startup_state["services"]["brier_metrics"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Brier metrics initialization failed: {e}")
+        _startup_state["services"]["brier_metrics"] = {"status": "failed", "error": str(e)}
+    
+    try:
+        from memory.neo4j_graph import get_neo4j_graph, is_neo4j_available
+        if is_neo4j_available():
+            graph = get_neo4j_graph()
+            logger.info(f"✅ Neo4j graph database connected: {graph.config.uri}")
+            _startup_state["services"]["neo4j"] = {"status": "running", "started_at": time.time()}
+        else:
+            logger.info("⚠️  Neo4j not available - using JSON-only memory storage")
+            _startup_state["services"]["neo4j"] = {"status": "unavailable", "message": "Not configured or not installed"}
+    except Exception as e:
+        logger.warning(f"⚠️  Neo4j initialization failed: {e}")
+        _startup_state["services"]["neo4j"] = {"status": "failed", "error": str(e)}
+    
+    # Phase 2: Start prediction market aggregator with timeout
+    logger.info("Phase 2: Starting prediction markets...")
     aggregator = await _start_service_with_timeout(
         "prediction_markets",
         _start_prediction_markets(),
@@ -1272,35 +1488,36 @@ async def startup_event():
     
     if aggregator:
         market_count = len(aggregator._all_markets) if hasattr(aggregator, '_all_markets') else 0
-        logger.info(f"Started prediction market aggregator with {market_count} initial markets")
+        logger.info(f"✅ Prediction market aggregator: {market_count} initial markets")
     else:
-        logger.info("Continuing without prediction markets - will use fallback data")
+        logger.info("⚠️  Continuing without prediction markets - will use fallback data")
         startup_success = False
     
-    # Start whale detection listener (only if prediction markets started)
+    # Phase 3: Start whale detection listener (only if prediction markets started)
+    logger.info("Phase 3: Starting background services...")
     if aggregator:
         try:
             from merid.whales import solana_whale_listener
             task = asyncio.create_task(solana_whale_listener(aggregator))
             _startup_state["background_tasks"].append(task)
-            logger.info("Started Solana whale detection listener")
+            logger.info("✅ Solana whale detection listener started")
         except Exception as e:
-            logger.warning(f"Failed to start whale detection listener: {e}")
-            logger.info("Continuing without whale detection")
+            logger.warning(f"⚠️  Whale detection listener failed: {e}")
             startup_success = False
     else:
-        logger.info("Skipping whale detection - no prediction markets available")
+        logger.info("⚠️  Skipping whale detection - no prediction markets available")
     
     # Calculate startup duration
     startup_duration = time.time() - _startup_state["started_at"]
     
     # Log overall startup status
+    logger.info("=" * 80)
     if startup_success:
-        logger.info(f"✅ All background services started successfully in {startup_duration:.2f}s")
+        logger.info(f"✅ All services started successfully in {startup_duration:.2f}s")
     else:
-        logger.warning(f"⚠️  Some services failed to start - system operating in degraded mode ({startup_duration:.2f}s)")
-    
-    logger.info("🚀 MERID startup complete - system ready")
+        logger.warning(f"⚠️  Some services failed - system in degraded mode ({startup_duration:.2f}s)")
+    logger.info("🚀 MERID STARTUP COMPLETE - System Ready")
+    logger.info("=" * 80)
 
 
 async def _start_prediction_markets():
@@ -1427,13 +1644,19 @@ async def readyz():
 
 @app.get("/startup")
 async def startup_status():
-    """Introspection endpoint - current startup state and service health."""
-    import time
+    """Get detailed startup status."""
+    return _startup_state
+
+
+@app.get("/api/v1/health/startup")
+async def startup_health():
+    """Comprehensive startup health check."""
+    if _startup_state.get("started_at") is None:
+        return {
+            "status": "not_started",
+            "message": "Startup has not been initiated"
+        }
     
-    started_at = _startup_state.get("started_at")
-    uptime = time.time() - started_at if started_at else 0
-    
-    # Count running vs failed services
     services = _startup_state.get("services", {})
     running_count = sum(1 for s in services.values() if s.get("status") == "running")
     failed_count = sum(1 for s in services.values() if s.get("status") in ("failed", "timeout"))

@@ -1,4 +1,7 @@
-"""MERID relay client for local/cloud sentiment analysis.
+"""DEPRECATED / UNUSED - Not integrated into main system
+
+MERID relay client for local/cloud sentiment analysis.
+Relay module for forwarding messages between components.
 
 Previously this file shipped with a BOM and hardcoded API key placeholders,
 which prevented coverage analysis and CI linting.  This rewrite removes the BOM,

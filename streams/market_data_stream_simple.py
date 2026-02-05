@@ -53,7 +53,8 @@ class MarketDataStream(BaseStream):
     """
     
     def __init__(self, config: Dict[str, Any]):
-        super().__init__()
+        stream_id = config.get("stream_id", "market_data_default")
+        super().__init__(stream_id=stream_id)
         self.config = config
         self.source_type = config.get("source_type", "mock")  # "websocket", "http", "mock"
         self.source_url = config.get("source_url", "")

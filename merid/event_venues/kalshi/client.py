@@ -1,12 +1,19 @@
-"""Kalshi REST client - Implements EventVenueClient interface."""
+"""Kalshi REST client - Implements EventVenueClient interface.
+
+This is the **canonical resilient venue client** implementation.
+Pattern: circuit breaker per venue, retry with backoff on I/O,
+explicit OperationResult returns instead of silent fallbacks.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypeVar
 
 import aiohttp
 import httpx
@@ -32,9 +39,24 @@ from merid.event_venues.kalshi.models import (
     KalshiPosition,
     KalshiTrade,
 )
+from merid.resilience import (
+    CircuitBreaker,
+    CircuitOpenError,
+    OperationResult,
+    get_circuit_breaker,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.client")
+
+T = TypeVar("T")
+
+# Retry configuration for Kalshi
+KALSHI_MAX_RETRIES = 3
+KALSHI_BACKOFF_BASE = 2.0
+KALSHI_RETRY_STATUSES = {429, 500, 502, 503, 504}
+KALSHI_CIRCUIT_FAILURE_THRESHOLD = 5
+KALSHI_CIRCUIT_RECOVERY_TIMEOUT = 30.0
 
 
 class KalshiVenueClient(EventVenueClient):
@@ -43,6 +65,11 @@ class KalshiVenueClient(EventVenueClient):
     
     Uses Kalshi REST API (v2) for trading operations.
     Supports both email/password auth and RSA key auth.
+    
+    Resilience features:
+    - Circuit breaker: Opens after 5 failures, recovers after 30s
+    - Retry with backoff: 3 retries with exponential backoff (2^n seconds)
+    - Explicit results: All methods return OperationResult for clear error handling
     """
     
     def __init__(self, config: Optional[KalshiConfig] = None):
@@ -50,6 +77,13 @@ class KalshiVenueClient(EventVenueClient):
         self._http_client: Optional[httpx.AsyncClient] = None
         self._auth_token: Optional[str] = None
         self._member_id: Optional[str] = None
+        
+        # Resilience: one circuit breaker per venue instance
+        self._circuit_breaker = get_circuit_breaker(
+            f"kalshi_{id(self)}",
+            failure_threshold=KALSHI_CIRCUIT_FAILURE_THRESHOLD,
+            recovery_timeout=KALSHI_CIRCUIT_RECOVERY_TIMEOUT,
+        )
         
     @property
     def venue_name(self) -> str:
@@ -116,211 +150,502 @@ class KalshiVenueClient(EventVenueClient):
             await self._http_client.aclose()
     
     # ------------------------------------------------------------------------
+    # Resilient Request Infrastructure
+    # ------------------------------------------------------------------------
+    
+    async def _request_with_resilience(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        operation_name: str = "request",
+    ) -> OperationResult[Dict[str, Any]]:
+        """
+        Execute HTTP request with circuit breaker and retry logic.
+        
+        This is the core resilient I/O method. All public methods should use this.
+        
+        Args:
+            method: HTTP method (GET, POST, DELETE, etc.)
+            path: URL path (appended to base_url)
+            params: Query parameters
+            json_data: JSON body for POST/PUT
+            operation_name: Human-readable name for logging
+            
+        Returns:
+            OperationResult with parsed JSON data or error
+        """
+        url = f"{self.config.base_url}{path}"
+        start_time = time.time()
+        last_error: Optional[Exception] = None
+        
+        for attempt in range(KALSHI_MAX_RETRIES + 1):
+            try:
+                # Check circuit breaker before making request
+                async with self._circuit_breaker:
+                    response = await self._http_client.request(
+                        method=method,
+                        url=url,
+                        params=params,
+                        json=json_data,
+                    )
+                    
+                    latency_ms = (time.time() - start_time) * 1000
+                    
+                    # Check for retryable status codes
+                    if response.status_code in KALSHI_RETRY_STATUSES:
+                        if attempt < KALSHI_MAX_RETRIES:
+                            wait_time = KALSHI_BACKOFF_BASE ** attempt
+                            logger.warning(
+                                f"[kalshi] {operation_name} returned {response.status_code}, "
+                                f"retrying in {wait_time}s (attempt {attempt + 1})"
+                            )
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            error = httpx.HTTPStatusError(
+                                f"Max retries exceeded: {response.status_code}",
+                                request=response.request,
+                                response=response,
+                            )
+                            return OperationResult.fail(
+                                error,
+                                latency_ms=latency_ms,
+                                retries=attempt,
+                                operation=operation_name,
+                                status_code=response.status_code,
+                            )
+                    
+                    # Check for client errors (4xx) - don't retry
+                    if 400 <= response.status_code < 500:
+                        error = httpx.HTTPStatusError(
+                            f"Client error: {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        )
+                        return OperationResult.fail(
+                            error,
+                            latency_ms=latency_ms,
+                            retries=attempt,
+                            operation=operation_name,
+                            status_code=response.status_code,
+                        )
+                    
+                    # Success
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    return OperationResult.ok(
+                        data,
+                        latency_ms=latency_ms,
+                        retries=attempt,
+                        operation=operation_name,
+                    )
+                    
+            except CircuitOpenError as e:
+                # Circuit is open - fail fast
+                latency_ms = (time.time() - start_time) * 1000
+                logger.warning(f"[kalshi] Circuit open for {operation_name}: {e}")
+                return OperationResult.fail(
+                    e,
+                    latency_ms=latency_ms,
+                    retries=attempt,
+                    operation=operation_name,
+                    circuit_open=True,
+                )
+                
+            except httpx.TimeoutException as e:
+                last_error = e
+                if attempt < KALSHI_MAX_RETRIES:
+                    wait_time = KALSHI_BACKOFF_BASE ** attempt
+                    logger.warning(
+                        f"[kalshi] {operation_name} timeout, retrying in {wait_time}s "
+                        f"(attempt {attempt + 1})"
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+                    
+            except (httpx.ConnectError, httpx.ReadError) as e:
+                last_error = e
+                if attempt < KALSHI_MAX_RETRIES:
+                    wait_time = KALSHI_BACKOFF_BASE ** attempt
+                    logger.warning(
+                        f"[kalshi] {operation_name} connection error, retrying in {wait_time}s "
+                        f"(attempt {attempt + 1}): {e}"
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+                    
+            except Exception as e:
+                # Unexpected error - don't retry
+                latency_ms = (time.time() - start_time) * 1000
+                logger.error(f"[kalshi] Unexpected error in {operation_name}: {e}")
+                return OperationResult.fail(
+                    e,
+                    latency_ms=latency_ms,
+                    retries=attempt,
+                    operation=operation_name,
+                )
+        
+        # Max retries exhausted
+        latency_ms = (time.time() - start_time) * 1000
+        error = last_error or RuntimeError(f"Max retries exceeded for {operation_name}")
+        return OperationResult.fail(
+            error,
+            latency_ms=latency_ms,
+            retries=KALSHI_MAX_RETRIES,
+            operation=operation_name,
+        )
+    
+    def get_circuit_status(self) -> Dict[str, Any]:
+        """Get circuit breaker status for monitoring."""
+        return self._circuit_breaker.get_stats()
+    
+    # ------------------------------------------------------------------------
     # Market Data
     # ------------------------------------------------------------------------
     
     async def list_markets(self, filter_params: Optional[MarketFilter] = None) -> List[EventMarket]:
-        """List Kalshi markets."""
-        filter_params = filter_params or MarketFilter()
+        """List Kalshi markets.
         
-        try:
-            url = f"{self.config.base_url}/markets"
-            params = {"limit": filter_params.limit, "status": "active" if filter_params.active_only else None}
-            
-            if filter_params.category:
-                params["category"] = filter_params.category
-            
-            response = await self._http_client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            markets = []
-            for market_data in data.get("markets", []):
-                market = self._parse_market(market_data)
-                if market:
-                    markets.append(self._to_event_market(market))
-            
-            return markets
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to list Kalshi markets: {e}")
-            return []
+        Returns empty list on failure for backward compatibility.
+        Use list_markets_result() for explicit error handling.
+        """
+        result = await self.list_markets_result(filter_params)
+        return result.unwrap_or([])
+    
+    async def list_markets_result(
+        self, filter_params: Optional[MarketFilter] = None
+    ) -> OperationResult[List[EventMarket]]:
+        """List Kalshi markets with explicit result.
+        
+        Returns:
+            OperationResult containing list of markets or error details
+        """
+        filter_params = filter_params or MarketFilter()
+        params = {
+            "limit": filter_params.limit,
+            "status": "active" if filter_params.active_only else None,
+        }
+        if filter_params.category:
+            params["category"] = filter_params.category
+        
+        result = await self._request_with_resilience(
+            "GET", "/markets", params=params, operation_name="list_markets"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        markets = []
+        for market_data in result.data.get("markets", []):
+            market = self._parse_market(market_data)
+            if market:
+                markets.append(self._to_event_market(market))
+        
+        return OperationResult.ok(
+            markets,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     async def get_market(self, market_id: str) -> Optional[EventMarket]:
-        """Get market details by ticker."""
-        try:
-            url = f"{self.config.base_url}/markets/{market_id}"
-            response = await self._http_client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            
-            market = self._parse_market(data.get("market", data))
-            return self._to_event_market(market) if market else None
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to get Kalshi market {market_id}: {e}")
-            return None
+        """Get market details by ticker.
+        
+        Returns None on failure for backward compatibility.
+        Use get_market_result() for explicit error handling.
+        """
+        result = await self.get_market_result(market_id)
+        return result.unwrap_or(None)
+    
+    async def get_market_result(self, market_id: str) -> OperationResult[Optional[EventMarket]]:
+        """Get market details with explicit result."""
+        result = await self._request_with_resilience(
+            "GET", f"/markets/{market_id}", operation_name=f"get_market({market_id})"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        market = self._parse_market(result.data.get("market", result.data))
+        return OperationResult.ok(
+            self._to_event_market(market) if market else None,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     async def get_orderbook(self, market_id: str, outcome_id: Optional[str] = None) -> Optional[VenueOrderBook]:
-        """Get order book for a market."""
-        try:
-            url = f"{self.config.base_url}/markets/{market_id}/orderbook"
-            response = await self._http_client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            
-            return self._to_venue_orderbook(data, market_id)
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to get Kalshi orderbook: {e}")
-            return None
+        """Get order book for a market.
+        
+        Returns None on failure for backward compatibility.
+        Use get_orderbook_result() for explicit error handling.
+        """
+        result = await self.get_orderbook_result(market_id, outcome_id)
+        return result.unwrap_or(None)
+    
+    async def get_orderbook_result(
+        self, market_id: str, outcome_id: Optional[str] = None
+    ) -> OperationResult[Optional[VenueOrderBook]]:
+        """Get order book with explicit result."""
+        result = await self._request_with_resilience(
+            "GET", f"/markets/{market_id}/orderbook", operation_name=f"get_orderbook({market_id})"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        return OperationResult.ok(
+            self._to_venue_orderbook(result.data, market_id),
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     # ------------------------------------------------------------------------
     # Trading
     # ------------------------------------------------------------------------
     
     async def place_order(self, order: VenueOrder) -> Optional[PlacedOrder]:
-        """Place order on Kalshi."""
-        try:
-            url = f"{self.config.base_url}/orders"
-            
-            # Convert to Kalshi format
-            kalshi_order = {
-                "ticker": order.market_id,
-                "action": order.side,  # "buy" or "sell"
-                "side": order.outcome_id or "yes",  # "yes" or "no"
-                "count": int(order.size),
-                "type": order.order_type,  # "limit" or "market"
-                "client_order_id": order.client_order_id or f"merid_{datetime.now().timestamp()}"
-            }
-            
-            if order.order_type == "limit" and order.price:
-                # Kalshi prices are in cents (0-100)
-                kalshi_order["price"] = int(order.price * 100)
-            
-            response = await self._http_client.post(url, json=kalshi_order)
-            response.raise_for_status()
-            data = response.json()
-            
-            return self._to_placed_order(data.get("order", data))
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to place Kalshi order: {e}")
-            return None
+        """Place order on Kalshi.
+        
+        Returns None on failure for backward compatibility.
+        Use place_order_result() for explicit error handling.
+        """
+        result = await self.place_order_result(order)
+        return result.unwrap_or(None)
+    
+    async def place_order_result(self, order: VenueOrder) -> OperationResult[Optional[PlacedOrder]]:
+        """Place order with explicit result."""
+        # Convert to Kalshi format
+        kalshi_order = {
+            "ticker": order.market_id,
+            "action": order.side,
+            "side": order.outcome_id or "yes",
+            "count": int(order.size),
+            "type": order.order_type,
+            "client_order_id": order.client_order_id or f"merid_{datetime.now().timestamp()}"
+        }
+        
+        if order.order_type == "limit" and order.price:
+            kalshi_order["price"] = int(order.price * 100)
+        
+        result = await self._request_with_resilience(
+            "POST", "/orders", json_data=kalshi_order, operation_name="place_order"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        return OperationResult.ok(
+            self._to_placed_order(result.data.get("order", result.data)),
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     async def cancel_order(self, order_id: str, market_id: Optional[str] = None) -> bool:
-        """Cancel an order."""
-        try:
-            url = f"{self.config.base_url}/orders/{order_id}"
-            response = await self._http_client.delete(url)
-            response.raise_for_status()
-            return True
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to cancel Kalshi order: {e}")
-            return False
+        """Cancel an order.
+        
+        Returns False on failure for backward compatibility.
+        Use cancel_order_result() for explicit error handling.
+        """
+        result = await self.cancel_order_result(order_id, market_id)
+        return result.success
+    
+    async def cancel_order_result(
+        self, order_id: str, market_id: Optional[str] = None
+    ) -> OperationResult[bool]:
+        """Cancel order with explicit result."""
+        result = await self._request_with_resilience(
+            "DELETE", f"/orders/{order_id}", operation_name=f"cancel_order({order_id})"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        return OperationResult.ok(
+            True,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     async def get_order(self, order_id: str, market_id: Optional[str] = None) -> Optional[PlacedOrder]:
-        """Get order status."""
-        try:
-            url = f"{self.config.base_url}/orders/{order_id}"
-            response = await self._http_client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            
-            return self._to_placed_order(data.get("order", data))
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to get Kalshi order: {e}")
-            return None
+        """Get order status.
+        
+        Returns None on failure for backward compatibility.
+        Use get_order_result() for explicit error handling.
+        """
+        result = await self.get_order_result(order_id, market_id)
+        return result.unwrap_or(None)
+    
+    async def get_order_result(
+        self, order_id: str, market_id: Optional[str] = None
+    ) -> OperationResult[Optional[PlacedOrder]]:
+        """Get order status with explicit result."""
+        result = await self._request_with_resilience(
+            "GET", f"/orders/{order_id}", operation_name=f"get_order({order_id})"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        return OperationResult.ok(
+            self._to_placed_order(result.data.get("order", result.data)),
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     async def get_open_orders(self, market_id: Optional[str] = None) -> List[PlacedOrder]:
-        """Get open orders."""
-        try:
-            url = f"{self.config.base_url}/orders"
-            params = {"status": "open"}
-            if market_id:
-                params["ticker"] = market_id
-                
-            response = await self._http_client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            orders = []
-            for order_data in data.get("orders", []):
-                order = self._to_placed_order(order_data)
-                if order:
-                    orders.append(order)
-            
-            return orders
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to get Kalshi open orders: {e}")
-            return []
+        """Get open orders. Returns empty list on failure."""
+        result = await self.get_open_orders_result(market_id)
+        return result.unwrap_or([])
+    
+    async def get_open_orders_result(
+        self, market_id: Optional[str] = None
+    ) -> OperationResult[List[PlacedOrder]]:
+        """Get open orders with explicit result."""
+        params = {"status": "open"}
+        if market_id:
+            params["ticker"] = market_id
+        
+        result = await self._request_with_resilience(
+            "GET", "/orders", params=params, operation_name="get_open_orders"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        orders = []
+        for order_data in result.data.get("orders", []):
+            order = self._to_placed_order(order_data)
+            if order:
+                orders.append(order)
+        
+        return OperationResult.ok(
+            orders,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     # ------------------------------------------------------------------------
     # Account Data
     # ------------------------------------------------------------------------
     
     async def get_positions(self) -> List[VenuePosition]:
-        """Get positions."""
-        try:
-            url = f"{self.config.base_url}/portfolio/positions"
-            response = await self._http_client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            
-            positions = []
-            for pos_data in data.get("positions", []):
-                position = self._parse_position(pos_data)
-                if position:
-                    positions.append(self._to_venue_position(position))
-            
-            return positions
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to get Kalshi positions: {e}")
-            return []
+        """Get positions. Returns empty list on failure."""
+        result = await self.get_positions_result()
+        return result.unwrap_or([])
+    
+    async def get_positions_result(self) -> OperationResult[List[VenuePosition]]:
+        """Get positions with explicit result."""
+        result = await self._request_with_resilience(
+            "GET", "/portfolio/positions", operation_name="get_positions"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        positions = []
+        for pos_data in result.data.get("positions", []):
+            position = self._parse_position(pos_data)
+            if position:
+                positions.append(self._to_venue_position(position))
+        
+        return OperationResult.ok(
+            positions,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     async def get_trades(self, limit: int = 100) -> List[VenueTrade]:
-        """Get trade history."""
-        try:
-            url = f"{self.config.base_url}/portfolio/trades"
-            params = {"limit": limit}
-            
-            response = await self._http_client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            trades = []
-            for trade_data in data.get("trades", []):
-                trade = self._parse_trade(trade_data)
-                if trade:
-                    trades.append(self._to_venue_trade(trade))
-            
-            return trades
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to get Kalshi trades: {e}")
-            return []
+        """Get trade history. Returns empty list on failure."""
+        result = await self.get_trades_result(limit)
+        return result.unwrap_or([])
+    
+    async def get_trades_result(self, limit: int = 100) -> OperationResult[List[VenueTrade]]:
+        """Get trade history with explicit result."""
+        result = await self._request_with_resilience(
+            "GET", "/portfolio/trades", params={"limit": limit}, operation_name="get_trades"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        trades = []
+        for trade_data in result.data.get("trades", []):
+            trade = self._parse_trade(trade_data)
+            if trade:
+                trades.append(self._to_venue_trade(trade))
+        
+        return OperationResult.ok(
+            trades,
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     async def get_balance(self) -> Dict[str, Decimal]:
-        """Get account balance."""
-        try:
-            url = f"{self.config.base_url}/portfolio/balance"
-            response = await self._http_client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            
-            balance = data.get("balance", {})
-            return {
-                "USD": Decimal(str(balance.get("balance", 0))) / 100,  # Convert cents to dollars
+        """Get account balance. Returns zeros on failure."""
+        result = await self.get_balance_result()
+        return result.unwrap_or({"USD": Decimal("0"), "locked": Decimal("0")})
+    
+    async def get_balance_result(self) -> OperationResult[Dict[str, Decimal]]:
+        """Get account balance with explicit result."""
+        result = await self._request_with_resilience(
+            "GET", "/portfolio/balance", operation_name="get_balance"
+        )
+        
+        if not result.success:
+            return OperationResult.fail(
+                result.error,
+                latency_ms=result.latency_ms,
+                retries=result.retries,
+            )
+        
+        balance = result.data.get("balance", {})
+        return OperationResult.ok(
+            {
+                "USD": Decimal(str(balance.get("balance", 0))) / 100,
                 "locked": Decimal(str(balance.get("locked_balance", 0))) / 100
-            }
-            
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.error(f"Failed to get Kalshi balance: {e}")
-            return {"USD": Decimal("0"), "locked": Decimal("0")}
+            },
+            latency_ms=result.latency_ms,
+            retries=result.retries,
+        )
     
     # ------------------------------------------------------------------------
     # Helpers

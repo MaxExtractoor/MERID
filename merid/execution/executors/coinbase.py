@@ -10,7 +10,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from merid.execution.base import Quote, Position, TradeResult, TradeSideLiteral
-from merid.execution.http_base import HTTPExecutor
+from merid.execution.http_base import HTTPExecutor, ExecutionError
 
 
 class CoinbaseExecutor(HTTPExecutor):
@@ -117,7 +117,7 @@ class CoinbaseExecutor(HTTPExecutor):
                 tx_id=data.get("id"),
                 metadata={"order_id": data.get("id")},
             )
-        except (ConnectionError, RuntimeError, ValueError, asyncio.TimeoutError) as e:
+        except (ConnectionError, RuntimeError, ValueError, asyncio.TimeoutError, ExecutionError) as e:
             return TradeResult(
                 success=False,
                 venue=self.venue,

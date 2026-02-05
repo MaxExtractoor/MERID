@@ -29,6 +29,7 @@ class AssertionSeverity(Enum):
 
 class AssertionCategory(Enum):
     """High-level categories for assertions."""
+    CORE = "core"
     REALITY = "reality"
     RISK = "risk"
     EXECUTION = "execution"

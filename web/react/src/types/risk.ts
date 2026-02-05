@@ -2,6 +2,8 @@ export type RiskStatus = 'GOOD' | 'WARNING' | 'BAD' | 'UNKNOWN';
 
 export type LowercaseRiskStatus = 'good' | 'warning' | 'bad' | 'unknown';
 
+export type CircuitBreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+
 /**
  * Risk types for the Live Risk Strip
  *

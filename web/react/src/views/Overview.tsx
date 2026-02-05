@@ -1,6 +1,12 @@
 import { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import ConsoleViewer from '../components/ConsoleViewer';
+import CollapsibleConsole from '../components/CollapsibleConsole';
+import PredictionMarketsPanel from '../components/PredictionMarketsPanel';
+import AgentActivityPanel from '../components/AgentActivityPanel';
+import QuickActionsPanel from '../components/QuickActionsPanel';
+import LivePriceStream from '../components/LivePriceStream';
+import LivePortfolioValue from '../components/LivePortfolioValue';
+import { api } from '../services/api';
 import { 
   SystemHealthCard, 
   PnLCard, 
@@ -117,11 +123,8 @@ export default function Overview() {
       try {
         // Load portfolio summary
         try {
-          const summaryResponse = await fetch('/api/v1/portfolio/summary');
-          if (summaryResponse.ok) {
-            const summaryData = await summaryResponse.json();
-            setSummary(summaryData);
-          }
+          const summaryData = await api.getPortfolioSummary();
+          setSummary(summaryData as any);
         } catch (e) {
           // Fallback data
           setSummary({
@@ -135,11 +138,8 @@ export default function Overview() {
 
         // Load watchlist
         try {
-          const watchlistResponse = await fetch('/api/v1/prices/live?symbols=BTC-USD,ETH-USD,SOL-USD,AAPL,NVDA');
-          if (watchlistResponse.ok) {
-            const watchlistData = await watchlistResponse.json();
-            setWatchlist(watchlistData.prices || []);
-          }
+          const watchlistData = await api.getLivePrices(['BTC-USD', 'ETH-USD', 'SOL-USD', 'AAPL', 'NVDA']);
+          setWatchlist((watchlistData as any).prices || []);
         } catch (e) {
           // Fallback data
           setWatchlist([
@@ -153,11 +153,8 @@ export default function Overview() {
 
         // Load recent activity
         try {
-          const activityResponse = await fetch('/api/v1/orders/recent');
-          if (activityResponse.ok) {
-            const activityData = await activityResponse.json();
-            setRecentActivity(activityData.orders || []);
-          }
+          const activityData = await api.getRecentOrders();
+          setRecentActivity((activityData as any).orders || []);
         } catch (e) {
           // Fallback data
           setRecentActivity([
@@ -218,7 +215,13 @@ export default function Overview() {
         <RiskProtectionCard />
       </section>
 
-      {/* Second Row - Risk & Exposure */}
+      {/* Second Row - Live Portfolio & Prices */}
+      <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <LivePortfolioValue />
+        <LivePriceStream symbols={['BTC', 'ETH', 'SOL']} />
+      </section>
+
+      {/* Third Row - Risk & Exposure */}
       <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <ExposureBar />
         
@@ -287,8 +290,16 @@ export default function Overview() {
         </div>
       </section>
 
-      {/* Watchlist and Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* Agent Activity & Quick Actions */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2">
+          <AgentActivityPanel />
+        </div>
+        <QuickActionsPanel />
+      </div>
+
+      {/* Three Column Layout - Watchlist, Activity, Prediction Markets */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Watchlist */}
         <section className="bg-slate-900/70 rounded-xl p-6 border border-slate-800">
           <div className="mb-4">
@@ -331,13 +342,13 @@ export default function Overview() {
             ))}
           </div>
         </section>
+
+        {/* Prediction Markets */}
+        <PredictionMarketsPanel />
       </div>
 
-      {/* Console Viewer */}
-      <section>
-        <h2 className="text-lg font-semibold mb-3">API Console</h2>
-        <ConsoleViewer />
-      </section>
+      {/* Collapsible Console */}
+      <CollapsibleConsole />
     </div>
   );
 }

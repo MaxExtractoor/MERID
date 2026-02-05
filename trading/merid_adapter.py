@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Any
 import time
 import json
 
-from execution import get_execution_service, ExecutionService
+from merid.execution.router import ExecutionRouter, get_execution_router
 from utils.logger import get_logger
 
 logger = get_logger("trading.merid_adapter")
@@ -28,6 +28,7 @@ class MeridExecutionAdapter:
     
     def __init__(self, execution_service_url: str = "http://127.0.0.1:8012"):
         self.execution_service_url = execution_service_url
+        self._router: Optional[ExecutionRouter] = None
         self.account_id = "merid_sim_account"
         self.session: Optional[aiohttp.ClientSession] = None
         self._connected = False

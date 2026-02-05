@@ -17,6 +17,10 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 
+from utils.logger import get_logger
+
+logger = get_logger("trading.polymarket_trading_layer")
+
 
 @dataclass(frozen=True)
 class ChainlinkFeed:

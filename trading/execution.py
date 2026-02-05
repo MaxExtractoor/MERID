@@ -452,6 +452,14 @@ class ExecutionEngine:
         """
         if self.config.mode == ExecutionMode.DISABLED:
             raise ExecutionError("Execution is disabled")
+        
+        # Risk controller check - halt if kill switch triggered
+        try:
+            from merid.risk import can_trade
+            if not can_trade():
+                raise OrderRejectedError("Risk kill switch triggered - trading halted")
+        except ImportError:
+            pass  # Risk module not available, continue without check
 
         order_id = str(uuid.uuid4())
         latency_metadata = {

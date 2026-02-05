@@ -14,7 +14,7 @@ asgi-correlation-id==4.3.1
 
 # Web & HTTP
 httpx==0.28.1
-aiohttp==3.11.11
+aiohttp==3.10.11
 requests==2.32.3
 
 # Database & Storage
@@ -27,7 +27,7 @@ eth-account==0.13.7
 
 # Machine Learning & RL
 torch==2.5.1
-numpy==2.2.1
+numpy==1.24.3
 stable-baselines3==2.4.0
 ray[rllib]==2.40.0
 gymnasium==1.0.0
@@ -57,12 +57,15 @@ tweepy==4.14.0
 ccxt==4.4.42
 
 # Polymarket Integration
-polymarket-clob==0.1.0
+py-clob-client==0.1.0
 gql==3.5.0
 websockets==13.1
 
 # Task Scheduling (Optional)
 apache-airflow==2.10.4
+
+# Alpaca Trade API
+alpaca-trade-api>=2.3.0
 
 # Testing
 pytest==8.3.4
@@ -163,14 +166,104 @@ mkdocs==1.6.1
 mkdocs-material==9.5.47
 
 # Resilience & Circuit Breakers (NEW for Gate 3)
-circuit-breaker==2.0.1
-opentelemetry-api==1.21.0
-opentelemetry-sdk==1.21.0
+circuitbreaker==2.1.3
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
 opentelemetry-exporter-jaeger==1.21.0
 opentelemetry-instrumentation-requests==0.42b0
 opentelemetry-instrumentation-logging==0.42b0
 opentelemetry-instrumentation-fastapi==0.42b0
-opentelemetry-propagator-grpc==1.21.0
+# opentelemetry-propagator-grpc==1.21.0  # Package does not exist
+
+# Swarm Intelligence & Multi-Agent Systems (NEW)
+swarm==0.0.2
+swarms>=6.0.0
+crewai==0.1.0
+langgraph==0.0.50
+langchain>=0.1.0
+langchain-openai>=0.0.5
+pyautogen>=0.2.0
+guidance>=0.1.0
+
+# Prompt Management & Optimization (NEW)
+promptflow>=1.0.0
+langsmith>=0.1.0
+promptfoo>=0.1.2
+instructor>=0.4.0
+outlines>=0.0.40
+lmql>=0.7.0
+deepeval>=0.21.0
+trulens>=0.25.0
+
+# Blockchain & Web3 (NEW)
+web3>=6.0.0
+solana>=0.30.0
+solders>=0.18.0
+moralis>=0.1.0
+uniswap-python>=0.6.0
+eth-account>=0.11.0
+ccxt>=4.0.0
+
+# Web Scraping & Sentiment Analysis (NEW)
+playwright>=1.40.0
+selenium>=4.15.0
+scrapy>=2.11.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+cloudscraper>=1.2.71
+praw>=7.7.0
+tweepy>=4.14.0
+snscrape>=0.7.0
+python-telegram-bot>=20.7
+aiogram>=3.2.0
+vaderSentiment>=3.3.2
+transformers>=4.36.0
+textblob>=0.17.1
+
+# Visualization & Streaming (NEW)
+plotly>=5.18.0
+bokeh>=3.3.0
+prometheus-client>=0.19.0
+elasticsearch>=8.11.0
+meilisearch>=0.28.0
+backtrader>=1.9.78
+zipline-reloaded>=3.0.3
+websockets>=12.0
+python-socketio>=5.10.0
+fastapi-socketio>=0.0.10
+
+# Workflow Orchestration & Agents (NEW)
+temporalio>=1.5.0
+prefect>=2.14.0
+dagster>=1.6.0
+apache-airflow>=2.8.0
+openai-swarm>=0.1.0
+# agent-swarm>=0.1.0  # Package does not exist
+# cadence>=0.1.0  # Package does not exist
+
+# Market Making (NEW)
+hummingbot>=1.20.0
+freqtrade>=2023.12.1
+hftbacktest>=0.1.0
+kalshi-python>=2.0.0
+# uniswap-sdk-py>=0.1.0  # Package does not exist
+# gnosis-conditional-tokens>=1.0.0  # Package does not exist
+# web3-amm>=0.1.0  # Package does not exist
+
+# Sniper & High-Velocity Trading (NEW)
+solana>=0.32.1
+# solana-py>=0.31.0  # Package does not exist (solana>=0.30.0 covers this)
+jupiter-python-sdk>=0.0.2.0
+solders>=0.21.1
+ccxt>=4.2.0
+# pumpdotfun-sdk>=0.1.1  # Package does not exist
+# dexscreener-api>=0.1.0  # Package does not exist
+# rugcheck-api>=0.1.0  # Package does not exist
+
+# US-Compliant Trading Venues (NEW)
+alpaca-py>=0.15.0      # US stocks/ETFs/crypto (paper + live)
+ib_insync>=0.9.71      # IBKR futures/options/FX
+kalshi-python>=2.0.0   # CFTC-regulated prediction markets
 
 # License: MIT
 # All packages are production-ready and actively maintained

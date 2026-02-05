@@ -6,9 +6,11 @@ import { formatCurrency, formatPercent, formatDateTime } from "../utils/formatte
 import MetricCard from "../components/MetricCard";
 import StatusIndicator from "../components/StatusIndicator";
 import DataTableEnhanced from "../components/DataTableEnhanced";
+import SwarmPanel from "../components/SwarmPanel";
+import ExplainabilityPanel from "../components/ExplainabilityPanel";
 import { RiskStatus } from "../types/risk";
 import { LiveAgentHealthPanel } from "./LiveAgentHealthPanel";
-import { Activity, HeartPulse } from "lucide-react";
+import { Activity, HeartPulse, Brain } from "lucide-react";
 
 interface Agent {
   id: string;
@@ -57,7 +59,7 @@ interface AgentDetail {
 export default function Agents() {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [showDetail, setShowDetail] = useState(false);
-  const [activeTab, setActiveTab] = useState<"fleet" | "health">("fleet");
+  const [activeTab, setActiveTab] = useState<"fleet" | "health" | "explainability">("fleet");
 
   // Fetch agents data
   const { data: agents } = useApiData<Agent[]>(
@@ -350,14 +352,30 @@ export default function Agents() {
             <HeartPulse className="w-4 h-4" />
             Health
           </button>
+          <button
+            onClick={() => setActiveTab("explainability")}
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === "explainability"
+                ? "border-blue-500 text-blue-400"
+                : "border-transparent text-slate-400 hover:text-slate-300"
+            }`}
+          >
+            <Brain className="w-4 h-4" />
+            Explainability
+          </button>
         </div>
       </div>
 
       {/* Tab Content */}
       {activeTab === "health" ? (
         <LiveAgentHealthPanel />
+      ) : activeTab === "explainability" ? (
+        <ExplainabilityPanel />
       ) : (
         <>
+          {/* Swarm Intelligence Panel */}
+          <SwarmPanel />
+
           {/* Summary Cards */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <MetricCard

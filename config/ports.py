@@ -2,25 +2,32 @@
 Port configuration for MERID swarm architecture.
 
 Separates concerns:
+- Backend API: Main FastAPI application
+- Frontend: React dashboard
 - User UI: Public-facing dashboard
 - Agent Mesh: Internal agent communication
 - Ops Admin: System control (localhost only)
 - Telemetry: Metrics export (localhost only)
 """
 
+import os
 from typing import Dict
 
-# Port assignments
-USER_UI_PORT = 3000
-AGENT_MESH_PORT = 8080
-OPS_ADMIN_PORT = 9090
-TELEMETRY_PORT = 9091
+# Port assignments (read from env with fallbacks)
+BACKEND_PORT = int(os.getenv("MERID_BACKEND_PORT", "8000"))
+FRONTEND_PORT = int(os.getenv("MERID_FRONTEND_PORT", "5173"))
+USER_UI_PORT = int(os.getenv("MERID_USER_UI_PORT", "3000"))
+AGENT_MESH_PORT = int(os.getenv("MERID_AGENT_MESH_PORT", "8080"))
+OPS_ADMIN_PORT = int(os.getenv("MERID_OPS_PORT", "9090"))
+TELEMETRY_PORT = int(os.getenv("MERID_TELEMETRY_PORT", "9091"))
 
 # Legacy port (to be deprecated)
 LEGACY_PORT = 8001
 
 # Port map
 PORTS: Dict[str, int] = {
+    "backend": BACKEND_PORT,
+    "frontend": FRONTEND_PORT,
     "user_ui": USER_UI_PORT,
     "agent_mesh": AGENT_MESH_PORT,
     "ops_admin": OPS_ADMIN_PORT,
@@ -31,7 +38,9 @@ PORTS: Dict[str, int] = {
 # Firewall/binding configuration
 # 0.0.0.0 = public, 127.0.0.1 = localhost only
 BINDINGS: Dict[str, str] = {
-    "user_ui": "0.0.0.0",      # Public access
+    "backend": "0.0.0.0",       # Public access - main API
+    "frontend": "0.0.0.0",      # Public access - React dashboard
+    "user_ui": "0.0.0.0",       # Public access
     "agent_mesh": "127.0.0.1",  # Localhost only - agents should not be exposed
     "ops_admin": "127.0.0.1",   # Localhost only - admin functions
     "telemetry": "127.0.0.1",   # Localhost only - Prometheus scrapes locally

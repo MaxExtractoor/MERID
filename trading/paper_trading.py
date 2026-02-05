@@ -19,6 +19,15 @@ from trading.mode_controller import get_trading_mode_controller
 logger = get_logger("trading.paper_trading")
 
 
+def _get_risk_controller():
+    """Lazy import risk controller to avoid circular imports."""
+    try:
+        from merid.risk import risk_controller
+        return risk_controller
+    except ImportError:
+        return None
+
+
 # Global singleton reference so FastAPI hot reloads don't lose state
 _paper_engine: Optional["PaperTradingEngine"] = None
 
@@ -367,6 +376,21 @@ class PaperTradingEngine:
         market_id: Optional[str] = None
     ) -> PaperOrder:
         """Place paper trading order."""
+        # Check risk controller before placing order
+        risk_ctrl = _get_risk_controller()
+        if risk_ctrl and not risk_ctrl.can_trade():
+            logger.warning(f"Order rejected - risk kill switch triggered for {user_id}")
+            order = PaperOrder(
+                order_id=f"rejected_{int(time.time())}",
+                user_id=user_id,
+                asset=asset,
+                side=side,
+                order_type=PaperOrderType[order_type.upper()],
+                size_usd=size_usd,
+                status=PaperOrderStatus.REJECTED,
+            )
+            return order
+        
         portfolio = self.get_portfolio(user_id)
         
         # Generate order ID
@@ -410,8 +434,26 @@ class PaperTradingEngine:
         if order.market_type == "perp":
             current_price = self.current_prices.get(order.asset, 0.0)
         else:
-            # For prediction markets, use probability as price
-            current_price = order.price or 0.5
+            # For prediction markets, get real price from simulation aggregator
+            try:
+                from monitoring.simulation_prediction_markets import get_simulation_aggregator
+                aggregator = get_simulation_aggregator()
+                markets = aggregator.get_all_markets()
+                
+                # Find matching market
+                market = next((m for m in markets if m.market_id == order.market_id), None)
+                
+                if market:
+                    # Use real probability as price
+                    current_price = market.yes_price if order.side == "yes" else market.no_price
+                    logger.info(f"Using real prediction market price: {current_price} for {order.market_id}")
+                else:
+                    # Fallback to order price or 0.5
+                    current_price = order.price or 0.5
+                    logger.warning(f"Market {order.market_id} not found, using fallback price: {current_price}")
+            except Exception as e:
+                logger.error(f"Failed to get prediction market price: {e}")
+                current_price = order.price or 0.5
         
         if current_price == 0.0:
             order.status = PaperOrderStatus.REJECTED
@@ -512,6 +554,11 @@ class PaperTradingEngine:
         elif pnl < 0:
             portfolio.losing_trades += 1
         
+        # Record P&L with risk controller (may trigger daily loss kill)
+        risk_ctrl = _get_risk_controller()
+        if risk_ctrl:
+            risk_ctrl.record_pnl(pnl)
+        
         # Mark position as closed
         position.closed_at = time.time()
         position.realized_pnl = pnl
@@ -563,9 +610,51 @@ class PaperTradingEngine:
         position.unrealized_pnl = pnl
         return pnl
     
+    def _check_pending_orders(self):
+        """Check if any pending orders should be triggered based on current prices."""
+        for portfolio in self.portfolios.values():
+            triggered_orders = []
+            
+            for order_id, order in list(portfolio.orders.items()):
+                if order.status != PaperOrderStatus.PENDING:
+                    continue
+                
+                current_price = self.current_prices.get(order.asset, 0)
+                if current_price == 0:
+                    continue
+                
+                should_trigger = False
+                
+                # Check limit orders
+                if order.order_type == PaperOrderType.LIMIT:
+                    if order.side in ["long", "yes"] and current_price <= (order.price or 0):
+                        should_trigger = True
+                    elif order.side in ["short", "no"] and current_price >= (order.price or 0):
+                        should_trigger = True
+                
+                # Check stop-loss orders
+                elif order.order_type == PaperOrderType.STOP_LOSS:
+                    if order.side in ["long", "yes"] and current_price <= (order.stop_price or 0):
+                        should_trigger = True
+                    elif order.side in ["short", "no"] and current_price >= (order.stop_price or 0):
+                        should_trigger = True
+                
+                if should_trigger:
+                    triggered_orders.append((order_id, order))
+            
+            # Execute triggered orders
+            for order_id, order in triggered_orders:
+                logger.info(f"Triggering pending order: {order_id} at price {self.current_prices.get(order.asset)}")
+                self._execute_order(order, portfolio)
+                if order_id in portfolio.orders:
+                    del portfolio.orders[order_id]
+    
     def update_prices(self, prices: Dict[str, float]):
-        """Update current market prices."""
+        """Update current market prices and check pending orders."""
         self.current_prices.update(prices)
+        
+        # Check if any pending orders should be triggered
+        self._check_pending_orders()
         
         # Update all open positions
         price_changed = False
@@ -682,6 +771,14 @@ def paper_trading_handler(action_type: str, parameters: Dict) -> Dict:
             "paper_executed": False,
             "error": f"Unknown action type: {action_type}",
         }
+
+
+def get_paper_trading_engine() -> PaperTradingEngine:
+    """Get or create the global paper trading engine instance."""
+    global _paper_engine
+    if _paper_engine is None:
+        _paper_engine = PaperTradingEngine()
+    return _paper_engine
 
 
 def register_with_pipeline() -> None:

@@ -34,9 +34,16 @@ class EventStream:
             self._listeners.discard(queue)
 
     async def publish(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        from utils.logger import get_logger
+        logger = get_logger("observability.event_stream")
+        
         record = EventRecord(event_type=event_type, payload=payload or {})
         async with self._lock:
+            listener_count = len(self._listeners)
+            logger.debug(f"Publishing event: type={event_type}, listeners={listener_count}, payload_keys={list((payload or {}).keys())}")
+            
             stale: Set[asyncio.Queue] = set()
+            published_count = 0
             for queue in list(self._listeners):
                 try:
                     if queue.full():
@@ -45,10 +52,15 @@ class EventStream:
                         except asyncio.QueueEmpty:
                             pass
                     queue.put_nowait(record)
-                except Exception:
+                    published_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to publish to queue: {e}")
                     stale.add(queue)
+            
             for queue in stale:
                 self._listeners.discard(queue)
+            
+            logger.debug(f"Event published to {published_count}/{listener_count} listeners")
 
 
 _stream: EventStream | None = None

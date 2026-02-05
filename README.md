@@ -1,5 +1,9 @@
 # MERID v2.0
 
+[![Tests](https://github.com/merid/merid/actions/workflows/tests.yml/badge.svg)](https://github.com/merid/merid/actions/workflows/tests.yml)
+[![TradingGuard Coverage](https://img.shields.io/badge/TradingGuard-66%25-yellow)](https://github.com/merid/merid/blob/main/.github/workflows/tests.yml)
+[![Circuit Breaker](https://img.shields.io/badge/Circuit%20Breaker-Active-emerald)](./RISK_POLICY.md)
+
 ## Sovereign, Local-First Decision Organism
 
 A hardened control room for an AI organism with unrestricted internal cognition but strictly constrained execution. MERID is not a chatbot or trading bot—it's an "adult" system governed by immutable Charter/invariants, designed to evolve timelessly under human primacy.
@@ -118,58 +122,17 @@ Control room mixer console with:
 - Status indicators (secure, active, quarantined)
 - Hostile-by-default threat model
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-=======
-### 8. Unified Trading Suite (2026 build)
-
-- **Runtime config service** with global mode + per-venue overrides (Coinbase, Pump.fun, Paper, Kalshi).
-- **Execution router** that treats humans and swarm agents identically with explainability + guard enforcement.
-- **Adapter registry** with live Coinbase spot adapter, Pump.fun memecoin adapter, paper fallback, and a Kalshi balance adapter built on the official SDK.
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 ### 8. Unified Trading Suite (2026 build)
 
 - **Runtime config service** with global mode + per-venue overrides (Coinbase, Pump.fun, Paper, Kalshi, Alpaca).
 - **Execution router** that treats humans and swarm agents identically with explainability + guard enforcement.
 - **Adapter registry** with live Coinbase spot adapter, Pump.fun memecoin adapter, paper fallback, Kalshi balance adapter, and Alpaca equities execution adapter (official SDKs for each venue).
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 - **Trading Arena UI** (`/trading-arena`) exposing runtime controls, manual order ticket, live intent/result stream, and guard/explainability feed.
 - **Spectator/backtest telemetry** surfaced via REST + WebSocket so dashboards can subscribe to live trading intents/results.
 
 > **Tip:** Set `MERID_ENABLE_TRADING_SUITE=true` and `MERID_ALLOW_LIVE_TRADES=true` in your environment when you are ready to route live orders. Leave spectator mode on (`MERID_SPECTATOR_MODE=true`) for read-only rehearsals.
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-### 8. Stage 5 Data Feeds (Backend + Frontend)
+### 9. Stage 5 Data Feeds (Backend + Frontend)
 
 #### Observability Dashboards
 
@@ -237,38 +200,11 @@ flutter build apk --release  # Android
 flutter build ios --release  # iOS
 ```
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 ```bash
-# Python backend dependencies (includes Coinbase, Pump.fun, and Kalshi adapters)
+# Python backend dependencies (includes Coinbase, Pump.fun, Kalshi, and Alpaca adapters)
 pip install -r requirements.txt
 ```
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 ### Fonts
 
 Download **JetBrains Mono** and place TTF files in `assets/fonts/`:
@@ -321,20 +257,6 @@ The app polls `/api/v1/blocks/latest` every ~20 seconds and renders:
 
 Hot reload is fully supported, making it ideal for rapid UI iterations on the ControlStation panel.
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 #### Trading Arena
 
 - Navigate to `http://127.0.0.1:8001/trading-arena` when the FastAPI server is running.
@@ -354,31 +276,10 @@ curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/venues/coinbase \
   -H "Content-Type: application/json" \
   -d '{"mode":"live","credentials_present":true}'
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/venues/alpaca \
   -H "Content-Type: application/json" \
   -d '{"mode":"live","credentials_present":true}'
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 # Submit an order (paper fallback when guards block live execution)
 curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/order \
   -H "Content-Type: application/json" \
@@ -400,18 +301,6 @@ print("Available cash:", balance["balance"])
 - Optional: override `KALSHI_API_HOST` if you need a different Kalshi environment.
 - The Kalshi adapter currently exposes balances/telemetry; upcoming work will enable full execution routing through the unified router.
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 ##### Alpaca SDK integration
 
 ```python
@@ -426,16 +315,6 @@ print("Equity buying power:", account.get("buying_power"))
 - Set `ALPACA_API_KEY` / `ALPACA_API_SECRET` (or `MERID_ALPACA_*`) and optionally `ALPACA_ENVIRONMENT=live|paper` and `ALPACA_BASE_URL`.
 - The Alpaca adapter supports live market/limit orders for equities; guards still enforce notional/risk rules and will fall back to paper execution when blocked.
 
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
-<<<<<<< C:\Dev\MERID\README.md
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\README.md
 ---
 
 ## Usage
@@ -536,6 +415,83 @@ lib/
 
 - **MERID**: Invariants, security, narrative immunity, unbreakable
 - **MoonDev**: Trading crew, no governance, market-focused only
+
+---
+
+## Developer Workflow
+
+### Quick Start
+
+```bash
+# Clone and install
+git clone https://github.com/merid/merid.git
+cd merid
+pip install -r requirements.txt
+
+# Run sanity check (validates environment, imports, tests, demo)
+make sanity
+
+# Or run individual components:
+make run-paper-demo   # Paper trading demo (no API keys needed)
+make smoke-test       # Run smoke tests
+make coverage         # Full test coverage report
+```
+
+### Pre-Commit Checklist
+
+Before committing, run the sanity check:
+
+```bash
+make sanity
+```
+
+This validates:
+- ✓ Python version (>= 3.10)
+- ✓ Environment variables
+- ✓ Core module imports
+- ✓ Coverage floor (18% minimum)
+- ✓ Smoke tests (9 tests)
+- ✓ Paper trading demo
+
+### Coverage Policy
+
+- **Floor**: 25% (enforced by `.coveragerc`)
+- **Target**: 85% for new modules
+- **Regression rule**: Any PR that lowers coverage must add tests or justify a new exception
+
+See `tests/MERID_COVERAGE_BACKLOG.md` for documented exceptions and priorities.
+
+### Risk Management & Resilience
+
+MERID includes production-grade safety controls:
+
+- **Kill Switches**: Global halt, daily loss limit, position limits (`merid/risk/`)
+- **Circuit Breakers**: Per-venue failure isolation (`merid/resilience/`)
+- **Retry with Backoff**: Automatic retry for transient failures
+- **Config Validation**: Pre-flight checks before trading
+
+```bash
+# Check risk status
+python -c "from merid.risk import get_risk_status; print(get_risk_status())"
+
+# Emergency stop
+python -c "from merid.risk import emergency_stop; emergency_stop('Manual halt')"
+```
+
+See `docs/GO_LIVE_CHECKLIST.md` for the complete go-live procedure.
+
+### Paper Trading
+
+Paper trading works without API keys:
+
+```bash
+python scripts/run_paper_demo.py
+```
+
+For live API integration, set optional environment variables:
+- `ALPACA_API_KEY` / `ALPACA_API_SECRET` - Alpaca equities
+- `KRAKEN_API_KEY` / `KRAKEN_API_SECRET` - Kraken crypto
+- `COINBASE_API_KEY` / `COINBASE_API_SECRET` - Coinbase
 
 ---
 

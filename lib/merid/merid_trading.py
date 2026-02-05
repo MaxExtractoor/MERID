@@ -1,4 +1,6 @@
-"""Compatibility shim to expose local trading modules under a single import name.
+"""DEPRECATED / UNUSED - Not integrated into main system
+
+Compatibility shim to expose local trading module to ensure trading imports work correctly.
 
 This avoids conflicts with an existing top-level `trading` package in the repo
 root during local tests and CI. We load the local module files directly to

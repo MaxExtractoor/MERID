@@ -45,7 +45,7 @@ interface NotificationSettings {
 }
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<"preferences" | "trading" | "notifications">("preferences");
+  const [activeTab, setActiveTab] = useState<"preferences" | "trading" | "notifications" | "risk" | "agents">("preferences");
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
@@ -263,6 +263,26 @@ export default function Settings() {
           >
             Notifications
           </button>
+          <button
+            onClick={() => setActiveTab("risk")}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              activeTab === "risk"
+                ? "bg-blue-600 text-white"
+                : "text-slate-400 hover:text-white hover:bg-slate-800"
+            }`}
+          >
+            Risk Parameters
+          </button>
+          <button
+            onClick={() => setActiveTab("agents")}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              activeTab === "agents"
+                ? "bg-blue-600 text-white"
+                : "text-slate-400 hover:text-white hover:bg-slate-800"
+            }`}
+          >
+            Agent Config
+          </button>
         </div>
       </div>
 
@@ -373,8 +393,10 @@ export default function Settings() {
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Default Order Size</label>
+                <label htmlFor="default-order-size" className="block text-sm font-medium text-slate-400 mb-2">Default Order Size</label>
                 <input
+                  id="default-order-size"
+                  name="defaultOrderSize"
                   type="number"
                   title="Enter default order size"
                   placeholder="Default order size"
@@ -385,8 +407,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Max Leverage</label>
+                <label htmlFor="max-leverage" className="block text-sm font-medium text-slate-400 mb-2">Max Leverage</label>
                 <input
+                  id="max-leverage"
+                  name="maxLeverage"
                   type="number"
                   title="Enter maximum leverage"
                   placeholder="Max leverage"
@@ -406,8 +430,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Stop Loss (%)</label>
+                <label htmlFor="stop-loss" className="block text-sm font-medium text-slate-400 mb-2">Stop Loss (%)</label>
                 <input
+                  id="stop-loss"
+                  name="stopLoss"
                   type="number"
                   title="Enter stop loss percentage"
                   placeholder="Stop loss %"
@@ -421,8 +447,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Take Profit (%)</label>
+                <label htmlFor="take-profit" className="block text-sm font-medium text-slate-400 mb-2">Take Profit (%)</label>
                 <input
+                  id="take-profit"
+                  name="takeProfit"
                   type="number"
                   title="Enter take profit percentage"
                   placeholder="Take profit %"
@@ -436,8 +464,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Max Position Size</label>
+                <label htmlFor="max-position-size" className="block text-sm font-medium text-slate-400 mb-2">Max Position Size</label>
                 <input
+                  id="max-position-size"
+                  name="maxPositionSize"
                   type="number"
                   title="Enter maximum position size"
                   placeholder="Max position size"
@@ -600,6 +630,270 @@ export default function Settings() {
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
                   />
                   <span className="text-white">Weekly report</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Risk Parameters Tab */}
+        {activeTab === "risk" && (
+          <div className="space-y-6">
+            <h2 className="text-lg font-semibold text-white">Risk Management Parameters</h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label htmlFor="max-portfolio-risk" className="block text-sm font-medium text-slate-400 mb-2">Max Portfolio Risk (%)</label>
+                <input
+                  id="max-portfolio-risk"
+                  name="maxPortfolioRisk"
+                  type="number"
+                  min="1"
+                  max="100"
+                  defaultValue="25"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="25"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="max-position-size-risk" className="block text-sm font-medium text-slate-400 mb-2">Max Position Size (%)</label>
+                <input
+                  id="max-position-size-risk"
+                  name="maxPositionSizeRisk"
+                  type="number"
+                  min="1"
+                  max="50"
+                  defaultValue="10"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="10"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="stop-loss-default" className="block text-sm font-medium text-slate-400 mb-2">Stop Loss Default (%)</label>
+                <input
+                  id="stop-loss-default"
+                  name="stopLossDefault"
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="0.5"
+                  defaultValue="5"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="5"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="max-drawdown" className="block text-sm font-medium text-slate-400 mb-2">Max Drawdown Limit (%)</label>
+                <input
+                  id="max-drawdown"
+                  name="maxDrawdown"
+                  type="number"
+                  min="5"
+                  max="50"
+                  defaultValue="15"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="15"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="max-correlation" className="block text-sm font-medium text-slate-400 mb-2">Max Correlation</label>
+                <input
+                  id="max-correlation"
+                  name="maxCorrelation"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  defaultValue="0.7"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="0.7"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="var-confidence" className="block text-sm font-medium text-slate-400 mb-2">VaR Confidence Level (%)</label>
+                <input
+                  id="var-confidence"
+                  name="varConfidence"
+                  type="number"
+                  min="90"
+                  max="99"
+                  defaultValue="95"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="95"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <h3 className="text-md font-medium text-white">Risk Controls</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    defaultChecked
+                    className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                  />
+                  <span className="text-white">Enable automatic stop losses</span>
+                </label>
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    defaultChecked
+                    className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                  />
+                  <span className="text-white">Enable position size limits</span>
+                </label>
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    defaultChecked
+                    className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                  />
+                  <span className="text-white">Enable correlation checks</span>
+                </label>
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                  />
+                  <span className="text-white">Pause trading on high volatility</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Agent Config Tab */}
+        {activeTab === "agents" && (
+          <div className="space-y-6">
+            <h2 className="text-lg font-semibold text-white">Agent Configuration</h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label htmlFor="max-concurrent-agents" className="block text-sm font-medium text-slate-400 mb-2">Max Concurrent Agents</label>
+                <input
+                  id="max-concurrent-agents"
+                  name="maxConcurrentAgents"
+                  type="number"
+                  min="1"
+                  max="20"
+                  defaultValue="5"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="5"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="agent-timeout" className="block text-sm font-medium text-slate-400 mb-2">Agent Timeout (seconds)</label>
+                <input
+                  id="agent-timeout"
+                  name="agentTimeout"
+                  type="number"
+                  min="10"
+                  max="300"
+                  defaultValue="60"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="60"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="min-confidence" className="block text-sm font-medium text-slate-400 mb-2">Min Confidence Threshold</label>
+                <input
+                  id="min-confidence"
+                  name="minConfidence"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  defaultValue="0.6"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="0.6"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="consensus-threshold" className="block text-sm font-medium text-slate-400 mb-2">Consensus Threshold</label>
+                <input
+                  id="consensus-threshold"
+                  name="consensusThreshold"
+                  type="number"
+                  min="0.5"
+                  max="1"
+                  step="0.05"
+                  defaultValue="0.7"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="0.7"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="max-retries" className="block text-sm font-medium text-slate-400 mb-2">Max Retries</label>
+                <input
+                  id="max-retries"
+                  name="maxRetries"
+                  type="number"
+                  min="1"
+                  max="10"
+                  defaultValue="3"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="3"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="refresh-interval" className="block text-sm font-medium text-slate-400 mb-2">Refresh Interval (seconds)</label>
+                <input
+                  id="refresh-interval"
+                  name="refreshInterval"
+                  type="number"
+                  min="5"
+                  max="60"
+                  defaultValue="10"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  placeholder="10"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <h3 className="text-md font-medium text-white">Agent Features</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    defaultChecked
+                    className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                  />
+                  <span className="text-white">Enable swarm coordination</span>
+                </label>
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    defaultChecked
+                    className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                  />
+                  <span className="text-white">Enable decision explainability</span>
+                </label>
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                  />
+                  <span className="text-white">Auto-restart failed agents</span>
+                </label>
+                <label className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    defaultChecked
+                    className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
+                  />
+                  <span className="text-white">Log all agent decisions</span>
                 </label>
               </div>
             </div>
