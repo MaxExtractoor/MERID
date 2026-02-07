@@ -69,6 +69,49 @@ class Settings(BaseSettings):
     # =============================================================================
     MESSARI_API_KEY: Optional[str] = Field(default=None, description="Messari API key")
     ALPHA_VANTAGE_API_KEY: Optional[str] = Field(default=None, description="Alpha Vantage API key")
+    POLYGON_API_KEY: Optional[str] = Field(default=None, description="Polygon API key")
+    POLYGON_ACCESS_KEY_ID: Optional[str] = Field(default=None, description="Polygon S3 access key ID")
+    POLYGON_SECRET_ACCESS_KEY: Optional[str] = Field(default=None, description="Polygon S3 secret access key")
+    POLYGON_S3_ENDPOINT: Optional[str] = Field(default=None, description="Polygon S3 endpoint")
+    POLYGON_BUCKET: Optional[str] = Field(default=None, description="Polygon S3 bucket")
+    NEWS_API_KEY: Optional[str] = Field(default=None, description="NewsAPI key")
+    SERPER_API_KEY: Optional[str] = Field(default=None, description="Serper search API key")
+    FRED_API_KEY: Optional[str] = Field(default=None, description="FRED economic data API key")
+    FINNHUB_API_KEY: Optional[str] = Field(default=None, description="Finnhub API key")
+    FINNHUB_SECRET_KEY: Optional[str] = Field(default=None, description="Finnhub secret key")
+    THE_GRAPH_API_KEY: Optional[str] = Field(default=None, description="The Graph API key")
+    NANSEN_API_KEY: Optional[str] = Field(default=None, description="Nansen analytics API key")
+    
+    # =============================================================================
+    # BLOCKCHAIN & SOLANA
+    # =============================================================================
+    HELIUS_RPC_URL: Optional[str] = Field(default=None, description="Helius Solana RPC URL")
+    
+    # =============================================================================
+    # AI & MACHINE LEARNING
+    # =============================================================================
+    HUGGINGFACE_API_KEY: Optional[str] = Field(default=None, description="HuggingFace API key")
+    CLAUDE_SONNET_4: Optional[str] = Field(default=None, description="Anthropic Claude API key")
+    DEEPSEEK_API_KEY: Optional[str] = Field(default=None, description="DeepSeek API key")
+    OLLAMA_API_KEY: Optional[str] = Field(default=None, description="Ollama API key")
+    OPENAI_API_KEY: Optional[str] = Field(default=None, description="OpenAI API key")
+    OPEN_ROUTER_API_KEY: Optional[str] = Field(default=None, description="OpenRouter API key")
+    
+    # =============================================================================
+    # DATABASE & INFRASTRUCTURE
+    # =============================================================================
+    MONGODB_URI: Optional[str] = Field(default=None, description="MongoDB connection URI")
+    RAILWAY_API_TOKEN: Optional[str] = Field(default=None, description="Railway deployment token")
+    REDIS_API_USER_KEY: Optional[str] = Field(default=None, description="Redis Cloud user API key")
+    REDIS_API_ACCOUNT_KEY: Optional[str] = Field(default=None, description="Redis Cloud account API key")
+    
+    # =============================================================================
+    # COMMUNICATION (TWILIO)
+    # =============================================================================
+    TWILIO_SID: Optional[str] = Field(default=None, description="Twilio account SID")
+    TWILIO_TOKEN: Optional[str] = Field(default=None, description="Twilio auth token")
+    TWILIO_VERIFY_SERVICE_SID: Optional[str] = Field(default=None, description="Twilio Verify service SID")
+    TWILIO_PHONE: Optional[str] = Field(default=None, description="Twilio phone number")
     
     # =============================================================================
     # X/TWITTER API
@@ -92,11 +135,26 @@ class Settings(BaseSettings):
     # =============================================================================
     # CRYPTO EXCHANGE APIS
     # =============================================================================
+    BINANCE_API_KEY: Optional[str] = Field(default=None, description="Binance API key")
+    BINANCE_API_SECRET: Optional[str] = Field(default=None, description="Binance API secret")
+    COINBASE_API_KEY: Optional[str] = Field(default=None, description="Coinbase API key")
+    COINBASE_API_SECRET: Optional[str] = Field(default=None, description="Coinbase API secret")
+    KRAKEN_API_KEY: Optional[str] = Field(default=None, description="Kraken API key")
+    KRAKEN_PRIVATE_KEY: Optional[str] = Field(default=None, description="Kraken private key")
+    OKX_API_KEY: Optional[str] = Field(default=None, description="OKX API key")
+    OKX_SECRET_KEY: Optional[str] = Field(default=None, description="OKX secret key")
+    OKX_API_KEY_NAME: Optional[str] = Field(default=None, description="OKX API key name")
+    OKX_PERMISSIONS: Optional[str] = Field(default=None, description="OKX API permissions")
+    BYBIT_API_KEY: Optional[str] = Field(default=None, description="Bybit API key")
+    BYBIT_API_SECRET: Optional[str] = Field(default=None, description="Bybit API secret")
     ALPACA_API_KEY: Optional[str] = Field(default=None, description="Alpaca API key")
     ALPACA_API_SECRET: Optional[str] = Field(default=None, description="Alpaca API secret")
+    IBKR_PAPER_TRADING_USERNAME: Optional[str] = Field(default=None, description="IBKR paper trading username")
+    IBKR_PAPER_TRADING_ACCOUNT_NUMBER: Optional[str] = Field(default=None, description="IBKR paper trading account")
     KALSHI_API_KEY_ID: Optional[str] = Field(default=None, description="Kalshi API key ID")
     KALSHI_PRIVATE_KEY_PATH: Optional[str] = Field(default="change_me", description="Kalshi private key path")
     KALSHI_PRIVATE_KEY_PEM: Optional[str] = Field(default=None, description="Kalshi private key PEM")
+    KALSHI_API_HOST: Optional[str] = Field(default="https://api.elections.kalshi.com/trade-api/v2", description="Kalshi API host")
     
     # =============================================================================
     # TRADING MODE SETTINGS

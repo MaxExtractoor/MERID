@@ -1,5 +1,10 @@
 .env
+.env.backup
+.env.*
 .venv/
 __pycache__/
+*.pem
+kalshi_private_key.pem
+backups/
 logs/
 tmp/
