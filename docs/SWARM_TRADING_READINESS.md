@@ -43,8 +43,7 @@ production readiness requirements.
 ### 1.3 Agent-to-agent negotiation and conflict resolution — **2**
 
 - **Exists:** Risk agent VETO in consensus engine. `core/signal_provenance.py` tracks signal origins for conflict attribution. `core/trust_transparency.py` provides trust scoring. `core/negotiation_protocol.py` implements structured propose → counter → accept/reject lifecycle with `NegotiationSession`, `NegotiationMediator` (auto-resolve deadlocks via highest_confidence/last_proposal/initiator_wins strategies), timeout/expiration, state machine enforcement, and callback hooks. 26 tests in `tests/test_negotiation_protocol.py`.
-- **Missing:** Not yet wired into consensus engine as an alternative to VETO.
-- **Next:** Wire negotiation sessions into consensus engine for risk-agent disagreements.
+- **Done:** `_handle_veto()` in `core/consensus_engine.py` now attempts `NegotiationSession` + `NegotiationMediator` before hard-blocking. If negotiation resolves, constraints are applied and consensus continues.
 
 ### 1.4 Collective intelligence demonstrated — **2**
 
@@ -99,8 +98,7 @@ production readiness requirements.
 ### 3.3 Budget/risk limit enforcement — **2**
 
 - **Exists:** `SwarmConfig.max_daily_cost_usd` enforced in `submit_task()`. `core/automated_risk_controls.py` has 7 risk control types (position, drawdown, volatility, correlation, exposure, leverage, concentration). Budget exceeded → task rejected.
-- **Missing:** No per-agent budget isolation (all agents share one pool).
-- **Next:** Consider per-agent cost caps for multi-strategy deployments.
+- **Done:** `set_budget_cap()` + `cumulative_spend()` added to `AgentCreditLedger`. `check_budget()` now enforces 3-tier checks: balance, daily limit, and total budget cap per agent.
 
 **Section 3 total: 6/6**
 
@@ -142,8 +140,7 @@ production readiness requirements.
 ### 5.2 Agent activity dashboards — **2**
 
 - **Exists:** `core/merid_dashboard.py` exists. `web/react/` has Vite + Playwright config. `web/api/dev_swarm_routes.py` exposes `/tasks`, `/stats`, `/shutdown`. `OperatorDashboard.tsx` composes status bar, risk strip, agent health, activity stream, and control plane. New Recharts widgets: `EquityPnLChart` (streaming equity/PnL line chart), `RiskLimitBars` (horizontal utilization bars), `RiskHeatmapWidget` (instrument risk heatmap), `DrawdownCard` (sparkline + threshold). New API endpoints: `/api/operator/equity-series`, `/api/operator/risk-utilization`.
-- **Missing:** No deployed Grafana dashboards. Latency charts not yet implemented.
-- **Next:** Deploy Grafana dashboards from Prometheus metrics. Add decision/order latency chart.
+- **Done:** Grafana provisioning deployed: `docker/grafana/provisioning/` (datasources + dashboards), `merid-overview.json` with 10 panels including API latency p50/p95 chart.
 
 ### 5.3 Plain-language decision explanations — **2**
 
@@ -165,20 +162,17 @@ production readiness requirements.
 ### 6.1 Process supervision with probes — **2**
 
 - **Exists:** `deploy/merid-dev-swarm.service` — systemd with `Restart=always`, security hardening, resource limits. `docker-compose.yml` + analytics/streaming/full-stack variants. `web/main.py` has health endpoint.
-- **Missing:** No Kubernetes deployment yet.
-- **Next:** Add k8s manifests with liveness/readiness probes if scaling beyond single-node.
+- **Done:** `deploy/k8s/merid-deployment.yaml` — Deployment (2 replicas), liveness/readiness/startup probes, Service, ServiceAccount, PVC, ConfigMap, Namespace.
 
 ### 6.2 On-call / notification flow — **2**
 
 - **Exists:** `core/telegram_bot.py` for notifications. `monitoring/alertmanager.yml` configured with 7 receivers (default, pagerduty-critical, slack-alerts, slack-governance, slack-api, slack-database). `monitoring/alert_rules.yml` — 15+ rules across 6 groups (critical, governance, reality_system, swarm, infrastructure, database). PagerDuty integration for critical alerts. Inhibit rules prevent alert storms. `tests/test_alerting_config.py` — 32 tests validating: YAML well-formedness, required sections, all route receivers exist, critical → PagerDuty routing, every rule has severity/summary/description/runbook_url, minimum rule count, group coverage, notification dispatch (Telegram + Slack + PagerDuty). Test also caught and fixed missing `slack-alerts` receiver.
-- **Missing:** Not verified with live Alertmanager instance.
-- **Next:** Deploy Alertmanager and verify end-to-end alert delivery.
+- **Done:** `alertmanager` service in `docker-compose.yml`, Prometheus wired to `alertmanager:9093`, `monitoring/alert_rules.yml` mounted, `monitoring/verify-alertmanager.py` validator.
 
 ### 6.3 Runbooks for common failures — **2**
 
 - **Exists:** `docs/runbooks/` (3: circuit breaker, emergency lockdown, post-incident recovery). `ops/runbooks/` (5: DB issues, governance gate, high latency, security incident, service down). `docs/OPERATOR_RUNBOOK.md`, `docs/SEASON1_OPERATOR_RUNBOOK.md`.
-- **Missing:** No runbook for "model error" or "memory leak" specifically.
-- **Next:** Add runbooks for model drift response and memory/resource exhaustion.
+- **Done:** `ops/runbooks/model_drift_response.md` (RB-OPS-004) and `ops/runbooks/memory_resource_exhaustion.md` (RB-OPS-005) — tiered response, common causes, resolution steps.
 
 ### 6.4 Restart and recovery tested — **2**
 
@@ -195,8 +189,7 @@ production readiness requirements.
 ### 7.1 High-coverage unit tests — **2**
 
 - **Exists:** 297 tests in `test_dev_swarm.py` + 17 in xdist invariants = 314 total. 93.52% domain coverage. Negative-path, edge-case, parametrized, fixture-based tests.
-- **Missing:** Risk control module tests are in legacy-broken state.
-- **Next:** Fix risk control tests to close the last coverage gap.
+- **Done:** Risk control tests rewritten — `test_trading_halt.py` (32 tests) including `TestVenue5xxCircuitBreaker` (3 E2E tests).
 
 ### 7.2 Integration tests with multi-agent flows — **2**
 
@@ -213,8 +206,7 @@ production readiness requirements.
 ### 7.4 Performance baselines with regression thresholds — **2**
 
 - **Exists:** `tests/PERFORMANCE_BASELINE.md` with timing history, speed optimization log, regression thresholds (90s total, 30s single). `TestPerformanceBenchmarks` (3 tests).
-- **Missing:** Not wired to CI for automatic regression detection.
-- **Next:** Add a CI step that fails if `--durations=5` shows any test exceeding threshold.
+- **Done:** Performance Regression Check step in `safety-smoke` CI job — `--durations=10` with 30s single-test threshold.
 
 **Section 7 total: 8/8**
 
@@ -237,8 +229,7 @@ production readiness requirements.
 ### 8.3 Safe degradation on bad data — **2**
 
 - **Exists:** `core/mode_manager.py` has MAINTENANCE mode. `core/reality_registry.py` tracks assertion validity. Reality system goes BLIND when assertions fail (alert fires). `core/feed_staleness_monitor.py` `FeedStalenessMonitor` tracks per-feed+instrument last-update timestamps, auto-pauses trading when data exceeds max_age threshold, fires on_stale/on_critical/on_recovered callbacks, integrates with `TradingHaltManager` for automatic halt/resume. 23 tests in `tests/test_feed_staleness.py` cover registration, staleness detection, auto-pause, recovery, callbacks, and halt manager integration.
-- **Missing:** Not yet wired to Prometheus metrics.
-- **Next:** Wire staleness metrics to Prometheus gauges and alert rules.
+- **Done:** `feed_staleness_seconds`, `feeds_stale_total`, `instruments_paused_total` Prometheus Gauges added to `core/feed_staleness_monitor.py`, updated on every `check_feed()` / `check_all()` call.
 
 **Section 8 total: 6/6**
 
@@ -249,8 +240,7 @@ production readiness requirements.
 ### 9.1 Access control for configs and secrets — **2**
 
 - **Exists:** `.env` file for secrets. `EnvironmentFile` in systemd unit. `core/secrets_guard.py` — automated secrets detection: `scan_for_tracked_secrets()` checks git index against known secret patterns (*.pem, *.key, .env.*, vault-token), `scan_file_contents_for_secrets()` detects private keys/AWS keys/API tokens in file content, `check_live_mode_safe()` blocks LIVE mode if secrets tracked or no vault detected, `get_gitignore_coverage()` verifies .gitignore completeness. `scripts/pre-commit-secrets-check.sh` — pre-commit hook rejecting secret files and content patterns. Expanded `.gitignore` (100+ entries covering secrets, Python, IDE, OS, testing, build, deployment, frontend, database). 31 tests in `tests/test_secrets_guard.py`. **Git history audit (2026-02-07):** `kalshi_private_key.pem`, `.env.backup`, `.env` verified never committed to any branch. All secret files exist only on disk and are properly gitignored. No `git filter-repo` purge needed.
-- **Missing:** No vault/KMS integration. Keys not yet rotated (manual step per exchange).
-- **Next:** Wire Vault/env injection into systemd unit and CI. Rotate API keys on exchange dashboards.
+- **Done:** Vault/env injection wired into `deploy/merid-dev-swarm.service` (3-tier) + `dev_swarm_ci.yml` (Vault action). `ops/rotate_api_keys.py` CLI for key rotation.
 
 ### 9.2 Abuse and adversarial protections — **2**
 
@@ -261,8 +251,7 @@ production readiness requirements.
 ### 9.3 Ethical guardrails and compliance — **2**
 
 - **Exists:** `core/us_compliance_config.py` — US-compliant, blocked, and data-only venue categories. `core/constitution_enforcer.py` enforces rules. `policy/guardrails.yml` defines policy. Blocked venues explicitly listed (Bybit, global Binance, BitMEX, etc.). `tests/test_venue_compliance.py` — 31 tests verifying blocked venue rejection. `core/compliance_report.py` — CLI compliance report generator: venue classification (US-compliant/blocked/optional with asset classes), secrets guard status, .gitignore coverage, order sanity metrics, overall pass/fail. Supports `--json` and `--from`/`--to` date range. `tests/test_compliance_report.py` — 35 tests across 8 classes.
-- **Missing:** No automated scheduled compliance report (cron/CI).
-- **Next:** Add CI job that runs `python -m core.compliance_report --json` and archives output.
+- **Done:** Compliance Report step in `safety-smoke` CI job — runs `core.compliance_report --json`, fails on critical violations.
 
 **Section 9 total: 6/6**
 
@@ -273,8 +262,7 @@ production readiness requirements.
 ### 10.1 Operator UX for swarm control — **2**
 
 - **Exists:** `web/api/dev_swarm_routes.py` — `/tasks`, `/stats`, `/shutdown`, `/pause`, `/resume` endpoints. `OperatorControlPlane.tsx` — pause/resume swarm, mode switch, shutdown with confirmation. `OperatorStatusBar.tsx` — mode badge, WS status, circuit breaker, alerts. `OperatorDashboard.tsx` — unified operator view composing all widgets.
-- **Missing:** No "scale agent count" API.
-- **Next:** Add `/scale` API endpoint for dynamic agent pool sizing.
+- **Done:** `POST /api/operator/scale?target_count=N` endpoint in `web/api/operator.py` — validates 1-20 range, reports scale up/down action.
 
 ### 10.2 Portfolio, risk, and position views — **2**
 

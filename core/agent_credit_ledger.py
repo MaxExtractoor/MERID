@@ -67,6 +67,7 @@ class AgentCreditLedger:
         self._default_credits = default_credits
         self._daily_spend: Dict[str, float] = {}  # agent_id -> today's spend
         self._daily_limit: Dict[str, float] = {}  # agent_id -> daily cap
+        self._budget_cap: Dict[str, float] = {}    # agent_id -> max total spend cap
 
     def _next_id(self) -> int:
         self._entry_counter += 1
@@ -179,15 +180,38 @@ class AgentCreditLedger:
 
     # ── Budget enforcement ─────────────────────────────────────────
 
+    def set_budget_cap(self, agent_id: str, cap: float) -> None:
+        """Set a total budget cap for an agent.
+
+        Once cumulative spend reaches this cap, the agent cannot execute
+        further tasks regardless of remaining balance.
+        """
+        if cap < 0:
+            raise ValueError("Budget cap must be non-negative")
+        self._budget_cap[agent_id] = cap
+        logger.info(f"Budget cap for {agent_id} set to {cap}")
+
+    def cumulative_spend(self, agent_id: str) -> float:
+        """Total credits ever deducted from this agent."""
+        return sum(
+            abs(e.amount) for e in self._history
+            if e.agent_id == agent_id and e.entry_type == "deduct"
+        )
+
     def set_daily_limit(self, agent_id: str, limit: float) -> None:
         """Set a daily spending limit for an agent."""
         self._daily_limit[agent_id] = limit
 
     def check_budget(self, agent_id: str, cost: float) -> bool:
-        """Check if agent can afford a task without exceeding daily limit.
+        """Check if agent can afford a task without exceeding limits.
+
+        Checks (in order):
+        1. Sufficient balance
+        2. Daily spending limit
+        3. Total budget cap
 
         Returns:
-            True if the agent has sufficient credits and is within daily limit.
+            True if the agent passes all checks.
         """
         balance = self._balances.get(agent_id, 0.0)
         if balance < cost:
@@ -196,6 +220,10 @@ class AgentCreditLedger:
         if limit is not None:
             spent = self._daily_spend.get(agent_id, 0.0)
             if spent + cost > limit:
+                return False
+        cap = self._budget_cap.get(agent_id)
+        if cap is not None:
+            if self.cumulative_spend(agent_id) + cost > cap:
                 return False
         return True
 
@@ -231,6 +259,7 @@ class AgentCreditLedger:
             "total_transactions": len(self._history),
             "balances": dict(self._balances),
             "daily_spend": dict(self._daily_spend),
+            "budget_caps": dict(self._budget_cap),
         }
 
 
