@@ -119,7 +119,7 @@ agents-summary:
 	python -c "from merid.agents.base import get_canonical_registry; import json; print(json.dumps(get_canonical_registry().summary(), indent=2))"
 
 all-pipeline-tests:
-	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_blockchain.py tests/test_blockchain_v2.py tests/test_agent_wiring.py -v
+	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_blockchain.py tests/test_blockchain_v2.py tests/test_agent_wiring.py tests/test_signals.py -v
 
 # ── Agent Wiring & Orchestrator ──────────────────────────────────────
 wiring-test:
@@ -127,6 +127,16 @@ wiring-test:
 
 orchestrator-summary:
 	python -c "from merid.agents.orchestrator import AgentOrchestrator; import json; print(json.dumps(AgentOrchestrator().summary(), indent=2))"
+
+# ── Signals (X, Telegram, News) ─────────────────────────────────────
+signals-test:
+	python -m pytest tests/test_signals.py -v
+
+signals-sentiment:
+	python -c "from merid.signals.processing import get_sentiment_processor; import json; print(json.dumps(get_sentiment_processor().summary(), indent=2))"
+
+signals-alerts:
+	python -c "from merid.signals.alerts import get_alert_router; import json; print(json.dumps(get_alert_router().summary(), indent=2))"
 
 # ── Blockchain Integration ────────────────────────────────────────────
 blockchain-test:
