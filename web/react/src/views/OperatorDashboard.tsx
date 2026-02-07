@@ -24,6 +24,11 @@ import OnChainHealthPanel from '../components/OnChainHealthPanel';
 import PredictionMarketDetail from '../components/PredictionMarketDetail';
 import ModeControlPanel from '../components/ModeControlPanel';
 import ExplainabilityTimeline from '../components/ExplainabilityTimeline';
+import TelegramLogViewer from '../components/TelegramLogViewer';
+import AlertHistoryPanel from '../components/AlertHistoryPanel';
+import DomainPnLChart from '../components/DomainPnLChart';
+import StrategyLeaderboard from '../components/StrategyLeaderboard';
+import CompliancePanel from '../components/CompliancePanel';
 import { formatCurrency } from '../utils/formatters';
 import { Monitor } from 'lucide-react';
 
@@ -202,7 +207,22 @@ export default function OperatorDashboard() {
       {/* 11. Decision Audit Trail */}
       <ExplainabilityTimeline />
 
-      {/* 12. Activity Stream + Control Plane (side by side) */}
+      {/* 12. Domain PnL + Strategy Leaderboard */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <DomainPnLChart />
+        <StrategyLeaderboard />
+      </div>
+
+      {/* 13. Alert History + Compliance */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <AlertHistoryPanel />
+        <CompliancePanel />
+      </div>
+
+      {/* 14. Telegram Log */}
+      <TelegramLogViewer />
+
+      {/* 15. Activity Stream + Control Plane (side by side) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Activity Stream (2/3 width) */}
         <div className="lg:col-span-2">
