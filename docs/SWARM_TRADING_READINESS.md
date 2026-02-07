@@ -39,11 +39,11 @@ production readiness requirements.
 - **Missing:** No market-style bidding mechanism for resource allocation.
 - **Next:** Consider adding internal auction for task priority when agents compete for limited execution slots.
 
-### 1.3 Agent-to-agent negotiation and conflict resolution — **1**
+### 1.3 Agent-to-agent negotiation and conflict resolution — **2**
 
-- **Exists:** Risk agent VETO in consensus engine. `core/signal_provenance.py` tracks signal origins for conflict attribution. `core/trust_transparency.py` provides trust scoring.
-- **Missing:** No explicit negotiation protocol — conflicts are resolved by VETO or majority vote, not iterative negotiation.
-- **Next:** Implement a structured negotiation round (propose → counter → accept/reject) for conflicting risk views.
+- **Exists:** Risk agent VETO in consensus engine. `core/signal_provenance.py` tracks signal origins for conflict attribution. `core/trust_transparency.py` provides trust scoring. `core/negotiation_protocol.py` implements structured propose → counter → accept/reject lifecycle with `NegotiationSession`, `NegotiationMediator` (auto-resolve deadlocks via highest_confidence/last_proposal/initiator_wins strategies), timeout/expiration, state machine enforcement, and callback hooks. 26 tests in `tests/test_negotiation_protocol.py`.
+- **Missing:** Not yet wired into consensus engine as an alternative to VETO.
+- **Next:** Wire negotiation sessions into consensus engine for risk-agent disagreements.
 
 ### 1.4 Collective intelligence demonstrated — **1**
 
@@ -51,7 +51,7 @@ production readiness requirements.
 - **Missing:** No A/B comparison showing swarm decisions outperform single-agent baselines in backtests.
 - **Next:** Add a benchmark test comparing swarm consensus accuracy vs. best single-agent on historical data.
 
-**Section 1 total: 6/8**
+**Section 1 total: 7/8**
 
 ---
 
@@ -231,11 +231,11 @@ production readiness requirements.
 
 ## 8. Data, Models, and Drift
 
-### 8.1 Data contracts and validation — **1**
+### 8.1 Data contracts and validation — **2**
 
-- **Exists:** `core/data_validation.py` with schema validation. `core/validation/time_window.py` and `core/validation/onchain.py` for specific feed types.
-- **Missing:** No formal data contract per feed (expected schema, freshness SLA, fallback behavior).
-- **Next:** Define a `DataContract` dataclass per feed with schema, max_age, and fallback strategy.
+- **Exists:** `core/data_validation.py` with schema validation. `core/validation/time_window.py` and `core/validation/onchain.py` for specific feed types. `core/data_contracts.py` implements formal `DataContract` per feed with schema types, `FieldSpec` (range/allowed values), freshness SLA (`max_age_seconds`), `FallbackStrategy` (use_cached/pause_instrument/halt_trading), custom validators, default value application. `DataContractRegistry` with validation history, failure tracking, dashboard summary. `build_default_contracts()` seeds 5 feeds (binance, coinbase, kalshi, alpaca, polygon). 35 tests in `tests/test_data_contracts.py`.
+- **Missing:** Not yet wired into live data ingestion pipeline.
+- **Next:** Wire `DataContractRegistry.validate()` into market data adapters on each tick.
 
 ### 8.2 Drift monitoring — **2**
 
@@ -249,7 +249,7 @@ production readiness requirements.
 - **Missing:** Not yet wired to Prometheus metrics.
 - **Next:** Wire staleness metrics to Prometheus gauges and alert rules.
 
-**Section 8 total: 5/6**
+**Section 8 total: 6/6**
 
 ---
 
@@ -319,24 +319,24 @@ production readiness requirements.
 
 | Section | Score | Max | Pct |
 |---------|-------|-----|-----|
-| 1. Swarm Architecture & Agent Roles | 6 | 8 | 75% |
+| 1. Swarm Architecture & Agent Roles | 7 | 8 | 88% |
 | 2. Decentralization, Trust, Ledgers | 6 | 8 | 75% |
 | 3. Tokenization / Value Flow | 5 | 6 | 83% |
 | 4. Strategy, Risk, Safety | 8 | 8 | 100% |
 | 5. Observability & Swarm-Health UX | 8 | 8 | 100% |
 | 6. 24/7 Operations & SRE | 7 | 8 | 88% |
 | 7. Testing Depth | 8 | 8 | 100% |
-| 8. Data, Models, Drift | 5 | 6 | 83% |
+| 8. Data, Models, Drift | 6 | 6 | 100% |
 | 9. Security, Abuse, Ethics | 4 | 6 | 67% |
 | 10. User & Operator Experience | 8 | 8 | 100% |
-| **TOTAL** | **65** | **74** | **88%** |
+| **TOTAL** | **67** | **74** | **91%** |
 
 ### Composite Scores
 
-- **Swarm-trading maturity (sections 1-5):** 33/38 = **87%**
-- **24/7 readiness (sections 6-10):** 32/36 = **89%**
+- **Swarm-trading maturity (sections 1-5):** 34/38 = **89%**
+- **24/7 readiness (sections 6-10):** 33/36 = **92%**
 
-### Readiness Level: **Staging** (≥70%; Production at ≥90%) — 2 points from Production
+### Readiness Level: **Production** (≥90%)
 
 ---
 
@@ -345,7 +345,7 @@ production readiness requirements.
 **Target window:** 2026-02-06 → 2026-03-06 (4 weeks)  
 **Projected score after completion:** ~70/74 (95%) — Production level
 
-**Progress (2026-02-07):** Backlogs #2, #4, #5 completed (+4 points, 61→65).
+**Progress (2026-02-07):** Backlogs #2, #4, #5 completed; S1-03 negotiation protocol, S8-01 data contracts added (+6 points, 61→67).
 
 ### 1. Secrets rotation and vault integration (Week 1) — CRITICAL
 
