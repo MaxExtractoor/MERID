@@ -29,6 +29,7 @@ import AlertHistoryPanel from '../components/AlertHistoryPanel';
 import DomainPnLChart from '../components/DomainPnLChart';
 import StrategyLeaderboard from '../components/StrategyLeaderboard';
 import CompliancePanel from '../components/CompliancePanel';
+import TradingHaltBanner from '../components/TradingHaltBanner';
 import { formatCurrency } from '../utils/formatters';
 import { Monitor } from 'lucide-react';
 
@@ -72,6 +73,9 @@ export default function OperatorDashboard() {
           />
         </div>
       </div>
+
+      {/* 0. Trading Halt Banner */}
+      <TradingHaltBanner />
 
       {/* 1. Status Bar */}
       <OperatorStatusBar
