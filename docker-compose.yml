@@ -73,6 +73,7 @@ services:
       - "9090:9090"
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -88,7 +89,10 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=merid_local
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./docker/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
 
   jaeger:
     image: jaegertracing/all-in-one:1.50
@@ -98,6 +102,50 @@ services:
       - "4317:4317"
     environment:
       - COLLECTOR_OTLP_ENABLED=true
+
+  # ========== Alertmanager ==========
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: merid-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    depends_on:
+      - prometheus
+
+  # ========== Celery Workers ==========
+  celery-worker:
+    build: .
+    container_name: merid-celery-worker
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=merid
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://merid:merid_local_dev@postgres:5432/merid
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - redis
+      - postgres
+    command: celery -A core.celery_tasks worker --loglevel=info --concurrency=4 -Q default,backtest,risk
+    restart: always
+
+  celery-beat:
+    build: .
+    container_name: merid-celery-beat
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      - redis
+      - celery-worker
+    command: celery -A core.celery_tasks beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    restart: always
 
   # ========== Container Management ==========
   portainer:
