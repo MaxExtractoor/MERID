@@ -21,6 +21,8 @@ import OrchestratorPanel from '../components/OrchestratorPanel';
 import SentimentTimeline from '../components/SentimentTimeline';
 import ArbScannerPanel from '../components/ArbScannerPanel';
 import OnChainHealthPanel from '../components/OnChainHealthPanel';
+import PredictionMarketDetail from '../components/PredictionMarketDetail';
+import ModeControlPanel from '../components/ModeControlPanel';
 import { formatCurrency } from '../utils/formatters';
 import { Monitor } from 'lucide-react';
 
@@ -190,7 +192,13 @@ export default function OperatorDashboard() {
         <DataFreshnessPanel />
       </div>
 
-      {/* 9. Activity Stream + Control Plane (side by side) */}
+      {/* 10. Prediction Markets + Mode Control */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <PredictionMarketDetail />
+        <ModeControlPanel />
+      </div>
+
+      {/* 11. Activity Stream + Control Plane (side by side) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Activity Stream (2/3 width) */}
         <div className="lg:col-span-2">
