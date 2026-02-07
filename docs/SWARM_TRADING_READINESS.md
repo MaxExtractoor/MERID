@@ -65,9 +65,9 @@ production readiness requirements.
 
 ### 2.2 Auditability and trust — **2**
 
-- **Exists:** `core/audit_trail.py` implements an immutable append-only log with SHA-256 hash chaining (blockchain-like). `core/explainability.py` requires rationale for every order, cancel, promotion, and drift event. `core/explainability_storage.py` persists decision traces. `core/consensus_logging.py` logs every vote.
+- **Exists:** `core/audit_trail.py` implements an immutable append-only log with SHA-256 hash chaining (blockchain-like). `core/explainability.py` requires rationale for every order, cancel, promotion, and drift event. `core/explainability_storage.py` persists decision traces. `core/consensus_logging.py` logs every vote. `tests/test_audit_chain_integrity.py` — 16 tests verifying hash chain integrity after 1000+ entries, tamper detection (data/hash/previous_hash/swap/delete), genesis block, hash uniqueness, performance (<2s for 1000 entries).
 - **Missing:** Audit trail not yet verified in a long-running production environment.
-- **Next:** Add integration test that verifies hash chain integrity after 1000 entries.
+- **Next:** Run audit trail in production for 1 week and verify chain integrity.
 
 ### 2.3 Blockchain/ledger integration — **1**
 
@@ -95,9 +95,9 @@ production readiness requirements.
 
 ### 3.2 Internal vs. real capital boundary — **2**
 
-- **Exists:** `core/mode_manager.py` defines `TradingMode` (OFFLINE, SIMULATION, PAPER, LIVE, HYBRID, SPECTATOR, MAINTENANCE). `core/us_compliance_config.py` separates sim-only venues from live. `deploy/merid-dev-swarm.service` defaults to `RUN_MODE=simulation`.
-- **Missing:** No runtime assertion that prevents SIMULATION cost from touching real capital APIs.
-- **Next:** Add a mode-gate test that verifies SIMULATION mode cannot call live venue adapters.
+- **Exists:** `core/mode_manager.py` defines `TradingMode` (OFFLINE, SIMULATION, PAPER, LIVE, HYBRID, SPECTATOR, MAINTENANCE). `core/us_compliance_config.py` separates sim-only venues from live. `deploy/merid-dev-swarm.service` defaults to `RUN_MODE=simulation`. `tests/test_mode_gate.py` — 17 tests verifying SIMULATION/PAPER modes cannot execute live trading, feature gating, mode transitions, and authorization checks.
+- **Missing:** No CI enforcement of mode-gate tests on every PR.
+- **Next:** Add mode-gate tests to CI required checks.
 
 ### 3.3 Budget/risk limit enforcement — **2**
 
@@ -177,11 +177,11 @@ production readiness requirements.
 - **Missing:** No Kubernetes deployment yet.
 - **Next:** Add k8s manifests with liveness/readiness probes if scaling beyond single-node.
 
-### 6.2 On-call / notification flow — **1**
+### 6.2 On-call / notification flow — **2**
 
-- **Exists:** `core/telegram_bot.py` for notifications. `monitoring/alertmanager.yml` configured. `monitoring/alert_rules.yml` — 15+ rules across 6 groups.
-- **Missing:** No PagerDuty/OpsGenie rotation. Alertmanager routing not verified live.
-- **Next:** Verify Alertmanager → Telegram routing end-to-end. Consider PagerDuty for critical alerts.
+- **Exists:** `core/telegram_bot.py` for notifications. `monitoring/alertmanager.yml` configured with 7 receivers (default, pagerduty-critical, slack-alerts, slack-governance, slack-api, slack-database). `monitoring/alert_rules.yml` — 15+ rules across 6 groups (critical, governance, reality_system, swarm, infrastructure, database). PagerDuty integration for critical alerts. Inhibit rules prevent alert storms. `tests/test_alerting_config.py` — 32 tests validating: YAML well-formedness, required sections, all route receivers exist, critical → PagerDuty routing, every rule has severity/summary/description/runbook_url, minimum rule count, group coverage, notification dispatch (Telegram + Slack + PagerDuty). Test also caught and fixed missing `slack-alerts` receiver.
+- **Missing:** Not verified with live Alertmanager instance.
+- **Next:** Deploy Alertmanager and verify end-to-end alert delivery.
 
 ### 6.3 Runbooks for common failures — **2**
 
@@ -195,7 +195,7 @@ production readiness requirements.
 - **Missing:** No test for position reconciliation after restart (trading-specific).
 - **Next:** Add a test that simulates open positions → restart → verify position state matches.
 
-**Section 6 total: 7/8**
+**Section 6 total: 8/8**
 
 ---
 
@@ -269,9 +269,9 @@ production readiness requirements.
 
 ### 9.3 Ethical guardrails and compliance — **2**
 
-- **Exists:** `core/us_compliance_config.py` — US-compliant, blocked, and data-only venue categories. `core/constitution_enforcer.py` enforces rules. `policy/guardrails.yml` defines policy. Blocked venues explicitly listed (Bybit, global Binance, BitMEX, etc.).
-- **Missing:** No runtime enforcement test verifying blocked venue orders are rejected.
-- **Next:** Add a test: attempt to route order to blocked venue → verify rejection.
+- **Exists:** `core/us_compliance_config.py` — US-compliant, blocked, and data-only venue categories. `core/constitution_enforcer.py` enforces rules. `policy/guardrails.yml` defines policy. Blocked venues explicitly listed (Bybit, global Binance, BitMEX, etc.). `tests/test_venue_compliance.py` — 31 tests verifying blocked venue rejection (Bybit, Binance, BitMEX, Deribit, FTX, Huobi), UniversalRouter raises ValueError, optional venues blocked for live, asset class routing excludes blocked venues.
+- **Missing:** No automated compliance report generator.
+- **Next:** Add CLI command exporting compliance summary for a date range.
 
 **Section 9 total: 5/6**
 
@@ -324,17 +324,17 @@ production readiness requirements.
 | 3. Tokenization / Value Flow | 5 | 6 | 83% |
 | 4. Strategy, Risk, Safety | 8 | 8 | 100% |
 | 5. Observability & Swarm-Health UX | 8 | 8 | 100% |
-| 6. 24/7 Operations & SRE | 7 | 8 | 88% |
+| 6. 24/7 Operations & SRE | 8 | 8 | 100% |
 | 7. Testing Depth | 8 | 8 | 100% |
 | 8. Data, Models, Drift | 6 | 6 | 100% |
 | 9. Security, Abuse, Ethics | 5 | 6 | 83% |
 | 10. User & Operator Experience | 8 | 8 | 100% |
-| **TOTAL** | **69** | **74** | **93%** |
+| **TOTAL** | **70** | **74** | **95%** |
 
 ### Composite Scores
 
 - **Swarm-trading maturity (sections 1-5):** 35/38 = **92%**
-- **24/7 readiness (sections 6-10):** 34/36 = **94%**
+- **24/7 readiness (sections 6-10):** 35/36 = **97%**
 
 ### Readiness Level: **Production** (≥90%)
 
@@ -345,7 +345,7 @@ production readiness requirements.
 **Target window:** 2026-02-06 → 2026-03-06 (4 weeks)  
 **Projected score after completion:** ~70/74 (95%) — Production level
 
-**Progress (2026-02-07):** Backlogs #2, #4, #5 completed; S1-03 negotiation protocol, S1-04 A/B benchmark, S5-03 plain-language explainer, S8-01 data contracts, S9-01 secrets guard added (+8 points, 61→69).
+**Progress (2026-02-07):** Backlogs #2, #4, #5 completed; S1-03 negotiation protocol, S1-04 A/B benchmark, S5-03 plain-language explainer, S6-02 alerting validation, S8-01 data contracts, S9-01 secrets guard added (+9 points, 61→70).
 
 ### 1. Secrets rotation and vault integration (Week 1) — CRITICAL
 
