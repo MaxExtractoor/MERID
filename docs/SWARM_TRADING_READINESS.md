@@ -269,9 +269,9 @@ production readiness requirements.
 
 ### 9.3 Ethical guardrails and compliance — **2**
 
-- **Exists:** `core/us_compliance_config.py` — US-compliant, blocked, and data-only venue categories. `core/constitution_enforcer.py` enforces rules. `policy/guardrails.yml` defines policy. Blocked venues explicitly listed (Bybit, global Binance, BitMEX, etc.). `tests/test_venue_compliance.py` — 31 tests verifying blocked venue rejection (Bybit, Binance, BitMEX, Deribit, FTX, Huobi), UniversalRouter raises ValueError, optional venues blocked for live, asset class routing excludes blocked venues.
-- **Missing:** No automated compliance report generator.
-- **Next:** Add CLI command exporting compliance summary for a date range.
+- **Exists:** `core/us_compliance_config.py` — US-compliant, blocked, and data-only venue categories. `core/constitution_enforcer.py` enforces rules. `policy/guardrails.yml` defines policy. Blocked venues explicitly listed (Bybit, global Binance, BitMEX, etc.). `tests/test_venue_compliance.py` — 31 tests verifying blocked venue rejection. `core/compliance_report.py` — CLI compliance report generator: venue classification (US-compliant/blocked/optional with asset classes), secrets guard status, .gitignore coverage, order sanity metrics, overall pass/fail. Supports `--json` and `--from`/`--to` date range. `tests/test_compliance_report.py` — 35 tests across 8 classes.
+- **Missing:** No automated scheduled compliance report (cron/CI).
+- **Next:** Add CI job that runs `python -m core.compliance_report --json` and archives output.
 
 **Section 9 total: 5/6**
 
