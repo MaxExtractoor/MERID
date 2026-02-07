@@ -157,6 +157,18 @@ class Settings(BaseSettings):
     KALSHI_API_HOST: Optional[str] = Field(default="https://api.elections.kalshi.com/trade-api/v2", description="Kalshi API host")
     
     # =============================================================================
+    # PREDICTION MARKET SETTINGS (Kalshi-first)
+    # =============================================================================
+    MERID_PM_TRADING_MODE: str = Field(default="sim", description="Prediction market mode: sim/paper/live")
+    MERID_PM_LIVE_ENABLED: bool = Field(default=False, description="Explicit unlock for live PM trading")
+    MERID_PM_MAX_NOTIONAL_PER_MARKET: float = Field(default=500.0, description="Max notional per PM market (USD)")
+    MERID_PM_MAX_DAILY_LOSS: float = Field(default=250.0, description="Max daily loss for prediction markets (USD)")
+    MERID_PM_MAX_TOTAL_NOTIONAL: float = Field(default=5000.0, description="Max total PM portfolio notional (USD)")
+    KALSHI_USE_DEMO: bool = Field(default=False, description="Use Kalshi demo/sandbox API")
+    KALSHI_EMAIL: Optional[str] = Field(default=None, description="Kalshi account email")
+    KALSHI_PASSWORD: Optional[str] = Field(default=None, description="Kalshi account password")
+
+    # =============================================================================
     # TRADING MODE SETTINGS
     # =============================================================================
     # Trading mode: "paper" (simulated), "live" (real money)

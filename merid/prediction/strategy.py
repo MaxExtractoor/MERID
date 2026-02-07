@@ -1,0 +1,425 @@
+"""§3 Kalshi Strategy — Edge thresholds, time-to-expiry logic, position sizing.
+
+Provides named, testable prediction-market playbooks for Kalshi:
+- Same-market consistency checks (multi-outcome arb).
+- Time-to-expiry aware behaviour (early speculative vs late arb).
+- Explicit position sizing and exit rules.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from enum import Enum
+from typing import Dict, List, Optional
+
+from merid.prediction.model import (
+    ContractState,
+    EdgeEstimate,
+    MarketSnapshot,
+    PredictionMarketModel,
+)
+from utils.logger import get_logger
+
+logger = get_logger("merid.prediction.strategy")
+
+
+class SignalAction(str, Enum):
+    """What the strategy recommends."""
+    BUY_YES = "buy_yes"
+    BUY_NO = "buy_no"
+    SELL_YES = "sell_yes"
+    SELL_NO = "sell_no"
+    CLOSE = "close"
+    HOLD = "hold"
+    NO_ACTION = "no_action"
+
+
+class ExpiryPhase(str, Enum):
+    """Time-to-expiry regime."""
+    EARLY = "early"        # > 24 h to expiry
+    MID = "mid"            # 4–24 h
+    LATE = "late"          # 1–4 h
+    TERMINAL = "terminal"  # < 1 h
+
+
+@dataclass
+class StrategyConfig:
+    """Tunable parameters for KalshiStrategy."""
+    # Edge thresholds (as probability fraction, e.g. 0.03 = 3 %)
+    min_edge_early: Decimal = Decimal("0.05")      # 5 % edge required early
+    min_edge_mid: Decimal = Decimal("0.04")
+    min_edge_late: Decimal = Decimal("0.03")
+    min_edge_terminal: Decimal = Decimal("0.02")
+    min_arb_edge: Decimal = Decimal("0.005")        # 0.5 % for pure arb
+
+    # Position sizing
+    max_contracts_per_market: int = 100
+    max_contracts_per_order: int = 25
+    kelly_fraction: Decimal = Decimal("0.25")       # Quarter-Kelly
+
+    # Exit rules
+    profit_target_pct: Decimal = Decimal("0.15")    # Take profit at 15 %
+    stop_loss_pct: Decimal = Decimal("0.10")         # Cut at 10 % loss
+    max_hold_hours: Decimal = Decimal("48")          # Force close after 48 h
+
+    # Liquidity
+    min_volume: Decimal = Decimal("1000")            # Min market volume
+    min_open_interest: Decimal = Decimal("100")
+    min_depth_contracts: int = 5                      # Min depth at best price
+
+    # Confidence
+    min_confidence: Decimal = Decimal("0.5")
+
+
+@dataclass
+class StrategySignal:
+    """Output of strategy evaluation for one market."""
+    market_id: str
+    action: SignalAction
+    side: str                  # "yes" or "no"
+    contracts: int             # Recommended size
+    limit_price_cents: Optional[int] = None
+    edge: Optional[EdgeEstimate] = None
+    phase: Optional[ExpiryPhase] = None
+    reason: str = ""
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict:
+        return {
+            "market_id": self.market_id,
+            "action": self.action.value,
+            "side": self.side,
+            "contracts": self.contracts,
+            "limit_price_cents": self.limit_price_cents,
+            "phase": self.phase.value if self.phase else None,
+            "reason": self.reason,
+            "net_edge": str(self.edge.net_edge) if self.edge else None,
+            "timestamp": self.timestamp.isoformat(),
+        }
+
+
+@dataclass
+class PositionState:
+    """Tracks an open position for exit-rule evaluation."""
+    market_id: str
+    side: str
+    contracts: int
+    avg_entry_cents: Decimal
+    opened_at: datetime
+    current_price_cents: Optional[Decimal] = None
+    unrealized_pnl_cents: Optional[Decimal] = None
+
+
+class KalshiStrategy:
+    """Prediction-market strategy dedicated to Kalshi.
+
+    Evaluates MarketSnapshots and produces StrategySignals.
+    """
+
+    def __init__(
+        self,
+        config: Optional[StrategyConfig] = None,
+        model: Optional[PredictionMarketModel] = None,
+    ):
+        self.config = config or StrategyConfig()
+        self.model = model or PredictionMarketModel()
+        self._positions: Dict[str, PositionState] = {}
+
+    # ------------------------------------------------------------------
+    # Expiry phase
+    # ------------------------------------------------------------------
+
+    def _expiry_phase(self, hours_left: Optional[Decimal]) -> ExpiryPhase:
+        if hours_left is None:
+            return ExpiryPhase.EARLY
+        if hours_left > 24:
+            return ExpiryPhase.EARLY
+        if hours_left > 4:
+            return ExpiryPhase.MID
+        if hours_left > 1:
+            return ExpiryPhase.LATE
+        return ExpiryPhase.TERMINAL
+
+    def _min_edge_for_phase(self, phase: ExpiryPhase) -> Decimal:
+        return {
+            ExpiryPhase.EARLY: self.config.min_edge_early,
+            ExpiryPhase.MID: self.config.min_edge_mid,
+            ExpiryPhase.LATE: self.config.min_edge_late,
+            ExpiryPhase.TERMINAL: self.config.min_edge_terminal,
+        }[phase]
+
+    # ------------------------------------------------------------------
+    # Position sizing (quarter-Kelly)
+    # ------------------------------------------------------------------
+
+    def _kelly_size(self, edge: EdgeEstimate, phase: ExpiryPhase) -> int:
+        """Compute position size using fractional Kelly criterion.
+
+        Kelly fraction = (p * b - q) / b
+        where p = model_prob, q = 1 - p, b = payout odds.
+        For binary contracts: b = (1 / market_prob) - 1.
+        """
+        p = edge.model_prob
+        q = Decimal("1") - p
+        market_prob = edge.market_prob
+
+        if market_prob <= Decimal("0") or market_prob >= Decimal("1"):
+            return 0
+
+        b = (Decimal("1") / market_prob) - Decimal("1")
+        if b <= Decimal("0"):
+            return 0
+
+        kelly = (p * b - q) / b
+        if kelly <= Decimal("0"):
+            return 0
+
+        # Apply fractional Kelly
+        fraction = self.config.kelly_fraction
+        # Reduce size in terminal phase
+        if phase == ExpiryPhase.TERMINAL:
+            fraction = fraction / 2
+
+        raw_size = kelly * fraction * self.config.max_contracts_per_market
+        size = int(raw_size.quantize(Decimal("1"), ROUND_HALF_UP))
+
+        return min(size, self.config.max_contracts_per_order)
+
+    # ------------------------------------------------------------------
+    # Entry evaluation
+    # ------------------------------------------------------------------
+
+    def evaluate(self, snapshot: MarketSnapshot) -> StrategySignal:
+        """Evaluate a market snapshot and produce a signal.
+
+        Decision tree:
+        1. Skip if market not in TRADING or CLOSING state.
+        2. Skip if volume / OI below minimums.
+        3. Check for pure arb first (highest priority).
+        4. Find best speculative edge across yes/no.
+        5. Apply time-to-expiry edge threshold.
+        6. Size with Kelly, cap per config.
+        """
+        phase = self._expiry_phase(snapshot.time_to_expiry_hours)
+
+        # 1. State filter
+        if snapshot.state not in (ContractState.TRADING, ContractState.CLOSING):
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none",
+                contracts=0,
+                phase=phase,
+                reason=f"Market state is {snapshot.state.value}, not tradeable.",
+            )
+
+        # 2. Liquidity filter
+        if snapshot.volume < self.config.min_volume:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none",
+                contracts=0,
+                phase=phase,
+                reason=f"Volume {snapshot.volume} below minimum {self.config.min_volume}.",
+            )
+
+        if snapshot.open_interest < self.config.min_open_interest:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none",
+                contracts=0,
+                phase=phase,
+                reason=f"OI {snapshot.open_interest} below minimum {self.config.min_open_interest}.",
+            )
+
+        # 3. Arb check
+        arb_edges = [e for e in snapshot.edges if e.edge_type == "arb"]
+        if arb_edges:
+            best_arb = max(arb_edges, key=lambda e: e.net_edge)
+            if best_arb.net_edge >= self.config.min_arb_edge:
+                return StrategySignal(
+                    market_id=snapshot.market_id,
+                    action=SignalAction.BUY_YES,  # arb buys both sides
+                    side="both",
+                    contracts=self.config.max_contracts_per_order,
+                    edge=best_arb,
+                    phase=phase,
+                    reason=f"Pure arb detected: net edge {best_arb.net_edge:.4f}.",
+                )
+
+        # 4. Best speculative edge
+        spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        if not spec_edges:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none",
+                contracts=0,
+                phase=phase,
+                reason="No actionable edge found.",
+            )
+
+        best = max(spec_edges, key=lambda e: e.net_edge)
+
+        # 5. Edge threshold
+        min_edge = self._min_edge_for_phase(phase)
+        if best.net_edge < min_edge:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side,
+                contracts=0,
+                edge=best,
+                phase=phase,
+                reason=f"Edge {best.net_edge:.4f} below {phase.value} threshold {min_edge}.",
+            )
+
+        # Confidence filter
+        if best.confidence < self.config.min_confidence:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side,
+                contracts=0,
+                edge=best,
+                phase=phase,
+                reason=f"Confidence {best.confidence} below minimum {self.config.min_confidence}.",
+            )
+
+        # 6. Size
+        size = self._kelly_size(best, phase)
+        if size <= 0:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side,
+                contracts=0,
+                edge=best,
+                phase=phase,
+                reason="Kelly sizing returned 0 contracts.",
+            )
+
+        # Determine action
+        if best.action == "buy":
+            action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
+        else:
+            action = SignalAction.SELL_YES if best.side == "yes" else SignalAction.SELL_NO
+
+        # Limit price: use the ask for buys, bid for sells
+        limit_cents = None
+        if best.side == "yes":
+            if best.action == "buy" and snapshot.implied.yes_ask is not None:
+                limit_cents = int(snapshot.implied.yes_ask)
+            elif best.action == "sell" and snapshot.implied.yes_bid is not None:
+                limit_cents = int(snapshot.implied.yes_bid)
+        else:
+            if best.action == "buy" and snapshot.implied.no_ask is not None:
+                limit_cents = int(snapshot.implied.no_ask)
+            elif best.action == "sell" and snapshot.implied.no_bid is not None:
+                limit_cents = int(snapshot.implied.no_bid)
+
+        return StrategySignal(
+            market_id=snapshot.market_id,
+            action=action,
+            side=best.side,
+            contracts=size,
+            limit_price_cents=limit_cents,
+            edge=best,
+            phase=phase,
+            reason=f"{phase.value} phase, {best.edge_type} edge {best.net_edge:.4f}, "
+                   f"Kelly size {size}.",
+        )
+
+    # ------------------------------------------------------------------
+    # Exit evaluation
+    # ------------------------------------------------------------------
+
+    def register_position(self, pos: PositionState) -> None:
+        """Register an open position for exit monitoring."""
+        self._positions[pos.market_id] = pos
+
+    def remove_position(self, market_id: str) -> None:
+        """Remove a closed position."""
+        self._positions.pop(market_id, None)
+
+    def evaluate_exits(self, snapshots: Dict[str, MarketSnapshot]) -> List[StrategySignal]:
+        """Check all open positions for exit conditions.
+
+        Exit rules:
+        - Profit target: unrealized PnL >= profit_target_pct of entry cost.
+        - Stop loss: unrealized PnL <= -stop_loss_pct of entry cost.
+        - Max hold: position held longer than max_hold_hours.
+        - Market closing: force close if state is CLOSING or CLOSED.
+        """
+        signals: List[StrategySignal] = []
+
+        for mid, pos in list(self._positions.items()):
+            snap = snapshots.get(mid)
+            if snap is None:
+                continue
+
+            phase = self._expiry_phase(snap.time_to_expiry_hours)
+
+            # Update current price
+            if pos.side == "yes" and snap.implied.yes_bid is not None:
+                pos.current_price_cents = snap.implied.yes_bid
+            elif pos.side == "no" and snap.implied.no_bid is not None:
+                pos.current_price_cents = snap.implied.no_bid
+
+            if pos.current_price_cents is not None:
+                pnl_per_contract = pos.current_price_cents - pos.avg_entry_cents
+                pos.unrealized_pnl_cents = pnl_per_contract * pos.contracts
+
+            reason = None
+
+            # Profit target
+            if pos.unrealized_pnl_cents is not None:
+                entry_cost = pos.avg_entry_cents * pos.contracts
+                if entry_cost > 0:
+                    pnl_pct = pos.unrealized_pnl_cents / entry_cost
+                    if pnl_pct >= self.config.profit_target_pct:
+                        reason = f"Profit target hit: {pnl_pct:.2%} >= {self.config.profit_target_pct:.2%}."
+                    elif pnl_pct <= -self.config.stop_loss_pct:
+                        reason = f"Stop loss hit: {pnl_pct:.2%} <= -{self.config.stop_loss_pct:.2%}."
+
+            # Max hold
+            if reason is None:
+                hours_held = Decimal(str(
+                    (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
+                ))
+                if hours_held >= self.config.max_hold_hours:
+                    reason = f"Max hold exceeded: {hours_held:.1f}h >= {self.config.max_hold_hours}h."
+
+            # Market closing
+            if reason is None and snap.state in (ContractState.CLOSING, ContractState.CLOSED):
+                reason = f"Market state is {snap.state.value}, closing position."
+
+            if reason:
+                action = SignalAction.SELL_YES if pos.side == "yes" else SignalAction.SELL_NO
+                signals.append(StrategySignal(
+                    market_id=mid,
+                    action=action,
+                    side=pos.side,
+                    contracts=pos.contracts,
+                    phase=phase,
+                    reason=reason,
+                ))
+
+        return signals
+
+    # ------------------------------------------------------------------
+    # Batch evaluation
+    # ------------------------------------------------------------------
+
+    def scan_markets(self, snapshots: List[MarketSnapshot]) -> List[StrategySignal]:
+        """Evaluate multiple markets and return actionable signals only."""
+        signals = []
+        for snap in snapshots:
+            sig = self.evaluate(snap)
+            if sig.action != SignalAction.NO_ACTION:
+                signals.append(sig)
+        return signals
