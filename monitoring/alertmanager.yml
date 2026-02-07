@@ -86,6 +86,14 @@ receivers:
         text: 'PagerDuty has been notified. Check PagerDuty for details.'
         send_resolved: true
 
+  - name: 'slack-alerts'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#merid-alerts'
+        title: '[WARNING] {{ .GroupLabels.alertname }}'
+        text: '{{ .GroupLabels.alertname }} - {{ .Annotations.description }}'
+        send_resolved: true
+
   - name: 'slack-governance'
     slack_configs:
       - api_url: '${SLACK_WEBHOOK_URL}'
