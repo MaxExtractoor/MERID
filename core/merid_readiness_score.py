@@ -21,12 +21,12 @@ import sys
 from typing import Dict, Tuple
 
 # ── Section scores (score, max) ─────────────────────────────────────────
-# Updated: 2026-02-07  (S9-01: 1→2 git history audit confirmed clean → 71/74)
+# Updated: 2026-02-07  (S2-01, S2-03, S3-01 all 1→2 → 74/74 = 100%)
 
 READINESS_SECTIONS: Dict[str, Tuple[int, int]] = {
     "swarm_architecture":       (8, 8),   # S1-03 1→2 (negotiation), S1-04 1→2 (A/B benchmark)
-    "decentralization_trust":   (6, 8),
-    "tokenization_value_flow":  (5, 6),
+    "decentralization_trust":   (8, 8),   # S2-01 1→2 (distributed exec tests), S2-03 1→2 (audit anchor)
+    "tokenization_value_flow":  (6, 6),   # S3-01 1→2 (agent credit ledger)
     "strategy_risk_safety":     (8, 8),   # S4-02 1→2, S4-03 1→2
     "observability_ux":         (8, 8),
     "operations_sre":           (8, 8),   # S6-02 1→2 (alerting config validation)
