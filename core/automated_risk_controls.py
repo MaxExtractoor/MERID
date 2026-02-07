@@ -667,12 +667,21 @@ class RiskControlCoordinator:
         self.stop_loss_manager = AutomatedStopLossManager()
         self.halt_manager = TradingHaltManager()
         self.error_handler = get_error_handler()
+        self.staleness_monitor = None  # Set via wire_staleness_monitor()
         
         self._monitoring = False
         self._monitor_task: Optional[asyncio.Task] = None
         self._circuit_breakers: Dict[str, Any] = {}
         
         logger.info("Risk control coordinator initialized")
+
+    def wire_staleness_monitor(self, monitor) -> None:
+        """Wire a FeedStalenessMonitor so stale feeds auto-halt trading."""
+        self.staleness_monitor = monitor
+        monitor.on_stale(lambda fid, inst, age: self.halt_manager.halt(
+            f"Stale data: {fid}:{inst} ({age:.0f}s)"
+        ))
+        logger.info("Staleness monitor wired to risk coordinator")
 
     def register_circuit_breaker(self, name: str, breaker: Any) -> None:
         """Register an external circuit breaker for monitoring."""
@@ -726,6 +735,10 @@ class RiskControlCoordinator:
                 open_count += 1
         self.halt_manager.check_circuit_breakers(open_count)
 
+        # --- Feed staleness auto-halt ---
+        if self.staleness_monitor is not None:
+            self.staleness_monitor.check_all()
+
         # --- Legacy: critical violation → error handler ---
         critical_violations = [
             limit for limit in risk_report['risk_limits']
@@ -752,6 +765,7 @@ class RiskControlCoordinator:
             'monitoring_active': self._monitoring,
             'trading_halt': self.halt_manager.get_status(),
             'can_trade': self.can_trade(),
+            'staleness': self.staleness_monitor.get_summary() if self.staleness_monitor else {},
         }
 
 
