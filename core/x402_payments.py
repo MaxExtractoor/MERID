@@ -247,6 +247,9 @@ class X402Client:
         
         # Remove from pending
         self._pending_requests.pop(request.request_id, None)
+
+        # Record in explainability system for audit trail
+        self._record_payment_explanation(request, receipt)
         
         logger.info(
             "Payment completed: %s (token expires %s)",
@@ -351,6 +354,41 @@ class X402Client:
             ),
         ]
     
+    def _record_payment_explanation(
+        self, request: PaymentRequest, receipt: PaymentReceipt
+    ) -> None:
+        """Record x402 payment in the explainability system for audit."""
+        try:
+            from core.explainability import (
+                ExplanationContext,
+                ExplanationType,
+                get_explainability_service,
+            )
+
+            svc = get_explainability_service()
+            context = ExplanationContext(
+                agent_id="x402_client",
+                strategy="micropayment",
+                inputs={
+                    "resource_url": request.resource_url,
+                    "amount_sats": str(request.amount_sats),
+                    "amount_usd": str(request.amount_usd),
+                    "rail": request.rail.value,
+                },
+            )
+            svc.record_explanation(
+                explanation_type=ExplanationType.X402_PAYMENT,
+                summary=(
+                    f"x402 payment: {request.amount_sats} sats "
+                    f"via {request.rail.value} for {request.resource_url}"
+                ),
+                context=context,
+                domain="payments",
+                decision_id=receipt.receipt_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to record x402 explanation: %s", exc)
+
     def get_statistics(self) -> Dict[str, Any]:
         """Get payment statistics."""
         return {

@@ -358,6 +358,15 @@ production readiness requirements.
 - [x] `tests/test_adapter_integration.py` — mock exchange adapters (24 tests)
 - [x] `tests/test_alerting_config.py` — alertmanager config validation (32 tests)
 
+### 6. Rewards, Gamification & x402 Payments — ✅ DONE
+
+- [x] `web/api/rewards.py` — Unified rewards API: XP/leaderboard, quest campaigns (5 seeded), reward pools (3 pools), x402 stats/receipts/resources, security quests/bug reports. Wired into `web/main.py`.
+- [x] `core/reward_event_hooks.py` — `RewardEventHooks` bridges trading/risk/compliance/consensus events to XP awards. 16 event types with daily cap (5000 XP), streak tracking, multiplier table.
+- [x] `core/x402_payments.py` — `_record_payment_explanation()` wires every x402 payment into `ExplainabilityService` as `X402_PAYMENT` type for audit trail.
+- [x] `tests/test_gamified_security.py` — 40 tests across 7 classes: quest creation, bug report submission/verification, reward distribution, security seasons/leaderboards, user profiles/tiers/badges, Sybil resistance, severity-based rewards.
+- [x] `tests/test_mev_rewards.py` — 35 tests across 9 classes: MEV classification (safe/neutral/harmful), action recording, actor stats, health score, reward calculation, distribution from pools, pool management, health metrics, badge awards.
+- [x] `core/drift_reward_bridge.py` — Bridges `DriftMonitoringPipeline` → `DriftRewardLoop`: adapts pipeline `DriftEvent` to monitor `DriftEvent`, registers callbacks for all `MitigationAction` types, idempotent `wire_drift_reward_loop()`.
+
 ---
 
 ## Deferred Items (not required for score, operational improvements)
@@ -377,7 +386,7 @@ production readiness requirements.
 
 ---
 
-## Test Suite Summary (488 tests across 20 files)
+## Test Suite Summary (575+ tests across 24 files)
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
@@ -389,16 +398,19 @@ production readiness requirements.
 | `test_data_contracts.py` | 35 | Data contract validation per feed |
 | `test_negotiation_protocol.py` | 26 | Agent negotiation lifecycle |
 | `test_plain_language_explainer.py` | 17 | Plain-language decision explanations |
-| `test_swarm_vs_single_agent_benchmark.py` | 13 | A/B benchmark: swarm vs. single agent |
+| `test_swarm_vs_single_agent_benchmark.py` | 18 | A/B benchmark: swarm vs. single agent + Kalshi |
 | `test_secrets_guard.py` | 31 | Secrets detection + .gitignore coverage |
 | `test_audit_chain_integrity.py` | 16 | Hash chain integrity + tamper detection |
 | `test_venue_compliance.py` | 31 | Blocked venue rejection |
 | `test_alerting_config.py` | 32 | Alertmanager config validation |
 | `test_order_sanity_check.py` | 24 | Pre-execution order guard |
 | `test_compliance_report.py` | 35 | CLI compliance report generator |
-| `test_position_reconciliation.py` | 14 | Position persistence + recovery |
+| `test_position_reconciliation.py` | 19 | Position persistence + recovery + load |
 | `test_adapter_integration.py` | 24 | Mock exchange adapter integration |
 | `test_distributed_execution.py` | 25 | Celery tasks + StreamingBus pub/sub |
 | `test_audit_anchor.py` | 30 | Merkle-tree audit anchoring |
 | `test_agent_credit_ledger.py` | 35 | Per-agent credit ledger |
-| **Total** | **488** | **20 files, all passing** |
+| `test_gamified_security.py` | 40 | Gamified security quests + bug bounty |
+| `test_mev_rewards.py` | 35 | MEV reward system + health metrics |
+| `test_sandbox_integration.py` | 12 | Alpaca paper + Kalshi demo sandbox |
+| **Total** | **575+** | **23 files, all passing** |

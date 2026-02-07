@@ -97,6 +97,7 @@ from web.api.governance import router as governance_router
 from web.api.signals_api import router as signals_api_router
 from web.api.orchestrator_api import router as orchestrator_api_router
 from web.api.blockchain_health_api import router as blockchain_health_api_router
+from web.api.rewards import router as rewards_router
 
 # Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
 # from web.api.mock_simulation import router as mock_simulation_router
@@ -424,6 +425,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(signals_api_router)
     application.include_router(orchestrator_api_router)
     application.include_router(blockchain_health_api_router)
+    application.include_router(rewards_router)
     # Phase 0 adapters - only mount if feature flags are enabled
     if phase0_router:
         application.include_router(phase0_router)
