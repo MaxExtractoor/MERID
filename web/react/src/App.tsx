@@ -19,9 +19,13 @@ import Mining from "./views/Mining";
 import Institutional from "./views/Institutional";
 import Plugins from "./views/Plugins";
 import OperatorDashboard from "./views/OperatorDashboard";
+import TradeFloor from "./views/TradeFloor";
+import DevSwarm from "./views/DevSwarm";
+import Positions from "./views/Positions";
+import Orders from "./views/Orders";
 import { ThemeProvider } from "./theme";
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders";
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
@@ -86,6 +90,10 @@ export default function App() {
             {view === "institutional" && <Institutional />}
             {view === "plugins" && <Plugins />}
             {view === "operator" && <OperatorDashboard />}
+            {view === "tradefloor" && <TradeFloor />}
+            {view === "devswarm" && <DevSwarm />}
+            {view === "positions" && <Positions />}
+            {view === "orders" && <Orders />}
           </main>
         </div>
       </div>

@@ -20,18 +20,37 @@ export default function Orders() {
   const [searchTerm, setSearchTerm] = useState('');
 
   useEffect(() => {
-    // Simulated data - replace with real API call
-    const mockOrders: Order[] = [
-      { id: 'ord-001', symbol: 'AAPL', side: 'buy', type: 'market', quantity: 100, price: 185.50, status: 'filled', timestamp: '2025-01-31 14:30:00', venue: 'Alpaca' },
-      { id: 'ord-002', symbol: 'TSLA', side: 'sell', type: 'limit', quantity: 50, price: 245.00, status: 'open', timestamp: '2025-01-31 14:25:00', venue: 'Alpaca' },
-      { id: 'ord-003', symbol: 'BTC-USD', side: 'buy', type: 'market', quantity: 0.5, price: 42500.00, status: 'filled', timestamp: '2025-01-31 14:20:00', venue: 'Coinbase' },
-      { id: 'ord-004', symbol: 'ETH-USD', side: 'buy', type: 'limit', quantity: 2.0, price: 2550.00, status: 'open', timestamp: '2025-01-31 14:15:00', venue: 'Kraken' },
-    ];
-    
-    setTimeout(() => {
-      setOrders(mockOrders);
+    const fetchOrders = async () => {
+      try {
+        const res = await fetch('/api/v1/trading/orders/open');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.orders) {
+            setOrders(data.orders.map((o: any) => ({
+              id: o.id || o.order_id || '',
+              symbol: o.symbol || o.asset || '',
+              side: (o.side || 'buy').toLowerCase() as 'buy' | 'sell',
+              type: (o.type || o.order_type || 'market').toLowerCase() as 'market' | 'limit' | 'stop',
+              quantity: o.size || o.quantity || 0,
+              price: o.price || null,
+              status: (o.status || 'open').toLowerCase() as 'open' | 'filled' | 'cancelled' | 'rejected',
+              timestamp: o.createdAt || o.timestamp || '',
+              venue: o.venue || 'Paper',
+            })));
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to fetch orders from API, showing empty state');
+      }
+      setOrders([]);
       setLoading(false);
-    }, 500);
+    };
+
+    fetchOrders();
+    const interval = setInterval(fetchOrders, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const filteredOrders = orders.filter(order => {
@@ -81,6 +100,7 @@ export default function Orders() {
         <select
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          aria-label="Filter orders by status"
           className="px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
         >
           <option value="all">All Status</option>
