@@ -7,8 +7,10 @@ without risking real capital. Tracks virtual portfolio, P&L, and performance.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Callable, Set, Any
 from enum import Enum
 
@@ -497,6 +499,7 @@ class PaperTradingEngine:
         self._mark_positions_dirty()
 
         logger.info(f"Order executed: {order.order_id} - {order.asset} {order.side} @ {fill_price}")
+        _save_paper_state(self)
     
     def _update_position(self, order: PaperOrder, portfolio: PaperPortfolio):
         """Update or create position from order."""
@@ -567,6 +570,7 @@ class PaperTradingEngine:
         del portfolio.positions[position_key]
         
         logger.info(f"Position closed: {position_key} - P&L: ${pnl:.2f}")
+        _save_paper_state(self)
 
         self._notify_listeners(
             "position",
@@ -709,11 +713,93 @@ class PaperTradingEngine:
             "pending_orders": len(portfolio.orders)
         }
 
+# Default persistence path
+_PERSIST_DIR = Path(__file__).resolve().parent.parent / "data"
+_PERSIST_FILE = _PERSIST_DIR / "paper_positions.json"
+
+
+def _save_paper_state(engine: PaperTradingEngine) -> None:
+    """Persist paper trading state to disk."""
+    try:
+        _PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+        state = {
+            "saved_at": time.time(),
+            "portfolios": {},
+        }
+        for uid, portfolio in engine.portfolios.items():
+            positions = {}
+            for pk, pos in portfolio.positions.items():
+                positions[pk] = {
+                    "position_id": pos.position_id,
+                    "user_id": pos.user_id,
+                    "asset": pos.asset,
+                    "side": pos.side,
+                    "size_usd": pos.size_usd,
+                    "entry_price": pos.entry_price,
+                    "current_price": pos.current_price,
+                    "leverage": pos.leverage,
+                    "unrealized_pnl": pos.unrealized_pnl,
+                    "realized_pnl": pos.realized_pnl,
+                    "opened_at": pos.opened_at,
+                    "market_type": pos.market_type,
+                    "market_id": pos.market_id,
+                }
+            state["portfolios"][uid] = {
+                "starting_balance": portfolio.starting_balance,
+                "current_balance": portfolio.current_balance,
+                "total_pnl": portfolio.total_pnl,
+                "total_trades": portfolio.total_trades,
+                "winning_trades": portfolio.winning_trades,
+                "losing_trades": portfolio.losing_trades,
+                "positions": positions,
+            }
+        _PERSIST_FILE.write_text(json.dumps(state, indent=2))
+        logger.debug(f"Paper trading state saved ({len(engine.portfolios)} portfolios)")
+    except Exception as exc:
+        logger.warning(f"Failed to save paper trading state: {exc}")
+
+
+def _load_paper_state(engine: PaperTradingEngine) -> None:
+    """Restore paper trading state from disk."""
+    if not _PERSIST_FILE.exists():
+        return
+    try:
+        data = json.loads(_PERSIST_FILE.read_text())
+        for uid, pdata in data.get("portfolios", {}).items():
+            portfolio = engine._get_or_create_portfolio(uid)
+            portfolio.starting_balance = pdata.get("starting_balance", 10000.0)
+            portfolio.current_balance = pdata.get("current_balance", 10000.0)
+            portfolio.total_pnl = pdata.get("total_pnl", 0.0)
+            portfolio.total_trades = pdata.get("total_trades", 0)
+            portfolio.winning_trades = pdata.get("winning_trades", 0)
+            portfolio.losing_trades = pdata.get("losing_trades", 0)
+            for pk, posdata in pdata.get("positions", {}).items():
+                portfolio.positions[pk] = PaperPosition(
+                    position_id=posdata["position_id"],
+                    user_id=posdata["user_id"],
+                    asset=posdata["asset"],
+                    side=posdata["side"],
+                    size_usd=posdata["size_usd"],
+                    entry_price=posdata["entry_price"],
+                    current_price=posdata.get("current_price", posdata["entry_price"]),
+                    leverage=posdata.get("leverage", 1),
+                    unrealized_pnl=posdata.get("unrealized_pnl", 0.0),
+                    realized_pnl=posdata.get("realized_pnl", 0.0),
+                    opened_at=posdata.get("opened_at", time.time()),
+                    market_type=posdata.get("market_type", "perp"),
+                    market_id=posdata.get("market_id"),
+                )
+        logger.info(f"Paper trading state restored ({len(data.get('portfolios', {}))} portfolios)")
+    except Exception as exc:
+        logger.warning(f"Failed to load paper trading state: {exc}")
+
+
 def get_paper_engine() -> PaperTradingEngine:
     """Get or create paper trading engine singleton."""
     global _paper_engine
     if _paper_engine is None:
         _paper_engine = PaperTradingEngine(starting_balance=10000.0)
+        _load_paper_state(_paper_engine)
     return _paper_engine
 
 def paper_trading_handler(action_type: str, parameters: Dict) -> Dict:
