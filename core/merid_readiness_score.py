@@ -21,10 +21,10 @@ import sys
 from typing import Dict, Tuple
 
 # ── Section scores (score, max) ─────────────────────────────────────────
-# Updated: 2026-02-07  (backlogs #2, #4, #5 + S1-03, S8-01: +6 points)
+# Updated: 2026-02-07  (backlogs #2, #4, #5 + S1-03, S1-04, S5-03, S8-01: +7 points)
 
 READINESS_SECTIONS: Dict[str, Tuple[int, int]] = {
-    "swarm_architecture":       (7, 8),   # S1-03 1→2 (negotiation protocol)
+    "swarm_architecture":       (8, 8),   # S1-03 1→2 (negotiation), S1-04 1→2 (A/B benchmark)
     "decentralization_trust":   (6, 8),
     "tokenization_value_flow":  (5, 6),
     "strategy_risk_safety":     (8, 8),   # S4-02 1→2, S4-03 1→2
