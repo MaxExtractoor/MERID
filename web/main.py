@@ -325,6 +325,14 @@ def create_app(lifespan=None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Wire distributed tracing middleware (graceful degradation)
+    try:
+        from core.tracing import CorrelationMiddleware
+        CorrelationMiddleware(application)
+        logger.info("Distributed tracing middleware enabled")
+    except Exception as exc:
+        logger.debug(f"Tracing middleware not available: {exc}")
+
     application.include_router(root_router)
     application.include_router(router)
     application.include_router(router_v1)
@@ -1447,11 +1455,29 @@ async def startup_event():
         from trading.paper_trading import get_paper_trading_engine
         paper_engine = get_paper_trading_engine()
         portfolio_count = len(paper_engine.portfolios)
-        logger.info(f"✅ Paper trading engine: {portfolio_count} portfolios loaded")
-        _startup_state["services"]["paper_trading"] = {"status": "running", "started_at": time.time()}
+        position_count = sum(len(p.positions) for p in paper_engine.portfolios.values())
+        logger.info(f"✅ Paper trading engine: {portfolio_count} portfolios, {position_count} positions restored")
+        _startup_state["services"]["paper_trading"] = {"status": "running", "started_at": time.time(), "portfolios": portfolio_count, "positions": position_count}
     except Exception as e:
         logger.warning(f"⚠️  Paper trading engine initialization failed: {e}")
         _startup_state["services"]["paper_trading"] = {"status": "failed", "error": str(e)}
+
+    # Verify backup/persistence subsystem
+    try:
+        from pathlib import Path
+        data_dir = Path(__file__).resolve().parent.parent / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        backup_api_ok = True
+        try:
+            from backup import get_backup_manager
+            get_backup_manager()
+        except Exception:
+            backup_api_ok = False
+        logger.info(f"✅ Data persistence: dir={data_dir.exists()}, backup_api={backup_api_ok}")
+        _startup_state["services"]["data_persistence"] = {"status": "running", "data_dir": str(data_dir), "backup_api": backup_api_ok, "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Data persistence check failed: {e}")
+        _startup_state["services"]["data_persistence"] = {"status": "failed", "error": str(e)}
     
     try:
         from agents.reflection_layer import get_reflection_system

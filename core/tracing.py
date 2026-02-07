@@ -13,6 +13,7 @@ import time
 import uuid
 from typing import Dict, Optional, Any
 from contextlib import contextmanager
+from functools import wraps
 from dataclasses import dataclass, field
 
 from opentelemetry import trace
