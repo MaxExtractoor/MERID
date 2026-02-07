@@ -263,9 +263,9 @@ production readiness requirements.
 
 ### 9.2 Abuse and adversarial protections — **2**
 
-- **Exists:** `core/adversarial_hardening.py` with 16+ matches for adversarial patterns. `core/reuse_guardrails.py` limits what agents can change. `SwarmConfig` enforces concurrent limits. `core/constitution_enforcer.py` enforces behavioral guardrails.
-- **Missing:** No explicit order-size sanity check (e.g., max single order as % of portfolio).
-- **Next:** Add a pre-execution sanity check: reject orders > X% of portfolio or > Y notional.
+- **Exists:** `core/adversarial_hardening.py` with 16+ matches for adversarial patterns. `core/reuse_guardrails.py` limits what agents can change. `SwarmConfig` enforces concurrent limits. `core/constitution_enforcer.py` enforces behavioral guardrails. `core/order_sanity_check.py` — `OrderSanityChecker` pre-execution guard: max order as % of portfolio (default 10%), max absolute notional ($10K), min order notional ($1), daily order count limit (500), per-symbol daily notional cap ($25K), zero/negative quantity/price rejection. Daily counters auto-reset. 24 tests in `tests/test_order_sanity_check.py`.
+- **Missing:** Not yet wired into `TradeRouter` or `UniversalRouter` execution path.
+- **Next:** Wire `OrderSanityChecker.check()` into `TradeRouter.route()` and `UniversalRouter.execute()` as mandatory pre-flight.
 
 ### 9.3 Ethical guardrails and compliance — **2**
 
