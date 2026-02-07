@@ -58,7 +58,7 @@ def wire_drift_reward_loop() -> bool:
 
         # Map pipeline DriftStatus → reward loop DriftSeverity
         status_to_severity = {
-            DriftStatus.NORMAL: DriftSeverity.INFO,
+            DriftStatus.STABLE: DriftSeverity.INFO,
             DriftStatus.WARNING: DriftSeverity.WARNING,
             DriftStatus.DEGRADED: DriftSeverity.WARNING,
             DriftStatus.CRITICAL: DriftSeverity.CRITICAL,
