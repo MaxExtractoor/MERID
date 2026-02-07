@@ -119,7 +119,14 @@ agents-summary:
 	python -c "from merid.agents.base import get_canonical_registry; import json; print(json.dumps(get_canonical_registry().summary(), indent=2))"
 
 all-pipeline-tests:
-	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_blockchain.py tests/test_blockchain_v2.py -v
+	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_blockchain.py tests/test_blockchain_v2.py tests/test_agent_wiring.py -v
+
+# ── Agent Wiring & Orchestrator ──────────────────────────────────────
+wiring-test:
+	python -m pytest tests/test_agent_wiring.py -v
+
+orchestrator-summary:
+	python -c "from merid.agents.orchestrator import AgentOrchestrator; import json; print(json.dumps(AgentOrchestrator().summary(), indent=2))"
 
 # ── Blockchain Integration ────────────────────────────────────────────
 blockchain-test:
