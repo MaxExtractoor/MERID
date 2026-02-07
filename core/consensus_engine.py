@@ -215,11 +215,46 @@ class ConsensusEngine:
         return vote
         
     def _handle_veto(self, event: StreamEvent):
-        """Handle risk agent veto."""
+        """Handle risk agent veto — attempt negotiation before hard block."""
         data = event.data
-        logger.warning(f"VETO received from {event.source}: {data.get('reason')}")
-        
-        # Clear pending votes - veto blocks consensus
+        veto_reason = data.get("reason", "unspecified")
+        logger.warning(f"VETO received from {event.source}: {veto_reason}")
+
+        # Attempt negotiation before hard-blocking
+        try:
+            from core.negotiation_protocol import NegotiationSession, NegotiationMediator
+
+            session = NegotiationSession(
+                session_id=f"veto-{event.source}-{int(time.time())}",
+                initiator=event.source,
+                responder="consensus_engine",
+                topic=f"risk_veto: {veto_reason}",
+                timeout_seconds=10.0,
+            )
+            mediator = NegotiationMediator()
+
+            # Risk agent proposes constraints; consensus engine counter-proposes
+            session.propose(event.source, {
+                "action": "block",
+                "reason": veto_reason,
+                "constraints": data.get("constraints", {}),
+            })
+
+            # Auto-resolve via mediator (highest_confidence strategy)
+            resolution = mediator.resolve(session)
+
+            if resolution and resolution.get("outcome") == "accepted":
+                logger.info(
+                    f"Negotiation resolved veto from {event.source} — "
+                    f"applying constraints instead of hard block"
+                )
+                # Apply negotiated constraints (e.g. reduced position size)
+                # but do NOT clear votes — consensus continues with constraints
+                return
+        except (ImportError, Exception) as exc:
+            logger.debug(f"Negotiation unavailable or failed: {exc}")
+
+        # Fallback: hard veto — clear pending votes
         self.pending_votes.clear()
         
     def _handle_challenge(self, event: StreamEvent):

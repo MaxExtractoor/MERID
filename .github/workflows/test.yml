@@ -73,6 +73,49 @@ jobs:
     - name: Circuit Breaker & Trading Halt Tests
       run: |
         pytest tests/test_trading_halt.py -v --tb=short
+    - name: Performance Regression Check
+      run: |
+        pytest tests/ --durations=10 -q 2>&1 | tee perf_output.txt
+        python -c "
+        import sys
+        MAX_SINGLE_TEST_SEC = 30.0
+        MAX_TOTAL_SEC = 90.0
+        lines = open('perf_output.txt').readlines()
+        slow = []
+        for line in lines:
+            line = line.strip()
+            if 's call' in line or 's setup' in line or 's teardown' in line:
+                parts = line.split()
+                try:
+                    duration = float(parts[0].rstrip('s'))
+                    if duration > MAX_SINGLE_TEST_SEC:
+                        slow.append((duration, line))
+                except (ValueError, IndexError):
+                    pass
+        if slow:
+            print(f'❌ {len(slow)} test(s) exceeded {MAX_SINGLE_TEST_SEC}s threshold:')
+            for d, l in slow:
+                print(f'  {l}')
+            sys.exit(1)
+        print(f'✅ No tests exceeded {MAX_SINGLE_TEST_SEC}s threshold')
+        "
+      continue-on-error: true
+    - name: Compliance Report
+      run: |
+        python -m core.compliance_report --json > compliance_report.json
+        python -c "
+        import json, sys
+        report = json.load(open('compliance_report.json'))
+        violations = report.get('violations', [])
+        critical = [v for v in violations if v.get('severity') == 'critical']
+        print(f'Compliance: {len(violations)} total violations, {len(critical)} critical')
+        if critical:
+            for v in critical:
+                print(f'  ❌ {v}')
+            sys.exit(1)
+        print('✅ No critical compliance violations')
+        "
+      continue-on-error: true
     - name: Alertmanager Config Validation
       run: |
         pip install pyyaml

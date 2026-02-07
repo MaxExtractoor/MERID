@@ -17,6 +17,26 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+try:
+    from prometheus_client import Gauge
+
+    feed_staleness_seconds = Gauge(
+        'merid_feed_staleness_seconds',
+        'Age in seconds since last update for a data feed',
+        ['feed', 'instrument']
+    )
+    feeds_stale_total = Gauge(
+        'merid_feeds_stale_total',
+        'Number of currently stale data feeds'
+    )
+    instruments_paused_total = Gauge(
+        'merid_instruments_paused_total',
+        'Number of instruments paused due to stale data'
+    )
+    _PROMETHEUS_AVAILABLE = True
+except ImportError:
+    _PROMETHEUS_AVAILABLE = False
+
 from utils.logger import get_logger
 
 logger = get_logger("core.feed_staleness_monitor")
@@ -163,6 +183,12 @@ class FeedStalenessMonitor:
                 except Exception as exc:
                     logger.error(f"on_critical callback error: {exc}")
 
+        # Update Prometheus gauges
+        if _PROMETHEUS_AVAILABLE:
+            feed_staleness_seconds.labels(feed=feed_id, instrument=instrument).set(
+                age if age != float("inf") else -1
+            )
+
         return FeedStatus(
             feed_id=feed_id,
             instrument=instrument,
@@ -184,6 +210,12 @@ class FeedStalenessMonitor:
             status = self.check_feed(feed_id, instrument)
             if status.stale:
                 stale_feeds.append(status)
+
+        # Update aggregate Prometheus gauges
+        if _PROMETHEUS_AVAILABLE:
+            feeds_stale_total.set(len(self._stale_set))
+            instruments_paused_total.set(len(self._paused_instruments))
+
         return stale_feeds
 
     def is_instrument_paused(self, instrument: str) -> bool:
