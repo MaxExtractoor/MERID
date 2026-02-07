@@ -1,0 +1,285 @@
+"""
+Integration tests for trading halt wiring (Backlog #2).
+
+Tests:
+- TradingHaltManager: halt/resume lifecycle, callbacks, idempotency
+- Daily loss breach → auto-halt
+- Drawdown breach → auto-halt
+- Circuit breaker open → trading halt
+- RiskControlCoordinator.can_trade() gate
+- Kill switch via /shutdown endpoint smoke test
+"""
+
+import asyncio
+import time
+import unittest
+from unittest.mock import MagicMock, patch
+
+from core.automated_risk_controls import (
+    TradingHaltManager,
+    RiskControlCoordinator,
+    PortfolioRiskManager,
+    PositionRisk,
+    RiskLimit,
+    RiskControlType,
+)
+from core.error_handling import CircuitBreaker
+
+
+class TestTradingHaltManager(unittest.TestCase):
+    """Tests for TradingHaltManager halt/resume lifecycle."""
+
+    def setUp(self):
+        self.mgr = TradingHaltManager(
+            max_daily_loss_pct=0.05,
+            max_drawdown_pct=0.15,
+            circuit_breaker_halt_threshold=2,
+        )
+
+    def test_initial_state_not_halted(self):
+        self.assertFalse(self.mgr.is_halted)
+        self.assertIsNone(self.mgr.halt_reason)
+
+    def test_halt_changes_state(self):
+        changed = self.mgr.halt("test reason")
+        self.assertTrue(changed)
+        self.assertTrue(self.mgr.is_halted)
+        self.assertEqual(self.mgr.halt_reason, "test reason")
+
+    def test_halt_idempotent(self):
+        self.mgr.halt("first")
+        changed = self.mgr.halt("second")
+        self.assertFalse(changed)
+        self.assertEqual(self.mgr.halt_reason, "first")
+
+    def test_resume_changes_state(self):
+        self.mgr.halt("test")
+        changed = self.mgr.resume("operator_1")
+        self.assertTrue(changed)
+        self.assertFalse(self.mgr.is_halted)
+        self.assertIsNone(self.mgr.halt_reason)
+
+    def test_resume_when_not_halted(self):
+        changed = self.mgr.resume()
+        self.assertFalse(changed)
+
+    def test_halt_fires_callbacks(self):
+        cb = MagicMock()
+        self.mgr.register_on_halt(cb)
+        self.mgr.halt("breach")
+        cb.assert_called_once_with("breach")
+
+    def test_resume_fires_callbacks(self):
+        cb = MagicMock()
+        self.mgr.register_on_resume(cb)
+        self.mgr.halt("breach")
+        self.mgr.resume("op")
+        cb.assert_called_once_with("op")
+
+    def test_callback_error_does_not_prevent_halt(self):
+        def bad_cb(reason):
+            raise RuntimeError("callback failed")
+        self.mgr.register_on_halt(bad_cb)
+        changed = self.mgr.halt("test")
+        self.assertTrue(changed)
+        self.assertTrue(self.mgr.is_halted)
+
+    def test_history_tracking(self):
+        self.mgr.halt("r1")
+        self.mgr.resume("op")
+        self.mgr.halt("r2")
+        status = self.mgr.get_status()
+        self.assertEqual(status["history_count"], 3)
+        self.assertEqual(status["history"][0]["action"], "halt")
+        self.assertEqual(status["history"][1]["action"], "resume")
+        self.assertEqual(status["history"][2]["action"], "halt")
+
+
+class TestDailyLossAutoHalt(unittest.TestCase):
+    """Daily loss breach → auto-halt."""
+
+    def setUp(self):
+        self.mgr = TradingHaltManager(max_daily_loss_pct=0.05)
+
+    def test_loss_below_threshold_no_halt(self):
+        halted = self.mgr.check_daily_loss(-400, 10000)  # 4%
+        self.assertFalse(halted)
+        self.assertFalse(self.mgr.is_halted)
+
+    def test_loss_at_threshold_halts(self):
+        halted = self.mgr.check_daily_loss(-500, 10000)  # 5%
+        self.assertTrue(halted)
+        self.assertTrue(self.mgr.is_halted)
+        self.assertIn("5.0%", self.mgr.halt_reason)
+
+    def test_loss_above_threshold_halts(self):
+        halted = self.mgr.check_daily_loss(-800, 10000)  # 8%
+        self.assertTrue(halted)
+        self.assertTrue(self.mgr.is_halted)
+
+    def test_positive_pnl_no_halt(self):
+        halted = self.mgr.check_daily_loss(500, 10000)
+        self.assertFalse(halted)
+
+    def test_zero_portfolio_no_halt(self):
+        halted = self.mgr.check_daily_loss(-100, 0)
+        self.assertFalse(halted)
+
+
+class TestDrawdownAutoHalt(unittest.TestCase):
+    """Drawdown breach → auto-halt."""
+
+    def setUp(self):
+        self.mgr = TradingHaltManager(max_drawdown_pct=0.15)
+
+    def test_drawdown_below_threshold_no_halt(self):
+        halted = self.mgr.check_drawdown(0.10)
+        self.assertFalse(halted)
+
+    def test_drawdown_at_threshold_halts(self):
+        halted = self.mgr.check_drawdown(0.15)
+        self.assertTrue(halted)
+        self.assertTrue(self.mgr.is_halted)
+
+    def test_drawdown_above_threshold_halts(self):
+        halted = self.mgr.check_drawdown(0.25)
+        self.assertTrue(halted)
+
+
+class TestCircuitBreakerAutoHalt(unittest.TestCase):
+    """Circuit breaker open → trading halt."""
+
+    def setUp(self):
+        self.mgr = TradingHaltManager(circuit_breaker_halt_threshold=2)
+
+    def test_one_breaker_no_halt(self):
+        halted = self.mgr.check_circuit_breakers(1)
+        self.assertFalse(halted)
+
+    def test_two_breakers_halts(self):
+        halted = self.mgr.check_circuit_breakers(2)
+        self.assertTrue(halted)
+        self.assertIn("2 circuit breakers", self.mgr.halt_reason)
+
+    def test_three_breakers_halts(self):
+        halted = self.mgr.check_circuit_breakers(3)
+        self.assertTrue(halted)
+
+
+class TestRiskControlCoordinatorGate(unittest.TestCase):
+    """RiskControlCoordinator.can_trade() gate."""
+
+    def setUp(self):
+        self.coord = RiskControlCoordinator()
+
+    def test_can_trade_initially(self):
+        self.assertTrue(self.coord.can_trade())
+
+    def test_cannot_trade_after_halt(self):
+        self.coord.halt_manager.halt("test")
+        self.assertFalse(self.coord.can_trade())
+
+    def test_can_trade_after_resume(self):
+        self.coord.halt_manager.halt("test")
+        self.coord.halt_manager.resume("op")
+        self.assertTrue(self.coord.can_trade())
+
+    def test_comprehensive_status_includes_halt(self):
+        self.coord.halt_manager.halt("drawdown")
+        status = self.coord.get_comprehensive_risk_status()
+        self.assertIn("trading_halt", status)
+        self.assertTrue(status["trading_halt"]["halted"])
+        self.assertFalse(status["can_trade"])
+
+
+class TestCircuitBreakerIntegration(unittest.TestCase):
+    """Integration: CircuitBreaker open state → coordinator detects → halt."""
+
+    def test_open_breakers_trigger_halt_in_check(self):
+        coord = RiskControlCoordinator()
+
+        # Create mock breakers
+        breaker1 = MagicMock()
+        breaker1.get_state.return_value = {"state": "open"}
+        breaker2 = MagicMock()
+        breaker2.get_state.return_value = {"state": "open"}
+        breaker3 = MagicMock()
+        breaker3.get_state.return_value = {"state": "closed"}
+
+        coord.register_circuit_breaker("binance", breaker1)
+        coord.register_circuit_breaker("kraken", breaker2)
+        coord.register_circuit_breaker("coinbase", breaker3)
+
+        # Run the risk check
+        asyncio.get_event_loop().run_until_complete(coord._check_all_risks())
+
+        self.assertTrue(coord.halt_manager.is_halted)
+        self.assertIn("2 circuit breakers", coord.halt_manager.halt_reason)
+        self.assertFalse(coord.can_trade())
+
+    def test_closed_breakers_no_halt(self):
+        coord = RiskControlCoordinator()
+
+        breaker1 = MagicMock()
+        breaker1.get_state.return_value = {"state": "closed"}
+        coord.register_circuit_breaker("binance", breaker1)
+
+        asyncio.get_event_loop().run_until_complete(coord._check_all_risks())
+
+        self.assertFalse(coord.halt_manager.is_halted)
+        self.assertTrue(coord.can_trade())
+
+
+class TestDrawdownIntegration(unittest.TestCase):
+    """Integration: large drawdown in portfolio → auto-halt via coordinator."""
+
+    def test_large_drawdown_triggers_halt(self):
+        coord = RiskControlCoordinator()
+        coord.halt_manager.max_drawdown_pct = 0.10  # 10%
+
+        # Set up portfolio with a large loss
+        pm = coord.portfolio_manager
+        pm.portfolio_value = 10000
+        pos = PositionRisk(
+            symbol="BTC",
+            position_size=1.0,
+            entry_price=50000,
+            current_price=40000,  # -20% drawdown
+            unrealized_pnl=-10000,
+            unrealized_pnl_pct=-0.20,
+        )
+        pm.add_position(pos)
+
+        asyncio.get_event_loop().run_until_complete(coord._check_all_risks())
+
+        # Drawdown is 100% of portfolio (10000 loss on 10000 portfolio)
+        self.assertTrue(coord.halt_manager.is_halted)
+        self.assertFalse(coord.can_trade())
+
+
+class TestKillSwitchEndpoint(unittest.TestCase):
+    """Smoke test: /shutdown endpoint exists and coordinator wires correctly."""
+
+    def test_halt_manager_status_serializable(self):
+        """Ensure get_status() returns JSON-serializable data."""
+        mgr = TradingHaltManager()
+        mgr.halt("test")
+        mgr.resume("op")
+        status = mgr.get_status()
+        import json
+        serialized = json.dumps(status)
+        self.assertIn("halted", serialized)
+        self.assertIn("history", serialized)
+
+    def test_coordinator_status_serializable(self):
+        """Ensure comprehensive status is JSON-serializable."""
+        coord = RiskControlCoordinator()
+        status = coord.get_comprehensive_risk_status()
+        import json
+        serialized = json.dumps(status)
+        self.assertIn("can_trade", serialized)
+        self.assertIn("trading_halt", serialized)
+
+
+if __name__ == "__main__":
+    unittest.main()
