@@ -119,4 +119,14 @@ agents-summary:
 	python -c "from merid.agents.base import get_canonical_registry; import json; print(json.dumps(get_canonical_registry().summary(), indent=2))"
 
 all-pipeline-tests:
-	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py -v
+	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_blockchain.py -v
+
+# ── Blockchain Integration ────────────────────────────────────────────
+blockchain-test:
+	python -m pytest tests/test_blockchain.py -v
+
+blockchain-secrets:
+	python -c "from merid.blockchain.secrets import get_secrets_manager; import json; print(json.dumps(get_secrets_manager().summary(), indent=2))"
+
+blockchain-execution:
+	python -c "from merid.blockchain.execution import get_execution_service; import json; print(json.dumps(get_execution_service().summary(), indent=2))"
