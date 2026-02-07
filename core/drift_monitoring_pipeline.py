@@ -21,6 +21,35 @@ import math
 
 logger = logging.getLogger(__name__)
 
+try:
+    from prometheus_client import Gauge, Counter
+
+    drift_score_gauge = Gauge(
+        'merid_drift_score',
+        'Current drift score for a monitor',
+        ['monitor_id', 'drift_type']
+    )
+    drift_status_gauge = Gauge(
+        'merid_drift_status',
+        'Drift status as numeric: 0=stable, 1=warning, 2=degraded, 3=critical',
+        ['monitor_id', 'drift_type']
+    )
+    drift_events_total = Counter(
+        'merid_drift_events_total',
+        'Total drift events detected',
+        ['drift_type', 'status']
+    )
+    drift_mitigations_total = Counter(
+        'merid_drift_mitigations_total',
+        'Total mitigation actions taken',
+        ['action']
+    )
+    _DRIFT_PROM_AVAILABLE = True
+except ImportError:
+    _DRIFT_PROM_AVAILABLE = False
+
+_DRIFT_STATUS_MAP = {"stable": 0, "warning": 1, "degraded": 2, "critical": 3}
+
 
 class DriftType(Enum):
     """Types of drift that can be detected."""
@@ -612,7 +641,23 @@ class DriftMonitoringPipeline:
     def _execute_mitigation(self, event: DriftEvent) -> None:
         """Execute mitigation action for a drift event."""
         action = event.recommended_action
-        
+
+        # Emit Prometheus metrics
+        if _DRIFT_PROM_AVAILABLE:
+            drift_score_gauge.labels(
+                monitor_id=event.source_id,
+                drift_type=event.drift_type.value,
+            ).set(event.drift_score)
+            drift_status_gauge.labels(
+                monitor_id=event.source_id,
+                drift_type=event.drift_type.value,
+            ).set(_DRIFT_STATUS_MAP.get(event.status.value, 0))
+            drift_events_total.labels(
+                drift_type=event.drift_type.value,
+                status=event.status.value,
+            ).inc()
+            drift_mitigations_total.labels(action=action.value).inc()
+
         for callback in self._mitigation_callbacks.get(action, []):
             try:
                 callback(event)
