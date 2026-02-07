@@ -18,9 +18,10 @@ import Betting from "./views/Betting";
 import Mining from "./views/Mining";
 import Institutional from "./views/Institutional";
 import Plugins from "./views/Plugins";
+import OperatorDashboard from "./views/OperatorDashboard";
 import { ThemeProvider } from "./theme";
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator";
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
@@ -84,6 +85,7 @@ export default function App() {
             {view === "mining" && <Mining />}
             {view === "institutional" && <Institutional />}
             {view === "plugins" && <Plugins />}
+            {view === "operator" && <OperatorDashboard />}
           </main>
         </div>
       </div>
