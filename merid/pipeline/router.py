@@ -18,6 +18,7 @@ from merid.pipeline.proposal import (
     TradeProposal,
 )
 from merid.pipeline.risk_manager import GlobalRiskManager, get_global_risk_manager
+from core.order_sanity_check import OrderSanityChecker, get_order_sanity_checker
 
 from utils.logger import get_logger
 
@@ -43,11 +44,13 @@ class TradeRouter:
         instruments: Optional[InstrumentRegistry] = None,
         mode_manager: Optional[ModeManager] = None,
         risk_manager: Optional[GlobalRiskManager] = None,
+        sanity_checker: Optional[OrderSanityChecker] = None,
     ):
         self._adapters = registry or get_adapter_registry()
         self._instruments = instruments or get_instrument_registry()
         self._modes = mode_manager or get_mode_manager()
         self._risk = risk_manager or get_global_risk_manager()
+        self._sanity = sanity_checker or get_order_sanity_checker()
         self._history: List[TradeProposal] = []
 
     # ── Main entry point ─────────────────────────────────────────────
@@ -92,6 +95,25 @@ class TradeRouter:
         if not risk_result.approved:
             proposal.reject(risk_result.reason)
             return proposal
+
+        # 4.5 Order sanity check (pre-execution guard)
+        try:
+            price_float = float(proposal.price) if proposal.price else 0.0
+            qty_float = float(proposal.qty) if proposal.qty else 0.0
+            portfolio_val = float(self._risk.total_capital)
+            sanity = self._sanity.check(
+                symbol=proposal.instrument_id or proposal.native_symbol or "UNKNOWN",
+                quantity=qty_float,
+                price=price_float,
+                portfolio_value=portfolio_val,
+                side=proposal.side.value if hasattr(proposal.side, 'value') else str(proposal.side),
+            )
+            if not sanity.passed:
+                reasons = "; ".join(v["message"] for v in sanity.violations)
+                proposal.reject(f"Order sanity check failed: {reasons}")
+                return proposal
+        except Exception as exc:
+            logger.warning(f"Order sanity check error (non-blocking): {exc}")
 
         proposal.approve()
 
