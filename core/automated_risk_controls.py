@@ -739,6 +739,18 @@ class RiskControlCoordinator:
         if self.staleness_monitor is not None:
             self.staleness_monitor.check_all()
 
+        # --- Anomaly detection auto-halt ---
+        try:
+            from ops.anomaly_detection import get_anomaly_detection
+            anomaly_stack = get_anomaly_detection()
+            should_halt, reason = anomaly_stack.should_halt()
+            if should_halt:
+                self.halt_manager.halt(f"Anomaly detection: {reason}")
+        except ImportError:
+            pass  # anomaly detection module not available
+        except Exception as exc:
+            logger.debug(f"Anomaly detection check error: {exc}")
+
         # --- Legacy: critical violation → error handler ---
         critical_violations = [
             limit for limit in risk_report['risk_limits']
