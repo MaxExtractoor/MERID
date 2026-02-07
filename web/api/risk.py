@@ -191,6 +191,50 @@ async def reset_circuit_breaker() -> Dict[str, Any]:
     }
 
 
+@router.get("/commitments")
+async def get_historical_commitments() -> Dict[str, Any]:
+    """
+    Surface historical commitments auditor results in the risk view.
+
+    Returns overdue items, gap counts, and readiness status.
+    """
+    try:
+        from core.historical_commitments_auditor import HistoricalCommitmentsAuditor
+        auditor = HistoricalCommitmentsAuditor()
+        report = auditor.generate_report()
+        return {
+            "success": True,
+            "overdue_count": report.get("overdue_count", 0),
+            "total_commitments": report.get("total_commitments", 0),
+            "overdue_items": report.get("overdue_items", []),
+            "gap_summary": report.get("gap_summary", {}),
+            "readiness_pct": report.get("readiness_pct", 0),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except ImportError:
+        return {
+            "success": False,
+            "message": "HistoricalCommitmentsAuditor not available",
+            "overdue_count": 0,
+            "total_commitments": 0,
+            "overdue_items": [],
+            "gap_summary": {},
+            "readiness_pct": 0,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": str(exc),
+            "overdue_count": 0,
+            "total_commitments": 0,
+            "overdue_items": [],
+            "gap_summary": {},
+            "readiness_pct": 0,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+
 @router.post("/kill-switch/{action}")
 async def toggle_kill_switch(action: str) -> Dict[str, Any]:
     """

@@ -32,8 +32,7 @@ production readiness requirements.
 ### 1.1 Agent roles and collaboration patterns — **2**
 
 - **Exists:** `core/dev_swarm.py` defines `DevAgent` with typed roles (researcher, coder, reviewer, auditor). `core/agent_orchestrator.py` orchestrates multi-agent pipelines. `core/collaboration_framework.py` defines `IntegrationPattern` (event-driven, pub/sub, message queue, shared state, API gateway).
-- **Missing:** No formal "agent capability manifest" — roles are implicit in code, not declarative.
-- **Next:** Add a YAML agent registry mapping role → capabilities → allowed actions.
+- **Done:** `config/agent_manifest.yml` — declarative YAML manifest for 14 agents: role, category, module, capabilities, allowed_actions, data_access, risk_level, and policy definitions.
 
 ### 1.2 Multi-agent coordination strategies — **2**
 
@@ -95,8 +94,7 @@ production readiness requirements.
 ### 3.2 Internal vs. real capital boundary — **2**
 
 - **Exists:** `core/mode_manager.py` defines `TradingMode` (OFFLINE, SIMULATION, PAPER, LIVE, HYBRID, SPECTATOR, MAINTENANCE). `core/us_compliance_config.py` separates sim-only venues from live. `deploy/merid-dev-swarm.service` defaults to `RUN_MODE=simulation`. `tests/test_mode_gate.py` — 17 tests verifying SIMULATION/PAPER modes cannot execute live trading, feature gating, mode transitions, and authorization checks.
-- **Missing:** No CI enforcement of mode-gate tests on every PR.
-- **Next:** Add mode-gate tests to CI required checks.
+- **Done:** `test_mode_gate.py` + `test_trading_halt.py` added to `safety-smoke` CI job in `test.yml` — runs on every push/PR.
 
 ### 3.3 Budget/risk limit enforcement — **2**
 
@@ -113,26 +111,22 @@ production readiness requirements.
 ### 4.1 Explicit risk limits enforced and tested — **2**
 
 - **Exists:** `core/automated_risk_controls.py` — `RiskLimit` with `check_breach()`, 7 control types, breach counting, action-on-breach (alert/block/reduce). `SwarmConfig` enforces concurrent task/agent limits.
-- **Missing:** Integration tests for risk controls are in legacy-broken state.
-- **Next:** Fix or rewrite risk control integration tests (R-05 gap from 24/7 audit).
+- **Done:** Risk control integration tests rewritten — `test_trading_halt.py` covers halt/resume, daily loss, drawdown, circuit breaker integration (32 tests).
 
 ### 4.2 Circuit breakers — **2**
 
 - **Exists:** `core/error_handling.py` and `core/venue_wrapper.py` have circuit breaker patterns. `core/resource_manager.py` has resource-level circuit breakers. `core/automated_risk_controls.py` `RiskControlCoordinator` registers external circuit breakers and auto-halts when ≥2 are open. `tests/test_trading_halt.py` `TestCircuitBreakerIntegration` proves open breakers → halt → no new orders.
-- **Missing:** No live venue 5xx simulation test (requires real adapter stubs).
-- **Next:** Add live adapter stub that simulates 5xx → verify circuit breaker opens end-to-end.
+- **Done:** `TestVenue5xxCircuitBreaker` in `test_trading_halt.py` — 3 tests: 5xx→breaker opens, 2 open breakers→halt, single breaker→no halt.
 
 ### 4.3 Kill switch and emergency stop — **2**
 
 - **Exists:** `core/human_ai_interface.py` has emergency shutdown. `ops/drills/3am_simulation.py` tests it. `DevSwarm.shutdown()` with graceful timeout. `core/automated_risk_controls.py` `TradingHaltManager` auto-halts on drawdown breach (>15%), daily loss breach (>5%), or ≥2 open circuit breakers. `RiskControlCoordinator.can_trade()` is the central gate. 29 tests in `tests/test_trading_halt.py` cover halt/resume lifecycle, callbacks, daily loss, drawdown, circuit breaker integration.
-- **Missing:** Kill switch not yet in CI smoke test.
-- **Next:** Add kill switch to CI smoke test (verify `/shutdown` endpoint).
+- **Done:** Kill switch smoke test in `safety-smoke` CI job — verifies halt/resume/daily-loss auto-halt.
 
 ### 4.4 Historical commitments auditor in risk view — **2**
 
 - **Exists:** `core/historical_commitments_auditor.py` parses gap reports, identifies overdue items, generates DevTasks. Integrated into `core/dev_swarm_readiness_auditor.py`. 55+ tests covering parsing, overdue detection, edge cases.
-- **Missing:** Not yet surfaced in the trading risk dashboard.
-- **Next:** Add historical commitments summary to the risk view API endpoint.
+- **Done:** `GET /risk/commitments` endpoint in `web/api/risk.py` — surfaces overdue items, gap counts, readiness pct from `HistoricalCommitmentsAuditor`.
 
 **Section 4 total: 8/8**
 
@@ -143,8 +137,7 @@ production readiness requirements.
 ### 5.1 Swarm health metrics — **2**
 
 - **Exists:** `core/dev_swarm_metrics.py` — Counter, Histogram, Gauge for task throughput, error rates, decision latency. `core/observability_manager.py` aggregates system-wide metrics. `core/health_monitor.py` tracks component health.
-- **Missing:** Queue depth metric not explicitly exposed.
-- **Next:** Add a Gauge for `active_tasks` count and `task_history` length.
+- **Done:** `task_history_length` and `queue_depth` Gauges added to `core/dev_swarm_metrics.py`, wired into `update_from_swarm()`.
 
 ### 5.2 Agent activity dashboards — **2**
 
@@ -161,8 +154,7 @@ production readiness requirements.
 ### 5.4 Audit trails tied to orders/risk events — **2**
 
 - **Exists:** `core/audit_trail.py` — immutable hash-chained log. `core/consensus_logging.py` logs every vote with outcome. `core/explainability_storage.py` persists per-decision traces.
-- **Missing:** No cross-reference index from order ID → audit entry → consensus vote.
-- **Next:** Add an index/lookup by order ID in the audit trail.
+- **Done:** `AuditTrail._order_index` dict + `get_by_order_id()` / `get_by_event_type()` methods in `core/audit_trail.py`. Index built on load and on each new entry.
 
 **Section 5 total: 8/8**
 
