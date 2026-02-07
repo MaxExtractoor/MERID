@@ -5,11 +5,14 @@ Provides unified interface for US-compliant venues.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 from decimal import Decimal
 from datetime import datetime
 from enum import Enum
+import logging
+
+_va_logger = logging.getLogger(__name__)
 
 
 class OrderSide(str, Enum):
@@ -130,3 +133,38 @@ class VenueAdapter(ABC):
     def is_connected(self) -> bool:
         """Check if connected."""
         return self.connected
+
+    async def get_market_data_validated(
+        self, symbol: str
+    ) -> Tuple[Optional["MarketData"], Optional[Dict[str, Any]]]:
+        """Get market data with DataContractRegistry validation.
+
+        Returns:
+            (market_data, validation_result_dict) — validation_result_dict is
+            None if no contract is registered for this venue.
+        """
+        md = await self.get_market_data(symbol)
+        if md is None:
+            return None, None
+
+        try:
+            from core.data_contracts import get_data_contract_registry
+            registry = get_data_contract_registry()
+            data_dict = {
+                "price": float(md.last),
+                "volume": float(md.volume_24h),
+                "timestamp": md.timestamp.timestamp() if hasattr(md.timestamp, 'timestamp') else float(md.timestamp),
+                "symbol": md.symbol,
+            }
+            result = registry.validate(self.venue_id, data_dict)
+            if not result.valid:
+                _va_logger.warning(
+                    "Data contract violation for %s/%s: %s",
+                    self.venue_id, symbol, result.errors,
+                )
+            return md, result.to_dict()
+        except ImportError:
+            return md, None
+        except Exception as exc:
+            _va_logger.debug("Data contract validation error: %s", exc)
+            return md, None

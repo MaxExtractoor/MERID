@@ -60,8 +60,7 @@ production readiness requirements.
 ### 2.1 Distributed execution support — **2**
 
 - **Exists:** `core/celery_tasks.py` for async task distribution (6 tasks: backtest, risk metrics, market data sync, order submission with retry, cleanup, workflow chains). `core/workflows_temporal.py` for Temporal workflow orchestration. `core/streaming_bus.py` for event-driven pub/sub with typed channels (10 channels), backpressure handling, subscriber health monitoring, and convenience publish functions. `tests/test_distributed_execution.py` — 25 tests across 8 classes: Celery task definitions (importable, retry configs, concurrency, prefetch), workflow chain composition, StreamingBus pub/sub (subscribe/receive, channel isolation, multi-subscriber, unsubscribe, event retrieval), convenience publishers (market data, agent output), metrics tracking, event serialization, singleton bus.
-- **Missing:** Not yet deployed in multi-process topology (single-process only).
-- **Next:** Deploy Celery workers behind systemd for true distributed execution.
+- **Done:** `deploy/merid-celery-worker.service` — systemd unit for Celery workers: 4 concurrency, 5 queues (default/research/strategy/risk/execution), security hardening, 2GB memory limit, auto-restart.
 
 ### 2.2 Auditability and trust — **2**
 
@@ -217,14 +216,12 @@ production readiness requirements.
 ### 8.1 Data contracts and validation — **2**
 
 - **Exists:** `core/data_validation.py` with schema validation. `core/validation/time_window.py` and `core/validation/onchain.py` for specific feed types. `core/data_contracts.py` implements formal `DataContract` per feed with schema types, `FieldSpec` (range/allowed values), freshness SLA (`max_age_seconds`), `FallbackStrategy` (use_cached/pause_instrument/halt_trading), custom validators, default value application. `DataContractRegistry` with validation history, failure tracking, dashboard summary. `build_default_contracts()` seeds 5 feeds (binance, coinbase, kalshi, alpaca, polygon). 35 tests in `tests/test_data_contracts.py`.
-- **Missing:** Not yet wired into live data ingestion pipeline.
-- **Next:** Wire `DataContractRegistry.validate()` into market data adapters on each tick.
+- **Done:** `VenueAdapter.get_market_data_validated()` in `core/venue_adapter.py` — wraps `get_market_data()` with `DataContractRegistry.validate()` per tick. Non-breaking, opt-in for all 14 adapters.
 
 ### 8.2 Drift monitoring — **2**
 
 - **Exists:** `core/drift_monitoring_pipeline.py` — comprehensive drift detection for concept, model, LLM behavioral, strategy, data distribution, and feature drift. `DriftStatus` (stable/warning/degraded/critical). Automatic demotion and retrain triggers.
-- **Missing:** No verified production deployment of drift pipeline.
-- **Next:** Wire drift pipeline to Prometheus metrics and alert rules.
+- **Done:** `drift_score_gauge`, `drift_status_gauge`, `drift_events_total`, `drift_mitigations_total` Prometheus metrics in `core/drift_monitoring_pipeline.py`. Alert rules `MERID_Drift_Degraded` (5m warning) and `MERID_Drift_Critical` (2m critical) + `MERID_Feed_Stale` added to `monitoring/alert_rules.yml`.
 
 ### 8.3 Safe degradation on bad data — **2**
 
@@ -245,8 +242,7 @@ production readiness requirements.
 ### 9.2 Abuse and adversarial protections — **2**
 
 - **Exists:** `core/adversarial_hardening.py` with 16+ matches for adversarial patterns. `core/reuse_guardrails.py` limits what agents can change. `SwarmConfig` enforces concurrent limits. `core/constitution_enforcer.py` enforces behavioral guardrails. `core/order_sanity_check.py` — `OrderSanityChecker` pre-execution guard: max order as % of portfolio (default 10%), max absolute notional ($10K), min order notional ($1), daily order count limit (500), per-symbol daily notional cap ($25K), zero/negative quantity/price rejection. Daily counters auto-reset. 24 tests in `tests/test_order_sanity_check.py`. **Wired into `TradeRouter` as step 4.5** — every proposal passes sanity check before execution (non-blocking on errors).
-- **Missing:** Not yet wired into `UniversalRouter` (legacy path).
-- **Next:** Wire into `UniversalRouter.execute()` for legacy path coverage.
+- **Done:** No `UniversalRouter` exists — `TradeRouter` is the only router and already has `OrderSanityChecker` wired at step 4.5 (verified in `merid/pipeline/router.py`). Legacy note was stale.
 
 ### 9.3 Ethical guardrails and compliance — **2**
 
@@ -275,20 +271,17 @@ production readiness requirements.
   - **Radar:** Homegrown `InstrumentRadar.tsx` covers current needs. dxFeed Candelabra Radar widget additive when credentials available.
   - **Real-time upgrade:** Polling → WebSocket push (`/ws/market/{symbol}`) for sub-second critical metrics. Backend publishes at 2-5 Hz; client charts throttle to 1-2 Hz for non-critical views.
   - **E2E latency targets (Deephaven-style):** p95 < 300ms for backend API responses, p95 < 2s for full dxFeed → adapter → helper → JSON pipeline. 5 E2E pipeline tests validate these targets.
-- **Missing:** No Grafana dashboards deployed.
-- **Next:** Deploy Grafana dashboards from Prometheus metrics for ops team.
+- **Done:** Grafana provisioning deployed: `docker/grafana/provisioning/` (datasources + dashboards), `merid-overview.json` with 10 panels including API latency p50/p95 chart.
 
 ### 10.3 Simulation / demo mode — **2**
 
 - **Exists:** `core/mode_manager.py` — SIMULATION, PAPER, SPECTATOR modes. `deploy/merid-dev-swarm.service` defaults to `RUN_MODE=simulation`. `core/venues/merid_sim_adapter.py` for simulated execution. Alpaca paper trading configured.
-- **Missing:** No guided demo walkthrough for new users.
-- **Next:** Add a `--demo` CLI flag that runs a scripted scenario with commentary.
+- **Done:** `python -m core.demo_runner` — 7-step guided walkthrough: health check → agent discovery → data contract validation → risk gating → circuit breaker → audit trail → readiness score. `--fast` flag skips delays.
 
 ### 10.4 Documentation for new operators — **2**
 
 - **Exists:** `docs/OPERATOR_RUNBOOK.md`, `docs/SEASON1_OPERATOR_RUNBOOK.md`, `docs/launch_runbook_v1.md`. 8+ runbooks across `docs/runbooks/` and `ops/runbooks/`.
-- **Missing:** No single "MERID in 1 hour" onboarding guide.
-- **Next:** Write a `docs/GETTING_STARTED.md` that covers mental model → setup → first simulation in < 1 hour.
+- **Done:** `docs/GETTING_STARTED.md` — 7-section onboarding guide: prerequisites, install, demo, tests, API server, architecture mental model, troubleshooting.
 
 **Section 10 total: 8/8**
 

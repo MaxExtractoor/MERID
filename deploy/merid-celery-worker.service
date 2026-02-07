@@ -1,0 +1,46 @@
+[Unit]
+Description=MERID Celery Worker — Distributed Task Execution
+After=network.target redis.service
+Requires=redis.service
+Documentation=https://docs.merid.com/ops/celery-workers
+
+[Service]
+Type=simple
+User=merid
+Group=merid
+WorkingDirectory=/opt/merid
+EnvironmentFile=/opt/merid/.env
+
+ExecStart=/opt/merid/.venv/bin/celery -A core.celery_tasks worker \
+    --loglevel=info \
+    --concurrency=4 \
+    --max-tasks-per-child=100 \
+    --queues=default,research,strategy,risk,execution \
+    --hostname=worker@%%h
+
+ExecStop=/opt/merid/.venv/bin/celery -A core.celery_tasks control shutdown
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=256
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/merid/data /opt/merid/logs
+PrivateTmp=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=merid-celery
+
+[Install]
+WantedBy=multi-user.target
