@@ -209,9 +209,9 @@ production readiness requirements.
 
 ### 7.2 Integration tests with multi-agent flows — **2**
 
-- **Exists:** `TestIntegration::test_multi_agent_pipeline` runs a realistic multi-agent flow. `TestSeason2RRGFlows` tests end-to-end from audit → template → task generation. `tests/test_full_pipeline_integration.py` — 18 tests across 8 classes covering signal → consensus → risk check → trading halt gate → audit trail → explainability as a single flow. Includes blocked venue rejection (Polymarket/Augur → VenueBlockedError), order-size sanity check (>10% portfolio rejected), audit trail hash chain integrity (1000 entries + tamper detection), consensus round approve/reject/veto lifecycle.
-- **Missing:** No wall-clock integration test with real venue adapters.
-- **Next:** Add adapter-level integration test with mock exchange responses.
+- **Exists:** `TestIntegration::test_multi_agent_pipeline` runs a realistic multi-agent flow. `TestSeason2RRGFlows` tests end-to-end from audit → template → task generation. `tests/test_full_pipeline_integration.py` — 18 tests across 8 classes covering signal → consensus → risk check → trading halt gate → audit trail → explainability as a single flow. `tests/test_adapter_integration.py` — 24 tests across 6 classes: 4 mock adapters (crypto/equity/failing/partial-fill) implementing full `UnifiedVenueAdapter` interface, TradeRouter dispatch through risk+sanity+mode checks to mock adapters, multi-venue routing (crypto→binanceus, equity→alpaca), batch submit, error handling (ConnectionError → FAILED), partial fills, unknown venue rejection, cancellation, execution result details (fee/latency/venue_order_id).
+- **Missing:** No wall-clock integration test with real exchange sandbox APIs.
+- **Next:** Add live sandbox integration test against Alpaca paper and Kalshi demo APIs.
 
 ### 7.3 Long-run / soak tests — **2**
 
