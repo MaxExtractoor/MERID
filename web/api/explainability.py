@@ -99,6 +99,69 @@ async def get_explainability_stats() -> Dict[str, Any]:
 
 
 # ============================================================================
+# PLAIN-LANGUAGE DECISION EXPLANATION (S5-03)
+# ============================================================================
+
+@router.get("/explain/{decision_id}")
+async def explain_decision_plain_language(decision_id: str) -> Dict[str, Any]:
+    """Return a human-readable, plain-language explanation for a decision.
+
+    Converts structured ExplanationRecord into conversational English
+    suitable for operator queries like "why did we take that trade?"
+    """
+    try:
+        from core.explainability import get_explainability_service
+        service = get_explainability_service()
+        result = service.explain_plain_language(decision_id)
+
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No explanation found for decision_id={decision_id}",
+            )
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating plain-language explanation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/explain/correlation/{correlation_id}")
+async def explain_correlated_decisions(correlation_id: str) -> Dict[str, Any]:
+    """Return plain-language explanations for all decisions sharing a correlation_id."""
+    try:
+        from core.explainability import get_explainability_service
+        service = get_explainability_service()
+        records = service.find_by_correlation_id(correlation_id)
+
+        if not records:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No explanations found for correlation_id={correlation_id}",
+            )
+
+        explanations = []
+        for record in records:
+            if record.decision_id:
+                expl = service.explain_plain_language(record.decision_id)
+                if expl:
+                    explanations.append(expl)
+
+        return {
+            "correlation_id": correlation_id,
+            "total": len(explanations),
+            "explanations": explanations,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating correlated explanations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # CONSENSUS TRANSPARENCY
 # ============================================================================
 
