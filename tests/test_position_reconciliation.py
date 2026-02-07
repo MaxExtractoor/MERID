@@ -223,5 +223,107 @@ class TestStateManagerStatus(unittest.TestCase):
         self.assertEqual(status["recovery_points"], 0)
 
 
+class TestPositionReconciliationUnderLoad(unittest.TestCase):
+    """Position reconciliation under simulated load (S6-04 soak)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.sm = StateManager("positions", persistence_dir=self.tmpdir)
+        _run(self.sm.initialize())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_rapid_updates_1000_cycles(self):
+        """1000 rapid position updates with periodic saves."""
+        for i in range(1000):
+            positions = {
+                f"SYM-{i % 20}": {
+                    "qty": float(i % 50) * 0.1,
+                    "entry_price": 100.0 + (i % 100),
+                    "venue": ["binanceus", "coinbase", "alpaca"][i % 3],
+                },
+            }
+            _run(self.sm.update_state(positions))
+            if i % 100 == 0:
+                _run(self.sm._save_state())
+
+        _run(self.sm._save_state())
+        state = _run(self.sm.get_state())
+        self.assertGreater(len(state), 0)
+        self.assertEqual(self.sm.state_status, StateStatus.HEALTHY)
+
+    def test_save_load_cycle_under_load(self):
+        """Repeated save → new instance → load cycle under load."""
+        for cycle in range(50):
+            positions = {
+                f"POS-{j}": {"qty": float(cycle + j), "entry_price": 1000.0 * (j + 1)}
+                for j in range(10)
+            }
+            _run(self.sm.update_state(positions))
+            _run(self.sm._save_state())
+
+            # Simulate restart
+            sm2 = StateManager("positions", persistence_dir=self.tmpdir)
+            _run(sm2.initialize())
+            loaded = _run(sm2.get_state())
+            self.assertEqual(len(loaded), 10, f"Cycle {cycle}: expected 10 positions")
+            self.sm = sm2  # continue with reloaded instance
+
+        self.assertEqual(self.sm.state_status, StateStatus.HEALTHY)
+
+    def test_recovery_point_under_load(self):
+        """Recovery points remain valid after many updates."""
+        # Create recovery point with known-good state
+        good_state = {"BTC/USDT": {"qty": 1.0, "entry_price": 50000}}
+        _run(self.sm.update_state(good_state, create_recovery_point=True))
+
+        # Hammer with 500 updates
+        for i in range(500):
+            _run(self.sm.update_state({
+                f"LOAD-{i}": {"qty": float(i), "entry_price": float(i * 10)},
+            }))
+
+        # Corrupt and recover
+        self.sm.current_state = "corrupted"
+        self.sm.state_status = StateStatus.CORRUPTED
+        result = _run(self.sm._attempt_recovery())
+        self.assertTrue(result)
+        recovered = _run(self.sm.get_state())
+        self.assertIn("BTC/USDT", recovered)
+
+    def test_large_position_book_persistence(self):
+        """100-position book persists and reloads correctly."""
+        positions = {
+            f"INST-{i:03d}": {
+                "qty": round(0.01 * (i + 1), 4),
+                "entry_price": round(100.0 + i * 10.5, 2),
+                "venue": ["binanceus", "coinbase", "alpaca", "kalshi"][i % 4],
+                "side": "long" if i % 2 == 0 else "short",
+            }
+            for i in range(100)
+        }
+        _run(self.sm.update_state(positions))
+        _run(self.sm._save_state())
+
+        sm2 = StateManager("positions", persistence_dir=self.tmpdir)
+        _run(sm2.initialize())
+        loaded = _run(sm2.get_state())
+        self.assertEqual(len(loaded), 100)
+        self.assertEqual(loaded["INST-050"]["venue"], "alpaca")
+
+    def test_checksum_stable_under_load(self):
+        """Checksum is deterministic even after many updates."""
+        state = {"BTC/USDT": {"qty": 1.0, "entry_price": 50000}}
+        cs1 = self.sm._calculate_checksum(state)
+
+        # Do 200 unrelated updates
+        for i in range(200):
+            _run(self.sm.update_state({f"TMP-{i}": {"qty": float(i)}}))
+
+        cs2 = self.sm._calculate_checksum(state)
+        self.assertEqual(cs1, cs2, "Checksum should be deterministic for same input")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -318,5 +318,94 @@ class TestBenchmarkOutputStructure(unittest.TestCase):
         self.assertEqual(len(results["agent_accuracies"]), len(DEFAULT_AGENTS))
 
 
+# ── Historical / realistic Kalshi benchmark (S1-04) ─────────────────
+
+
+def generate_kalshi_scenarios(n: int, seed: int = 99) -> List[MarketScenario]:
+    """Generate realistic Kalshi-style binary event scenarios.
+
+    Simulates prediction market events with:
+    - yes_ask / no_ask cent prices (1-99)
+    - Implied probability from market mid
+    - Known resolution (+1 = YES, -1 = NO)
+    - Edge cases: tight spreads, wide spreads, extreme prices
+    """
+    rng = random.Random(seed)
+    scenarios = []
+    for i in range(n):
+        # True probability of YES outcome
+        true_prob = rng.betavariate(2, 2)  # beta(2,2) gives realistic distribution
+        resolved_yes = rng.random() < true_prob
+        true_signal = +1 if resolved_yes else -1
+
+        # Market prices with noise around true probability
+        noise = rng.gauss(0, 0.08)
+        yes_ask = max(1, min(99, int((true_prob + noise) * 100)))
+        no_ask = max(1, min(99, 100 - yes_ask + rng.randint(-3, 3)))
+        spread = abs(yes_ask + no_ask - 100)
+
+        scenarios.append(MarketScenario(
+            scenario_id=f"kalshi-{i:04d}",
+            true_signal=true_signal,
+            features={
+                "yes_ask": float(yes_ask),
+                "no_ask": float(no_ask),
+                "implied_prob": yes_ask / 100.0,
+                "spread_cents": float(spread),
+                "volume": rng.lognormvariate(6, 1.5),
+                "hours_to_expiry": rng.expovariate(1 / 24) + 0.5,
+            },
+        ))
+    return scenarios
+
+
+class TestHistoricalKalshiBenchmark(unittest.TestCase):
+    """Benchmark swarm consensus on realistic Kalshi-style event data."""
+
+    def setUp(self):
+        self.agents = DEFAULT_AGENTS
+        self.scenarios = generate_kalshi_scenarios(500, seed=99)
+
+    def test_kalshi_swarm_beats_random(self):
+        results = run_benchmark(self.agents, self.scenarios, seed=99)
+        self.assertGreater(
+            results["swarm_consensus"],
+            results["random_baseline"] + 0.03,
+            "Swarm should beat random by >3% on Kalshi-style scenarios",
+        )
+
+    def test_kalshi_swarm_beats_worst_agent(self):
+        results = run_benchmark(self.agents, self.scenarios, seed=99)
+        self.assertGreater(
+            results["swarm_consensus"],
+            results["worst_single_agent"],
+            "Swarm should beat worst single agent on Kalshi scenarios",
+        )
+
+    def test_kalshi_swarm_within_5pct_of_best(self):
+        results = run_benchmark(self.agents, self.scenarios, seed=99)
+        gap = results["best_single_agent"] - results["swarm_consensus"]
+        self.assertLessEqual(
+            gap, 0.05,
+            f"Swarm should be within 5% of best agent (gap={gap:.3f})",
+        )
+
+    def test_kalshi_scenario_features_valid(self):
+        for s in self.scenarios[:50]:
+            self.assertIn(s.true_signal, (+1, -1))
+            self.assertGreaterEqual(s.features["yes_ask"], 1)
+            self.assertLessEqual(s.features["yes_ask"], 99)
+            self.assertGreater(s.features["volume"], 0)
+            self.assertGreater(s.features["hours_to_expiry"], 0)
+
+    def test_kalshi_1000_scenarios_accuracy_above_55(self):
+        scenarios = generate_kalshi_scenarios(1000, seed=200)
+        results = run_benchmark(self.agents, scenarios, seed=200)
+        self.assertGreater(
+            results["swarm_consensus"], 0.55,
+            "Swarm should achieve >55% on 1000 Kalshi scenarios",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
