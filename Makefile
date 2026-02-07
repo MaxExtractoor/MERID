@@ -110,3 +110,13 @@ pipeline-risk:
 
 pipeline-instruments:
 	python -c "from merid.pipeline.instruments import get_instrument_registry; import json; print(json.dumps(get_instrument_registry().summary(), indent=2))"
+
+# ── Canonical Agents ──────────────────────────────────────────────────
+agents-test:
+	python -m pytest tests/test_canonical_agents.py -v
+
+agents-summary:
+	python -c "from merid.agents.base import get_canonical_registry; import json; print(json.dumps(get_canonical_registry().summary(), indent=2))"
+
+all-pipeline-tests:
+	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py -v
