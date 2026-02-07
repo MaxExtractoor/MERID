@@ -153,11 +153,11 @@ production readiness requirements.
 - **Missing:** No deployed Grafana dashboards. Latency charts not yet implemented.
 - **Next:** Deploy Grafana dashboards from Prometheus metrics. Add decision/order latency chart.
 
-### 5.3 Plain-language decision explanations — **1**
+### 5.3 Plain-language decision explanations — **2**
 
-- **Exists:** `core/explainability.py` generates structured rationale for every decision. `ExplanationType` covers orders, cancels, promotions, drift events.
-- **Missing:** No natural-language query interface ("why that trade?"). Explanations are structured data, not conversational.
-- **Next:** Add a `/explain/<trade_id>` API endpoint that returns human-readable rationale.
+- **Exists:** `core/explainability.py` generates structured rationale for every decision. `ExplanationType` covers orders, cancels, promotions, drift events. New: `explain_plain_language(decision_id)` converts structured `ExplanationRecord` into conversational English including agent/strategy, key features (top-5 by importance), rule evaluations, model evidence, counterfactual alternatives, constraints, and expert notes. `find_by_decision_id()` and `find_by_correlation_id()` lookups. API: `GET /api/v1/explainability/explain/{decision_id}` and `GET /api/v1/explainability/explain/correlation/{correlation_id}`. 17 tests in `tests/test_plain_language_explainer.py`.
+- **Missing:** No LLM-powered conversational follow-up ("tell me more about that rule").
+- **Next:** Consider adding LLM-backed conversational layer for interactive explanation queries.
 
 ### 5.4 Audit trails tied to orders/risk events — **2**
 
