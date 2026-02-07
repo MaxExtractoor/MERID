@@ -33,3 +33,41 @@ jobs:
           --cov-fail-under=85 tests/
     - uses: codecov/codecov-action@v4
       with: { file: coverage-tier2.xml }
+
+  safety-smoke:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with: { python-version: '3.12' }
+    - run: pip install -e .[test]
+    - name: Kill Switch & Safety Smoke Tests
+      run: |
+        python -c "
+        from core.automated_risk_controls import TradingHaltManager
+        hm = TradingHaltManager()
+        assert not hm.is_halted, 'Should start unhalted'
+        hm.halt('CI smoke test')
+        assert hm.is_halted, 'Should be halted after halt()'
+        assert hm.halt_reason == 'CI smoke test'
+        hm.resume('ci')
+        assert not hm.is_halted, 'Should be unhalted after resume()'
+        # Daily loss auto-halt
+        hm2 = TradingHaltManager(max_daily_loss_pct=0.05)
+        hm2.check_daily_loss(-600, 10000)
+        assert hm2.is_halted, 'Should halt on 6% daily loss'
+        print('✅ Kill switch smoke tests passed')
+        "
+    - name: Secrets Guard Smoke Test
+      run: |
+        python -c "
+        from core.secrets_guard import scan_for_tracked_secrets
+        findings = scan_for_tracked_secrets()
+        critical = [f for f in findings if f.get('severity') == 'CRITICAL']
+        assert len(critical) == 0, f'CRITICAL secrets found: {critical}'
+        print('✅ No tracked secrets found')
+        "
+    - name: Alertmanager Config Validation
+      run: |
+        pip install pyyaml
+        python monitoring/verify-alertmanager.py

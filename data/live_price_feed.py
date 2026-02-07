@@ -277,7 +277,27 @@ class LivePriceFeed:
                         logger.error(f"Cached price for {symbol} too old ({cached_age:.1f}s)")
     
     async def _broadcast_update(self, price_data: PriceData):
-        """Broadcast price update to all subscribers."""
+        """Broadcast price update to all subscribers, validating against data contracts."""
+        # Validate against data contract (if registered for this exchange)
+        try:
+            from core.data_contracts import get_data_contract_registry
+            registry = get_data_contract_registry()
+            feed_id = price_data.exchange.lower()
+            if registry.get_contract(feed_id):
+                data_dict = {
+                    "price": price_data.price,
+                    "volume": price_data.volume_24h,
+                    "symbol": price_data.symbol,
+                    "timestamp": price_data.timestamp.timestamp(),
+                }
+                result = registry.validate(feed_id, data_dict)
+                if not result.valid:
+                    logger.warning(f"Data contract violation for {feed_id}/{price_data.symbol}: {result.errors}")
+        except ImportError:
+            pass  # data_contracts module not available
+        except Exception as exc:
+            logger.debug(f"Data contract check error: {exc}")
+
         for subscriber in self.subscribers:
             try:
                 if asyncio.iscoroutinefunction(subscriber):
