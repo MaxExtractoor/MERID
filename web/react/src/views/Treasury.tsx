@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Coins, TrendingUp, Users, Vote, DollarSign, ArrowUpRight, RefreshCw, AlertCircle } from 'lucide-react';
+import QuadraticFundingPanel from '../components/QuadraticFundingPanel';
 
 interface TreasuryBalance {
   currency: string;
@@ -400,60 +401,8 @@ export default function Treasury() {
         </div>
       )}
 
-      {/* Funding Tab */}
-      {selectedTab === 'funding' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-gray-400">Quadratic funding rounds</p>
-            <button className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors">
-              Create Round
-            </button>
-          </div>
-
-          {treasuryData?.funding_rounds.map(round => (
-            <div key={round.id} className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-6">
-              <div className="flex items-start justify-between mb-4">
-                <div>
-                  <div className="flex items-center gap-3 mb-2">
-                    <h3 className="text-lg font-bold text-white">{round.name}</h3>
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(round.status)}`}>
-                      {round.status}
-                    </span>
-                  </div>
-                  <p className="text-sm text-gray-500">{formatTimeRemaining(round.ends_at)}</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-2xl font-bold text-white">{formatCurrency(round.total_pool)}</p>
-                  <p className="text-sm text-gray-400">Total pool</p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4">
-                <div className="text-center p-3 bg-slate-700/30 rounded-lg">
-                  <p className="text-2xl font-bold text-white">{formatNumber(round.contributions)}</p>
-                  <p className="text-sm text-gray-400">Contributors</p>
-                </div>
-                <div className="text-center p-3 bg-slate-700/30 rounded-lg">
-                  <p className="text-2xl font-bold text-white">{round.projects}</p>
-                  <p className="text-sm text-gray-400">Projects</p>
-                </div>
-                <div className="text-center p-3 bg-slate-700/30 rounded-lg">
-                  <p className="text-2xl font-bold text-white">
-                    {formatCurrency(round.total_pool / round.projects)}
-                  </p>
-                  <p className="text-sm text-gray-400">Avg per project</p>
-                </div>
-              </div>
-
-              {round.status === 'active' && (
-                <button className="w-full mt-4 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors">
-                  Contribute to Round
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Funding Tab — live from /api/v1/quadratic-funding */}
+      {selectedTab === 'funding' && <QuadraticFundingPanel />}
     </div>
   );
 }

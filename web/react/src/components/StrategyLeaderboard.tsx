@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Trophy, RefreshCw, TrendingUp, TrendingDown } from 'lucide-react';
+import { Trophy, RefreshCw, TrendingUp, TrendingDown, Star } from 'lucide-react';
 
 interface StrategyRow {
   rank: number;
@@ -14,6 +14,11 @@ interface StrategyRow {
   maxDrawdown: number;
 }
 
+interface XpEntry {
+  user: string;
+  xp: number;
+}
+
 const DOMAIN_BADGE: Record<string, string> = {
   prediction: 'bg-orange-500/20 text-orange-400',
   crypto: 'bg-blue-500/20 text-blue-400',
@@ -22,15 +27,25 @@ const DOMAIN_BADGE: Record<string, string> = {
 
 export default function StrategyLeaderboard() {
   const [rows, setRows] = useState<StrategyRow[]>([]);
+  const [xpEntries, setXpEntries] = useState<XpEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState<'totalPnl' | 'winRate' | 'sharpe'>('totalPnl');
 
   const fetchData = useCallback(async () => {
+    // Fetch XP leaderboard from rewards API
+    try {
+      const xpRes = await fetch('/api/v1/rewards/leaderboard?limit=10');
+      if (xpRes.ok) {
+        const xpData = await xpRes.json();
+        if (xpData.items) setXpEntries(xpData.items);
+      }
+    } catch { /* ignore */ }
+
     try {
       const res = await fetch('/api/v1/pipeline/leaderboard');
       if (res.ok) {
         const data = await res.json();
-        if (data.strategies) { setRows(data.strategies); return; }
+        if (data.strategies) { setRows(data.strategies); setLoading(false); return; }
       }
     } catch { /* fallback */ }
 
@@ -157,6 +172,27 @@ export default function StrategyLeaderboard() {
           </tbody>
         </table>
       </div>
+
+      {/* XP Leaderboard from Rewards API */}
+      {xpEntries.length > 0 && (
+        <div className="bg-slate-800/40 border border-slate-700/50 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Star className="w-4 h-4 text-amber-400" />
+            <h4 className="text-sm font-semibold text-white">XP Leaderboard</h4>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+            {xpEntries.slice(0, 10).map((entry, i) => (
+              <div key={entry.user} className="flex items-center gap-2 bg-slate-700/30 rounded px-2.5 py-1.5">
+                <span className={`text-xs font-bold w-4 ${i === 0 ? 'text-yellow-400' : i === 1 ? 'text-slate-300' : i === 2 ? 'text-amber-600' : 'text-slate-500'}`}>
+                  {i + 1}
+                </span>
+                <span className="text-xs text-white truncate flex-1">{entry.user}</span>
+                <span className="text-xs font-semibold text-amber-400">{entry.xp.toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

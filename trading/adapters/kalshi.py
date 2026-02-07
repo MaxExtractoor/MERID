@@ -1,4 +1,9 @@
-"""Kalshi prediction market adapter."""
+"""Kalshi prediction market adapter — DEPRECATED.
+
+Superseded by merid/prediction/ (strategy, risk, model) and
+merid/event_venues/kalshi/ (resilient async client with circuit breaker).
+Kept for backward compatibility only.
+"""
 
 from __future__ import annotations
 

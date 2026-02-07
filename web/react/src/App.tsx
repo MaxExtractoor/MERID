@@ -23,9 +23,10 @@ import TradeFloor from "./views/TradeFloor";
 import DevSwarm from "./views/DevSwarm";
 import Positions from "./views/Positions";
 import Orders from "./views/Orders";
+import Rewards from "./views/Rewards";
 import { ThemeProvider } from "./theme";
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders" | "rewards";
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
@@ -94,6 +95,7 @@ export default function App() {
             {view === "devswarm" && <DevSwarm />}
             {view === "positions" && <Positions />}
             {view === "orders" && <Orders />}
+            {view === "rewards" && <Rewards />}
           </main>
         </div>
       </div>

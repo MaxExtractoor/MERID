@@ -21,10 +21,11 @@ import {
   Zap,
   Code2,
   Briefcase,
-  ClipboardList
+  ClipboardList,
+  Star
 } from 'lucide-react';
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders" | "rewards";
 
 interface SidebarProps {
   current: View;
@@ -43,6 +44,7 @@ const navigation = [
   { name: 'Research', href: 'research', icon: Search, color: 'text-purple-400' },
   { name: 'Prediction Markets', href: 'predictions', icon: TrendingUp, color: 'text-orange-400' },
   { name: 'Betting Markets', href: 'betting', icon: Trophy, color: 'text-yellow-500' },
+  { name: 'Rewards', href: 'rewards', icon: Star, color: 'text-amber-400' },
   { name: 'Social Feed', href: 'social', icon: Twitter, color: 'text-sky-400' },
 ];
 

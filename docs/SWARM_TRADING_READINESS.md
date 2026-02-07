@@ -363,9 +363,19 @@ production readiness requirements.
 - [x] `web/api/rewards.py` — Unified rewards API: XP/leaderboard, quest campaigns (5 seeded), reward pools (3 pools), x402 stats/receipts/resources, security quests/bug reports. Wired into `web/main.py`.
 - [x] `core/reward_event_hooks.py` — `RewardEventHooks` bridges trading/risk/compliance/consensus events to XP awards. 16 event types with daily cap (5000 XP), streak tracking, multiplier table.
 - [x] `core/x402_payments.py` — `_record_payment_explanation()` wires every x402 payment into `ExplainabilityService` as `X402_PAYMENT` type for audit trail.
-- [x] `tests/test_gamified_security.py` — 40 tests across 7 classes: quest creation, bug report submission/verification, reward distribution, security seasons/leaderboards, user profiles/tiers/badges, Sybil resistance, severity-based rewards.
-- [x] `tests/test_mev_rewards.py` — 35 tests across 9 classes: MEV classification (safe/neutral/harmful), action recording, actor stats, health score, reward calculation, distribution from pools, pool management, health metrics, badge awards.
+- [x] `tests/test_gamified_security.py` — 42 tests across 7 classes: quest creation, bug report submission/verification, reward distribution, security seasons/leaderboards, user profiles/tiers/badges, Sybil resistance, severity-based rewards.
+- [x] `tests/test_mev_rewards.py` — 34 tests across 9 classes: MEV classification (safe/neutral/harmful), action recording, actor stats, health score, reward calculation, distribution from pools, pool management, health metrics, badge awards.
 - [x] `core/drift_reward_bridge.py` — Bridges `DriftMonitoringPipeline` → `DriftRewardLoop`: adapts pipeline `DriftEvent` to monitor `DriftEvent`, registers callbacks for all `MitigationAction` types, idempotent `wire_drift_reward_loop()`.
+
+### 7. Stale Code Cleanup & UI Gap Closure — ✅ DONE
+
+- [x] `agents/prediction_arbitrage_analyst.py` — Resolved 212 merge conflict markers (1653→808 lines), deduplicated code, verified syntax.
+- [x] Deleted dead files: `core/brier_metrics_db_broken.py` (merge-conflicted), `web/api/predictions_backup.py` (merge-conflicted).
+- [x] Deleted 5 empty stubs: `agents/truth_layer.py`, `core/swarm_orchestrator.py`, `swarm/rag.py`, `core/context.py`, `core/energy_ingest.py`.
+- [x] `web/react/src/views/Rewards.tsx` — Full rewards UI: 5-tab panel (Overview, Quests, Leaderboard, Reward Pools, Security), wired to `/api/v1/rewards/*` (14 endpoints). Added to Sidebar + App.tsx.
+- [x] `web/react/src/components/QuadraticFundingPanel.tsx` — Live quadratic funding panel: proposals list, round summaries with breakdown, governance notes. Wired into Treasury view's Funding tab.
+- [x] `web/react/src/components/StrategyLeaderboard.tsx` — Wired to `/api/v1/rewards/leaderboard` for live XP data alongside strategy PnL.
+- [x] Deprecated adapters marked: `trading/adapters/kalshi.py`, `trading/router.py` (superseded by `merid/pipeline/` and `merid/event_venues/kalshi/`).
 
 ---
 
@@ -386,7 +396,7 @@ production readiness requirements.
 
 ---
 
-## Test Suite Summary (577+ tests across 24 files)
+## Test Suite Summary (577+ tests across 24 files, all verified passing)
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
@@ -413,4 +423,4 @@ production readiness requirements.
 | `test_gamified_security.py` | 42 | Gamified security quests + bug bounty |
 | `test_mev_rewards.py` | 34 | MEV reward system + health metrics |
 | `test_sandbox_integration.py` | 12 | Alpaca paper + Kalshi demo sandbox |
-| **Total** | **577+** | **23 files, all verified passing** |
+| **Total** | **577+** | **24 files, all verified passing** |
