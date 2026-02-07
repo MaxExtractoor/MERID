@@ -1,10 +1,10 @@
 # MERID v2.0
 
-[![Tests](https://github.com/merid/merid/actions/workflows/tests.yml/badge.svg)](https://github.com/merid/merid/actions/workflows/tests.yml)
-[![TradingGuard Coverage](https://img.shields.io/badge/TradingGuard-66%25-yellow)](https://github.com/merid/merid/blob/main/.github/workflows/tests.yml)
+[![Tests](https://github.com/MaxExtractoor/MERID/actions/workflows/tests.yml/badge.svg)](https://github.com/MaxExtractoor/MERID/actions/workflows/tests.yml)
+[![Coverage Floor](https://img.shields.io/badge/Coverage%20Floor-40%25-yellow)](https://github.com/MaxExtractoor/MERID/blob/main/.coveragerc)
 [![Circuit Breaker](https://img.shields.io/badge/Circuit%20Breaker-Active-emerald)](./RISK_POLICY.md)
 
-## Sovereign, Local-First Decision Organism
+## Sovereign Decision Organism
 
 A hardened control room for an AI organism with unrestricted internal cognition but strictly constrained execution. MERID is not a chatbot or trading bot—it's an "adult" system governed by immutable Charter/invariants, designed to evolve timelessly under human primacy.
 
@@ -16,19 +16,35 @@ A hardened control room for an AI organism with unrestricted internal cognition 
 - **Unrestricted Cognition / Constrained Execution**: Internal thought free (simulate taboo); action gated (buses/human approval)
 - **Emotionless / Narrative-Immune**: Outputs calm/evidence-based; narratives as hypotheses; price/structure = truth
 - **Anti-Manipulation / Pro-Human**: Reject nudging/hidden stakeholders/silent changes
-- **Quantum-Ready & Sovereign**: Operates entirely offline/local; quantum simulation for candidate generation
+- **Quantum-Ready & Sovereign**: Quantum simulation for candidate generation; local-first with optional cloud APIs
 
 ---
 
 ## Tech Stack
 
-- **Flutter** - Cross-platform mobile (iOS/Android)
-- **SQLite** - Memory layers
-- **ONNX Runtime + Phi-3 Mini** - Local LLM cognition
-- **Qiskit/Pennylane** - Quantum simulation (local only)
-- **Web3.dart** - Onchain ports (Ethereum/Solana/Polkadot)
-- **Crypto libs** - PQC (ML-KEM/ML-DSA) and QKD simulation
-- **No backend/cloud** - Full offline; optional API ports via credential proxy
+### Backend (Python 3.11)
+
+- **FastAPI + Uvicorn** - Async REST API & WebSocket server (port 8000)
+- **Pydantic Settings** - Type-safe environment configuration (`merid/settings.py`)
+- **Neo4j** - Graph database for consensus/memory
+- **Redis** - Caching, pub/sub, event bus
+- **CCXT + venue SDKs** - Multi-exchange trading (Alpaca, Coinbase, Kraken, Kalshi, Binance, OKX)
+- **Celery + Redis** - Background task queue
+- **OpenTelemetry** - Distributed tracing and observability
+
+### Frontend
+
+- **React + TypeScript** - Web dashboard (`web/react/`)
+- **TailwindCSS** - Styling
+- **Recharts** - Data visualization (heatmaps, treemaps, latency charts)
+- **Flutter** - Cross-platform mobile/desktop UI (`lib/`)
+
+### AI & Data
+
+- **PyTorch + Stable Baselines 3** - Swarm RL/learning (optional)
+- **LangChain + CrewAI** - Multi-agent orchestration
+- **Web3.py + Solana** - Onchain ports (Ethereum/Solana)
+- **Cryptography** - PQC (ML-KEM/ML-DSA) and credential security
 
 ---
 
@@ -124,10 +140,10 @@ Control room mixer console with:
 
 ### 8. Unified Trading Suite (2026 build)
 
-- **Runtime config service** with global mode + per-venue overrides (Coinbase, Pump.fun, Paper, Kalshi, Alpaca).
+- **Runtime config service** with global mode + per-venue overrides (Coinbase, Kalshi, Alpaca, Kraken, Binance, OKX, Paper).
 - **Execution router** that treats humans and swarm agents identically with explainability + guard enforcement.
-- **Adapter registry** with live Coinbase spot adapter, Pump.fun memecoin adapter, paper fallback, Kalshi balance adapter, and Alpaca equities execution adapter (official SDKs for each venue).
-- **Trading Arena UI** (`/trading-arena`) exposing runtime controls, manual order ticket, live intent/result stream, and guard/explainability feed.
+- **Adapter registry** with live venue adapters (Coinbase spot, Kalshi prediction markets, Alpaca equities, Kraken/Binance/OKX crypto) and paper fallback.
+- **Trading Suite API** (`/api/v1/trading-suite/`) exposing config, venue overrides, and order submission endpoints.
 - **Spectator/backtest telemetry** surfaced via REST + WebSocket so dashboards can subscribe to live trading intents/results.
 
 > **Tip:** Set `MERID_ENABLE_TRADING_SUITE=true` and `MERID_ALLOW_LIVE_TRADES=true` in your environment when you are ready to route live orders. Leave spectator mode on (`MERID_SPECTATOR_MODE=true`) for read-only rehearsals.
@@ -140,7 +156,7 @@ Control room mixer console with:
 - `/api/v1/observability/summary` and `/api/v1/observability/dashboards` expose the data for React/Flutter dashboards.
 - Frontend JS: `web/static/js/observability_dashboard.js`.
 - Telemetry app also serves `/stats/observability` for localhost-only metrics.
-**Heatmap feed** (`/api/v1/heatmap`): Hyperliquid + CoinGlass liquidation density, venue totals, and perp-market arbitrage candidates. Rendered in both React dashboard (Intel Grid) and Flutter ControlStation Distillation Gate.
+- **Heatmap feed** (`/api/v1/heatmap`): Hyperliquid + CoinGlass liquidation density, venue totals, and perp-market arbitrage candidates. Rendered in both React dashboard (Intel Grid) and Flutter ControlStation Distillation Gate.
 - **Perp ticker feed** (`/api/v1/ticker`): Top perp quotes (price, basis, funding, OI, volume) plus funding extremes. Shown in React Perp Ticker card and Flutter intel panels.
 - **AI assist feed** (`/api/v1/assist`): Latest simulation intent summary, drivers, risk flags, news highlights, and embedded heatmap/ticker excerpts powering AI chat assist panels in both frontends.
 - **Hover explainability feed** (`/api/v1/hover-metadata`): Structured hover cards (theta, funding bias, oracle gap, risk flags) used for Stage 5 explainability overlays in React and ControlStation.
@@ -165,23 +181,25 @@ Control room mixer console with:
 
 ### Prerequisites
 
-- Flutter SDK 3.2.0+
-- Android Studio / Xcode (for mobile deployment)
-- Python 3.11.9 with MERID backend dependencies (see below)
+- Python 3.11+ (required for backend)
+- Flutter SDK 3.0+ (optional, for mobile/desktop UI)
+- Android Studio / Xcode (optional, for mobile deployment)
+- Neo4j (optional, for graph memory)
+- Redis (optional, for caching/events)
 
 ### Backend Dependencies & Optional Modules
 
 The Python backend relies on a mix of required and optional libraries:
 
-- **Required**: `fastapi`, `uvicorn`, `ccxt`, `email-validator`, `pydantic`, `redis`, `neo4j`, etc. Install via `pip install -r requirements.txt`.
+- **Required**: `fastapi`, `uvicorn`, `ccxt`, `email-validator`, `pydantic`, `pydantic-settings`, `redis`, `neo4j`, etc. Install via `pip install -r requirements.txt`.
 - **Optional** (auto-detected):
-  - `torch`, `gymnasium`, `networkx` — enable swarm RL/learning modules.
+  - `torch`, `gymnasium`, `stable-baselines3` — enable swarm RL/learning modules.
   - When these packages are absent, MERID gracefully degrades and related tests are skipped (e.g., `pytest.importorskip("torch")`). Install them only if you intend to train swarm agents locally.
 
-You can always check the live dependency status via the new health endpoint:
+You can check the live dependency status via the health endpoint:
 
 ```bash
-curl http://127.0.0.1:8001/api/health | jq
+curl http://127.0.0.1:8000/api/health | jq
 ```
 
 This reports CCXT availability, PyTorch/Gym optional status, and DB/cache connectivity.
@@ -189,20 +207,23 @@ This reports CCXT availability, PyTorch/Gym optional status, and DB/cache connec
 ### Setup
 
 ```bash
-# Install dependencies
-flutter pub get
+# Clone the repo
+git clone https://github.com/MaxExtractoor/MERID.git
+cd MERID
 
-# Run on device/emulator
-flutter run
+# Python backend (primary)
+pip install -r requirements.txt
+cp .env.example .env   # then fill in your credentials
 
-# Build for production
-flutter build apk --release  # Android
-flutter build ios --release  # iOS
+# Start the backend server
+python main.py          # runs on http://127.0.0.1:8000
 ```
 
 ```bash
-# Python backend dependencies (includes Coinbase, Pump.fun, Kalshi, and Alpaca adapters)
-pip install -r requirements.txt
+# Flutter UI (optional - from repo root)
+flutter pub get
+flutter run -d chrome   # web
+flutter run -d windows  # desktop
 ```
 
 ### Fonts
@@ -212,22 +233,19 @@ Download **JetBrains Mono** and place TTF files in `assets/fonts/`:
 - `JetBrainsMono-Regular.ttf`
 - `JetBrainsMono-Bold.ttf`
 
-### ControlStation Launch Guide
+### ControlStation (Flutter UI)
 
 The Flutter ControlStation mirrors the React dashboard and surfaces the PoS stream, token economy, oracle anchoring, and whale alerts. Launch it alongside the backend for a full-stack local run.
 
 #### Requirements
 
-- Flutter SDK 3.16+ (stable)
+- Flutter SDK 3.0+ (stable)
 - Chrome (web target) or a mobile/desktop runtime (Android Studio, Xcode, Windows/macOS desktop)
 
 #### Steps
 
 ```bash
-# From repo root
-cd merid_flutter    # adjust if your flutter app lives elsewhere
-
-# Install deps (first time)
+# From repo root (Flutter app lives at lib/)
 flutter pub get
 
 # Recommended for quick testing (web)
@@ -253,14 +271,14 @@ The app polls `/api/v1/blocks/latest` every ~20 seconds and renders:
 - Latest PoS block with confidence + decayed/anchor context
 - Token balances and miner rewards
 - Whale alerts pushed via backend
-- Platform/hybrid indicators (Polymarket/Augur) once enabled
+- Platform/hybrid indicators (Kalshi/Augur) once enabled
 
 Hot reload is fully supported, making it ideal for rapid UI iterations on the ControlStation panel.
 
-#### Trading Arena
+#### Trading Suite API
 
-- Navigate to `http://127.0.0.1:8001/trading-arena` when the FastAPI server is running.
-- Update global mode, venue overrides, or trader overrides directly from the UI.
+- The trading suite is exposed at `http://127.0.0.1:8000/api/v1/trading-suite/` when the FastAPI server is running.
+- Update global mode, venue overrides, or trader overrides via the API.
 - Submit manual orders (defaults to paper fallback unless guards allow live execution).
 - Inspect guard/explainability and spectator feeds in real time.
 
@@ -268,20 +286,20 @@ Hot reload is fully supported, making it ideal for rapid UI iterations on the Co
 
 ```bash
 # Enable live mode + venues
-curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/config \
+curl -X POST http://127.0.0.1:8000/api/v1/trading-suite/config \
   -H "Content-Type: application/json" \
   -d '{"mode":"live","allow_live_trades":true,"spectator_mode":false}'
 
-curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/venues/coinbase \
+curl -X POST http://127.0.0.1:8000/api/v1/trading-suite/venues/coinbase \
   -H "Content-Type: application/json" \
   -d '{"mode":"live","credentials_present":true}'
 
-curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/venues/alpaca \
+curl -X POST http://127.0.0.1:8000/api/v1/trading-suite/venues/alpaca \
   -H "Content-Type: application/json" \
   -d '{"mode":"live","credentials_present":true}'
 
 # Submit an order (paper fallback when guards block live execution)
-curl -X POST http://127.0.0.1:8001/api/v1/trading-suite/order \
+curl -X POST http://127.0.0.1:8000/api/v1/trading-suite/order \
   -H "Content-Type: application/json" \
   -d '{"trader_type":"human","trader_id":"arena-user","venue_id":"paper","instrument":"BTC/USDT","side":"buy","size":0.01}'
 ```
@@ -352,32 +370,48 @@ print("Equity buying power:", account.get("buying_power"))
 ## Architecture
 
 ```text
-lib/
-├── main.dart                    # App entry point
-├── home_screen.dart             # Main control room UI
-├── core/
-│   ├── theme.dart               # Industrial theme
-│   ├── constants.dart           # Charter, invariants
-│   └── mock_data.dart           # Simulation data
-├── features/
-│   ├── charter/                 # Charter v2.0 display
-│   ├── bus_hierarchy/           # Mixer console UI
-│   ├── distillation_gate/       # Input/output processing
-│   ├── quantum_sim/             # QAOA/VQE simulation
-│   ├── market_exploit/          # Time-gap detection
-│   ├── intuition/               # Gut feel analysis
-│   ├── manifestation/           # Multiverse simulator
-│   └── ports/                   # Port status display
-├── body_protocol/
-│   ├── brain/                   # Reasoning module
-│   ├── spine/                   # Message bus
-│   ├── memory/                  # Layered memory + EKG
-│   ├── learning/                # Self-supervised
-│   ├── simulation/              # Multiverse
-│   ├── optimization/            # Quantum QAOA/VQE
-│   └── governance/              # Action validation
-└── shared/
-    └── widgets/                 # Reusable UI
+MERID/
+├── main.py                      # FastAPI entry point (port 8000)
+├── merid/                       # Core Python package
+│   ├── settings.py              # Pydantic Settings (env config)
+│   ├── risk/                    # Kill switches, daily loss limits
+│   ├── resilience/              # Circuit breakers, retry logic
+│   ├── execution/               # Execution router, order management
+│   └── event_venues/            # Venue-specific adapters
+├── core/                        # Business logic (180+ modules)
+│   ├── merid_readiness_auditor.py  # Readiness scoring
+│   ├── dev_swarm.py             # Dev Swarm task engine
+│   ├── automated_risk_controls.py  # Risk limits, position sizing
+│   ├── agent_orchestrator.py    # Multi-agent coordination
+│   └── ...
+├── trading/                     # Trading layer
+│   ├── adapters/                # Venue adapters (Coinbase, Alpaca, etc.)
+│   ├── integrations/            # SDK clients (Kalshi, Alpaca)
+│   ├── execution.py             # Order execution engine
+│   └── paper_trading.py         # Paper trading engine
+├── agents/                      # AI agent framework
+│   ├── base_agent.py            # Base agent class
+│   ├── governor_agent.py        # Governance agent
+│   └── ...                      # 50+ specialized agents
+├── web/                         # Web layer
+│   ├── main.py                  # FastAPI app factory (80+ routers)
+│   ├── api/                     # REST API endpoints
+│   ├── react/                   # React + TypeScript dashboard
+│   └── static/                  # Static assets
+├── lib/                         # Flutter ControlStation UI
+│   ├── main.dart                # App entry point
+│   ├── home_screen.dart         # Control room UI
+│   ├── core/                    # Theme, constants
+│   ├── features/                # Charter, bus hierarchy, quantum sim, etc.
+│   └── body_protocol/           # Brain, spine, memory, governance
+├── tests/                       # Test suite (393+ tests)
+│   └── test_dev_swarm.py        # Primary test file
+├── scripts/                     # Utilities (sanity check, paper demo, etc.)
+├── ops/                         # Operational scripts (backup/restore)
+├── docs/                        # Documentation (150+ files)
+├── Makefile                     # Dev commands
+├── requirements.txt             # Python dependencies
+└── pubspec.yaml                 # Flutter dependencies
 ```
 
 ---
@@ -424,17 +458,20 @@ lib/
 
 ```bash
 # Clone and install
-git clone https://github.com/merid/merid.git
-cd merid
+git clone https://github.com/MaxExtractoor/MERID.git
+cd MERID
 pip install -r requirements.txt
+cp .env.example .env  # fill in credentials
 
 # Run sanity check (validates environment, imports, tests, demo)
 make sanity
 
 # Or run individual components:
+make test             # Run all tests
 make run-paper-demo   # Paper trading demo (no API keys needed)
 make smoke-test       # Run smoke tests
 make coverage         # Full test coverage report
+make lint             # Run ruff + mypy
 ```
 
 ### Pre-Commit Checklist
@@ -446,16 +483,17 @@ make sanity
 ```
 
 This validates:
-- ✓ Python version (>= 3.10)
-- ✓ Environment variables
-- ✓ Core module imports
-- ✓ Coverage floor (18% minimum)
-- ✓ Smoke tests (9 tests)
-- ✓ Paper trading demo
+
+- Python version (>= 3.10)
+- Environment variables
+- Core module imports (trading, merid, core)
+- Coverage floor (40% minimum, enforced by `.coveragerc`)
+- Smoke tests
+- Paper trading demo
 
 ### Coverage Policy
 
-- **Floor**: 25% (enforced by `.coveragerc`)
+- **Floor**: 40% (enforced by `.coveragerc`, raised from 25% on 2026-02-04)
 - **Target**: 85% for new modules
 - **Regression rule**: Any PR that lowers coverage must add tests or justify a new exception
 
@@ -471,11 +509,20 @@ MERID includes production-grade safety controls:
 - **Config Validation**: Pre-flight checks before trading
 
 ```bash
-# Check risk status
-python -c "from merid.risk import get_risk_status; print(get_risk_status())"
+# Show current trading mode and safety settings
+make show-mode
 
-# Emergency stop
-python -c "from merid.risk import emergency_stop; emergency_stop('Manual halt')"
+# Check risk status
+make show-risk
+
+# Emergency stop - halt all trading immediately
+make emergency-stop
+
+# Validate configuration for go-live
+make validate-config
+
+# Full go-live dry run (config + smoke test + paper demo)
+make go-live-dry-run
 ```
 
 See `docs/GO_LIVE_CHECKLIST.md` for the complete go-live procedure.
@@ -488,10 +535,16 @@ Paper trading works without API keys:
 python scripts/run_paper_demo.py
 ```
 
-For live API integration, set optional environment variables:
+For live API integration, set environment variables in `.env`:
+
 - `ALPACA_API_KEY` / `ALPACA_API_SECRET` - Alpaca equities
-- `KRAKEN_API_KEY` / `KRAKEN_API_SECRET` - Kraken crypto
+- `KRAKEN_API_KEY` / `KRAKEN_PRIVATE_KEY` - Kraken crypto
 - `COINBASE_API_KEY` / `COINBASE_API_SECRET` - Coinbase
+- `BINANCE_API_KEY` / `BINANCE_API_SECRET` - Binance
+- `KALSHI_API_KEY_ID` / `KALSHI_PRIVATE_KEY_PEM` - Kalshi prediction markets
+- `OKX_API_KEY` / `OKX_SECRET_KEY` - OKX
+
+See `.env.example` for the full list of supported environment variables.
 
 ---
 
