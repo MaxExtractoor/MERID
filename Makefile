@@ -84,3 +84,16 @@ emergency-stop:
 # Reset kill switch (use with caution)
 reset-kill-switch:
 	python -c "from merid.risk import risk_controller; risk_controller.reset('operator')"
+
+# ── Prediction Markets (Kalshi-first) ──────────────────────────────────
+pm-test:
+	python -m pytest tests/test_prediction_markets.py -v
+
+pm-status:
+	python -c "from merid.prediction.venue_gate import get_venue_gate; g=get_venue_gate(); print(g.summary())"
+
+pm-pause:
+	python -c "from merid.prediction.venue_gate import get_venue_gate, TradingMode; g=get_venue_gate(); g.mode=TradingMode.SIM; print('PM paused (SIM mode)')"
+
+pm-resume:
+	python -c "from merid.prediction.venue_gate import get_venue_gate, TradingMode; g=get_venue_gate(); g.mode=TradingMode.PAPER; print('PM resumed (PAPER mode)')"

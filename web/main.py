@@ -76,6 +76,7 @@ from web.api.institutional import router as institutional_router
 from web.api.schemas import router as schemas_router
 from web.api.arbitrage import router as arbitrage_router
 from web.api.prediction import router as prediction_router
+from web.api.prediction_markets import router as prediction_markets_router
 from web.api.wallet import router as wallet_router
 from web.api.offline import router as offline_router
 from web.api.notifications import router as notifications_router
@@ -390,6 +391,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(health_router)
     application.include_router(analytics_router)
     application.include_router(predictions_router)
+    application.include_router(prediction_markets_router)
     application.include_router(simulation_router)
     application.include_router(neo4j_memory_router)
     # Skip assertion registry for Phase 0 trial
