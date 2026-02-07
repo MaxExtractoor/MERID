@@ -169,6 +169,18 @@ class Settings(BaseSettings):
     KALSHI_PASSWORD: Optional[str] = Field(default=None, description="Kalshi account password")
 
     # =============================================================================
+    # UNIFIED PIPELINE SETTINGS (multi-venue)
+    # =============================================================================
+    MERID_TOTAL_CAPITAL_USD: float = Field(default=50000.0, description="Total capital for pipeline risk manager")
+    MERID_MAX_PORTFOLIO_NOTIONAL_USD: float = Field(default=50000.0, description="Max portfolio-wide notional")
+    MERID_CRYPTO_MAX_NOTIONAL_USD: float = Field(default=25000.0, description="Max crypto domain notional")
+    MERID_CRYPTO_MAX_DAILY_LOSS_USD: float = Field(default=1000.0, description="Max crypto daily loss")
+    MERID_CRYPTO_ALLOCATION_PCT: float = Field(default=0.50, description="Max crypto capital allocation %")
+    MERID_EQUITY_MAX_NOTIONAL_USD: float = Field(default=20000.0, description="Max equity domain notional")
+    MERID_EQUITY_MAX_DAILY_LOSS_USD: float = Field(default=500.0, description="Max equity daily loss")
+    MERID_EQUITY_ALLOCATION_PCT: float = Field(default=0.40, description="Max equity capital allocation %")
+
+    # =============================================================================
     # TRADING MODE SETTINGS
     # =============================================================================
     # Trading mode: "paper" (simulated), "live" (real money)

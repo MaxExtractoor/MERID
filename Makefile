@@ -97,3 +97,16 @@ pm-pause:
 
 pm-resume:
 	python -c "from merid.prediction.venue_gate import get_venue_gate, TradingMode; g=get_venue_gate(); g.mode=TradingMode.PAPER; print('PM resumed (PAPER mode)')"
+
+# ── Unified Pipeline (multi-venue) ────────────────────────────────────
+pipeline-test:
+	python -m pytest tests/test_unified_pipeline.py -v
+
+pipeline-status:
+	python -c "from merid.pipeline.mode_manager import get_mode_manager; import json; print(json.dumps(get_mode_manager().summary(), indent=2))"
+
+pipeline-risk:
+	python -c "from merid.pipeline.risk_manager import get_global_risk_manager; import json; print(json.dumps(get_global_risk_manager().summary(), indent=2))"
+
+pipeline-instruments:
+	python -c "from merid.pipeline.instruments import get_instrument_registry; import json; print(json.dumps(get_instrument_registry().summary(), indent=2))"
