@@ -132,13 +132,16 @@ async def round_summary(round_id: str) -> Dict[str, Any]:
 
 @router.post("/contributions", response_model=Contribution)
 async def record_contribution(payload: ContributionPayload) -> Contribution:
-    return _program.record_contribution(
-        round_id=payload.round_id,
-        proposal_id=payload.proposal_id,
-        contributor_id=payload.contributor_id,
-        amount_usd=payload.amount_usd,
-        metadata=payload.metadata,
-    )
+    try:
+        return _program.record_contribution(
+            round_id=payload.round_id,
+            proposal_id=payload.proposal_id,
+            contributor_id=payload.contributor_id,
+            amount_usd=payload.amount_usd,
+            metadata=payload.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/rounds/finalize")

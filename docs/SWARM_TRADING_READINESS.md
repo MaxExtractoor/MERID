@@ -396,7 +396,7 @@ production readiness requirements.
 
 ---
 
-## Test Suite Summary (625+ tests across 25 files, all verified passing)
+## Test Suite Summary (664+ tests across 26 files, all verified passing)
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
@@ -424,4 +424,5 @@ production readiness requirements.
 | `test_mev_rewards.py` | 34 | MEV reward system + health metrics |
 | `test_sandbox_integration.py` | 12 | Alpaca paper + Kalshi demo sandbox |
 | `test_rewards_api.py` | 48 | Rewards API: summary, XP, quests, pools, x402, security, e2e |
-| **Total** | **625+** | **25 files, all verified passing** |
+| `test_quadratic_funding_api.py` | 39 | Quadratic funding: proposals, rounds, contributions, finalization, e2e |
+| **Total** | **664+** | **26 files, all verified passing** |
