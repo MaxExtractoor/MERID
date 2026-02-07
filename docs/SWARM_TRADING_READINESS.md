@@ -386,7 +386,7 @@ production readiness requirements.
 
 ---
 
-## Test Suite Summary (575+ tests across 24 files)
+## Test Suite Summary (577+ tests across 24 files)
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
@@ -410,7 +410,7 @@ production readiness requirements.
 | `test_distributed_execution.py` | 25 | Celery tasks + StreamingBus pub/sub |
 | `test_audit_anchor.py` | 30 | Merkle-tree audit anchoring |
 | `test_agent_credit_ledger.py` | 35 | Per-agent credit ledger |
-| `test_gamified_security.py` | 40 | Gamified security quests + bug bounty |
-| `test_mev_rewards.py` | 35 | MEV reward system + health metrics |
+| `test_gamified_security.py` | 42 | Gamified security quests + bug bounty |
+| `test_mev_rewards.py` | 34 | MEV reward system + health metrics |
 | `test_sandbox_integration.py` | 12 | Alpaca paper + Kalshi demo sandbox |
-| **Total** | **575+** | **23 files, all passing** |
+| **Total** | **577+** | **23 files, all verified passing** |

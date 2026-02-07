@@ -30,7 +30,7 @@ from core.streaming_bus import StreamEvent, EventChannel
 
 def _banner(msg: str) -> None:
     print(f"\n{'=' * 60}")
-    print(f"  {msg}")
+    print(f"  {msg}", flush=True)
     print(f"{'=' * 60}\n")
 
 
@@ -38,7 +38,7 @@ async def run_soak(duration_seconds: float, target_entries: int, storage_dir: st
     """Run the soak test, returning a results dict."""
     trail = AuditTrail(storage_path=storage_dir)
 
-    _banner(f"Audit Trail Soak Test — {duration_seconds}s / {target_entries} entries")
+    _banner(f"Audit Trail Soak Test - {duration_seconds}s / {target_entries} entries")
 
     start = time.time()
     count = 0
@@ -103,7 +103,7 @@ async def run_soak(duration_seconds: float, target_entries: int, storage_dir: st
     indexed_orders = len(trail._order_index)
     print(f"  Order index entries: {indexed_orders}")
 
-    # Verify persistence — reload from disk
+    # Verify persistence - reload from disk
     _banner("Verifying Persistence (reload from disk)")
     trail2 = AuditTrail(storage_path=storage_dir)
     reload_valid = trail2.verify_chain()
@@ -125,7 +125,7 @@ async def run_soak(duration_seconds: float, target_entries: int, storage_dir: st
         "passed": chain_valid and reload_valid and reload_count == count and len(errors) == 0,
     }
 
-    _banner("RESULT: " + ("PASS ✓" if results["passed"] else "FAIL ✗"))
+    _banner("RESULT: " + ("PASS [OK]" if results["passed"] else "FAIL [ERROR]"))
     return results
 
 
