@@ -16,10 +16,11 @@ import {
   Trophy,
   Cpu,
   Building2,
-  Package
+  Package,
+  Monitor
 } from 'lucide-react';
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator";
 
 interface SidebarProps {
   current: View;
@@ -39,6 +40,7 @@ const navigation = [
 ];
 
 const management = [
+  { name: 'Operator', href: 'operator', icon: Monitor, color: 'text-orange-400' },
   { name: 'Risk & Health', href: 'risk', icon: Shield, color: 'text-red-400' },
   { name: 'Bots/Agents', href: 'agents', icon: Bot, color: 'text-cyan-400' },
   { name: 'Mining', href: 'mining', icon: Cpu, color: 'text-purple-400' },
