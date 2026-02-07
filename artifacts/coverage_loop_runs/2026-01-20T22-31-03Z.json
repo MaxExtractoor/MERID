@@ -1,0 +1,27 @@
+{
+  "failure_logs": [
+    {
+      "path": "artifacts\\coverage_loop_failures\\failure_initial_20260120T222601Z.log",
+      "stage": "initial"
+    },
+    {
+      "path": "artifacts\\coverage_loop_failures\\failure_retry1_20260120T223103Z.log",
+      "stage": "retry_1"
+    }
+  ],
+  "history": [
+    {
+      "files": [],
+      "raw_output": "\n2026-01-20 17:22:50 | INFO | agents.reflection | Loaded 49 reflections for 2 agents\n\n[run_swarm_tests] Timeout",
+      "tests_passed": false,
+      "total_coverage": 0.0
+    },
+    {
+      "files": [],
+      "raw_output": "\n2026-01-20 17:30:38 | INFO | agents.reflection | Loaded 49 reflections for 2 agents\n\n[run_swarm_tests] Timeout",
+      "tests_passed": false,
+      "total_coverage": 0.0
+    }
+  ],
+  "remaining_targets": []
+}

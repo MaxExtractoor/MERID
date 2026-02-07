@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MERID Vigilance Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            background: #f0f4f8;
+            color: #333;
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        .header {
+            background: #1f4e79;
+            color: white;
+            padding: 10px;
+            display: flex;
+            align-items: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 18px;
+        }
+        .tabs {
+            margin-left: 20px;
+        }
+        .tab-button {
+            background: none;
+            border: none;
+            color: white;
+            padding: 10px 15px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .tab-button.active {
+            background: #337ab7;
+        }
+        .main-container {
+            display: flex;
+            height: calc(100vh - 40px);
+        }
+        .sidebar {
+            width: 250px;
+            background: #e7e7e7;
+            border-right: 1px solid #ccc;
+            padding: 10px;
+            overflow-y: auto;
+        }
+        .sidebar ul {
+            list-style: none;
+            padding: 0;
+        }
+        .sidebar li {
+            padding: 5px;
+            cursor: pointer;
+        }
+        .sidebar li:hover {
+            background: #d9d9d9;
+        }
+        .content {
+            flex: 1;
+            padding: 10px;
+            overflow-y: auto;
+        }
+        .panel {
+            background: white;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .panel h3 {
+            margin: 0 0 10px;
+            font-size: 16px;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 5px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background: #f5f5f5;
+        }
+        .chart-container {
+            height: 200px;
+        }
+        #user-input {
+            width: 100%;
+            padding: 10px;
+            margin-top: 10px;
+            box-sizing: border-box;
+        }
+        #spinner {
+            display: none;
+            text-align: center;
+            font-size: 24px;
+            color: #337ab7;
+        }
+        .lockdown {
+            background: #d9534f;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .amber-shift {
+            filter: sepia(1) hue-rotate(30deg) saturate(2);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MERID Vigilance Dashboard</h1>
+        <div class="tabs">
+            <button class="tab-button active" onclick="showTab('dashboard')">Dashboard</button>
+            <button class="tab-button" onclick="showTab('query')">Query Tool</button>
+            <button class="tab-button" onclick="showTab('monitoring')">Monitoring</button>
+        </div>
+    </div>
+    <div class="main-container">
+        <div class="sidebar">
+            <ul id="sidebar-list">
+                <li>Agents
+                    <ul>
+                        <li>Eyes (Data Ingestion)</li>
+                        <li>Brain (Reasoning)</li>
+                        <li>Immune (Anomaly)</li>
+                        <li>Perception</li>
+                    </ul>
+                </li>
+                <li>Databases</li>
+                <li>Tables</li>
+                <li>Views</li>
+                <li>Functions</li>
+            </ul>
+        </div>
+        <div class="content">
+            <div id="dashboard-tab" class="tab-content">
+                <div class="panel">
+                    <h3>Boost Top 20 Units</h3>
+                    <table id="top-units-table">
+                        <thead>
+                            <tr>
+                                <th>Unit</th>
+                                <th>Status</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Data will be populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+                <div class="panel" style="display: inline-block; width: 48%;">
+                    <h3>Sessions (active connections)</h3>
+                    <div class="chart-container">
+                        <canvas id="sessions-pie"></canvas>
+                    </div>
+                </div>
+                <div class="panel" style="display: inline-block; width: 48%;">
+                    <h3>Memory Usage</h3>
+                    <div class="chart-container">
+                        <canvas id="memory-line"></canvas>
+                    </div>
+                </div>
+                <div class="panel">
+                    <h3>Locks</h3>
+                    <div class="chart-container">
+                        <canvas id="locks-bar"></canvas>
+                    </div>
+                </div>
+                <div class="panel" style="display: inline-block; width: 48%;">
+                    <h3>CPU Usage</h3>
+                    <div class="chart-container">
+                        <canvas id="cpu-line"></canvas>
+                    </div>
+                </div>
+                <div class="panel" style="display: inline-block; width: 48%;">
+                    <h3>Database Size</h3>
+                    <div class="chart-container">
+                        <canvas id="db-size-line"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div id="query-tab" class="tab-content" style="display: none;">
+                <div class="panel">
+                    <h3>Query Tool</h3>
+                    <textarea id="query-editor" rows="10" style="width: 100%;"></textarea>
+                    <button onclick="runQuery()">Run Query</button>
+                    <div id="query-result"></div>
+                </div>
+            </div>
+            <div id="monitoring-tab" class="tab-content" style="display: none;">
+                <div class="panel">
+                    <h3>Monitoring Overview</h3>
+                    <p>Real-time system metrics and signal flow.</p>
+                    <button class="lockdown" id="lockdown">Lockdown System</button>
+                </div>
+            </div>
+            <div id="spinner">Processing...</div>
+            <input type="text" id="user-input" placeholder="Enter query (e.g., Status Report) then press Enter">
+        </div>
+    </div>
+
+    <script>
+        let sessionsChart, memoryChart, locksChart, cpuChart, dbSizeChart;
+
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(content => content.style.display = 'none');
+            document.getElementById(tabId + '-tab').style.display = 'block';
+            document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+        }
+
+        function initCharts() {
+            sessionsChart = new Chart(document.getElementById('sessions-pie'), {
+                type: 'pie',
+                data: {
+                    labels: ['Active', 'Idle'],
+                    datasets: [{
+                        data: [60, 40],
+                        backgroundColor: ['#5cb85c', '#d3d3d3']
+                    }]
+                },
+                options: { responsive: true }
+            });
+
+            memoryChart = new Chart(document.getElementById('memory-line'), {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 10}, (_, i) => `T${i}`),
+                    datasets: [{
+                        label: 'Memory %',
+                        data: Array(10).fill(0),
+                        borderColor: '#337ab7'
+                    }]
+                },
+                options: { responsive: true, scales: { y: { beginAtZero: true } } }
+            });
+
+            locksChart = new Chart(document.getElementById('locks-bar'), {
+                type: 'bar',
+                data: {
+                    labels: ['Exclusive', 'Share', 'Access Share'],
+                    datasets: [{
+                        data: [10, 20, 30],
+                        backgroundColor: '#5cb85c'
+                    }]
+                },
+                options: { responsive: true }
+            });
+
+            cpuChart = new Chart(document.getElementById('cpu-line'), {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 10}, (_, i) => `T${i}`),
+                    datasets: [{
+                        label: 'CPU %',
+                        data: Array(10).fill(0),
+                        borderColor: '#d9534f'
+                    }]
+                },
+                options: { responsive: true, scales: { y: { beginAtZero: true } } }
+            });
+
+            dbSizeChart = new Chart(document.getElementById('db-size-line'), {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 10}, (_, i) => `T${i}`),
+                    datasets: [{
+                        label: 'DB Size (MB)',
+                        data: Array(10).fill(0),
+                        borderColor: '#f0ad4e'
+                    }]
+                },
+                options: { responsive: true, scales: { y: { beginAtZero: true } } }
+            });
+        }
+
+        function updateRealTimeData() {
+            // Simulate real-time updates
+            const cpu = Math.random() * 100;
+            const memory = Math.random() * 100;
+            const dbSize = Math.random() * 100 + 20; // Simulated MB
+            const sessionsActive = Math.floor(Math.random() * 50) + 50;
+            const sessionsIdle = 100 - sessionsActive;
+            const locks = [Math.random() * 20, Math.random() * 30, Math.random() * 40];
+
+            // Update pie
+            sessionsChart.data.datasets[0].data = [sessionsActive, sessionsIdle];
+            sessionsChart.update();
+
+            // Shift line data
+            memoryChart.data.datasets[0].data.shift();
+            memoryChart.data.datasets[0].data.push(memory);
+            memoryChart.update();
+
+            cpuChart.data.datasets[0].data.shift();
+            cpuChart.data.datasets[0].data.push(cpu);
+            cpuChart.update();
+
+            dbSizeChart.data.datasets[0].data.shift();
+            dbSizeChart.data.datasets[0].data.push(dbSize);
+            dbSizeChart.update();
+
+            // Update bar
+            locksChart.data.datasets[0].data = locks;
+            locksChart.update();
+
+            // Update table
+            const tableBody = document.querySelector('#top-units-table tbody');
+            tableBody.innerHTML = '';
+            for (let i = 0; i < 5; i++) {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>Unit ${i + 1}</td>
+                    <td>Active</td>
+                    <td>${Math.random().toFixed(2)}</td>
+                `;
+                tableBody.appendChild(row);
+            }
+
+            // Confidence simulation
+            const confidence = Math.floor(70 + Math.random() * 30);
+            document.querySelector('#confidence-meter span').textContent = `Confidence: ${confidence}%`;
+            if (confidence < 80) {
+                document.body.classList.add('amber-shift');
+            } else {
+                document.body.classList.remove('amber-shift');
+            }
+        }
+
+        function runQuery() {
+            const query = document.getElementById('query-editor').value;
+            document.getElementById('query-result').innerHTML = `Executed: ${query}<br>Result: Simulated success.`;
+        }
+
+        document.getElementById('lockdown').addEventListener('click', () => {
+            alert('System Locked Down');
+            // Simulate lockdown
+            document.body.style.background = '#d9534f';
+        });
+
+        document.getElementById('user-input').addEventListener('keypress', e => {
+            if (e.key === 'Enter') {
+                alert(`Processing query: ${e.target.value}`);
+                e.target.value = '';
+            }
+        });
+
+        initCharts();
+        setInterval(updateRealTimeData, 3000); // Real-time update every 3 seconds
+    </script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+name: Static Analysis
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-and-format:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install ruff mypy bandit codespell
+
+      - name: Run ruff linter
+        run: ruff check . --output-format=github
+
+      - name: Run ruff format check
+        run: ruff format --check .
+
+      - name: Run mypy type checker
+        run: mypy src/ --strict --ignore-missing-imports
+        continue-on-error: true  # Allow gradual type adoption
+
+  security-scan:
+    name: Security Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install bandit safety pip-audit
+
+      - name: Run bandit security scan
+        run: bandit -r . -f json -o bandit-report.json || true
+
+      - name: Upload bandit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-security-report
+          path: bandit-report.json
+
+      - name: Check dependencies for CVEs
+        run: safety check --json --output safety-report.json || true
+
+      - name: Upload safety report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-security-report
+          path: safety-report.json
+
+      - name: Run pip-audit
+        run: pip-audit --format=json --output=pip-audit-report.json || true
+
+      - name: Upload pip-audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+
+  dead-code-detection:
+    name: Dead Code Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install vulture
+        run: pip install vulture
+
+      - name: Run vulture dead code detection
+        run: vulture . --min-confidence 80 --exclude tests/
+        continue-on-error: true  # Report only, don't fail CI
+
+  typo-check:
+    name: Typo Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install codespell
+        run: pip install codespell
+
+      - name: Run codespell
+        run: codespell --quiet-level=2 --skip="*.json,*.lock,*.min.js"
+
+  pre-commit:
+    name: Pre-commit Hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit hooks
+        run: pre-commit run --all-files --show-diff-on-failure

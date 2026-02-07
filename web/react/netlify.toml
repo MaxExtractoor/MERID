@@ -1,0 +1,8 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_ENV = "production"
+  VITE_API_BASE = "https://api.merid.yourdomain"
+  VITE_WS_URL = "wss://api.merid.yourdomain"

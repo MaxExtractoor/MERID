@@ -1,0 +1,88 @@
+name: Publish Docker Image on Tag
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/merid:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/merid:latest
+          platforms: linux/amd64
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          # Generate SBOM for the published image using syft (via Docker)
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:latest ghcr.io/${{ github.repository_owner }}/merid:${{ github.ref_name }} -o cyclonedx-json=sbom.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.ref_name }}
+          path: sbom.json
+
+      - name: Install cosign (for image signing)
+        uses: sigstore/cosign-installer@v2
+
+      - name: Sign image with cosign
+        if: ${{ secrets.COSIGN_PRIVATE_KEY != '' }}
+        env:
+          COSIGN_KEY_B64: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        run: |
+          # Decode the base64-encoded private key held in COSIGN_PRIVATE_KEY and sign the image
+          echo "$COSIGN_KEY_B64" | base64 --decode > cosign.key
+          chmod 600 cosign.key
+          cosign sign --key cosign.key ghcr.io/${{ github.repository_owner }}/merid:${{ github.ref_name }}
+
+      - name: Upload cosign signature (verify & attach)
+        if: ${{ secrets.COSIGN_PRIVATE_KEY != '' }}
+        run: |
+          cosign verify --key cosign.key ghcr.io/${{ github.repository_owner }}/merid:${{ github.ref_name }}
+          # If desired, add steps here to attach the signature or provenance to the release.
+
+      - name: Create release and attach SBOM
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs')
+            const tag = context.ref.replace('refs/tags/', '')
+            // Create or update the release with the tag
+            const release = await github.rest.repos.createRelease({ owner: context.repo.owner, repo: context.repo.repo, tag_name: tag, name: tag, body: `Docker image published to GHCR: ghcr.io/${context.repo.owner}/merid:${tag}` })
+
+            // If SBOM artifact exists, upload it as a release asset
+            try {
+              if (fs.existsSync('sbom.json')) {
+                const sbomData = fs.readFileSync('sbom.json')
+                await github.rest.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release.data.id,
+                  name: `sbom-${tag}.json`,
+                  data: sbomData,
+                })
+                console.log('SBOM uploaded to release')
+              } else {
+                console.log('SBOM not found; skipping release attachment')
+              }
+            } catch (err) {
+              console.warn('Failed to attach SBOM to release:', err)
+            }

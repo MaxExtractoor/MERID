@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID Prime Screen - Market Intelligence</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%); 
+            color: #ffffff; 
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        
+        .header { 
+            background: rgba(255, 255, 255, 0.05); 
+            -webkit-backdrop-filter: blur(20px);
+            backdrop-filter: blur(20px);
+            padding: 30px; 
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(45deg, #00ff41, #00b4d8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .header p {
+            color: #a8a8a8;
+            font-size: 1.1em;
+        }
+        
+        .main-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        
+        .launch-section {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 20px;
+            padding: 40px;
+            margin-bottom: 40px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
+        }
+        
+        .launch-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+            align-items: center;
+        }
+        
+        .launch-info h2 {
+            font-size: 2em;
+            margin-bottom: 20px;
+            color: #00ff41;
+        }
+        
+        .launch-info p {
+            color: #b8b8b8;
+            line-height: 1.6;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        
+        .feature-list {
+            list-style: none;
+            margin-bottom: 30px;
+        }
+        
+        .feature-list li {
+            padding: 10px 0;
+            color: #d0d0d0;
+            display: flex;
+            align-items: center;
+        }
+        
+        .feature-list li::before {
+            content: "✓";
+            color: #00ff41;
+            font-weight: bold;
+            margin-right: 15px;
+            font-size: 1.2em;
+        }
+        
+        .launch-buttons {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(45deg, #00ff41, #00b4d8);
+            color: #0f0f23;
+            text-decoration: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 1.1em;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(0, 255, 65, 0.3);
+        }
+        
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #ffffff;
+            text-decoration: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 1.1em;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+        }
+        
+        .preview-container {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 15px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            position: relative;
+        }
+        
+        .preview-header {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .preview-dots {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+        
+        .dot.red { background: #ff5f56; }
+        .dot.yellow { background: #ffbd2e; }
+        .dot.green { background: #27c93f; }
+        
+        .preview-title {
+            margin-left: 20px;
+            color: #a8a8a8;
+            font-size: 0.9em;
+        }
+        
+        .preview-frame {
+            width: 100%;
+            height: 500px;
+            border: none;
+        }
+        
+        .status-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+        
+        .status-card {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 15px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
+        }
+        
+        .status-card h3 {
+            color: #00b4d8;
+            margin-bottom: 20px;
+            font-size: 1.3em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .status-item:last-child {
+            border-bottom: none;
+        }
+        
+        .status-label {
+            color: #b8b8b8;
+        }
+        
+        .status-value {
+            color: #ffffff;
+            font-weight: bold;
+        }
+        
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-left: 10px;
+        }
+        
+        .status-indicator.active { background: #00ff41; }
+        .status-indicator.inactive { background: #ff6b6b; }
+        .status-indicator.pending { background: #ffbd2e; }
+        
+        .api-section {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 15px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
+        }
+        
+        .api-endpoints {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .api-endpoint {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+        
+        .api-endpoint:hover {
+            background: rgba(0, 0, 0, 0.3);
+            cursor: pointer;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #00b4d8;
+        }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        @media (max-width: 768px) {
+            .launch-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .launch-buttons {
+                flex-direction: column;
+            }
+            
+            .btn-primary, .btn-secondary {
+                width: 100%;
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MERID Prime Screen</h1>
+        <p>Advanced Market Intelligence with AI-Powered Decision Narratives</p>
+    </div>
+
+    <div class="main-container">
+        <div class="launch-section">
+            <div class="launch-grid">
+                <div class="launch-info">
+                    <h2>Real-Time Market Analysis</h2>
+                    <p>Experience the power of AI-driven market intelligence with our advanced Prime Screen interface. Get instant decision narratives, real-time data feeds, and comprehensive market insights.</p>
+                    
+                    <ul class="feature-list">
+                        <li>AI-generated decision narratives</li>
+                        <li>Real-time market data streams</li>
+                        <li>Multi-asset coverage (Crypto, Stocks, FX)</li>
+                        <li>Risk assessment and autonomy controls</li>
+                        <li>Historical backtesting capabilities</li>
+                        <li>Swarm agent consensus monitoring</li>
+                    </ul>
+                    
+                    <div class="launch-buttons">
+                        <a href="/lib/merid/web/" class="btn-primary" target="_blank">
+                            🚀 Launch Prime Screen
+                        </a>
+                        <a href="/api/v1/swarm/prime-screen/state" class="btn-secondary" target="_blank">
+                            📊 API Status
+                        </a>
+                    </div>
+                </div>
+                
+                <div class="preview-container">
+                    <div class="preview-header">
+                        <div class="preview-dots">
+                            <div class="dot red"></div>
+                            <div class="dot yellow"></div>
+                            <div class="dot green"></div>
+                        </div>
+                        <div class="preview-title">Prime Screen Preview</div>
+                    </div>
+                    <iframe src="/lib/merid/web/" class="preview-frame" frameborder="0" title="MERID Prime Screen Preview"></iframe>
+                </div>
+            </div>
+        </div>
+
+        <div class="status-section">
+            <div class="status-card">
+                <h3>🤖 Agent Status</h3>
+                <div id="agent-status" class="loading pulse">Loading agents...</div>
+            </div>
+            
+            <div class="status-card">
+                <h3>📊 Market Data</h3>
+                <div id="market-status" class="loading pulse">Connecting to feeds...</div>
+            </div>
+            
+            <div class="status-card">
+                <h3>🧠 AI Processing</h3>
+                <div id="ai-status" class="loading pulse">Initializing models...</div>
+            </div>
+        </div>
+
+        <div class="api-section">
+            <h3>🔌 API Endpoints</h3>
+            <p>Direct access to Prime Screen data and functionality</p>
+            
+            <div class="api-endpoints">
+                <div class="api-endpoint" onclick="window.open('/api/v1/swarm/prime-screen/state', '_blank')">
+                    GET /api/v1/swarm/prime-screen/state
+                </div>
+                <div class="api-endpoint" onclick="window.open('/api/v1/swarm/prime-screen/decisions', '_blank')">
+                    GET /api/v1/swarm/prime-screen/decisions
+                </div>
+                <div class="api-endpoint" onclick="window.open('/api/v1/swarm/prime-screen/autonomy/state', '_blank')">
+                    GET /api/v1/swarm/prime-screen/autonomy/state
+                </div>
+                <div class="api-endpoint" onclick="window.open('/docs', '_blank')">
+                    GET /docs (Full API Documentation)
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Load agent status
+        function loadAgentStatus() {
+            fetch('/api/v1/swarm/prime-screen/state')
+                .then(response => response.json())
+                .then(data => {
+                    const agentDiv = document.getElementById('agent-status');
+                    if (data.agents && data.agents.length > 0) {
+                        agentDiv.innerHTML = data.agents.map(agent => 
+                            `<div class="status-item">
+                                <span class="status-label">${agent.name}</span>
+                                <span class="status-value">
+                                    ${agent.status}
+                                    <span class="status-indicator ${agent.status === 'active' ? 'active' : 'inactive'}"></span>
+                                </span>
+                            </div>`
+                        ).join('');
+                    } else {
+                        agentDiv.innerHTML = '<div class="status-item"><span class="status-label">No agents active</span></div>';
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('agent-status').innerHTML = '<div class="status-item"><span class="status-label">Error loading agents</span></div>';
+                });
+        }
+
+        // Load market status
+        function loadMarketStatus() {
+            const marketDiv = document.getElementById('market-status');
+            
+            // Simulate market data status
+            marketDiv.innerHTML = `
+                <div class="status-item">
+                    <span class="status-label">BTC-USD</span>
+                    <span class="status-value">Live <span class="status-indicator active"></span></span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">ETH-USD</span>
+                    <span class="status-value">Live <span class="status-indicator active"></span></span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Data Sources</span>
+                    <span class="status-value">3 Active</span>
+                </div>
+            `;
+        }
+
+        // Load AI status
+        function loadAIStatus() {
+            const aiDiv = document.getElementById('ai-status');
+            
+            // Simulate AI processing status
+            aiDiv.innerHTML = `
+                <div class="status-item">
+                    <span class="status-label">Decision Engine</span>
+                    <span class="status-value">Ready <span class="status-indicator active"></span></span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Narrative Generator</span>
+                    <span class="status-value">Active <span class="status-indicator active"></span></span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Risk Assessment</span>
+                    <span class="status-value">Monitoring <span class="status-indicator pending"></span></span>
+                </div>
+            `;
+        }
+
+        // Initialize all status loaders
+        function initializeStatus() {
+            loadAgentStatus();
+            loadMarketStatus();
+            loadAIStatus();
+        }
+
+        // Load status on page load
+        initializeStatus();
+
+        // Refresh status every 30 seconds
+        setInterval(initializeStatus, 30000);
+
+        // Add smooth scrolling for API endpoints
+        document.querySelectorAll('.api-endpoint').forEach(endpoint => {
+            endpoint.addEventListener('click', function() {
+                this.style.background = 'rgba(0, 255, 65, 0.1)';
+                setTimeout(() => {
+                    this.style.background = 'rgba(0, 0, 0, 0.2)';
+                }, 200);
+            });
+        });
+    </script>
+</body>
+</html>

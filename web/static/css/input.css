@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom components */
+@layer components {
+  .glass-effect {
+    @apply bg-white/5 backdrop-blur-md border border-white/10;
+  }
+  
+  .card {
+    @apply glass-effect rounded-xl p-6;
+  }
+  
+  .gradient-bg {
+    @apply bg-gradient-to-br from-merid-primary to-merid-secondary;
+  }
+  
+  .status-online {
+    @apply text-green-500;
+  }
+  
+  .status-offline {
+    @apply text-red-500;
+  }
+  
+  .status-warning {
+    @apply text-yellow-500;
+  }
+  
+  .loading {
+    @apply animate-pulse;
+  }
+  
+  .metric-tile {
+    @apply bg-white/5 backdrop-blur-sm border border-white/10 rounded-lg p-4;
+  }
+  
+  .health-pill {
+    @apply bg-white/10 backdrop-blur-sm border border-white/20 rounded-full px-3 py-1 text-sm;
+  }
+}

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID Vigilance Dashboard</title>
+    <style>
+        body { margin: 0; font-family: 'Segoe UI', Arial, sans-serif; background: #f5f7fa; color: #333; }
+        .header { background: #1a3b5d; color: white; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { margin: 0; font-size: 20px; }
+        .tabs { display: flex; gap: 10px; }
+        .tab { padding: 10px 20px; background: #2c5282; cursor: pointer; border-radius: 4px 4px 0 0; }
+        .tab.active { background: #347ab7; }
+        .main { display: flex; height: calc(100vh - 56px); }
+        .sidebar { width: 260px; background: #eef2f6; border-right: 1px solid #ccc; padding: 15px; overflow-y: auto; }
+        .sidebar h3 { margin: 0 0 10px; font-size: 16px; color: #1a3b5d; }
+        .sidebar ul { list-style: none; padding: 0; margin: 0; }
+        .sidebar li { padding: 8px 12px; cursor: pointer; border-radius: 4px; }
+        .sidebar li:hover { background: #d0e3f0; }
+        .content { flex: 1; padding: 20px; overflow-y: auto; background: #fff; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .panel { background: white; border: 1px solid #ddd; border-radius: 6px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .panel h3 { margin: 0 0 15px; font-size: 16px; color: #1a3b5d; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #f8f9fa; }
+        .status-green { color: #28a745; }
+        .status-amber { color: #ffc107; }
+        .status-red { color: #dc3545; }
+        .heatmap { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; height: 180px; align-content: center; }
+        .heat-cell { background: #e0e0e0; border-radius: 2px; }
+        .line-chart { height: 180px; position: relative; }
+        .line { height: 100%; position: relative; }
+        .bar { height: 20px; background: #347ab7; margin-bottom: 8px; border-radius: 4px; }
+        .lockdown-btn { background: #dc3545; color: white; border: none; padding: 12px 24px; font-size: 16px; cursor: pointer; border-radius: 4px; margin-top: 15px; }
+        .lockdown-btn:hover { background: #c82333; }
+        .output-section { margin-top: 30px; }
+        .quick-actions-header { margin-top: 30px; }
+        .active-sessions-container { display: flex; height: 180px; align-items: flex-end; justify-content: space-around; }
+        .bar-primary { width: 60%; }
+        .bar-secondary { width: 40%; background: #6c757d; }
+        .lockdown-text { color: #d9534f; font-size: 24px; }
+        #raw { background: #000; color: #0f0; padding: 15px; font-family: 'Courier New', monospace; display: none; border-radius: 4px; }
+        #distilled { background: #f8f9fa; padding: 15px; border: 1px solid #ddd; border-radius: 4px; }
+        #user-input { width: 100%; padding: 12px; margin-top: 20px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; font-size: 16px; }
+        #spinner { display: none; text-align: center; font-size: 28px; margin: 20px 0; color: #347ab7; }
+        .amber-mode { filter: sepia(0.6) hue-rotate(30deg) saturate(1.8); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MERID Vigilance Dashboard</h1>
+        <div class="tabs">
+            <div class="tab active">Overview</div>
+            <div class="tab">Agents</div>
+            <div class="tab">Flow</div>
+        </div>
+    </div>
+    <div class="main">
+        <div class="sidebar">
+            <h3>System Components</h3>
+            <ul>
+                <li>Eyes (Ingestion)</li>
+                <li>Brain (Reasoning)</li>
+                <li>Immune (Anomaly Detection)</li>
+                <li>Perception</li>
+                <li>Governance</li>
+            </ul>
+            <h3 class="quick-actions-header">Quick Actions</h3>
+            <ul>
+                <li>Pause Processing</li>
+                <li>Review Logs</li>
+                <li>Reset Confidence</li>
+            </ul>
+        </div>
+        <div class="content">
+            <div class="grid">
+                <div class="panel">
+                    <h3>Agent Performance Review</h3>
+                    <table id="agent-table">
+                        <thead><tr><th>Agent</th><th>Status</th><th>Load</th><th>Last Active</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="panel">
+                    <h3>Active Sessions</h3>
+                    <div class="active-sessions-container">
+                        <div class="bar bar-primary"></div>
+                        <div class="bar bar-secondary"></div>
+                    </div>
+                    <p>Active: <span id="active-sessions">68</span> | Idle: <span id="idle-sessions">32</span></p>
+                </div>
+                <div class="panel">
+                    <h3>Data Density Heat Map</h3>
+                    <div class="heatmap" id="heatmap"></div>
+                </div>
+                <div class="panel">
+                    <h3>Reasoning Load (CPU)</h3>
+                    <div class="line-chart" id="cpu-chart"></div>
+                </div>
+                <div class="panel">
+                    <h3>Memory & Storage Trend</h3>
+                    <div class="line-chart" id="memory-chart"></div>
+                </div>
+                <div class="panel">
+                    <h3>Master Controls</h3>
+                    <p>System Integrity: <strong id="integrity-level">94%</strong></p>
+                    <button class="lockdown-btn" id="lockdown">Pause / Lockdown System</button>
+                </div>
+            </div>
+
+            <div class="output-section">
+                <pre id="raw">RAW COGNITION LOG (collapsed)</pre>
+                <div id="distilled">
+                    <strong>DISTILLED OUTPUT</strong><br><br>
+                    System online. Live Signal Flow stable. All agents operational.<br><br>
+                    <em>Habit Nudge:</em> Review agent performance daily to compound vigilance.
+                </div>
+            </div>
+
+            <div id="spinner"></div>
+            <input type="text" id="user-input" placeholder="Enter command or query (e.g., 'status report') then press Enter">
+        </div>
+    </div>
+
+    <script>
+        const spinner = document.getElementById('spinner');
+        const raw = document.getElementById('raw');
+        const distilled = document.getElementById('distilled');
+        const lockdown = document.getElementById('lockdown');
+        const input = document.getElementById('user-input');
+        const agentTable = document.querySelector('#agent-table tbody');
+        const heatmap = document.getElementById('heatmap');
+
+        // Initialize heat map
+        for (let i = 0; i < 100; i++) {
+            const cell = document.createElement('div');
+            cell.className = 'heat-cell';
+            heatmap.appendChild(cell);
+        }
+
+        function updateData() {
+            // Agent table
+            const agents = ['Eyes', 'Brain', 'Immune', 'Perception'];
+            agentTable.innerHTML = '';
+            agents.forEach(agent => {
+                const status = Math.random() > 0.2 ? 'Active' : 'Idle';
+                const load = Math.floor(Math.random() * 100);
+                const time = new Date().toLocaleTimeString();
+                const row = `<tr><td>${agent}</td><td class="${status === 'Active' ? 'status-green' : 'status-amber'}">${status}</td><td>${load}%</td><td>${time}</td></tr>`;
+                agentTable.innerHTML += row;
+            });
+
+            // Heat map
+            document.querySelectorAll('.heat-cell').forEach(cell => {
+                const intensity = Math.random();
+                cell.style.background = `hsl(${120 - intensity * 120}, 70%, 60%)`;
+            });
+
+            // Simulated metrics
+            document.getElementById('active-sessions').textContent = Math.floor(Math.random() * 40) + 50;
+            document.getElementById('integrity-level').textContent = Math.floor(Math.random() * 15) + 85 + '%';
+
+            // Animated bars
+            document.querySelectorAll('.bar')[0].style.width = Math.random() * 80 + 20 + '%';
+            document.querySelectorAll('.bar')[1].style.width = 100 - parseFloat(document.querySelectorAll('.bar')[0].style.width) + '%';
+        }
+
+        function simulateFlow(query) {
+            spinner.style.display = 'block';
+            raw.style.display = 'block';
+            raw.textContent = `INGESTION: "${query}"\nANOMALY SCAN: Clear\nREASONING: Applying simplicity & risk assessment\nGOVERNANCE: Ethics & fairness check passed\nMEMORY: Compounded from session history`;
+
+            setTimeout(() => {
+                distilled.innerHTML = `<strong>DISTILLED OUTPUT</strong><br><br>
+                    Query processed: "${query}"<br><br>
+                    Live Signal Flow: Stable and transparent<br>
+                    Confidence: High | All agents active<br><br>
+                    <strong>Potential Omission:</strong> Consider reviewing Immune logs for emerging patterns.<br><br>
+                    <em>Habit Nudge:</em> Daily vigilance reviews compound long-term awareness and system moat.`;
+
+                spinner.style.display = 'none';
+            }, 2200);
+        }
+
+        input.addEventListener('keypress', e => {
+            if (e.key === 'Enter' && input.value.trim()) {
+                simulateFlow(input.value.trim());
+                input.value = '';
+            }
+        });
+
+        lockdown.addEventListener('click', () => {
+            if (confirm('Execute Governance Override? This will halt all processing.')) {
+                document.body.classList.add('amber-mode');
+                distilled.innerHTML = '<strong class="lockdown-text">SYSTEM HALTED: GOVERNANCE OVERRIDE</strong><br><br>All flows paused for risk preservation.';
+                spinner.style.display = 'none';
+            }
+        });
+
+        // Initial load and real-time updates
+        updateData();
+        setInterval(updateData, 3000);
+    </script>
+</body>
+</html>

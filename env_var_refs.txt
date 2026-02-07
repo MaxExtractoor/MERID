@@ -1,0 +1,232 @@
+20AND|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+22AND|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+22CHAMBER|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+22GRANDCHAMBER|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+230000FF|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+23009C41|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+23FFFFFF|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+252C|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+252CC|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+252CR|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+253D|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2830857204UI1|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2830857210UI0|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2857399062UI1|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2857399064UI0|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2B|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2C|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2C1|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2C1542|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2C3|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2C5|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2CT|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2F|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2F11|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2F8|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2FIMAGE|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2FPTO|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+2FUS|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A|.dart_tool\extension_discovery\devtools.json, librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A000000|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A003F7D|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A009900|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A1|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A10|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A11|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A36A200|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A5308307011|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A663399|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A666666|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A70|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3A9|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3AB0B0B0|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3AC|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3AD|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3AFF9900|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3AFFFFFF|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3AMU|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3AS|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3B25607|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BAH|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BALC|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BBGC|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BDIV|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BFORID|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BGFNT|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BGIMP|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BGL|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BL|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BLBGC|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BLC|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BLH|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BLW|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BS|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3BT|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3D|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3D007724375775369850404|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3D1|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3D23|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3DFORID|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3DRU|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+3E|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B0|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B1|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B2|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B3|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B4|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B5|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B6|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5B7|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+5D|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+7B|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+7C|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+7D|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+8C|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+8D|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+8E|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+9A|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+9C|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+AB|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+AE|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+AF|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+AGENT_CONSENSUS_THRESHOLD|config\settings.py
+AGENT_DEFAULT_MODEL|config\settings.py
+AGENT_NUM_AGENTS|config\settings.py
+AGENT_VOTE_TIMEOUT|config\settings.py
+ALERT_CHECK_INTERVAL|config\settings.py
+ALERT_MAX_PER_SYMBOL|config\settings.py
+ALERT_RETENTION_HOURS|config\settings.py
+B1|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+B2|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+B4|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+B6|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+B7|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+B9|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+BD|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+BE|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+C2|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+C3|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+C4|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+C5|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+CE|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+CF|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+CLOUD_RELAY_MODEL|lib\merid\relay.py
+CONFIG_GOOGLE_LANGUAGE|librex\docker\attributes.sh, librex\librex-main\docker\attributes.sh
+CONFIG_NGINX_TEMPLATE|librex\docker\server\prepare.sh, librex\librex-main\docker\server\prepare.sh
+CONFIG_OPEN_SEARCH_TEMPLATE|librex\docker\php\prepare.sh, librex\librex-main\docker\php\prepare.sh
+CONFIG_PHP_TEMPLATE|librex\docker\php\prepare.sh, librex\librex-main\docker\php\prepare.sh
+CORS_ORIGINS|config\settings.py
+CRYPTOCOMPARE_API_KEY|monitoring\news_feeds.py
+CURLOPT_PROXY|librex\docker\php\prepare.sh, librex\librex-main\docker\php\prepare.sh
+CURLOPT_PROXY_ENABLED|librex\docker\php\prepare.sh, librex\librex-main\docker\php\prepare.sh
+D0|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+D1|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+DB_HOST|config\settings.py
+DB_NAME|config\settings.py
+DB_PASSWORD|config\settings.py
+DB_POOL_SIZE|config\settings.py
+DB_PORT|config\settings.py
+DB_USER|config\settings.py
+DEBUG|config\settings.py
+E0|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+E2|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+E3|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+E5|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+E6|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+E7|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+EC|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+ED|librex\librex-main\static\misc\ddg_bang.json, librex\static\misc\ddg_bang.json
+ENABLE_BACKTESTING|config\settings.py
+ENABLE_LIVE_TRADING|config\settings.py
+ENABLE_NEWS_MONITORING|config\settings.py
+ENABLE_PREDICTION_MARKETS|config\settings.py
+H|autonomous_soak_test.py, backup\snapshot.py, compliance\audit_logger.py, compliance\regulatory_reports.py, compliance\transaction_log.py, governance\algorithm_inventory.py, governance\model_risk_management.py, lib\agents\automation-agent.py, observability\debug_infrastructure.py
+LOCAL_RELAY_MODEL|lib\merid\relay.py
+MERID_ALERT_TOPIC|simulation\engine.py
+MERID_ALLOWED_ORIGINS|web\main.py, web\user_app.py
+MERID_ARKHAM_API_KEY|monitoring\liquidation_monitor.py
+MERID_AUGUR_MOCK|trading\augur_trading_layer.py
+MERID_CAPTCHA_SECRET|web\main.py
+MERID_CAPTCHA_VERIFY_URL|web\main.py
+MERID_COINGLASS_API_KEY|monitoring\liquidation_monitor.py
+MERID_CONSENSUS_THRESHOLD|core\settings.py
+MERID_DASHBOARD_API_KEY|web\main.py
+MERID_DEEP_MODEL|core\settings.py
+MERID_DRIFT_BASE_URL|trading\perp\adapters.py
+MERID_ENV|config\settings.py
+MERID_EVENT_BUFFER|core\settings.py
+MERID_FAST_MODEL|core\settings.py
+MERID_GAMIFICATION_BASE_XP|web\main.py
+MERID_GLASSNODE_API_KEY|monitoring\onchain_analytics.py
+MERID_GMX_BASE_URL|trading\perp\adapters.py
+MERID_HISTORY_CACHE_SECONDS|core\settings.py
+MERID_HYPERLIQUID_INFO_URL|trading\perp\adapters.py
+MERID_LINEAGE_HISTORY|simulation\engine.py
+MERID_MAX_AGENTS|simulation\engine.py
+MERID_MAX_TOOL_RESULTS|core\settings.py
+MERID_NANSEN_API_KEY|monitoring\liquidation_monitor.py
+MERID_ORACLE_PRIVATE_KEY|oracles\uma.py
+MERID_PERP_PROTOCOL_BASE_URL|trading\perp\adapters.py
+MERID_POLYGON_RPC|oracles\uma.py
+MERID_POLYMARKET_INTERVAL|core\settings.py
+MERID_POLYMARKET_MOCK|trading\polymarket_trading_layer.py, web\main.py
+MERID_PRIVATE_KEY|defi\aave.py
+MERID_SANTIMENT_API_KEY|monitoring\onchain_analytics.py
+MERID_SPAM_MAX_EVENTS|web\main.py
+MERID_SPAM_WINDOW_SECONDS|web\main.py
+MERID_TELEGRAM_BOT_TOKEN|notifications\telegram_client.py
+MERID_TELEGRAM_CHAT_ID|notifications\telegram_client.py
+MERID_TELEGRAM_INTERVAL|core\settings.py
+MERID_TRUTH_MIN_CONFIDENCE|core\settings.py
+MERID_UMA_API|oracles\uma.py
+MERID_VPN_HEADER_NAME|web\main.py
+MERID_VPN_HEADER_VALUE|web\main.py
+MERID_WEB_CONCURRENCY|core\settings.py
+MERID_X_POST_INTERVAL|core\settings.py
+MESSARI_API_KEY|web\api\intelligence.py
+NEO4J_DATABASE|autonomous_soak_test.py, startup.py, startup_minimal.py
+NEO4J_PASSWORD|autonomous_soak_test.py, startup.py, startup_minimal.py, web\main.py
+NEO4J_URI|autonomous_soak_test.py, startup.py, startup_minimal.py, web\main.py
+NEO4J_USER|autonomous_soak_test.py, startup.py, startup_minimal.py, web\main.py
+OLLAMA_API_KEY|lib\merid\relay.py
+OLLAMA_BASE_URL|core\settings.py, lib\merid\relay.py
+OLLAMA_GENERATE_ENDPOINT|core\settings.py
+OLLAMA_HOST|config\settings.py
+OPENAI_API_KEY|lib\merid\relay.py
+OPEN_SEARCH_HOST|librex\docker\server\prepare.sh, librex\librex-main\docker\server\prepare.sh
+OPEN_SEARCH_HOST_FOR_NGINX|librex\docker\server\nginx.conf, librex\docker\server\prepare.sh, librex\librex-main\docker\server\nginx.conf, librex\librex-main\docker\server\prepare.sh
+POLYMARKET_API_KEY|trading\polymarket_adapter.py
+REDIS_URL|core\settings.py
+S|monitoring\news_feeds.py
+SEARXNG_URL|core\settings.py
+SERVER_HOST|config\settings.py
+SERVER_PORT|config\settings.py
+SMTP_FROM_ADDRESS|notifications\channels.py
+SMTP_HOST|notifications\channels.py
+SMTP_PASSWORD|notifications\channels.py
+SMTP_PORT|notifications\channels.py
+SMTP_USER|notifications\channels.py
+SMTP_USE_TLS|notifications\channels.py
+SUPABASE_KEY|lib\merid\relay.py
+SUPABASE_URL|lib\merid\relay.py
+TELEGRAM_BOT_TOKEN|agents\telegram_agent.py
+TELEGRAM_CHAT_ID|agents\telegram_agent.py
+TELEGRAM_TOKEN|agents\telegram_agent.py
+TOKENIZED_EQUITY_API_BASE|core\xstocks_adapters.py
+TOKENIZED_EQUITY_API_KEY|core\xstocks_adapters.py
+TRADING_COMMISSION_PCT|config\settings.py
+TRADING_INITIAL_CAPITAL|config\settings.py
+TRADING_MAX_EXPOSURE|config\settings.py
+TRADING_MAX_POSITION|config\settings.py
+TRADING_MODE|config\settings.py
+TRADING_SLIPPAGE_PCT|config\settings.py
+TRADING_STOP_LOSS_PCT|config\settings.py
+TRADING_TAKE_PROFIT_PCT|config\settings.py
+X_ACCESS_TOKEN|agents\twitter_agent.py, lib\merid\twitter_agent.py
+X_ACCESS_TOKEN_SECRET|agents\twitter_agent.py, lib\merid\twitter_agent.py
+X_API_KEY|agents\twitter_agent.py, lib\merid\twitter_agent.py
+X_API_SECRET|agents\twitter_agent.py, lib\merid\twitter_agent.py
+X_BEARER_TOKEN|agents\twitter_agent.py, lib\merid\twitter_agent.py
+X_BOT_SERVICE_TOKEN|tests\test_x_bot_endpoints.py
+Y|autonomous_soak_test.py, backup\snapshot.py, compliance\audit_logger.py, compliance\regulatory_reports.py, compliance\transaction_log.py, governance\algorithm_inventory.py, governance\model_risk_management.py, lib\agents\automation-agent.py, observability\debug_infrastructure.py

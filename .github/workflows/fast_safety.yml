@@ -1,0 +1,48 @@
+name: Fast Safety Gate
+
+on:
+  pull_request:
+    paths:
+      - "analytics/**"
+      - "core/**"
+      - "swarm/**"
+      - "tests/**"
+      - "scripts/check_critical_coverage.py"
+      - ".github/workflows/fast_safety.yml"
+
+jobs:
+  fast-safety:
+    runs-on: ubuntu-latest
+    env:
+      COVERAGE_FILE: .coverage/coverage.data
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run safety + risk_core tests with coverage
+        run: |
+          mkdir -p .coverage
+          pytest -m "safety_critical or risk_core" \
+            --maxfail=1 \
+            --cov=analytics --cov=swarm --cov=core \
+            --cov-report=term \
+            --cov-report=xml:.coverage/coverage.xml \
+            --cov-report=json:.coverage/coverage.json \
+            --cov-fail-under=18
+
+      - name: Enforce per-file coverage thresholds
+        run: python scripts/check_critical_coverage.py
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-safety-coverage
+          path: .coverage/

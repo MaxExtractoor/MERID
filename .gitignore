@@ -1,0 +1,20 @@
+.env
+.env.backup
+.env.*
+.venv/
+__pycache__/
+*.pem
+kalshi_private_key.pem
+backups/
+logs/
+tmp/
+
+# Large binaries / build artifacts (never commit)
+Ollama/
+build/
+.dart_tool/
+node_modules/
+*.dill
+*.dill.track.dill
+*.cache.dill
+*.cache.dill.track.dill

@@ -1,0 +1,8 @@
+﻿MERID Project Goals 2026
+
+- Full local AI agent system
+- Live market data integration
+- Computer automation control
+- Voice interface
+- Private RAG knowledge base
+- No cloud dependency

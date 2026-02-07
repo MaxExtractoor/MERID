@@ -1,0 +1,8 @@
+{
+  "incident_type": "service_outage",
+  "service": "merid-api",
+  "status": "recovered",
+  "timestamp": 1769486975.6594362,
+  "simulation": true,
+  "recovery_time": "32.3s"
+}

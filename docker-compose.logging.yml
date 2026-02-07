@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  merid-api:
+    image: merid/api:latest
+    environment:
+      - SERVICE_NAME=merid-api
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"   # rotate at 20 MB
+        max-file: "5"     # keep 5 files per container
+        compress: "true"  # gzip rotated logs
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - fluent-bit
+
+  merid-worker:
+    image: merid/worker:latest
+    environment:
+      - SERVICE_NAME=merid-worker
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"   # larger for workers
+        max-file: "7"
+        compress: "true"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - fluent-bit
+
+  fluent-bit:
+    image: fluent/fluent-bit:latest
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - ./logs:/var/log/merid:ro
+    command: ["-c", "/fluent-bit/etc/fluent-bit.conf"]
+    ports:
+      - "24224:24224"  # fluent-bit HTTP endpoint
+
+  # Optional: Elasticsearch for log aggregation
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  # Optional: Kibana for log visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+
+volumes:
+  es_data:

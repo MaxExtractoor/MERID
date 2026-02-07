@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MERID Dashboard</title>
+    <link rel="stylesheet" href="/static/merid.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="app">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">M</div>
+            <div class="logo-text">MERID</div>
+        </div>
+        
+        <nav class="nav-section">
+            <div class="nav-section-title">Main</div>
+            <button class="nav-item active" data-view="overview">
+                <i class="nav-icon" data-lucide="layout-dashboard"></i>
+                Overview
+            </button>
+            <button class="nav-item" data-view="trading">
+                <i class="nav-icon" data-lucide="activity"></i>
+                Live Trading
+            </button>
+            <button class="nav-item" data-view="research">
+                <i class="nav-icon" data-lucide="search"></i>
+                Research
+            </button>
+            <button class="nav-item" data-view="predictions">
+                <i class="nav-icon" data-lucide="trending-up"></i>
+                Prediction Markets
+            </button>
+        </nav>
+        
+        <nav class="nav-section">
+            <div class="nav-section-title">Management</div>
+            <button class="nav-item" data-view="risk">
+                <i class="nav-icon" data-lucide="shield"></i>
+                Risk & Health
+            </button>
+            <button class="nav-item" data-view="agents">
+                <i class="nav-icon" data-lucide="cpu"></i>
+                Bots/Agents
+            </button>
+            <button class="nav-item" data-view="api">
+                <i class="nav-icon" data-lucide="api"></i>
+                API Dashboard
+            </button>
+        </nav>
+        
+        <nav class="nav-section">
+            <div class="nav-section-title">System</div>
+            <button class="nav-item" data-view="logs">
+                <i class="nav-icon" data-lucide="file-text"></i>
+                Logs
+            </button>
+            <button class="nav-item" data-view="settings">
+                <i class="nav-icon" data-lucide="settings"></i>
+                Settings
+            </button>
+        </nav>
+    </aside>
+
+    <!-- Main Shell -->
+    <div class="shell">
+        <!-- Top Bar -->
+        <header class="topbar">
+            <div class="topbar-left">
+                <button class="icon-button" id="mobile-menu-toggle" title="Toggle mobile menu">
+                    <i data-lucide="menu"></i>
+                </button>
+                
+                <div class="environment-badge live">LIVE</div>
+                
+                <div class="pnl-summary">
+                    <span class="text-muted">P&L:</span>
+                    <span class="pnl-value positive">+$12,847.32</span>
+                    <span class="text-muted">(+2.34%)</span>
+                </div>
+            </div>
+            
+            <div class="topbar-right">
+                <div class="search-bar">
+                    <i class="search-icon" data-lucide="search"></i>
+                    <input type="text" class="search-input" placeholder="Search symbols, commands..." />
+                </div>
+                
+                <button class="icon-button" id="theme-toggle" title="Toggle dark mode">
+                    <i data-lucide="moon"></i>
+                </button>
+                
+                <button class="icon-button">
+                    <i data-lucide="bell"></i>
+                    <span class="notification-badge">3</span>
+                </button>
+                
+                <button class="icon-button" title="Settings">
+                    <i data-lucide="settings"></i>
+                </button>
+                
+                <div class="user-avatar">JD</div>
+            </div>
+        </header>
+
+        <!-- Main Content Views -->
+        <main id="view-overview" class="view active">
+            <div class="grid grid-cols-4">
+                <div class="metric-card">
+                    <div class="metric-label">Total Equity</div>
+                    <div class="metric-value">$562,847</div>
+                    <div class="metric-change positive">+$12,847 (+2.34%)</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Daily P&L</div>
+                    <div class="metric-value positive">+$12,847</div>
+                    <div class="metric-change">Best day this month</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Available Margin</div>
+                    <div class="metric-value">$124,523</div>
+                    <div class="metric-change">22.1% available</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Active Bots</div>
+                    <div class="metric-value">12</div>
+                    <div class="metric-change">3 paused</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Portfolio Performance</h2>
+                    <div class="card-subtitle">Last 7 days</div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="portfolio-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Live Watchlist</h2>
+                        <button class="btn btn-secondary">Add Symbol</button>
+                    </div>
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Price</th>
+                                <th>24h Change</th>
+                                <th>Volume</th>
+                            </tr>
+                        </thead>
+                        <tbody id="watchlist-tbody">
+                            <!-- Populated by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">Recent Activity</h2>
+                        <div class="card-subtitle">Last 10 trades</div>
+                    </div>
+                    <div id="recent-activity">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <main id="view-trading" class="view">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Order Ticket</h2>
+                </div>
+                <div class="grid grid-cols-4">
+                    <div class="form-group">
+                        <label class="form-label">Symbol</label>
+                        <input type="text" class="form-input" value="BTC/USD" title="Trading symbol" />
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Order Type</label>
+                        <select class="form-select" title="Order type selection">
+                            <option>MARKET</option>
+                            <option>LIMIT</option>
+                            <option>STOP</option>
+                            <option>BRACKET</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Size</label>
+                        <input type="number" class="form-input" value="0.1" title="Order size" />
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Venue</label>
+                        <select class="form-select" title="Trading venue selection">
+                            <option>Coinbase</option>
+                            <option>Kraken</option>
+                            <option>Binance</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="flex gap-2 mt-4">
+                    <button class="btn btn-success">Buy</button>
+                    <button class="btn btn-danger">Sell</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Open Positions</h2>
+                </div>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Size</th>
+                            <th>Entry</th>
+                            <th>Current</th>
+                            <th>P&L</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-tbody">
+                        <!-- Populated by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </main>
+
+        <main id="view-agents" class="view">
+            <div class="grid grid-cols-3">
+                <div class="metric-card">
+                    <div class="status-indicator">
+                        <span class="status-dot online"></span>
+                        Trend Agent
+                    </div>
+                    <div class="metric-label">Confidence</div>
+                    <div class="metric-value">87%</div>
+                    <div class="metric-change positive">P&L: +$2,340</div>
+                </div>
+                <div class="metric-card">
+                    <div class="status-indicator">
+                        <span class="status-dot online"></span>
+                        Arbitrage Agent
+                    </div>
+                    <div class="metric-label">Confidence</div>
+                    <div class="metric-value">92%</div>
+                    <div class="metric-change positive">P&L: +$5,670</div>
+                </div>
+                <div class="metric-card">
+                    <div class="status-indicator">
+                        <span class="status-dot degraded"></span>
+                        Risk Agent
+                    </div>
+                    <div class="metric-label">Confidence</div>
+                    <div class="metric-value">45%</div>
+                    <div class="metric-change negative">P&L: -$890</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Agent Performance</h2>
+                </div>
+                <div class="chart-container">
+                    <canvas id="agent-performance-chart"></canvas>
+                </div>
+            </div>
+        </main>
+
+        <main id="view-predictions" class="view">
+            <div class="grid grid-cols-4">
+                <div class="metric-card">
+                    <div class="metric-label">Total Markets</div>
+                    <div class="metric-value">247</div>
+                    <div class="metric-change">+12 this week</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total Volume</div>
+                    <div class="metric-value">$18.4M</div>
+                    <div class="metric-change">24h volume</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Active Positions</div>
+                    <div class="metric-value">8</div>
+                    <div class="metric-change">3 winning</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Prediction P&L</div>
+                    <div class="metric-value positive">+$2,340</div>
+                    <div class="metric-change">+15.2% ROI</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Pinned Markets</h2>
+                </div>
+                <div class="grid grid-cols-2" id="pinned-markets">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </div>
+        </main>
+
+        <main id="view-risk" class="view">
+            <div class="grid grid-cols-4">
+                <div class="metric-card">
+                    <div class="metric-label">Overall Risk</div>
+                    <div class="metric-value text-success">LOW</div>
+                    <div class="metric-change">All systems normal</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Margin Usage</div>
+                    <div class="metric-value text-warning">78%</div>
+                    <div class="metric-change">Approaching limit</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Position Risk</div>
+                    <div class="metric-value">$45K</div>
+                    <div class="metric-change">8.0% of equity</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Leverage</div>
+                    <div class="metric-value text-success">2.3x</div>
+                    <div class="metric-change">Within limits</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Risk Alerts</h2>
+                </div>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Severity</th>
+                            <th>Type</th>
+                            <th>Description</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="risk-alerts-tbody">
+                        <!-- Populated by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </main>
+
+        <main id="view-api" class="view">
+            <div class="grid grid-cols-4">
+                <div class="metric-card">
+                    <div class="metric-label">Total APIs</div>
+                    <div class="metric-value">18</div>
+                    <div class="metric-change text-success">17 online</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Config Complete</div>
+                    <div class="metric-value">94%</div>
+                    <div class="metric-change">17/18 configured</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Avg Response</div>
+                    <div class="metric-value">67ms</div>
+                    <div class="metric-change">Last 5 min</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Error Rate</div>
+                    <div class="metric-value text-success">0.2%</div>
+                    <div class="metric-change">24h average</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">API Status</h2>
+                </div>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>API</th>
+                            <th>Category</th>
+                            <th>Status</th>
+                            <th>Response Time</th>
+                            <th>Error Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody id="api-status-tbody">
+                        <!-- Populated by JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </main>
+
+        <main id="view-research" class="view">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Research Tools</h2>
+                </div>
+                <div class="grid grid-cols-2">
+                    <div class="metric-card">
+                        <h3>Market Analysis</h3>
+                        <p>Technical indicators and trend analysis</p>
+                        <button class="btn btn-primary mt-3">Launch Analyzer</button>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Backtesting</h3>
+                        <p>Strategy backtesting and optimization</p>
+                        <button class="btn btn-primary mt-3">Run Backtest</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <main id="view-logs" class="view">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">System Logs</h2>
+                </div>
+                <div id="logs-container">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </div>
+        </main>
+
+        <main id="view-settings" class="view">
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Settings</h2>
+                </div>
+                <div class="grid grid-cols-2">
+                    <div>
+                        <h3>Trading Preferences</h3>
+                        <div class="form-group">
+                            <label class="form-label">Default Order Size</label>
+                            <input type="number" class="form-input" value="1000" title="Default order size" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Max Leverage</label>
+                            <input type="number" class="form-input" value="3" step="0.1" title="Maximum leverage" />
+                        </div>
+                    </div>
+                    <div>
+                        <h3>Notifications</h3>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" checked /> Email alerts
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" checked /> Push notifications
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <button class="btn btn-primary mt-4">Save Settings</button>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/merid.js"></script>
+</body>
+</html>

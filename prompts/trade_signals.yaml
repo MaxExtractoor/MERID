@@ -1,0 +1,98 @@
+description: MERID Trade Signal Generation Prompt Evaluation
+prompts:
+  - id: trade-signal-basic
+    label: "Basic Trade Signal"
+    raw: |
+      Analyze {{symbol}} and generate a trade signal.
+      Current price: ${{price}}
+      Recent trend: {{trend}}
+
+  - id: trade-signal-structured
+    label: "Structured Trade Signal with Reasoning"
+    raw: |
+      You are a quantitative trading analyst for MERID.
+      
+      Analyze {{symbol}} using {{strategy}} strategy:
+      
+      Market Data:
+      - Current Price: ${{price}}
+      - 24h Volume: {{volume}}
+      - 24h Change: {{change}}%
+      - Trend: {{trend}}
+      - Support: ${{support}}
+      - Resistance: ${{resistance}}
+      
+      Generate a trade signal with:
+      1. Side: BUY, SELL, or HOLD
+      2. Recommended quantity
+      3. Confidence score (0.0-1.0)
+      4. Detailed reasoning
+      5. Key risk factors
+
+providers:
+  - id: deepseek
+    config:
+      model: deepseek-chat
+      temperature: 0.4
+      max_tokens: 600
+
+  - id: claude
+    config:
+      model: claude-3-sonnet-20240229
+      temperature: 0.3
+      max_tokens: 600
+
+tests:
+  - description: "Bullish momentum signal - AAPL"
+    vars:
+      symbol: AAPL
+      price: 250.00
+      volume: 45000000
+      change: 3.5
+      trend: bullish
+      support: 240.00
+      resistance: 255.00
+      strategy: momentum
+    assert:
+      - type: contains
+        value: "BUY"
+      - type: contains
+        value: "confidence"
+      - type: contains
+        value: "reasoning"
+      
+  - description: "Bearish reversal signal - TSLA"
+    vars:
+      symbol: TSLA
+      price: 220.00
+      volume: 35000000
+      change: -4.2
+      trend: bearish
+      support: 210.00
+      resistance: 240.00
+      strategy: mean_reversion
+    assert:
+      - type: contains
+        value: "SELL"
+      - type: contains
+        value: "confidence"
+        
+  - description: "Neutral chop - sideways market"
+    vars:
+      symbol: SPY
+      price: 450.00
+      volume: 25000000
+      change: 0.1
+      trend: sideways
+      support: 445.00
+      resistance: 455.00
+      strategy: breakout
+    assert:
+      - type: contains
+        value: "HOLD"
+      - type: contains
+        value: "confidence"
+
+defaultTest:
+  options:
+    provider: deepseek
