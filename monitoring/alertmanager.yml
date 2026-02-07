@@ -1,0 +1,173 @@
+# MERID AlertManager Configuration
+# Week 2: Production Operations Gate - Evidence Artifact
+# Date: 2026-01-26
+
+global:
+  smtp_smarthost: localhost
+  smtp_from: 'merid-alerts@merid.com'
+  smtp_require_tls: true
+
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'default'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'pagerduty-critical'
+      continue: true
+    - match:
+        severity: warning
+      receiver: 'slack-alerts'
+      continue: true
+    - match:
+        alertname: 'Technical_Readiness_Gate_Failed'
+      receiver: 'slack-governance'
+      continue: true
+    - match:
+        alertname: 'Operational_Readiness_Gate_Failed'
+      receiver: 'slack-governance'
+      continue: true
+    - match:
+        alertname: 'Cohort_Governance_Gate_Failed'
+      receiver: 'slack-governance'
+      continue: true
+    - match:
+        alertname: 'Stress_Test_Gate_Failed'
+      receiver: 'slack-governance'
+      continue: true
+    - match:
+        service: 'merid-api'
+      receiver: 'slack-api'
+    - match:
+        service: 'neo4j'
+      receiver: 'slack-database'
+    - match:
+        service: 'redis'
+      receiver: 'slack-database'
+
+receivers:
+  - name: 'default'
+    email_configs:
+      - to: 'ops-team@merid.com'
+        subject: '[MERID] {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Runbook: {{ .Annotations.runbook_url }}
+          Dashboard: {{ .Annotations.dashboard_url }}
+          {{ end }}
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#merid-alerts'
+        title: '[MERID] {{ .GroupLabels.alertname }}'
+        text: '{{ .GroupLabels.alertname }} - {{ .GroupLabels.severity }}'
+        send_resolved: true
+
+  - name: 'pagerduty-critical'
+    pagerduty_configs:
+      - routing_key: '${PAGERDUTY_INTEGRATION_KEY}'
+        description: '{{ .GroupLabels.alertname }} - {{ .Annotations.description }}'
+        severity: 'critical'
+        class: 'critical'
+        component: '{{ .GroupLabels.service }}'
+        group: '{{ .GroupLabels.cluster }}'
+        details:
+          runbook_url: '{{ .Annotations.runbook_url }}'
+          dashboard_url: '{{ .Annotations.dashboard_url }}'
+          alert_source: 'prometheus'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#merid-critical'
+        title: '[CRITICAL] {{ .GroupLabels.alertname }}'
+        text: 'PagerDuty has been notified. Check PagerDuty for details.'
+        send_resolved: true
+
+  - name: 'slack-governance'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#merid-governance'
+        title: '[GOVERNANCE] {{ .GroupLabels.alertname }}'
+        text: '{{ .GroupLabels.alertname }} - {{ .Annotations.description }}'
+        send_resolved: true
+        actions:
+          - type: 'button'
+            text: 'View Dashboard'
+            url: '{{ .Annotations.dashboard_url }}'
+          - type: 'button'
+            text: 'Open Runbook'
+            url: '{{ .Annotations.runbook_url }}'
+
+  - name: 'slack-api'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#merid-api'
+        title: '[API] {{ .GroupLabels.alertname }}'
+        text: '{{ .GroupLabels.alertname }} - {{ .Annotations.description }}'
+        send_resolved: true
+        actions:
+          - type: 'button'
+            text: 'API Dashboard'
+            url: 'http://grafana.merid.com/d/api-performance'
+          - type: 'button'
+            text: 'API Runbook'
+            url: 'https://docs.merid.com/runbooks/SERVICE_DOWN'
+
+  - name: 'slack-database'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#merid-database'
+        title: '[DATABASE] {{ .GroupLabels.alertname }}'
+        text: '{{ .GroupLabels.alertname }} - {{ .Annotations.description }}'
+        send_resolved: true
+        actions:
+          - type: 'button'
+            text: 'Database Dashboard'
+            url: 'http://grafana.merid.com/d/database-health'
+          - type: 'button'
+            text: 'Database Runbook'
+            url: 'https://docs.merid.com/runbooks/DATABASE_ISSUES'
+
+inhibit_rules:
+  # Don't alert on latency if the service is down
+  - source_match:
+      alertname: 'MERID_API_Down'
+    target_match:
+      alertname: 'MERID_API_High_Latency'
+    equal: ['service', 'team']
+  
+  # Don't alert on error rate if the service is down
+  - source_match:
+      alertname: 'MERID_API_Down'
+    target_match:
+      alertname: 'MERID_API_High_Error_Rate'
+    equal: ['service', 'team']
+
+templates:
+  - from: 'template.html'
+    subject: '{{ .Subject }}'
+    html: |
+      <html>
+        <head>
+          <title>{{ .Subject }}</title>
+        </head>
+        <body>
+          <h2>{{ .Subject }}</h2>
+          <table>
+            <tr><td>Alert:</td><td>{{ .Alerts.Firing | len }}</td></tr>
+            <tr><td>Severity:</td><td>{{ .GroupLabels.severity }}</td></tr>
+            <tr><td>Service:</td><td>{{ .GroupLabels.service }}</td></tr>
+          </table>
+          <h3>Alerts:</h3>
+          {{ range .Alerts.Firing }}
+            <h4>{{ .Annotations.summary }}</h4>
+            <p>{{ .Annotations.description }}</p>
+            <p><strong>Runbook:</strong> <a href="{{ .Annotations.runbook_url }}">{{ .Annotations.runbook_url }}</a></p>
+            <p><strong>Dashboard:</strong> <a href="{{ .Annotations.dashboard_url }}">{{ .Annotations.dashboard_url }}</a></p>
+            <hr>
+          {{ end }}
+        </body>
+      </html>

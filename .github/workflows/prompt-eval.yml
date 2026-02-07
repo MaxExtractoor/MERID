@@ -1,0 +1,155 @@
+name: Prompt Evaluation
+
+on:
+  push:
+    paths:
+      - 'prompts/**'
+      - 'core/structured_prompts.py'
+      - 'core/prompt_eval.py'
+  pull_request:
+    paths:
+      - 'prompts/**'
+  workflow_dispatch:
+    inputs:
+      prompts:
+        description: 'Comma-separated list of prompt files to evaluate'
+        required: false
+        default: ''
+      providers:
+        description: 'LLM providers to test (deepseek,claude,ollama)'
+        required: false
+        default: 'deepseek'
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+jobs:
+  promptfoo-eval:
+    name: Promptfoo Bulk Evaluation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install promptfoo
+        run: npm install -g promptfoo
+
+      - name: Evaluate Risk Assessment Prompts
+        run: |
+          promptfoo eval \
+            --config prompts/risk_assessment.yaml \
+            --output results/risk_assessment.json \
+            --share
+        continue-on-error: true
+
+      - name: Evaluate Trade Signal Prompts
+        run: |
+          promptfoo eval \
+            --config prompts/trade_signals.yaml \
+            --output results/trade_signals.json \
+            --share
+        continue-on-error: true
+
+      - name: Upload promptfoo results
+        uses: actions/upload-artifact@v4
+        with:
+          name: promptfoo-results
+          path: results/
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const riskResults = JSON.parse(fs.readFileSync('results/risk_assessment.json', 'utf8'));
+            const signalResults = JSON.parse(fs.readFileSync('results/trade_signals.json', 'utf8'));
+            
+            const body = `## 🧪 Prompt Evaluation Results
+            
+            ### Risk Assessment Prompts
+            - ✅ Passed: ${riskResults.results.filter(r => r.success).length}
+            - ❌ Failed: ${riskResults.results.filter(r => !r.success).length}
+            
+            ### Trade Signal Prompts
+            - ✅ Passed: ${signalResults.results.filter(r => r.success).length}
+            - ❌ Failed: ${signalResults.results.filter(r => !r.success).length}
+            
+            See artifacts for detailed results.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  python-prompt-eval:
+    name: Python Prompt Evaluation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install deepeval
+
+      - name: Run structured prompt tests
+        run: |
+          python -m pytest tests/core/test_prompts.py -v --tb=short
+
+      - name: Run prompt benchmark
+        run: |
+          python scripts/evaluate_prompts.py --output=prompt_benchmark.json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-benchmark
+          path: prompt_benchmark.json
+
+  prompt-regression:
+    name: Prompt Regression Detection
+    runs-on: ubuntu-latest
+    needs: promptfoo-eval
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download baseline results
+        uses: actions/download-artifact@v4
+        with:
+          name: prompt-baseline
+          path: baseline/
+        continue-on-error: true
+
+      - name: Compare with baseline
+        run: |
+          python scripts/compare_prompt_results.py \
+            --baseline baseline/prompt_benchmark.json \
+            --current prompt_benchmark.json \
+            --threshold 0.05
+
+      - name: Alert on regression
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Prompt Performance Regression Detected',
+              body: 'Prompt evaluation scores have dropped below baseline threshold.',
+              labels: ['prompt-regression', 'needs-attention']
+            });

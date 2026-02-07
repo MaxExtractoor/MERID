@@ -1,0 +1,304 @@
+<!-- Prediction Markets Screen Component -->
+<div class="p-6">
+    <!-- Market Overview -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <div class="metric-card p-4">
+            <div class="text-sm text-gray-400 mb-1">Total Markets</div>
+            <div class="text-2xl font-bold">247</div>
+            <div class="text-xs text-gray-400">+12 this week</div>
+        </div>
+        <div class="metric-card p-4">
+            <div class="text-sm text-gray-400 mb-1">Total Volume</div>
+            <div class="text-2xl font-bold">$18.4M</div>
+            <div class="text-xs text-gray-400">24h volume</div>
+        </div>
+        <div class="metric-card p-4">
+            <div class="text-sm text-gray-400 mb-1">Active Positions</div>
+            <div class="text-2xl font-bold">8</div>
+            <div class="text-xs text-gray-400">3 winning, 5 losing</div>
+        </div>
+        <div class="metric-card p-4">
+            <div class="text-sm text-gray-400 mb-1">P&L from Predictions</div>
+            <div class="text-2xl font-bold text-green-400">+$2,340</div>
+            <div class="text-xs text-green-400">+15.2% ROI</div>
+        </div>
+    </div>
+    
+    <!-- Pinned Markets -->
+    <div class="metric-card p-6 mb-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold">Pinned Markets</h2>
+            <button class="text-sm text-blue-400 hover:text-blue-300">Manage Pins</button>
+        </div>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs bg-blue-900/50 text-blue-400 px-2 py-1 rounded">Polymarket</span>
+                    <button class="text-gray-400 hover:text-white" title="Pin market">
+                        <i data-lucide="pin" class="w-3 h-3 fill-current"></i>
+                    </button>
+                </div>
+                <div class="text-sm font-medium mb-2">BTC > $45k by Dec 31</div>
+                <div class="text-xs text-gray-400 mb-3">Resolves in 5 days</div>
+                <div class="mb-2">
+                    <div class="flex justify-between text-xs mb-1">
+                        <span>Yes: 65%</span>
+                        <span>No: 35%</span>
+                    </div>
+                    <div class="w-full bg-gray-700 rounded-full h-2">
+                        <div class="bg-green-500 h-2 rounded-full" style="width: 65%"></div>
+                    </div>
+                </div>
+                <div class="text-xs text-gray-400">Volume: $2.1M</div>
+            </div>
+            
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs bg-purple-900/50 text-purple-400 px-2 py-1 rounded">Kalshi</span>
+                    <button class="text-gray-400 hover:text-white" title="Pin market">
+                        <i data-lucide="pin" class="w-3 h-3 fill-current"></i>
+                    </button>
+                </div>
+                <div class="text-sm font-medium mb-2">Fed Rate Cut in March</div>
+                <div class="text-xs text-gray-400 mb-3">Resolves in 2 months</div>
+                <div class="mb-2">
+                    <div class="flex justify-between text-xs mb-1">
+                        <span>Yes: 72%</span>
+                        <span>No: 28%</span>
+                    </div>
+                    <div class="w-full bg-gray-700 rounded-full h-2">
+                        <div class="bg-green-500 h-2 rounded-full" style="width: 72%"></div>
+                    </div>
+                </div>
+                <div class="text-xs text-gray-400">Volume: $890K</div>
+            </div>
+            
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs bg-blue-900/50 text-blue-400 px-2 py-1 rounded">Polymarket</span>
+                    <button class="text-gray-400 hover:text-white" title="Pin market">
+                        <i data-lucide="pin" class="w-3 h-3 fill-current"></i>
+                    </button>
+                </div>
+                <div class="text-sm font-medium mb-2">ETH > $3k by Q1 2024</div>
+                <div class="text-xs text-gray-400 mb-3">Resolves in 3 months</div>
+                <div class="mb-2">
+                    <div class="flex justify-between text-xs mb-1">
+                        <span>Yes: 58%</span>
+                        <span>No: 42%</span>
+                    </div>
+                    <div class="w-full bg-gray-700 rounded-full h-2">
+                        <div class="bg-green-500 h-2 rounded-full" style="width: 58%"></div>
+                    </div>
+                </div>
+                <div class="text-xs text-gray-400">Volume: $1.3M</div>
+            </div>
+            
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs bg-purple-900/50 text-purple-400 px-2 py-1 rounded">Kalshi</span>
+                    <button class="text-gray-400 hover:text-white" title="Pin market">
+                        <i data-lucide="pin" class="w-3 h-3 fill-current"></i>
+                    </button>
+                </div>
+                <div class="text-sm font-medium mb-2">S&P 500 > 5,000 by March</div>
+                <div class="text-xs text-gray-400 mb-3">Resolves in 2 months</div>
+                <div class="mb-2">
+                    <div class="flex justify-between text-xs mb-1">
+                        <span>Yes: 45%</span>
+                        <span>No: 55%</span>
+                    </div>
+                    <div class="w-full bg-gray-700 rounded-full h-2">
+                        <div class="bg-green-500 h-2 rounded-full" style="width: 45%"></div>
+                    </div>
+                </div>
+                <div class="text-xs text-gray-400">Volume: $670K</div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- All Markets Table -->
+    <div class="metric-card p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold">All Markets</h2>
+            <div class="flex gap-2">
+                <select class="bg-gray-900 border border-gray-700 rounded px-3 py-1 text-sm" title="Filter by platform">
+                    <option>All Platforms</option>
+                    <option>Polymarket</option>
+                    <option>Kalshi</option>
+                </select>
+                <select class="bg-gray-900 border border-gray-700 rounded px-3 py-1 text-sm" title="Filter by category">
+                    <option>All Categories</option>
+                    <option>Crypto</option>
+                    <option>Politics</option>
+                    <option>Economics</option>
+                    <option>Sports</option>
+                </select>
+                <input type="text" placeholder="Search markets..." class="bg-gray-900 border border-gray-700 rounded px-3 py-1 text-sm" title="Search markets">
+            </div>
+        </div>
+        
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-left text-gray-400 border-b border-gray-800">
+                        <th class="pb-2">Market</th>
+                        <th class="pb-2">Platform</th>
+                        <th class="pb-2">Category</th>
+                        <th class="pb-2">Yes Probability</th>
+                        <th class="pb-2">No Probability</th>
+                        <th class="pb-2">Volume</th>
+                        <th class="pb-2">Time to Resolution</th>
+                        <th class="pb-2">Your Position</th>
+                        <th class="pb-2">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="marketsTable">
+                    <!-- Market rows will be populated here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+// Mock prediction markets data
+const predictionMarkets = [
+    {
+        id: 1,
+        title: 'Bitcoin will exceed $50,000 by end of 2024',
+        platform: 'Polymarket',
+        category: 'Crypto',
+        yesProb: 68,
+        noProb: 32,
+        volume: 2100000,
+        resolvesIn: '11 months',
+        yourPosition: 'YES $500',
+        pnl: '+$120'
+    },
+    {
+        id: 2,
+        title: 'Federal Reserve will cut rates in March 2024',
+        platform: 'Kalshi',
+        category: 'Economics',
+        yesProb: 72,
+        noProb: 28,
+        volume: 890000,
+        resolvesIn: '2 months',
+        yourPosition: 'YES $1,000',
+        pnl: '+$340'
+    },
+    {
+        id: 3,
+        title: 'Ethereum will surpass $3,000 by Q1 2024',
+        platform: 'Polymarket',
+        category: 'Crypto',
+        yesProb: 58,
+        noProb: 42,
+        volume: 1300000,
+        resolvesIn: '3 months',
+        yourPosition: 'NO $300',
+        pnl: '-$45'
+    },
+    {
+        id: 4,
+        title: 'S&P 500 will close above 5,000 in March',
+        platform: 'Kalshi',
+        category: 'Economics',
+        yesProb: 45,
+        noProb: 55,
+        volume: 670000,
+        resolvesIn: '2 months',
+        yourPosition: 'NO $200',
+        pnl: '+$80'
+    },
+    {
+        id: 5,
+        title: 'Joe Biden will win 2024 presidential election',
+        platform: 'Polymarket',
+        category: 'Politics',
+        yesProb: 52,
+        noProb: 48,
+        volume: 4500000,
+        resolvesIn: '10 months',
+        yourPosition: 'YES $250',
+        pnl: '+$15'
+    },
+    {
+        id: 6,
+        title: 'Tesla stock will exceed $250 by June 2024',
+        platform: 'Kalshi',
+        category: 'Markets',
+        yesProb: 38,
+        noProb: 62,
+        volume: 340000,
+        resolvesIn: '5 months',
+        yourPosition: 'YES $150',
+        pnl: '-$60'
+    }
+];
+
+// Populate markets table
+function populateMarketsTable() {
+    const tbody = document.getElementById('marketsTable');
+    tbody.innerHTML = '';
+    
+    predictionMarkets.forEach(market => {
+        const platformClass = market.platform === 'Polymarket' ? 'bg-blue-900/50 text-blue-400' : 'bg-purple-900/50 text-purple-400';
+        const pnlClass = market.pnl.startsWith('+') ? 'text-green-400' : 'text-red-400';
+        
+        const row = `
+            <tr class="table-row-hover border-b border-gray-800">
+                <td class="py-3">
+                    <div class="max-w-xs">
+                        <div class="font-medium text-sm">${market.title}</div>
+                    </div>
+                </td>
+                <td class="py-3">
+                    <span class="text-xs ${platformClass} px-2 py-1 rounded">${market.platform}</span>
+                </td>
+                <td class="py-3">
+                    <span class="text-xs bg-gray-800 px-2 py-1 rounded">${market.category}</span>
+                </td>
+                <td class="py-3">
+                    <div class="flex items-center gap-2">
+                        <span class="text-green-400 font-medium">${market.yesProb}%</span>
+                        <div class="w-12 bg-gray-700 rounded-full h-1.5">
+                            <div class="bg-green-500 h-1.5 rounded-full" style="width: ${market.yesProb}%"></div>
+                        </div>
+                    </div>
+                </td>
+                <td class="py-3">
+                    <div class="flex items-center gap-2">
+                        <span class="text-red-400 font-medium">${market.noProb}%</span>
+                        <div class="w-12 bg-gray-700 rounded-full h-1.5">
+                            <div class="bg-red-500 h-1.5 rounded-full" style="width: ${market.noProb}%"></div>
+                        </div>
+                    </div>
+                </td>
+                <td class="py-3">$${(market.volume / 1000000).toFixed(1)}M</td>
+                <td class="py-3 text-xs text-gray-400">${market.resolvesIn}</td>
+                <td class="py-3">
+                    <div class="text-sm">
+                        <div class="text-gray-300">${market.yourPosition}</div>
+                        <div class="${pnlClass} text-xs">${market.pnl}</div>
+                    </div>
+                </td>
+                <td class="py-3">
+                    <div class="flex gap-1">
+                        <button class="text-blue-400 hover:text-blue-300 text-xs">Trade</button>
+                        <button class="text-gray-400 hover:text-white text-xs">Pin</button>
+                    </div>
+                </td>
+            </tr>
+        `;
+        tbody.innerHTML += row;
+    });
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    populateMarketsTable();
+});
+</script>

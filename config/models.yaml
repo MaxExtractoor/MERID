@@ -1,0 +1,10 @@
+models:
+  gemma:
+    name: gemma3:1b
+    role: fast_analyst
+    hallucination_risk: low
+
+  llama:
+    name: llama3
+    role: deep_reasoner
+    hallucination_risk: medium

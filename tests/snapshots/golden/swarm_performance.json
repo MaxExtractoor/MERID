@@ -1,0 +1,54 @@
+{
+  "best_parent": {
+    "agent_id": "alpha",
+    "score": 1.08,
+    "accuracy": 1.0,
+    "rolling_accuracy": 1.0,
+    "votes": 4,
+    "streak": 4,
+    "last_active": "2026-01-20T20:21:00Z",
+    "decay_weight": 1.0
+  },
+  "leaderboard": [
+    {
+      "agent_id": "alpha",
+      "score": 1.08,
+      "accuracy": 1.0,
+      "rolling_accuracy": 1.0,
+      "votes": 4,
+      "streak": 4,
+      "last_active": "2026-01-20T20:21:00Z",
+      "decay_weight": 1.0
+    },
+    {
+      "agent_id": "delta",
+      "score": 0.6933,
+      "accuracy": 0.6667,
+      "rolling_accuracy": 0.6667,
+      "votes": 3,
+      "streak": 2,
+      "last_active": "2026-01-20T20:21:00Z",
+      "decay_weight": 1.0
+    },
+    {
+      "agent_id": "gamma",
+      "score": 0.51,
+      "accuracy": 0.5,
+      "rolling_accuracy": 0.5,
+      "votes": 4,
+      "streak": 1,
+      "last_active": "2026-01-20T20:21:00Z",
+      "decay_weight": 1.0
+    },
+    {
+      "agent_id": "beta",
+      "score": 0.49,
+      "accuracy": 0.5,
+      "rolling_accuracy": 0.5,
+      "votes": 4,
+      "streak": -1,
+      "last_active": "2026-01-20T20:21:00Z",
+      "decay_weight": 1.0
+    }
+  ]
+}

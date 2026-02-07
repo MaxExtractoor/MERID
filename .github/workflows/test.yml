@@ -1,0 +1,35 @@
+name: MERID Tests & Coverage
+on: [push, pull_request]
+
+jobs:
+  tier1:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with: { python-version: '3.12' }
+    - run: pip install -e .[test]
+    - name: Tier 1 Strict Coverage
+      run: |
+        pytest --cov-config=.coveragerc \
+          --cov=trading/execution --cov=merid/event_venues \
+          --cov-report=xml:coverage-tier1.xml \
+          --cov-fail-under=95 tests/
+    - uses: codecov/codecov-action@v4
+      with: { file: coverage-tier1.xml }
+
+  tier2:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with: { python-version: '3.12' }
+    - run: pip install -e .[test]
+    - name: Tier 2 Relaxed Coverage
+      run: |
+        pytest --cov-config=.coveragerc \
+          --cov=core --cov=trading/router \
+          --cov-report=xml:coverage-tier2.xml \
+          --cov-fail-under=85 tests/
+    - uses: codecov/codecov-action@v4
+      with: { file: coverage-tier2.xml }

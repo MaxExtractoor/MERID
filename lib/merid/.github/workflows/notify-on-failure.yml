@@ -1,0 +1,29 @@
+name: Notify on Nightly E2E Failure
+
+on:
+  workflow_run:
+    workflows: ["Nightly E2E Smoke"]
+    types:
+      - completed
+
+jobs:
+  file-issue-on-failure:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create issue
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const run = context.payload.workflow_run
+            const title = `Nightly E2E smoke failed: ${run.run_number} on ${run.head_branch || 'main'}`
+            const body = `The Nightly E2E smoke workflow (<${run.html_url}>) completed with a failure.\n\nRun ID: ${run.id}\nBranch: ${run.head_branch}\nCommit: ${run.head_sha}\n\nPlease investigate the failure and take corrective action.`
+            const issues = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, labels: 'nightly-e2e-failure' })
+            // avoid creating duplicate open issues
+            const exists = issues.data.find(i => i.title === title && i.state === 'open')
+            if (!exists) {
+              await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body, labels: ['nightly-e2e-failure'] })
+            } else {
+              console.log('Open issue already exists, skipping creation')
+            }

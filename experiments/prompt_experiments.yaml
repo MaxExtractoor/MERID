@@ -1,0 +1,15 @@
+id: arb-prompt-2026-01-24
+description: "Prompt variant test for prediction arbitrage analyst"
+agent_id: prediction-arbitrage-analyst
+runs_per_variant: 1
+
+filters:
+  min_spread: 0.05
+  min_liquidity: 50000.0
+  categories: ["crypto"]
+
+variants:
+  - name: prompt-A
+    description: "Focus on liquidity and venue diversity"
+  - name: prompt-B
+    description: "Focus on spread maximization and time decay"

@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID Neo4j Knowledge Graph Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+            color: #e0e0e0;
+            overflow-x: hidden;
+        }
+
+        .header {
+            background: linear-gradient(90deg, #10b981 0%, #0ea5e9 100%);
+            padding: 20px 40px;
+            box-shadow: 0 4px 20px rgba(16, 185, 129, 0.3);
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #ffffff;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .header p {
+            font-size: 14px;
+            color: #f0f0f0;
+            margin-top: 5px;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 30px 20px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 30px rgba(16, 185, 129, 0.4);
+            border-color: rgba(16, 185, 129, 0.6);
+        }
+
+        .stat-card h3 {
+            font-size: 14px;
+            color: #10b981;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .stat-card .value {
+            font-size: 36px;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 5px;
+        }
+
+        .stat-card .label {
+            font-size: 12px;
+            color: #a0a0a0;
+        }
+
+        .graph-container {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(14, 165, 233, 0.3);
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 30px;
+            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
+        }
+
+        .graph-container h2 {
+            font-size: 20px;
+            color: #0ea5e9;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .graph-container h2::before {
+            content: "●";
+            font-size: 24px;
+            color: #10b981;
+        }
+
+        #graph-canvas {
+            width: 100%;
+            height: 600px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .controls-query {
+            margin-top: 15px;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.5);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
+            box-shadow: 0 4px 15px rgba(14, 165, 233, 0.3);
+        }
+
+        .btn-secondary:hover {
+            box-shadow: 0 6px 20px rgba(14, 165, 233, 0.5);
+        }
+
+        .query-panel {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(251, 191, 36, 0.3);
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 30px;
+            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
+        }
+
+        .query-panel h2 {
+            font-size: 18px;
+            color: #fbbf24;
+            margin-bottom: 15px;
+        }
+
+        .query-input {
+            width: 100%;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            color: #e0e0e0;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .query-input:focus {
+            outline: none;
+            border-color: #fbbf24;
+            box-shadow: 0 0 15px rgba(251, 191, 36, 0.3);
+        }
+
+        .results-panel {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(139, 92, 246, 0.3);
+            border-radius: 12px;
+            padding: 25px;
+            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
+        }
+
+        .results-panel h2 {
+            font-size: 18px;
+            color: #8b5cf6;
+            margin-bottom: 15px;
+        }
+
+        .results-content {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .results-content::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .results-content::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 4px;
+        }
+
+        .results-content::-webkit-scrollbar-thumb {
+            background: rgba(139, 92, 246, 0.5);
+            border-radius: 4px;
+        }
+
+        .results-content::-webkit-scrollbar-thumb:hover {
+            background: rgba(139, 92, 246, 0.7);
+        }
+
+        .node-info {
+            background: rgba(16, 185, 129, 0.1);
+            border-left: 3px solid #10b981;
+            padding: 10px 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+
+        .relationship-info {
+            background: rgba(14, 165, 233, 0.1);
+            border-left: 3px solid #0ea5e9;
+            padding: 10px 15px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+
+        .error {
+            background: rgba(239, 68, 68, 0.1);
+            border-left: 3px solid #ef4444;
+            padding: 10px 15px;
+            color: #fca5a5;
+            border-radius: 4px;
+        }
+
+        .success {
+            background: rgba(16, 185, 129, 0.1);
+            border-left: 3px solid #10b981;
+            padding: 10px 15px;
+            color: #6ee7b7;
+            border-radius: 4px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #10b981;
+            font-size: 16px;
+        }
+
+        .loading::after {
+            content: "...";
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+
+        @keyframes dots {
+            0%, 20% { content: "."; }
+            40% { content: ".."; }
+            60%, 100% { content: "..."; }
+        }
+
+        .legend {
+            display: flex;
+            gap: 20px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .legend-agent {
+            background: #10b981;
+        }
+
+        .legend-memory {
+            background: #0ea5e9;
+        }
+
+        .legend-consensus {
+            background: #fbbf24;
+        }
+
+        .legend-market {
+            background: #8b5cf6;
+        }
+
+        .legend-alert {
+            background: #ef4444;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .status-online {
+            background: #10b981;
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+        }
+
+        .status-offline {
+            background: #ef4444;
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🧠 MERID Knowledge Graph Dashboard</h1>
+        <p><span class="status-indicator status-online"></span>Neo4j Graph Database Visualization & Query Interface</p>
+    </div>
+
+    <div class="container">
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Total Nodes</h3>
+                <div class="value" id="total-nodes">0</div>
+                <div class="label">Knowledge entities</div>
+            </div>
+            <div class="stat-card">
+                <h3>Relationships</h3>
+                <div class="value" id="total-relationships">0</div>
+                <div class="label">Connections</div>
+            </div>
+            <div class="stat-card">
+                <h3>Agent Memories</h3>
+                <div class="value" id="agent-memories">0</div>
+                <div class="label">Stored interactions</div>
+            </div>
+            <div class="stat-card">
+                <h3>Consensus Events</h3>
+                <div class="value" id="consensus-events">0</div>
+                <div class="label">Decision records</div>
+            </div>
+            <div class="stat-card">
+                <h3>Market Insights</h3>
+                <div class="value" id="market-insights">0</div>
+                <div class="label">Analyzed opportunities</div>
+            </div>
+            <div class="stat-card">
+                <h3>Graph Depth</h3>
+                <div class="value" id="graph-depth">0</div>
+                <div class="label">Max relationship hops</div>
+            </div>
+        </div>
+
+        <div class="graph-container">
+            <h2>Knowledge Graph Visualization</h2>
+            <div class="controls">
+                <button class="btn" onclick="loadFullGraph()">Load Full Graph</button>
+                <button class="btn btn-secondary" onclick="loadAgentMemories()">Agent Memories</button>
+                <button class="btn btn-secondary" onclick="loadConsensusEvents()">Consensus Events</button>
+                <button class="btn btn-secondary" onclick="loadMarketInsights()">Market Insights</button>
+                <button class="btn" onclick="clearGraph()">Clear</button>
+            </div>
+            <canvas id="graph-canvas"></canvas>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color legend-agent"></div>
+                    <span>Agent</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color legend-memory"></div>
+                    <span>Memory</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color legend-consensus"></div>
+                    <span>Consensus</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color legend-market"></div>
+                    <span>Market</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color legend-alert"></div>
+                    <span>Alert</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="query-panel">
+            <h2>🔍 Cypher Query Interface</h2>
+            <textarea 
+                class="query-input" 
+                id="cypher-query" 
+                placeholder="Enter Cypher query here...&#10;&#10;Example:&#10;MATCH (a:Agent)-[r:REMEMBERS]->(m:Memory)&#10;RETURN a.name, m.content, r.timestamp&#10;LIMIT 10"
+            ></textarea>
+            <div class="controls controls-query">
+                <button class="btn" onclick="executeQuery()">Execute Query</button>
+                <button class="btn btn-secondary" onclick="loadExampleQueries()">Load Examples</button>
+                <button class="btn" onclick="clearQuery()">Clear</button>
+            </div>
+        </div>
+
+        <div class="results-panel">
+            <h2>📊 Query Results</h2>
+            <div class="results-content" id="query-results">
+                <div class="success">Ready to execute queries. Enter a Cypher query above and click "Execute Query".</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Neo4j connection configuration
+        const NEO4J_URI = 'bolt://localhost:7687';
+        const NEO4J_USER = 'neo4j';
+        const NEO4J_PASSWORD = 'merid-graph-2026';
+
+        // Canvas setup
+        const canvas = document.getElementById('graph-canvas');
+        const ctx = canvas.getContext('2d');
+        let nodes = [];
+        let edges = [];
+        let selectedNode = null;
+
+        function resizeCanvas() {
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            drawGraph();
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Mock data for demonstration (replace with actual Neo4j queries)
+        function updateStats() {
+            document.getElementById('total-nodes').textContent = Math.floor(Math.random() * 500) + 100;
+            document.getElementById('total-relationships').textContent = Math.floor(Math.random() * 1000) + 200;
+            document.getElementById('agent-memories').textContent = Math.floor(Math.random() * 300) + 50;
+            document.getElementById('consensus-events').textContent = Math.floor(Math.random() * 100) + 20;
+            document.getElementById('market-insights').textContent = Math.floor(Math.random() * 200) + 30;
+            document.getElementById('graph-depth').textContent = Math.floor(Math.random() * 5) + 3;
+        }
+
+        function loadFullGraph() {
+            showLoading();
+            setTimeout(() => {
+                generateMockGraph(50, 100);
+                showSuccess('Loaded full knowledge graph with 50 nodes and 100 relationships');
+            }, 1000);
+        }
+
+        function loadAgentMemories() {
+            showLoading();
+            setTimeout(() => {
+                generateMockGraph(20, 30, 'agent-memory');
+                showSuccess('Loaded agent memory subgraph');
+            }, 800);
+        }
+
+        function loadConsensusEvents() {
+            showLoading();
+            setTimeout(() => {
+                generateMockGraph(15, 25, 'consensus');
+                showSuccess('Loaded consensus event subgraph');
+            }, 800);
+        }
+
+        function loadMarketInsights() {
+            showLoading();
+            setTimeout(() => {
+                generateMockGraph(25, 40, 'market');
+                showSuccess('Loaded market insight subgraph');
+            }, 800);
+        }
+
+        function generateMockGraph(nodeCount, edgeCount, type = 'mixed') {
+            nodes = [];
+            edges = [];
+
+            const colors = {
+                'agent': '#10b981',
+                'memory': '#0ea5e9',
+                'consensus': '#fbbf24',
+                'market': '#8b5cf6',
+                'alert': '#ef4444'
+            };
+
+            for (let i = 0; i < nodeCount; i++) {
+                let nodeType = type === 'mixed' ? 
+                    ['agent', 'memory', 'consensus', 'market'][Math.floor(Math.random() * 4)] :
+                    type === 'agent-memory' ? (i % 2 === 0 ? 'agent' : 'memory') :
+                    type;
+
+                nodes.push({
+                    id: i,
+                    x: Math.random() * (canvas.width - 100) + 50,
+                    y: Math.random() * (canvas.height - 100) + 50,
+                    vx: (Math.random() - 0.5) * 2,
+                    vy: (Math.random() - 0.5) * 2,
+                    type: nodeType,
+                    color: colors[nodeType],
+                    label: `${nodeType.charAt(0).toUpperCase() + nodeType.slice(1)}-${i}`,
+                    radius: 8 + Math.random() * 6
+                });
+            }
+
+            for (let i = 0; i < edgeCount; i++) {
+                const from = Math.floor(Math.random() * nodeCount);
+                let to = Math.floor(Math.random() * nodeCount);
+                while (to === from) {
+                    to = Math.floor(Math.random() * nodeCount);
+                }
+                edges.push({ from, to });
+            }
+
+            animateGraph();
+        }
+
+        function animateGraph() {
+            // Simple force-directed layout simulation
+            const iterations = 50;
+            for (let iter = 0; iter < iterations; iter++) {
+                // Repulsion between nodes
+                for (let i = 0; i < nodes.length; i++) {
+                    for (let j = i + 1; j < nodes.length; j++) {
+                        const dx = nodes[j].x - nodes[i].x;
+                        const dy = nodes[j].y - nodes[i].y;
+                        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                        const force = 500 / (dist * dist);
+                        nodes[i].vx -= (dx / dist) * force;
+                        nodes[i].vy -= (dy / dist) * force;
+                        nodes[j].vx += (dx / dist) * force;
+                        nodes[j].vy += (dy / dist) * force;
+                    }
+                }
+
+                // Attraction along edges
+                edges.forEach(edge => {
+                    const from = nodes[edge.from];
+                    const to = nodes[edge.to];
+                    const dx = to.x - from.x;
+                    const dy = to.y - from.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                    const force = dist * 0.01;
+                    from.vx += (dx / dist) * force;
+                    from.vy += (dy / dist) * force;
+                    to.vx -= (dx / dist) * force;
+                    to.vy -= (dy / dist) * force;
+                });
+
+                // Update positions
+                nodes.forEach(node => {
+                    node.x += node.vx * 0.1;
+                    node.y += node.vy * 0.1;
+                    node.vx *= 0.9;
+                    node.vy *= 0.9;
+
+                    // Keep within bounds
+                    node.x = Math.max(30, Math.min(canvas.width - 30, node.x));
+                    node.y = Math.max(30, Math.min(canvas.height - 30, node.y));
+                });
+            }
+
+            drawGraph();
+        }
+
+        function drawGraph() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw edges
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.lineWidth = 1;
+            edges.forEach(edge => {
+                const from = nodes[edge.from];
+                const to = nodes[edge.to];
+                ctx.beginPath();
+                ctx.moveTo(from.x, from.y);
+                ctx.lineTo(to.x, to.y);
+                ctx.stroke();
+            });
+
+            // Draw nodes
+            nodes.forEach(node => {
+                ctx.fillStyle = node.color;
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                if (node === selectedNode) {
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                }
+
+                // Draw label
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '10px Segoe UI';
+                ctx.textAlign = 'center';
+                ctx.fillText(node.label, node.x, node.y + node.radius + 12);
+            });
+        }
+
+        function clearGraph() {
+            nodes = [];
+            edges = [];
+            selectedNode = null;
+            drawGraph();
+            showSuccess('Graph cleared');
+        }
+
+        function executeQuery() {
+            const query = document.getElementById('cypher-query').value.trim();
+            if (!query) {
+                showError('Please enter a Cypher query');
+                return;
+            }
+
+            showLoading();
+            setTimeout(() => {
+                // Mock query execution
+                const mockResults = [
+                    { node: 'Agent-01', property: 'analyst-gemma-01', value: 'Active' },
+                    { node: 'Memory-15', property: 'content', value: 'Market analysis completed' },
+                    { node: 'Consensus-03', property: 'score', value: '0.87' }
+                ];
+
+                let html = '<div class="success">Query executed successfully</div>';
+                mockResults.forEach(result => {
+                    html += `<div class="node-info">
+                        <strong>${result.node}</strong>: ${result.property} = ${result.value}
+                    </div>`;
+                });
+
+                document.getElementById('query-results').innerHTML = html;
+            }, 500);
+        }
+
+        function loadExampleQueries() {
+            const examples = [
+                '// Get all agent memories\nMATCH (a:Agent)-[r:REMEMBERS]->(m:Memory)\nRETURN a.name, m.content, r.timestamp\nLIMIT 10',
+                '// Find consensus events\nMATCH (c:Consensus)-[r:INVOLVES]->(a:Agent)\nWHERE c.score > 0.8\nRETURN c, a\nLIMIT 20',
+                '// Market insights by agent\nMATCH (a:Agent)-[r:ANALYZED]->(m:Market)\nRETURN a.name, COUNT(m) as insights\nORDER BY insights DESC'
+            ];
+
+            document.getElementById('cypher-query').value = examples[Math.floor(Math.random() * examples.length)];
+        }
+
+        function clearQuery() {
+            document.getElementById('cypher-query').value = '';
+        }
+
+        function showLoading() {
+            document.getElementById('query-results').innerHTML = '<div class="loading">Loading</div>';
+        }
+
+        function showSuccess(message) {
+            const current = document.getElementById('query-results').innerHTML;
+            document.getElementById('query-results').innerHTML = `<div class="success">${message}</div>` + (current.includes('loading') ? '' : current);
+        }
+
+        function showError(message) {
+            document.getElementById('query-results').innerHTML = `<div class="error">Error: ${message}</div>`;
+        }
+
+        // Canvas interaction
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            selectedNode = null;
+            for (let node of nodes) {
+                const dist = Math.sqrt((x - node.x) ** 2 + (y - node.y) ** 2);
+                if (dist < node.radius) {
+                    selectedNode = node;
+                    showSuccess(`Selected: ${node.label} (${node.type})`);
+                    break;
+                }
+            }
+
+            drawGraph();
+        });
+
+        // Initialize
+        updateStats();
+        setInterval(updateStats, 5000);
+    </script>
+</body>
+</html>

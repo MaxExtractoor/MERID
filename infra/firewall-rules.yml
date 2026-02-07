@@ -1,0 +1,57 @@
+# MERID Infrastructure Security - Firewall Rules
+# Gate 1: Infrastructure Security - Evidence Artifact
+# Date: 2026-01-26
+
+# Network Security Policy
+# Only required ports allowed: 8000, 8001, 7687, 6379
+
+version: "3.8"
+
+services:
+  merid-api:
+    image: merid:latest
+    ports:
+      - "8000:8000"  # Primary API
+      - "8001:8001"  # Alternative API port
+    networks:
+      - merid-network
+    environment:
+      - FIREWALL_ENABLED=true
+      - TLS_CERT_PATH=/certs/server.crt
+      - TLS_KEY_PATH=/certs/server.key
+
+  neo4j:
+    image: neo4j:5.27-community
+    ports:
+      - "7474:7474"  # Neo4j HTTP (internal only)
+      - "7687:7687"  # Neo4j Bolt (internal only)
+    networks:
+      - merid-network
+    environment:
+      - NEO4J_dbms_ssl_policy__enabled=true
+      - NEO4J_dbms_ssl_policy__client_auth=NONE
+      - NEO4J_dbms_connector_bolt_advertised__address=neo4j:7687
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"  # Redis (internal only)
+    networks:
+      - merid-network
+    command: redis-server --requirepass ${REDIS_PASSWORD} --tls-port 0 --port 6379
+
+networks:
+  merid-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# Firewall Rules (UFW equivalent)
+# ALLOW:
+# - 8000/tcp (MERID API)
+# - 8001/tcp (MERID API Alt)
+# - 7687/tcp (Neo4j Bolt - internal)
+# - 6379/tcp (Redis - internal)
+# - 7474/tcp (Neo4j HTTP - internal)
+# DENY: All other ports

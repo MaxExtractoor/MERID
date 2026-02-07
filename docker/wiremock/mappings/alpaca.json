@@ -1,0 +1,215 @@
+{
+  "mappings": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "/v2/account"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "id": "mock-account-001",
+          "account_number": "PA00000000",
+          "status": "ACTIVE",
+          "crypto_status": "ACTIVE",
+          "currency": "USD",
+          "buying_power": "100000.00",
+          "regt_buying_power": "100000.00",
+          "daytrading_buying_power": "400000.00",
+          "cash": "100000.00",
+          "portfolio_value": "125000.00",
+          "equity": "125000.00",
+          "long_market_value": "25000.00",
+          "short_market_value": "0.00",
+          "initial_margin": "12500.00",
+          "maintenance_margin": "10000.00",
+          "last_equity": "120000.00",
+          "last_maintenance_margin": "9500.00",
+          "sma": "100000.00",
+          "daytrade_count": 0
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/v2/positions"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": [
+          {
+            "asset_id": "b0b6dd9d-8b9b-48a9-ba46-b9d54906e415",
+            "symbol": "AAPL",
+            "exchange": "NASDAQ",
+            "asset_class": "us_equity",
+            "avg_entry_price": "150.00",
+            "qty": "100",
+            "side": "long",
+            "market_value": "16500.00",
+            "cost_basis": "15000.00",
+            "unrealized_pl": "1500.00",
+            "unrealized_plpc": "10.00",
+            "current_price": "165.00",
+            "lastday_price": "162.50",
+            "change_today": "0.0154"
+          },
+          {
+            "asset_id": "8ccae427-5dd0-45b3-b5fe-7b5b04f0e7b8",
+            "symbol": "TSLA",
+            "exchange": "NASDAQ",
+            "asset_class": "us_equity",
+            "avg_entry_price": "200.00",
+            "qty": "50",
+            "side": "long",
+            "market_value": "8500.00",
+            "cost_basis": "10000.00",
+            "unrealized_pl": "-1500.00",
+            "unrealized_plpc": "-15.00",
+            "current_price": "170.00",
+            "lastday_price": "175.00",
+            "change_today": "-0.0286"
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "/v2/orders"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "id": "mock-order-{{randomValue type='UUID'}}",
+          "client_order_id": "{{jsonPath request.body '$.client_order_id'}}",
+          "created_at": "{{now format='yyyy-MM-dd HH:mm:ss.SSS'}}",
+          "updated_at": "{{now format='yyyy-MM-dd HH:mm:ss.SSS'}}",
+          "submitted_at": "{{now format='yyyy-MM-dd HH:mm:ss.SSS'}}",
+          "filled_at": "{{now format='yyyy-MM-dd HH:mm:ss.SSS'}}",
+          "expired_at": null,
+          "canceled_at": null,
+          "failed_at": null,
+          "replaced_at": null,
+          "replaced_by": null,
+          "replaces": null,
+          "asset_id": "mock-asset-id",
+          "symbol": "{{jsonPath request.body '$.symbol'}}",
+          "asset_class": "us_equity",
+          "notional": "{{jsonPath request.body '$.notional'}}",
+          "qty": "{{jsonPath request.body '$.qty'}}",
+          "filled_qty": "{{jsonPath request.body '$.qty'}}",
+          "filled_avg_price": "{{randomValue type='DECIMAL' min=100 max=300}}",
+          "order_class": "{{jsonPath request.body '$.order_class'}}",
+          "order_type": "{{jsonPath request.body '$.type'}}",
+          "side": "{{jsonPath request.body '$.side'}}",
+          "time_in_force": "{{jsonPath request.body '$.time_in_force'}}",
+          "limit_price": "{{jsonPath request.body '$.limit_price'}}",
+          "stop_price": "{{jsonPath request.body '$.stop_price'}}",
+          "status": "filled",
+          "extended_hours": false
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "urlPathPattern": "/v2/orders/.*"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "id": "{{request.pathSegments.[2]}}",
+          "client_order_id": "mock-client-id",
+          "created_at": "2024-01-01T00:00:00Z",
+          "updated_at": "2024-01-01T00:00:01Z",
+          "submitted_at": "2024-01-01T00:00:00Z",
+          "filled_at": "2024-01-01T00:00:01Z",
+          "symbol": "AAPL",
+          "asset_class": "us_equity",
+          "qty": "100",
+          "filled_qty": "100",
+          "filled_avg_price": "150.00",
+          "order_type": "market",
+          "side": "buy",
+          "time_in_force": "day",
+          "status": "filled"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "/v2/assets"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": [
+          {
+            "id": "b0b6dd9d-8b9b-48a9-ba46-b9d54906e415",
+            "class": "us_equity",
+            "exchange": "NASDAQ",
+            "symbol": "AAPL",
+            "name": "Apple Inc.",
+            "status": "active",
+            "tradable": true,
+            "marginable": true,
+            "shortable": true,
+            "easy_to_borrow": true,
+            "fractionable": true
+          },
+          {
+            "id": "8ccae427-5dd0-45b3-b5fe-7b5b04f0e7b8",
+            "class": "us_equity",
+            "exchange": "NASDAQ",
+            "symbol": "TSLA",
+            "name": "Tesla, Inc.",
+            "status": "active",
+            "tradable": true,
+            "marginable": true,
+            "shortable": true,
+            "easy_to_borrow": true,
+            "fractionable": true
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "urlPathPattern": "/v2/stocks/.*/quotes/latest"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "quote": {
+            "symbol": "{{request.pathSegments.[2]}}",
+            "ask_price": {{randomValue type='DECIMAL' min=145 max=155}},
+            "ask_size": {{randomValue type='INT' min=1 max=100}},
+            "bid_price": {{randomValue type='DECIMAL' min=144 max=154}},
+            "bid_size": {{randomValue type='INT' min=1 max=100}},
+            "timestamp": "{{now format='yyyy-MM-dd HH:mm:ss.SSS'}}"
+          }
+        }
+      }
+    }
+  ]
+}

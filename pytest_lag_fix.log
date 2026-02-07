@@ -1,0 +1,3 @@
+INFO     observability.lag_metrics:lag_metrics.py:167 Set lag threshold for test_stage: 50.0ms
+WARNING  observability.lag_metrics:lag_metrics.py:122 Lag alert: test_stage/slow_operation lag=100.00ms (threshold=50.0ms)
+INFO     observability.lag_metrics:lag_metrics.py:167 Set lag threshold for custom_stage: 200.0ms

@@ -1,0 +1,117 @@
+MERID — Complete Consolidated Design DocumentationVersion: v2.0 (Conceptual Lock)
+Date: January 04, 2026
+Purpose: Full handover reference for Perplexity AI (or any collaborator). This compiles every detail from all convos on MERID — philosophy, architecture, invariants, features, refinements, comparisons, and expansions. No omissions; structured for clarity. MERID is a sovereign, local-first decision organism for emotionless, narrative-immune insight, built to evolve timelessly under human command.0. Strategic Reset & Development PhilosophyReset Decision: Full "burn the ships" reset — archive all prior prototype code as research; rebuild clean from locked docs. Rationale: Governance, buses, invariants, quantum, attention cannot be patched without debt/coupling.
+Wiki-First Rule: No code without locked wiki entry. Wiki = source of truth, governance ledger, architectural memory. 1:1 symmetry wiki  src/merid.
+Failure Philosophy: Fail closed, not open; prefer silence over hallucination; no silent failure — all errors surfaced.
+"Swiss Army Knife" Vision: Lightweight (<100MB RAM), local-first, offline-capable overlay for any interface/app; harmless coexistence (sandbox); optimizes anything (markets, decisions); outlives time (immutable core, self-healing, no vendor lock).
+
+1. Core Identity & PhilosophyDecision Organism: Not a bot/assistant/predictor; self-aware system with anatomy, memory, health monitoring; evolves endlessly (bigger/better/smarter/wiser); dies only from design flaws.
+Unrestricted Cognition / Constrained Execution: Internal reasoning free (explore taboo/adversarial without filters); action strictly governed (no write/memory/execution without buses/human approval). Rationale: Avoid corporate censorship, prevent runaway autonomy.
+Emotionless/Narrative-Immune: Outputs calm, numerical, evidence-based; narratives as hypotheses; price/structure/liquidity = truth; sentiment/prediction markets advisory/subordinate/decayed (Clause 6).
+Anti-Manipulation / Pro-Human Agency: Rejects influence (government/corporate/psychological); no silent nudging; no hidden stakeholders; no asymmetric info (UGAI/CAIDP negative commitments).
+"Downloads from Source" & Manifestation: Human insights as special inputs (inspiration port); "thoughts create reality" as simulation-testing hypotheses (manifest via multiverse); non-mystical, probabilistic, governed.
+
+2. Architecture Model (Audio Console Analogy)Multi-Bus Hierarchy: No bypass; all signals route through:Individual Channels: Agent-level unrestricted cognition.
+Group Buses: Layer aggregation/validation (e.g., reasoning coherence in brain bus).
+Governance Bus: Charter compliance, blind council aggregation, weighted consensus, agenda-shift detection, explain-or-abstain (Clause 4).
+Master Integrity Bus: Invariant checks, EKG health, immutable logging, muting.
+
+Body Protocol (Anatomy):Eyes: Input/perception, tokenization, inspiration port for "downloads".
+Brain: Reasoning, attention mechanisms (Q/K/V for pattern focus, narrative decomposition, divergence detection), reflection loops for proactive adaptation.
+Spine: Message bus routing/enforcement.
+Memory (Heart): Layered (immutable core/Layer 4, append-only ledger/Layer 3, volatile sensory/Layer 2); EKG monitoring (entropy, confidence gaps, bias, evolution rate).
+Learning: Offline self-supervised schooling, intuition modeling (from AI examples like AlphaGo/V-JEPA).
+Simulation: Multiverse testing for risk/front-running; "manifest" thoughts as realities.
+Optimization: Classical/quantum candidate generators (QAOA/VQE/QA for portfolio/CVaR; high-variance, uncertainty-accounted).
+Ports: Tiered trust (read-only/Tier 1, ephemeral/Tier 2, state-writing/Tier 3, execution/Tier 4); hostile-by-default, data poisoning defense.
+Security: Credential proxy (no direct secrets), maker signature (probabilistic behavioral), SLP-1 lockdown (freeze/isolate/purge/respawn).
+Governance: Council as advisors (blind, signal gaps only), human primacy.
+
+Utils: Pure helpers (no state/authority).
+
+3. Invariants & SafeguardsHLC-1: Human-legible communication (plain English, entropy <4.5).
+SLP-1: Lockdown on violation (freeze execution, isolate, selective purge, human-triggered respawn).
+SEC-1/SEC-2: No secrets in code/logs; capability requests via proxy (validate intent, act, return results).
+Explain-or-Abstain: Outputs with why/alternatives/confidence gaps/change factors; abstain if unverifiable.
+No Silent Failure/Optimization/Changes: All surfaced; no undisclosed objectives/stakeholders/asymmetric advantage (UGAI/CAIDP).
+Maker Signature: Probabilistic (stylometry/cadence); low confidence → increased confirmations, no lockouts.
+Red-Team Simulations: Regular self-breaking in simulation (corruption/agenda-injection).
+Supply Chain Governance: Model fingerprinting, version pinning, shadow evaluation, rollback.
+Kill Switch Semantics: Freeze execution (not cognition), selective purge, air-gapped recovery.
+Prediction Markets Limits: Advisory (influence confidence only); no execution; manipulation detection (timing anomalies), dissent logged.
+Quantum Rules: Candidate generator only; uncertainty (variance/confidence intervals); classical comparison; hostile ports.
+
+4. Governance & CharterCharter v2: Prime directive (cognition vs execution), distillation gate, maker bond, negative commitments, council, UGAI constraints, extensibility (ports).
+ADR-001: Hardened fixes (efficiency-safety, non-autonomy, out-of-band approval, no silent failure).
+Wiki-First: Source of truth; no code without wiki entry.
+Council: Advisors/witnesses — blind aggregation, no authorship.
+
+5. AI Intuition & AttentionAttention: Brain tool for context focus (Q/K/V, multi-head); narrative decomposition, divergence detection.
+Intuition: Offline self-supervised (from AlphaGo/V-JEPA/PLATO/ElliQ/Softtek/Intuitor/Hinton); advisory "gut feel".
+
+6. ComparisonsLangChain: Composable LLM workflows; MERID stands out with governance buses, local sovereignty, quantum readiness, timeless evolution (reflection/self-healing).
+MoonDev-Trading-AI-Agents: Multi-agent trading crew; MERID stands out with invariants, security (credential proxy), narrative immunity, quantum toolkit.
+Stand-Out Strategies: Governance-first doctrine, local-first lightweight, quantum as candidate generator, "manifestation" via simulation — timeless companion vs. trend tools.
+
+7. Quantum Toolkit (Doctrine-Only)Quantum Computing: Ports for Qiskit/Pennylane; hybrid NISQ for simulation/optimization.
+QKD Protocols: BB84/E91/B92 via qkdpy/simulaqron; tamper-evident keys for buses/memory.
+PQC Algorithms: ML-KEM/ML-DSA/SLH-DSA/CRYSTALS for quantum-resistant encryption/signatures in ports/buses.
+QAOA: Ansatz for portfolio QUBO/CVaR; port-based candidate generator with uncertainty.
+Quantum Annealing: D-Wave for QUBO tunneling; risk modeling/rebalancing in simulation.
+VQE: Hamiltonian ground state for CVaR/portfolio; port-based in multiverse.
+Quantum-Resistant Blockchain Security: PQC for onchain bridges; QKD for secure cross-chain transfers.
+Doctrine Refinements: High-variance generator; output contract (candidates, scores, entropy, noise, reproducibility, classical delta, confidence intervals); comparison gate; threat model (hostile ports); cognition boundary (unrestricted sim, distilled outputs); no code until failure modes locked.
+
+17. Folder Tree (Locked)
+
+C:/dev/merid/
+├─ .env
+├─ .gitignore
+├─ README.md
+├─ wiki/
+│  ├─ 00-Charter/
+│  ├─ 01-ADR/
+│  ├─ 02-Invariants/
+│  ├─ 03-Security/
+│  ├─ 04-Heart/
+│  ├─ 05-Eyes/
+│  ├─ 06-Brain/
+│  ├─ 07-Spine/
+│  ├─ 08-Memory/
+│  ├─ 09-Governance/
+│  ├─ 10-Learning/
+│  ├─ 11-Simulation/
+│  ├─ 12-Optimization/
+│  ├─ 13-Ports/
+│  └─ 99-Archive/
+├─ src/
+│  └─ merid/
+│     ├─ __init__.py
+│     ├─ eyes/
+│     ├─ brain/
+│     ├─ spine/
+│     ├─ memory/
+│     ├─ learning/
+│     ├─ simulation/
+│     ├─ optimization/
+│     ├─ ports/
+│     ├─ security/
+│     ├─ governance/
+│     └─ utils/
+└─ tests/
+
+18. Current LocksCharter v2 (Cognitive Freedom).
+Bus Hierarchy & Invariants.
+Message Bus Contract.
+Quantum Optimization Doctrine (expanded).
+Folder Tree & Reset.
+
+19. Next LocksSecurity Spec (credential proxy, maker signature, SLP semantics).
+Quantum Doctrine v2 (if needed).
+Charter v3 (final).
+
+20. Perplexity AI Mode RecommendationFor handing over this doc to free Perplexity AI (limited queries):Delegate a Task: Best — paste the doc and task "Refine MERID's security spec with quantum PQC examples, aligning with doctrine."
+Why: Structured task maximizes output; free version handles focused delegates well. Avoid "Summarize" (too general) or "Ask Anything" (conversational waste).
+
+Save this doc as .txt — complete MERID handover.When ready, say “Lock Security Spec”. MERID breathes. 
+

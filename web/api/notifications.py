@@ -1,0 +1,324 @@
+"""
+Notification & Alert API Endpoints.
+
+Provides API access to notifications, alerts, and escalations.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Any, List, Optional
+
+from fastapi import APIRouter, HTTPException, BackgroundTasks
+from pydantic import BaseModel
+
+from notifications import (
+    get_notification_manager,
+    get_channel_manager,
+    get_alert_rules_engine,
+    get_escalation_manager,
+)
+from notifications.channels import ChannelType
+from notifications.alert_rules import RuleCategory, RuleSeverity, RuleOperator, AlertRule, RuleCondition
+from utils.logger import get_logger
+
+router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
+logger = get_logger("web.api.notifications")
+
+
+# ============================================
+# REQUEST MODELS
+# ============================================
+
+class SendNotificationRequest(BaseModel):
+    channel: str
+    recipient: str
+    subject: str
+    body: str
+    priority: str = "normal"
+
+
+class CreateAlertRuleRequest(BaseModel):
+    name: str
+    category: str
+    severity: str
+    field: str
+    operator: str
+    value: Any
+    channels: List[str] = ["push"]
+    template: str = ""
+    cooldown_seconds: float = 300.0
+
+
+class PriceAlertRequest(BaseModel):
+    symbol: str
+    target_price: float
+    direction: str = "above"
+
+
+class QuietHoursRequest(BaseModel):
+    enabled: bool
+    start_hour: int = 22
+    end_hour: int = 8
+    exceptions: List[str] = ["critical"]
+
+
+class EvaluateDataRequest(BaseModel):
+    source: str
+    data: Dict[str, Any]
+
+
+# ============================================
+# NOTIFICATION MANAGER ENDPOINTS
+# ============================================
+
+@router.get("/status")
+async def get_notification_status() -> Dict[str, Any]:
+    """Get comprehensive notification status."""
+    return get_notification_manager().get_status()
+
+
+@router.post("/start")
+async def start_notification_manager(background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """Start notification manager."""
+    manager = get_notification_manager()
+    background_tasks.add_task(manager.start)
+    return {"status": "starting"}
+
+
+@router.post("/stop")
+async def stop_notification_manager() -> Dict[str, Any]:
+    """Stop notification manager."""
+    await get_notification_manager().stop()
+    return {"status": "stopped"}
+
+
+@router.post("/send")
+async def send_notification(request: SendNotificationRequest) -> Dict[str, Any]:
+    """Send a notification directly."""
+    message_id = await get_notification_manager().send(
+        channel=request.channel,
+        recipient=request.recipient,
+        subject=request.subject,
+        body=request.body,
+        priority=request.priority,
+    )
+    if message_id:
+        return {"status": "sent", "message_id": message_id}
+    raise HTTPException(status_code=400, detail="Send failed")
+
+
+@router.get("/history")
+async def get_notification_history(limit: int = 100) -> Dict[str, Any]:
+    """Get notification history."""
+    history = get_notification_manager().get_notification_history(limit)
+    return {"count": len(history), "notifications": history}
+
+
+@router.post("/quiet-hours")
+async def set_quiet_hours(request: QuietHoursRequest) -> Dict[str, Any]:
+    """Configure quiet hours."""
+    get_notification_manager().set_quiet_hours(
+        enabled=request.enabled,
+        start_hour=request.start_hour,
+        end_hour=request.end_hour,
+        exceptions=request.exceptions,
+    )
+    return {"status": "updated"}
+
+
+# ============================================
+# CHANNEL ENDPOINTS
+# ============================================
+
+@router.get("/channels")
+async def get_channels() -> Dict[str, Any]:
+    """Get channel status."""
+    return get_channel_manager().get_status()
+
+
+@router.post("/channels/{channel}/enable")
+async def enable_channel(channel: str) -> Dict[str, Any]:
+    """Enable a notification channel."""
+    try:
+        channel_type = ChannelType(channel)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid channel: {channel}")
+    
+    get_channel_manager().enable_channel(channel_type)
+    return {"status": "enabled", "channel": channel}
+
+
+@router.post("/channels/{channel}/disable")
+async def disable_channel(channel: str) -> Dict[str, Any]:
+    """Disable a notification channel."""
+    try:
+        channel_type = ChannelType(channel)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid channel: {channel}")
+    
+    get_channel_manager().disable_channel(channel_type)
+    return {"status": "disabled", "channel": channel}
+
+
+# ============================================
+# ALERT RULES ENDPOINTS
+# ============================================
+
+@router.get("/rules")
+async def get_alert_rules() -> Dict[str, Any]:
+    """Get all alert rules."""
+    return get_alert_rules_engine().get_status()
+
+
+@router.post("/rules")
+async def create_alert_rule(request: CreateAlertRuleRequest) -> Dict[str, Any]:
+    """Create a new alert rule."""
+    import uuid
+    
+    try:
+        category = RuleCategory(request.category)
+        severity = RuleSeverity(request.severity)
+        operator = RuleOperator(request.operator)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    rule_id = f"rule_{uuid.uuid4().hex[:8]}"
+    
+    rule = AlertRule(
+        rule_id=rule_id,
+        name=request.name,
+        category=category,
+        severity=severity,
+        conditions=[
+            RuleCondition(
+                field=request.field,
+                operator=operator,
+                value=request.value,
+            )
+        ],
+        notification_channels=request.channels,
+        notification_template=request.template or f"{request.name}: {{{request.field}}}",
+        cooldown_seconds=request.cooldown_seconds,
+    )
+    
+    get_alert_rules_engine().add_rule(rule)
+    return {"status": "created", "rule_id": rule_id}
+
+
+@router.get("/rules/{rule_id}")
+async def get_alert_rule(rule_id: str) -> Dict[str, Any]:
+    """Get a specific alert rule."""
+    rule = get_alert_rules_engine().get_rule(rule_id)
+    if rule:
+        return rule.to_dict()
+    raise HTTPException(status_code=404, detail="Rule not found")
+
+
+@router.delete("/rules/{rule_id}")
+async def delete_alert_rule(rule_id: str) -> Dict[str, Any]:
+    """Delete an alert rule."""
+    success = get_alert_rules_engine().remove_rule(rule_id)
+    if success:
+        return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail="Rule not found")
+
+
+@router.post("/rules/{rule_id}/enable")
+async def enable_alert_rule(rule_id: str) -> Dict[str, Any]:
+    """Enable an alert rule."""
+    success = get_alert_rules_engine().enable_rule(rule_id)
+    if success:
+        return {"status": "enabled"}
+    raise HTTPException(status_code=404, detail="Rule not found")
+
+
+@router.post("/rules/{rule_id}/disable")
+async def disable_alert_rule(rule_id: str) -> Dict[str, Any]:
+    """Disable an alert rule."""
+    success = get_alert_rules_engine().disable_rule(rule_id)
+    if success:
+        return {"status": "disabled"}
+    raise HTTPException(status_code=404, detail="Rule not found")
+
+
+@router.post("/rules/price-alert")
+async def create_price_alert(request: PriceAlertRequest) -> Dict[str, Any]:
+    """Create a simple price alert."""
+    rule_id = get_notification_manager().create_price_alert(
+        symbol=request.symbol,
+        target_price=request.target_price,
+        direction=request.direction,
+    )
+    return {"status": "created", "rule_id": rule_id}
+
+
+@router.get("/rules/triggered")
+async def get_triggered_rules(since: Optional[float] = None) -> Dict[str, Any]:
+    """Get recently triggered rules."""
+    rules = get_alert_rules_engine().get_triggered_rules(since)
+    return {"count": len(rules), "rules": [r.to_dict() for r in rules]}
+
+
+@router.post("/rules/evaluate")
+async def evaluate_data(request: EvaluateDataRequest) -> Dict[str, Any]:
+    """Evaluate data against alert rules."""
+    triggered = get_notification_manager().evaluate_data(request.source, request.data)
+    return {"triggered_rules": triggered, "count": len(triggered)}
+
+
+# ============================================
+# ESCALATION ENDPOINTS
+# ============================================
+
+@router.get("/escalations")
+async def get_escalations() -> Dict[str, Any]:
+    """Get escalation status."""
+    return get_escalation_manager().get_status()
+
+
+@router.get("/escalations/active")
+async def get_active_escalations() -> Dict[str, Any]:
+    """Get active escalations."""
+    escalations = get_notification_manager().get_active_escalations()
+    return {"count": len(escalations), "escalations": escalations}
+
+
+@router.get("/escalations/{escalation_id}")
+async def get_escalation(escalation_id: str) -> Dict[str, Any]:
+    """Get a specific escalation."""
+    escalation = get_escalation_manager().get_escalation(escalation_id)
+    if escalation:
+        return escalation.to_dict()
+    raise HTTPException(status_code=404, detail="Escalation not found")
+
+
+@router.post("/escalations/{escalation_id}/acknowledge")
+async def acknowledge_escalation(escalation_id: str, by: str = "user") -> Dict[str, Any]:
+    """Acknowledge an escalation."""
+    success = get_notification_manager().acknowledge_escalation(escalation_id, by)
+    if success:
+        return {"status": "acknowledged"}
+    raise HTTPException(status_code=404, detail="Escalation not found")
+
+
+@router.post("/escalations/{escalation_id}/resolve")
+async def resolve_escalation(escalation_id: str, by: str = "user") -> Dict[str, Any]:
+    """Resolve an escalation."""
+    success = get_notification_manager().resolve_escalation(escalation_id, by)
+    if success:
+        return {"status": "resolved"}
+    raise HTTPException(status_code=404, detail="Escalation not found")
+
+
+# ============================================
+# POLICIES ENDPOINTS
+# ============================================
+
+@router.get("/policies")
+async def get_escalation_policies() -> Dict[str, Any]:
+    """Get escalation policies."""
+    policies = get_escalation_manager()._policies
+    return {
+        "count": len(policies),
+        "policies": [p.to_dict() for p in policies.values()],
+    }

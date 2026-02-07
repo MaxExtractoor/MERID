@@ -1,0 +1,476 @@
+<!-- API Dashboard Screen Component -->
+<div class="p-6">
+    <!-- API Overview Stats -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <div class="metric-card p-4">
+            <div class="text-sm text-gray-400 mb-1">Total APIs</div>
+            <div class="text-2xl font-bold">18</div>
+            <div class="text-xs text-green-400">17 online</div>
+        </div>
+        <div class="metric-card p-4">
+            <div class="text-sm text-gray-400 mb-1">Config Complete</div>
+            <div class="text-2xl font-bold">94%</div>
+            <div class="text-xs text-gray-400">17/18 configured</div>
+        </div>
+        <div class="metric-card p-4">
+            <div class="text-sm text-gray-400 mb-1">Avg Response Time</div>
+            <div class="text-2xl font-bold">67ms</div>
+            <div class="text-xs text-gray-400">Last 5 min</div>
+        </div>
+        <div class="metric-card p-4">
+            <div class="text-sm text-gray-400 mb-1">Error Rate</div>
+            <div class="text-2xl font-bold text-green-400">0.2%</div>
+            <div class="text-xs text-gray-400">24h average</div>
+        </div>
+    </div>
+    
+    <!-- API Categories Progress -->
+    <div class="metric-card p-6 mb-6">
+        <h2 class="text-lg font-semibold mb-4">API Categories</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <!-- Market Data -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium">Market Data</span>
+                    <span class="text-xs text-green-400">100%</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-2 mb-3">
+                    <div class="bg-green-500 h-2 rounded-full" style="width: 100%"></div>
+                </div>
+                <div class="space-y-1">
+                    <div class="flex justify-between text-xs">
+                        <span>CoinGecko</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Yahoo Finance</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Alpha Vantage</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Trading -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium">Trading</span>
+                    <span class="text-xs text-green-400">88%</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-2 mb-3">
+                    <div class="bg-green-500 h-2 rounded-full" style="width: 88%"></div>
+                </div>
+                <div class="space-y-1">
+                    <div class="flex justify-between text-xs">
+                        <span>Alpaca</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Interactive Brokers</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Binance</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Coinbase</span>
+                        <span class="text-yellow-400">●</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Infrastructure -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium">Infrastructure</span>
+                    <span class="text-xs text-green-400">100%</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-2 mb-3">
+                    <div class="bg-green-500 h-2 rounded-full" style="width: 100%"></div>
+                </div>
+                <div class="space-y-1">
+                    <div class="flex justify-between text-xs">
+                        <span>Redis</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>PostgreSQL</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Elasticsearch</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Communications -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium">Communications</span>
+                    <span class="text-xs text-green-400">92%</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-2 mb-3">
+                    <div class="bg-green-500 h-2 rounded-full" style="width: 92%"></div>
+                </div>
+                <div class="space-y-1">
+                    <div class="flex justify-between text-xs">
+                        <span>Telegram</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Discord</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Email</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Slack</span>
+                        <span class="text-red-400">●</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- On-chain Intelligence -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium">On-chain Intel</span>
+                    <span class="text-xs text-green-400">95%</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-2 mb-3">
+                    <div class="bg-green-500 h-2 rounded-full" style="width: 95%"></div>
+                </div>
+                <div class="space-y-1">
+                    <div class="flex justify-between text-xs">
+                        <span>Helius</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Nansen</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Dune Analytics</span>
+                        <span class="text-yellow-400">●</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- News & Social -->
+            <div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-medium">News & Social</span>
+                    <span class="text-xs text-green-400">86%</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-2 mb-3">
+                    <div class="bg-yellow-500 h-2 rounded-full" style="width: 86%"></div>
+                </div>
+                <div class="space-y-1">
+                    <div class="flex justify-between text-xs">
+                        <span>News API</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Twitter API</span>
+                        <span class="text-green-400">●</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Reddit API</span>
+                        <span class="text-red-400">●</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Detailed API Status Table -->
+    <div class="metric-card p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold">API Status Details</h2>
+            <div class="flex gap-2">
+                <button class="text-sm text-blue-400 hover:text-blue-300">Test All</button>
+                <button class="text-sm text-gray-400 hover:text-white">Export</button>
+            </div>
+        </div>
+        
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-left text-gray-400 border-b border-gray-800">
+                        <th class="pb-2">API</th>
+                        <th class="pb-2">Category</th>
+                        <th class="pb-2">Status</th>
+                        <th class="pb-2">Last Success</th>
+                        <th class="pb-2">Response Time</th>
+                        <th class="pb-2">Config %</th>
+                        <th class="pb-2">24h Calls</th>
+                        <th class="pb-2">Error Rate</th>
+                        <th class="pb-2">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="apiStatusTable">
+                    <!-- API rows will be populated here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <!-- API Performance Chart -->
+    <div class="metric-card p-6 mt-6">
+        <h2 class="text-lg font-semibold mb-4">API Performance Overview</h2>
+        <div class="h-64">
+            <canvas id="apiPerformanceChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<script>
+// Mock API status data
+const apiStatusData = [
+    {
+        name: 'Alpaca',
+        category: 'Trading',
+        status: 'online',
+        lastSuccess: '2s ago',
+        responseTime: 45,
+        configPercent: 100,
+        calls24h: 15420,
+        errorRate: 0.1
+    },
+    {
+        name: 'Interactive Brokers',
+        category: 'Trading',
+        status: 'online',
+        lastSuccess: '5s ago',
+        responseTime: 89,
+        configPercent: 100,
+        calls24h: 8934,
+        errorRate: 0.2
+    },
+    {
+        name: 'Binance',
+        category: 'Trading',
+        status: 'online',
+        lastSuccess: '1s ago',
+        responseTime: 23,
+        configPercent: 100,
+        calls24h: 45678,
+        errorRate: 0.05
+    },
+    {
+        name: 'Coinbase',
+        category: 'Trading',
+        status: 'degraded',
+        lastSuccess: '30s ago',
+        responseTime: 234,
+        configPercent: 85,
+        calls24h: 23456,
+        errorRate: 2.3
+    },
+    {
+        name: 'CoinGecko',
+        category: 'Market Data',
+        status: 'online',
+        lastSuccess: '3s ago',
+        responseTime: 67,
+        configPercent: 100,
+        calls24h: 12345,
+        errorRate: 0.1
+    },
+    {
+        name: 'Helius',
+        category: 'On-chain Intel',
+        status: 'online',
+        lastSuccess: '10s ago',
+        responseTime: 123,
+        configPercent: 95,
+        calls24h: 6789,
+        errorRate: 0.3
+    },
+    {
+        name: 'Nansen',
+        category: 'On-chain Intel',
+        status: 'online',
+        lastSuccess: '15s ago',
+        responseTime: 156,
+        configPercent: 100,
+        calls24h: 3456,
+        errorRate: 0.0
+    },
+    {
+        name: 'Redis',
+        category: 'Infrastructure',
+        status: 'online',
+        lastSuccess: '1s ago',
+        responseTime: 2,
+        configPercent: 100,
+        calls24h: 234567,
+        errorRate: 0.0
+    },
+    {
+        name: 'Slack',
+        category: 'Communications',
+        status: 'offline',
+        lastSuccess: '2h ago',
+        responseTime: 0,
+        configPercent: 75,
+        calls24h: 1234,
+        errorRate: 100.0
+    }
+];
+
+// Populate API status table
+function populateApiStatusTable() {
+    const tbody = document.getElementById('apiStatusTable');
+    tbody.innerHTML = '';
+    
+    apiStatusData.forEach(api => {
+        const statusClass = api.status === 'online' ? 'text-green-400' :
+                          api.status === 'degraded' ? 'text-yellow-400' :
+                          'text-red-400';
+        
+        const statusIcon = api.status === 'online' ? '●' :
+                          api.status === 'degraded' ? '◐' :
+                          '○';
+        
+        const configColor = api.configPercent >= 90 ? 'text-green-400' :
+                          api.configPercent >= 70 ? 'text-yellow-400' :
+                          'text-red-400';
+        
+        const errorColor = api.errorRate <= 0.5 ? 'text-green-400' :
+                          api.errorRate <= 2.0 ? 'text-yellow-400' :
+                          'text-red-400';
+        
+        const row = `
+            <tr class="table-row-hover border-b border-gray-800">
+                <td class="py-3 font-medium">${api.name}</td>
+                <td class="py-3">
+                    <span class="text-xs bg-gray-800 px-2 py-1 rounded">${api.category}</span>
+                </td>
+                <td class="py-3">
+                    <span class="${statusClass}">${statusIcon} ${api.status.toUpperCase()}</span>
+                </td>
+                <td class="py-3 text-xs text-gray-400">${api.lastSuccess}</td>
+                <td class="py-3 text-xs">${api.responseTime}ms</td>
+                <td class="py-3">
+                    <span class="${configColor}">${api.configPercent}%</span>
+                </td>
+                <td class="py-3 text-xs">${api.calls24h.toLocaleString()}</td>
+                <td class="py-3">
+                    <span class="${errorColor}">${api.errorRate}%</span>
+                </td>
+                <td class="py-3">
+                    <div class="flex gap-1">
+                        <button class="text-blue-400 hover:text-blue-300 text-xs">Test</button>
+                        <button class="text-gray-400 hover:text-white text-xs">Config</button>
+                    </div>
+                </td>
+            </tr>
+        `;
+        tbody.innerHTML += row;
+    });
+}
+
+// Initialize API performance chart
+function initApiPerformanceChart() {
+    const ctx = document.getElementById('apiPerformanceChart');
+    if (!ctx) return;
+    
+    new Chart(ctx.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00', '24:00'],
+            datasets: [
+                {
+                    label: 'Avg Response Time (ms)',
+                    data: [45, 52, 48, 67, 89, 72, 67],
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    yAxisID: 'y'
+                },
+                {
+                    label: 'Error Rate (%)',
+                    data: [0.1, 0.2, 0.15, 0.3, 0.8, 0.4, 0.2],
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    yAxisID: 'y1'
+                },
+                {
+                    label: 'Success Rate (%)',
+                    data: [99.9, 99.8, 99.85, 99.7, 99.2, 99.6, 99.8],
+                    borderColor: '#10b981',
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    yAxisID: 'y2'
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                mode: 'index',
+                intersect: false,
+            },
+            plugins: {
+                legend: {
+                    display: true,
+                    labels: { color: '#a0a0a0' }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: '#2a2a2a' },
+                    ticks: { color: '#a0a0a0' }
+                },
+                y: {
+                    type: 'linear',
+                    display: true,
+                    position: 'left',
+                    grid: { color: '#2a2a2a' },
+                    ticks: { color: '#a0a0a0' },
+                    title: {
+                        display: true,
+                        text: 'Response Time (ms)',
+                        color: '#a0a0a0'
+                    }
+                },
+                y1: {
+                    type: 'linear',
+                    display: true,
+                    position: 'right',
+                    grid: { drawOnChartArea: false },
+                    ticks: { color: '#a0a0a0' },
+                    title: {
+                        display: true,
+                        text: 'Error Rate (%)',
+                        color: '#a0a0a0'
+                    }
+                },
+                y2: {
+                    type: 'linear',
+                    display: false,
+                    grid: { drawOnChartArea: false },
+                    ticks: { color: '#a0a0a0' }
+                }
+            }
+        }
+    });
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    populateApiStatusTable();
+    initApiPerformanceChart();
+});
+</script>

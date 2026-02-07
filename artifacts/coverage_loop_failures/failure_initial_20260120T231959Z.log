@@ -1,0 +1,202 @@
+........................................................................ [ 14%]
+........................................................................ [ 28%]
+........................................................................ [ 42%]
+.......................................F........FFF..................... [ 56%]
+........................................................................ [ 70%]
+........................................................................ [ 84%]
+........................................................................ [ 98%]
+........                                                                 [100%]
+================================== FAILURES ===================================
+________________ test_record_cycle_applies_decay_and_persists _________________
+
+tmp_path = WindowsPath('C:/Users/Chris/AppData/Local/Temp/pytest-of-Chris/pytest-163/test_record_cycle_applies_deca0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000026B2662D010>
+
+    def test_record_cycle_applies_decay_and_persists(tmp_path, monkeypatch):
+        log_file = tmp_path / "ledger.json"
+        ledger = performance.SwarmPerformanceLedger(log_path=log_file, decay_window_hours=6, decay_rate=0.5)
+    
+        entry = performance.AgentPerformance(agent_id="agent-decay")
+        entry.last_active = "2024-01-01T00:00:00Z"
+        entry.decay_weight = 1.0
+        ledger._agents[entry.agent_id] = entry
+    
+        monkeypatch.setattr(
+            performance,
+            "current_time",
+            lambda: {"utc_iso": "2024-01-02T12:00:00Z"},
+        )
+    
+>       ledger.record_cycle([
+            {"agent_id": "agent-decay", "vote": "accept"},
+            {"agent_id": "agent-new", "vote": "reject"},
+        ], approved=True)
+
+tests\swarm\test_performance_ledger.py:65: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+swarm\performance.py:110: in record_cycle
+    self._apply_decay(entry, now)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <swarm.performance.SwarmPerformanceLedger object at 0x0000026B2662F450>
+entry = AgentPerformance(agent_id='agent-decay', accuracy_window=deque([], maxlen=50), total_votes=0, correct_votes=0, incorrect_votes=0, last_active='2024-01-01T00:00:00Z', streak=0, decay_weight=1.0)
+now_iso = '2026-01-20T23:19:53.523655+00:00'
+
+    def _apply_decay(self, entry: AgentPerformance, now_iso: str) -> None:
+        if not entry.last_active:
+            return
+        last = _coerce_dt(entry.last_active)
+        now = _coerce_dt(now_iso)
+>       hours = max((now - last).total_seconds() / 3600.0, 0.0)
+                     ^^^^^^^^^^
+E       TypeError: can't subtract offset-naive and offset-aware datetimes
+
+swarm\performance.py:156: TypeError
+_________________ test_swarm_performance_records_and_persists _________________
+
+ledger_env = WindowsPath('C:/Users/Chris/AppData/Local/Temp/pytest-of-Chris/pytest-163/test_swarm_performance_records0/swarm_perf.json')
+
+    def test_swarm_performance_records_and_persists(ledger_env):
+        ledger = SwarmPerformanceLedger()
+        votes = [
+            {"agent_id": "alpha", "vote": "accept"},
+            {"agent_id": "beta", "vote": "reject"},
+            {"agent_id": "beta", "vote": "accept"},
+        ]
+    
+        ledger.record_cycle(votes, approved=True)
+    
+        alpha = ledger._agents["alpha"]
+        beta = ledger._agents["beta"]
+>       assert alpha.correct_votes == 1
+E       AssertionError: assert 189 == 1
+E        +  where 189 = AgentPerformance(agent_id='alpha', accuracy_window=deque([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...otal_votes=189, correct_votes=189, incorrect_votes=0, last_active='2025-01-01T00:00:00Z', streak=189, decay_weight=0.1).correct_votes
+
+tests\swarm\test_predictive_health_and_performance.py:94: AssertionError
+________________ test_swarm_performance_decay_and_best_parent _________________
+
+ledger_env = WindowsPath('C:/Users/Chris/AppData/Local/Temp/pytest-of-Chris/pytest-163/test_swarm_performance_decay_a0/swarm_perf.json')
+
+    def test_swarm_performance_decay_and_best_parent(ledger_env):
+        ledger = SwarmPerformanceLedger(decay_window_hours=6, decay_rate=0.5, min_decay_weight=0.1)
+        votes = [{"agent_id": "alpha", "vote": "accept"}]
+    
+        ledger.record_cycle(votes, approved=True)
+        ledger.record_cycle(votes, approved=True)
+    
+        entry = ledger._agents["alpha"]
+>       assert entry.decay_weight == pytest.approx(0.25)
+E       assert 0.1 == 0.25 Â± 2.5e-07
+E         
+E         comparison failed
+E         Obtained: 0.1
+E         Expected: 0.25 Â± 2.5e-07
+
+tests\swarm\test_predictive_health_and_performance.py:111: AssertionError
+___________________ test_swarm_performance_loads_from_disk ____________________
+
+ledger_env = WindowsPath('C:/Users/Chris/AppData/Local/Temp/pytest-of-Chris/pytest-163/test_swarm_performance_loads_f0/swarm_perf.json')
+
+    def test_swarm_performance_loads_from_disk(ledger_env):
+        first = SwarmPerformanceLedger()
+        first.record_cycle([{"agent_id": "alpha", "vote": "accept"}], approved=True)
+    
+        reloaded = SwarmPerformanceLedger()
+        assert "alpha" in reloaded._agents
+>       assert reloaded.best_parent(min_score=0.1, min_votes=1)["agent_id"] == "alpha"
+E       AssertionError: assert 'beta' == 'alpha'
+E         
+E         - alpha
+E         + beta
+
+tests\swarm\test_predictive_health_and_performance.py:126: AssertionError
+=============================== tests coverage ================================
+_______________ coverage: platform win32, python 3.11.9-final-0 _______________
+
+Name                                      Stmts   Miss  Cover   Missing
+-----------------------------------------------------------------------
+swarm\adaptive_model_selector.py             24      0   100%
+swarm\adversarial_robustness.py              31      0   100%
+swarm\agent_benchmarking.py                  35      0   100%
+swarm\agent_monitoring_metrics.py           192      3    98%   646-648
+swarm\agent_pattern_library.py               67      3    96%   152-154
+swarm\agent_registry.py                     236     12    95%   340, 348, 350, 352, 412, 429, 464, 476-477, 496-497, 524
+swarm\anomaly_detection_ml.py                25      0   100%
+swarm\anti_silent_failure.py                311     18    94%   324, 396, 419-420, 480-493, 502, 561, 565, 622
+swarm\auto_code_generator.py                 35      0   100%
+swarm\automated_upgrade_testing.py           28      0   100%
+swarm\collab_orchestrator.py                226     26    88%   235-236, 246-247, 291-296, 305-310, 316-321, 383-384, 418-422, 453-455, 468-469, 537
+swarm\collaborative_swarm_guardrails.py     108      7    94%   129, 142-143, 160, 180, 197, 240
+swarm\coma.py                               204      1    99%   146
+swarm\command_runner.py                      81     11    86%   161-193, 209, 217-219
+swarm\continuous_learning_pipeline.py       292     33    89%   324, 371, 394-397, 402, 405-407, 413-416, 431, 436, 453, 458, 478, 483, 520, 536, 543-544, 557, 563-564, 591, 596, 618, 675, 678, 681, 684
+swarm\contract_scanner.py                   156      7    96%   337-340, 385, 403, 428
+swarm\cost_optimizer.py                      27      0   100%
+swarm\coverage_loop.py                       87     14    84%   73, 109, 115-123, 159-161, 180
+swarm\cross_chain_invariants.py              44      1    98%   59
+swarm\cross_protocol_health.py               43      1    98%   64
+swarm\design_linter.py                       75      6    92%   66, 123-124, 149-151
+swarm\dev_swarm_orchestrator.py             261     18    93%   283-287, 317, 466, 496-497, 508-510, 523-525, 529-531, 558
+swarm\dynamic_network_policy.py              25      0   100%
+swarm\emergent_behavior_safeguards.py       318      6    98%   367, 372, 432, 503, 568, 682
+swarm\exfiltration_defense.py               237      9    96%   384, 429, 461, 526, 533-537, 684-686
+swarm\failure_recovery_system.py            276     41    85%   374, 390-391, 405-408, 420, 446-449, 492, 502, 511, 526, 541, 556, 565, 585, 589, 592, 613-626, 633-641, 648-651, 694, 731-733
+swarm\federated_learning.py                 215     10    95%   284, 341, 344, 392, 474, 478, 482, 551-553
+swarm\gamification_swarm.py                  55      2    96%   103, 119
+swarm\gamified_security.py                  219      9    96%   355, 392, 406, 463, 479, 495, 544, 546, 548
+swarm\growth_metrics_tracker.py             287     45    84%   313, 327, 338, 395, 411, 519-540, 548, 641, 674-700, 734-735, 744-746
+swarm\hft_exploit_detection.py               28      0   100%
+swarm\hsm_key_management.py                 197     10    95%   253, 297, 326, 406, 409, 458, 519, 622-624
+swarm\idea_prioritizer.py                    32      0   100%
+swarm\invariants_enforcement.py             185      7    96%   428, 476, 482, 555, 644-646
+swarm\llm_gateway.py                        189      7    96%   410, 415, 482, 504, 600-602
+swarm\local_llm_gateway.py                  103      0   100%
+swarm\marl_engine.py                        314      0   100%
+swarm\mev_rewards.py                        225     16    93%   236, 249, 322, 377, 388, 392, 437, 475, 479, 521, 531, 534, 542, 551-553
+swarm\multi_model_ensemble.py                51      0   100%
+swarm\multi_venue_router.py                  33      0   100%
+swarm\network_policy.py                     251     25    90%   419-420, 451, 459, 479-480, 496-497, 514, 554-555, 610, 661, 670-681, 692, 706-708
+swarm\orchestration_patterns.py              32      0   100%
+swarm\orchestrator.py                       271     38    86%   220, 229, 234, 442-443, 450, 454, 459-460, 470, 487, 516, 527-531, 577, 608-621, 629, 636-644, 653-664, 673-675
+swarm\parameter_optimizer.py                 32      0   100%
+swarm\performance.py                        124     45    64%   1-19, 28-30, 32-39, 41, 44, 46, 49, 55, 67-68, 80-83, 102, 108, 123-124, 128, 145, 149-151, 153, 164, 168, 173-174, 180
+swarm\perpetual_memory.py                   210     10    95%   260-267, 285-287, 363, 495, 632-634
+swarm\predictive_health_monitor.py           44      1    98%   52
+swarm\privacy_preserving_inference.py        22      0   100%
+swarm\protocol_maintenance.py               275     25    91%   275, 283, 328-333, 502, 514, 594, 626, 653, 717, 743-745, 751-753, 759-761, 767-769
+swarm\proxy_health_checker.py                22      0   100%
+swarm\proxy_load_balancer.py                 25      0   100%
+swarm\pso_optimizer.py                      193     18    91%   94, 122-142
+swarm\rag.py                                  0      0   100%
+swarm\replicator.py                         172      6    97%   171, 189, 228, 309, 387, 407
+swarm\rllib_wrapper.py                      121     10    92%   153-173, 176-195, 198-218, 278, 306-308
+swarm\rnd_pipeline.py                        58      3    95%   90-92
+swarm\role_refactoring.py                    69      5    93%   102, 108, 125-127
+swarm\sb3_wrapper.py                        136     11    92%   189-190, 238-255, 326-328, 333
+swarm\scam_pattern_recognition.py            26      0   100%
+swarm\scam_protection.py                    296     30    90%   387-396, 472-473, 487-488, 492, 497-498, 514-519, 560, 590-591, 606, 613-614, 632, 698, 789-791
+swarm\secure_agent_communication.py         265     24    91%   254-256, 331-332, 348, 354-355, 359-360, 387, 401, 407, 419-420, 440-442, 450, 472, 510, 601-603
+swarm\secure_messaging.py                   195     16    92%   304, 310, 313, 362, 379-382, 435, 439, 449-460
+swarm\secure_yield_contracts.py             221     16    93%   284-286, 353-355, 359-360, 425-427, 474, 523, 559-561
+swarm\security_defense_system.py            290     10    97%   464, 530, 542, 550, 563, 576, 581, 590, 622, 692
+swarm\self_evolution_loop.py                 68      3    96%   129-131
+swarm\self_healing_rollback.py               39      0   100%
+swarm\sniper_scanner.py                     224     10    96%   415, 419, 421, 431-434, 603-605
+swarm\spawner.py                             99      6    94%   148, 157-161
+swarm\structural_weaknesses_analysis.py     240     17    93%   223, 293, 297, 319-320, 350-351, 369-386, 603, 624, 633, 662-664
+swarm\swarm_lab.py                          341     24    93%   448, 519, 574, 656, 677-703, 832, 914-916
+swarm\swarm_lab_orchestrator.py             283     29    90%   229, 241-242, 291, 297, 341, 347, 382, 388, 425, 431, 457, 463, 469-470, 481-482, 493, 499, 523, 550-554, 563, 594-596
+swarm\test_agents.py                         13      0   100%
+swarm\test_swarm_planner.py                 107      7    93%   164, 174, 202, 204, 207, 211, 217
+swarm\workflow_optimizer.py                  34      0   100%
+swarm\zk_privacy_bridge.py                   28      0   100%
+-----------------------------------------------------------------------
+TOTAL                                     10403    712    93%
+=========================== short test summary info ===========================
+FAILED tests/swarm/test_performance_ledger.py::test_record_cycle_applies_decay_and_persists
+FAILED tests/swarm/test_predictive_health_and_performance.py::test_swarm_performance_records_and_persists
+FAILED tests/swarm/test_predictive_health_and_performance.py::test_swarm_performance_decay_and_best_parent
+FAILED tests/swarm/test_predictive_health_and_performance.py::test_swarm_performance_loads_from_disk
+4 failed, 508 passed in 15.84s
+
+2026-01-20 18:19:38 | INFO | agents.reflection | Loaded 49 reflections for 2 agents

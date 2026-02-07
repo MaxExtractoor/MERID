@@ -1,0 +1,2139 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID - Unified Control Center</title>
+    <link rel="stylesheet" href="/static/css/institutional.css?v=13">
+    <link rel="stylesheet" href="/static/css/professional.css?v=13">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/unified-dashboard.css?v=13">
+    <link rel="stylesheet" href="/static/css/live-data.css?v=13">
+    <link rel="stylesheet" href="/static/css/market-terminal.css?v=13">
+    <link rel="stylesheet" href="/static/css/intelligence-feed.css?v=13">
+    <link rel="stylesheet" href="/static/css/predictions-markets.css?v=13">
+    <link rel="stylesheet" href="/static/css/execution-interface.css?v=13">
+    <link rel="stylesheet" href="/static/css/portfolio-dashboard.css?v=13">
+    <link rel="stylesheet" href="/static/css/risk-monitor.css?v=13">
+</head>
+<body>
+    <!-- Top Navigation Bar -->
+    <nav class="top-nav">
+        <div class="nav-brand">
+            <div class="brand-logo">M</div>
+            <div class="brand-text">
+                <span class="brand-name">MERID</span>
+                <span class="brand-subtitle">Unified Control Center</span>
+            </div>
+        </div>
+        <div class="nav-status">
+            <div class="status-item" id="global-status">
+                <span class="ws-status disconnected" id="ws-status" title="WebSocket status"></span>
+                <span class="status-dot status-operational"></span>
+                <span class="status-text">OPERATIONAL</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Risk:</span>
+                <span class="risk-badge risk-low" id="risk-level">LOW</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">UTC:</span>
+                <span class="status-value" id="utc-time">--:--:--</span>
+            </div>
+        </div>
+        <div class="nav-actions">
+            <button class="nav-btn nav-btn-warning" id="lockdown-btn" onclick="toggleLockdown()">
+                <span class="btn-icon">&#9888;</span> LOCKDOWN
+            </button>
+            <button class="nav-btn" onclick="refreshAll()">
+                <span class="btn-icon">&#8635;</span> Refresh
+            </button>
+        </div>
+    </nav>
+
+    <!-- Live Prices Bar -->
+    <div class="live-prices-bar" id="prices-bar">
+        <div class="price-ticker active" data-symbol="BTC/USDT" onclick="selectSymbol('BTC/USDT')">
+            <div class="ticker-icon btc">B</div>
+            <div class="ticker-info">
+                <div class="symbol">BTC/USDT</div>
+                <div class="price up" id="price-btc">$94,250</div>
+            </div>
+            <div class="ticker-stats">
+                <span class="change positive" id="change-btc">+2.4%</span>
+            </div>
+        </div>
+        <div class="price-ticker" data-symbol="ETH/USDT" onclick="selectSymbol('ETH/USDT')">
+            <div class="ticker-icon eth">E</div>
+            <div class="ticker-info">
+                <div class="symbol">ETH/USDT</div>
+                <div class="price up" id="price-eth">$3,320</div>
+            </div>
+            <div class="ticker-stats">
+                <span class="change positive" id="change-eth">+1.8%</span>
+            </div>
+        </div>
+        <div class="price-ticker" data-symbol="SOL/USDT" onclick="selectSymbol('SOL/USDT')">
+            <div class="ticker-icon sol">S</div>
+            <div class="ticker-info">
+                <div class="symbol">SOL/USDT</div>
+                <div class="price up" id="price-sol">$187</div>
+            </div>
+            <div class="ticker-stats">
+                <span class="change positive" id="change-sol">+3.2%</span>
+            </div>
+        </div>
+        <div class="price-ticker" data-symbol="AVAX/USDT" onclick="selectSymbol('AVAX/USDT')">
+            <div class="ticker-icon avax">A</div>
+            <div class="ticker-info">
+                <div class="symbol">AVAX/USDT</div>
+                <div class="price down" id="price-avax">$38</div>
+            </div>
+            <div class="ticker-stats">
+                <span class="change negative" id="change-avax">-0.8%</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Layout -->
+    <div class="main-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-title">OVERVIEW</div>
+                <a href="#dashboard" class="sidebar-link active" data-section="dashboard">Dashboard</a>
+                <a href="#intelligence" class="sidebar-link" data-section="intelligence">Intelligence</a>
+                <a href="#predictions" class="sidebar-link" data-section="predictions">Predictions</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">SYSTEMS</div>
+                <a href="#systems" class="sidebar-link" data-section="systems">Four Systems</a>
+                <a href="#agents" class="sidebar-link" data-section="agents">Agents</a>
+                <a href="#consensus" class="sidebar-link" data-section="consensus">Consensus</a>
+                <a href="#simulation" class="sidebar-link" data-section="simulation">Simulation</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">MONITORING</div>
+                <a href="#shadow" class="sidebar-link" data-section="shadow">Shadow MERID</a>
+                <a href="#risk" class="sidebar-link" data-section="risk">Risk</a>
+                <a href="#audit" class="sidebar-link" data-section="audit">Audit Trail</a>
+                <a href="#execution" class="sidebar-link" data-section="execution">Execution</a>
+                <a href="#analytics" class="sidebar-link" data-section="analytics">Analytics</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">TOOLS</div>
+                <a href="#arbitrage" class="sidebar-link" data-section="arbitrage">Arbitrage</a>
+                <a href="#portfolio" class="sidebar-link" data-section="portfolio">Portfolio</a>
+                <a href="#backtest" class="sidebar-link" data-section="backtest">Backtest</a>
+                <a href="#alerts" class="sidebar-link" data-section="alerts">Alerts</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">OPERATIONS</div>
+                <a href="#monitoring" class="sidebar-link" data-section="monitoring">Monitoring</a>
+                <a href="#ratelimit" class="sidebar-link" data-section="ratelimit">Rate Limits</a>
+                <a href="#backup" class="sidebar-link" data-section="backup">Backup</a>
+                <a href="#plugins" class="sidebar-link" data-section="plugins">Plugins</a>
+                <a href="#compliance" class="sidebar-link" data-section="compliance">Compliance</a>
+                <a href="#wallet" class="sidebar-link" data-section="wallet">Wallet</a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">ADVANCED</div>
+                <a href="#treasury" class="sidebar-link" data-section="treasury">Treasury</a>
+                <a href="#sniping" class="sidebar-link" data-section="sniping">Sniping</a>
+                <a href="#recovery" class="sidebar-link" data-section="recovery">Recovery</a>
+                <a href="#spectator" class="sidebar-link" data-section="spectator">Spectator</a>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Section: Dashboard Overview -->
+            <section id="dashboard" class="content-section active">
+                <div class="section-header">
+                    <h1 class="section-title">Market Terminal</h1>
+                    <p class="section-subtitle">Real-time data for 50+ cryptocurrencies - Bloomberg-grade interface</p>
+                </div>
+                
+                <!-- Market Overview -->
+                <div id="market-overview"></div>
+                
+                <!-- Market Filters -->
+                <div id="market-filters"></div>
+                
+                <!-- Price Table -->
+                <div id="price-table"></div>
+
+                <!-- Reality Status Panel -->
+                <div class="reality-status-panel">
+                    <div class="reality-header">
+                        <h3>Reality Status</h3>
+                        <div id="reality-mode" class="mode-badge mode-operational">OPERATIONAL</div>
+                    </div>
+                    <div class="reality-metrics">
+                        <div class="reality-metric">
+                            <span class="label">Valid Assertions</span>
+                            <span id="valid-pct" class="value">--</span>
+                        </div>
+                        <div class="reality-metric">
+                            <span class="label">Regime Entropy</span>
+                            <span id="regime-entropy" class="value">--</span>
+                        </div>
+                        <div class="reality-metric">
+                            <span class="label">Active Conflicts</span>
+                            <span id="active-conflicts" class="value">--</span>
+                        </div>
+                        <div class="reality-metric">
+                            <span class="label">Blind Spots</span>
+                            <span id="blind-spots-count" class="value">--</span>
+                        </div>
+                    </div>
+                    <div id="blind-spots-list" class="blind-spots-list"></div>
+                </div>
+
+                <!-- Stats Grid -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-equity">$100,000</div>
+                        <div class="stat-label">Total Equity</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value positive" id="stat-pnl">+$0</div>
+                        <div class="stat-label">Unrealized P&L</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-agents">8</div>
+                        <div class="stat-label">Active Agents</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-signals">0</div>
+                        <div class="stat-label">Intel Signals</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-divergence">0%</div>
+                        <div class="stat-label">Divergence</div>
+                    </div>
+                </div>
+
+                <!-- Charts Grid -->
+                <div class="charts-grid">
+                    <div class="chart-card featured">
+                        <div class="chart-header">
+                            <div class="chart-title">
+                                <h3 id="main-chart-symbol">BTC/USDT</h3>
+                                <span class="chart-price" id="main-chart-price">$94,250</span>
+                                <span class="chart-change positive" id="main-chart-change">+2.4%</span>
+                            </div>
+                            <div class="chart-controls">
+                                <button class="active" data-tf="1m">1M</button>
+                                <button data-tf="5m">5M</button>
+                                <button data-tf="1h">1H</button>
+                                <button data-tf="1d">1D</button>
+                            </div>
+                        </div>
+                        <div class="chart-body large">
+                            <canvas id="main-price-chart"></canvas>
+                        </div>
+                    </div>
+                    <div class="chart-card">
+                        <div class="chart-header">
+                            <h3>Portfolio Value</h3>
+                        </div>
+                        <div class="chart-body">
+                            <canvas id="portfolio-chart"></canvas>
+                        </div>
+                    </div>
+                    <div class="chart-card">
+                        <div class="chart-header">
+                            <h3>Agent Activity</h3>
+                        </div>
+                        <div class="chart-body">
+                            <canvas id="agent-activity-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Dashboard Grid -->
+                <div class="dashboard-grid">
+                    <div class="dashboard-left">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Intelligence Feed</h2>
+                                <span id="sentiment-score">Score: 0.00</span>
+                            </div>
+                            <div class="panel-body">
+                                <div class="sentiment-panel">
+                                    <div class="sentiment-value neutral" id="market-sentiment">NEUTRAL</div>
+                                </div>
+                                <div class="intelligence-feed" id="intel-feed">
+                                    <div class="empty-state">Loading intelligence...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="dashboard-right">
+                        <div class="divergence-panel">
+                            <div class="divergence-score nominal" id="div-score">0.0%</div>
+                            <div class="divergence-status" id="div-status">NOMINAL</div>
+                        </div>
+                        <div class="alerts-panel">
+                            <div class="alerts-header">
+                                <h4>Active Alerts</h4>
+                                <span class="alerts-count" id="alerts-count">0</span>
+                            </div>
+                            <div class="alerts-list" id="alerts-list">
+                                <div class="empty-state">No active alerts</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Intelligence -->
+            <section id="intelligence" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Intelligence Feed</h1>
+                    <p class="section-subtitle">Multi-source news aggregation with sentiment analysis</p>
+                </div>
+                
+                <!-- Sentiment Overview -->
+                <div id="sentiment-overview"></div>
+                
+                <!-- Trending Topics -->
+                <div id="trending-topics"></div>
+                
+                <!-- Intelligence Filters -->
+                <div id="intelligence-filters"></div>
+                
+                <!-- News Feed -->
+                <div id="news-feed-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Prediction Markets -->
+            <section id="predictions" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Prediction Markets</h1>
+                    <p class="section-subtitle">100+ markets from Polymarket with advanced filtering</p>
+                </div>
+
+                <!-- Predictions Analytics -->
+                <div id="predictions-analytics"></div>
+
+                <!-- Predictions Filters -->
+                <div id="predictions-filters"></div>
+
+                <!-- Predictions List -->
+                <div id="predictions-list"></div>
+
+                <div class="dashboard-grid">
+                    <div class="dashboard-left">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Odds Drift Signals</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div class="intelligence-feed" id="drift-feed">
+                                    <div class="empty-state">No drift signals</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Top Markets</h2>
+                                <select id="market-category" onchange="filterMarkets()" title="Filter by category">
+                                    <option value="all">All Categories</option>
+                                    <option value="crypto">Crypto</option>
+                                    <option value="politics">Politics</option>
+                                    <option value="economics">Economics</option>
+                                    <option value="finance">Finance</option>
+                                </select>
+                            </div>
+                            <div class="panel-body">
+                                <div id="predictions-feed">
+                                    <div class="empty-state">Loading markets...</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Crypto News</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="news-feed">
+                                    <div class="empty-state">Loading news...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-right">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Arbitrage Opportunities</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="arb-feed">
+                                    <div class="empty-state">No arbitrage found</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Resolution Decay</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="decay-feed">
+                                    <div class="empty-state">No urgent markets</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Actions</h2>
+                            </div>
+                            <div class="panel-body">
+                                <button class="btn btn-primary btn-block" onclick="startPredictions()">Start Aggregation</button>
+                                <button class="btn btn-secondary btn-block" onclick="refreshPredictions()">Refresh Data</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Systems -->
+            <section id="systems" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Four-System Architecture</h1>
+                </div>
+                <div class="systems-grid">
+                    <div class="system-card intelligence">
+                        <div class="system-header">
+                            <div class="system-icon intelligence">I</div>
+                            <div class="system-info">
+                                <h3 class="system-name">INTELLIGENCE</h3>
+                                <span class="system-role">Analysis & Signals</span>
+                            </div>
+                            <span class="status-indicator operational"></span>
+                        </div>
+                        <div class="system-metrics">
+                            <div class="metric"><span class="metric-label">Health</span><span class="metric-value" id="intel-health">98%</span></div>
+                            <div class="metric"><span class="metric-label">Intents</span><span class="metric-value" id="intel-intents">12</span></div>
+                        </div>
+                    </div>
+                    <div class="system-card trading">
+                        <div class="system-header">
+                            <div class="system-icon trading">T</div>
+                            <div class="system-info">
+                                <h3 class="system-name">TRADING</h3>
+                                <span class="system-role">Position Management</span>
+                            </div>
+                            <span class="status-indicator operational"></span>
+                        </div>
+                        <div class="system-metrics">
+                            <div class="metric"><span class="metric-label">Health</span><span class="metric-value" id="trading-health">96%</span></div>
+                            <div class="metric"><span class="metric-label">Intents</span><span class="metric-value" id="trading-intents">5</span></div>
+                        </div>
+                    </div>
+                    <div class="system-card treasury">
+                        <div class="system-header">
+                            <div class="system-icon treasury">$</div>
+                            <div class="system-info">
+                                <h3 class="system-name">TREASURY</h3>
+                                <span class="system-role">Capital Preservation</span>
+                            </div>
+                            <span class="status-indicator operational"></span>
+                        </div>
+                        <div class="system-metrics">
+                            <div class="metric"><span class="metric-label">Health</span><span class="metric-value" id="treasury-health">100%</span></div>
+                            <div class="metric"><span class="metric-label">Intents</span><span class="metric-value" id="treasury-intents">2</span></div>
+                        </div>
+                    </div>
+                    <div class="system-card governance">
+                        <div class="system-header">
+                            <div class="system-icon governance">G</div>
+                            <div class="system-info">
+                                <h3 class="system-name">GOVERNANCE</h3>
+                                <span class="system-role">Meta-Control</span>
+                            </div>
+                            <span class="status-indicator operational"></span>
+                        </div>
+                        <div class="system-metrics">
+                            <div class="metric"><span class="metric-label">Health</span><span class="metric-value" id="governance-health">100%</span></div>
+                            <div class="metric"><span class="metric-label">Intents</span><span class="metric-value" id="governance-intents">1</span></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Agents -->
+            <section id="agents" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Streaming Agent Mesh</h1>
+                    <p class="section-subtitle">8 mandatory autonomous agents</p>
+                </div>
+                <div class="stats-grid-4">
+                    <div class="stat-card">
+                        <div class="stat-value" id="mesh-status">IDLE</div>
+                        <div class="stat-label">Mesh Status</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="mesh-total">8</div>
+                        <div class="stat-label">Total Agents</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value positive" id="mesh-running">0</div>
+                        <div class="stat-label">Running</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="mesh-events">0</div>
+                        <div class="stat-label">Events Processed</div>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Agent Grid</h2>
+                        <button class="btn-sm" onclick="refreshMesh()">Refresh</button>
+                    </div>
+                    <div class="panel-body">
+                        <div class="mesh-grid" id="mesh-grid">
+                            <div class="empty-state">Loading agents...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Shadow -->
+            <section id="shadow" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Shadow MERID</h1>
+                </div>
+                <div class="shadow-comparison">
+                    <div class="comparison-card production">
+                        <div class="comparison-header"><h3>PRODUCTION</h3><span class="badge live">LIVE</span></div>
+                        <div class="comparison-metrics">
+                            <div class="comp-metric"><span class="label">Equity</span><span class="value" id="prod-equity">$100,000</span></div>
+                            <div class="comp-metric"><span class="label">P&L</span><span class="value positive" id="prod-pnl">+$0</span></div>
+                        </div>
+                    </div>
+                    <div class="comparison-divider">
+                        <span class="divergence-value" id="divergence-pct">0%</span>
+                    </div>
+                    <div class="comparison-card shadow">
+                        <div class="comparison-header"><h3>SHADOW</h3><span class="badge simulation">SIM</span></div>
+                        <div class="comparison-metrics">
+                            <div class="comp-metric"><span class="label">Equity</span><span class="value" id="shadow-equity">$100,000</span></div>
+                            <div class="comp-metric"><span class="label">P&L</span><span class="value positive" id="shadow-pnl">+$0</span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="panel guardian-panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">ShadowGuardian</h2>
+                        <div class="panel-actions">
+                            <button class="btn-sm" onclick="triggerReplay()">Replay</button>
+                            <button class="btn-sm btn-warning" onclick="runStressTest()">Stress</button>
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <div class="guardian-status">
+                            <div class="guardian-metric"><span class="label">State</span><span class="value" id="guardian-state">IDLE</span></div>
+                            <div class="guardian-metric"><span class="label">Threat</span><span class="value" id="guardian-threat">NONE</span></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Simulation -->
+            <section id="simulation" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Simulation Mining</h1>
+                    <p class="section-subtitle">Proof-of-Useful-Simulation block production</p>
+                </div>
+
+                <div class="stats-grid-4">
+                    <div class="stat-card">
+                        <div class="stat-value" id="sim-status">IDLE</div>
+                        <div class="stat-label">Status</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="sim-block">0</div>
+                        <div class="stat-label">Current Block</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="sim-interval">30s</div>
+                        <div class="stat-label">Block Interval</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="sim-pending">0</div>
+                        <div class="stat-label">Pending Decisions</div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="dashboard-left">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Recent Blocks</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="blocks-feed" class="feed-scroll">
+                                    <div class="empty-state">No blocks mined yet</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-right">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Strategy Leaderboard</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="strategies-feed">
+                                    <div class="empty-state">No strategies tracked</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Controls</h2>
+                            </div>
+                            <div class="panel-body">
+                                <button class="btn btn-primary btn-block" onclick="startSimulation()">Start Miner</button>
+                                <button class="btn btn-secondary btn-block" onclick="refreshSimulation()">Refresh Status</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Consensus -->
+            <section id="consensus" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Consensus Engine</h1>
+                    <p class="section-subtitle">Trust-weighted voting with 2/3 quorum</p>
+                </div>
+
+                <div class="stats-grid-4">
+                    <div class="stat-card">
+                        <div class="stat-value" id="consensus-status">IDLE</div>
+                        <div class="stat-label">Status</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="consensus-votes">0</div>
+                        <div class="stat-label">Pending Votes</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="consensus-quorum">67%</div>
+                        <div class="stat-label">Quorum Threshold</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="consensus-interval">10s</div>
+                        <div class="stat-label">Resolution Interval</div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="dashboard-left">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Pending Votes</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="votes-feed" class="feed-scroll">
+                                    <div class="empty-state">No pending votes</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-right">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Trust Scores</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="trust-scores">
+                                    <div class="empty-state">No trust data</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Controls</h2>
+                            </div>
+                            <div class="panel-body">
+                                <button class="btn btn-primary btn-block" onclick="startConsensus()">Start Engine</button>
+                                <button class="btn btn-secondary btn-block" onclick="refreshConsensus()">Refresh Status</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Risk -->
+            <section id="risk" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Risk Management</h1>
+                    <p class="section-subtitle">Real-time risk tracking and compliance monitoring</p>
+                </div>
+
+                <!-- Risk Stats -->
+                <div id="risk-stats"></div>
+
+                <!-- Exposures Table -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Position Exposures</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="risk-exposures-table"></div>
+                    </div>
+                </div>
+
+                <!-- Risk Limits -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Risk Limits Configuration</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="risk-limits-config"></div>
+                    </div>
+                </div>
+
+                <!-- Violations -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Risk Violations</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="risk-violations-list"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Execution -->
+            <section id="execution" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Execution Engine</h1>
+                    <p class="section-subtitle">Order management and position tracking</p>
+                </div>
+
+                <!-- Execution Stats -->
+                <div id="execution-stats"></div>
+
+                <!-- Order Form -->
+                <div id="order-form-container"></div>
+
+                <!-- Active Orders -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Active Orders</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="active-orders-list"></div>
+                    </div>
+                </div>
+
+                <!-- Open Positions -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Open Positions</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="positions-list"></div>
+                    </div>
+                </div>
+
+                    <div class="dashboard-right">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Account</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div class="account-info">
+                                    <div class="account-row">
+                                        <span class="account-label">Balance</span>
+                                        <span class="account-value" id="exec-balance">$100,000</span>
+                                    </div>
+                                    <div class="account-row">
+                                        <span class="account-label">Exposure</span>
+                                        <span class="account-value" id="exec-exposure">$0</span>
+                                    </div>
+                                    <div class="account-row">
+                                        <span class="account-label">Realized P&L</span>
+                                        <span class="account-value" id="exec-realized">$0</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Controls</h2>
+                            </div>
+                            <div class="panel-body">
+                                <button class="btn btn-primary btn-block" onclick="refreshExecution()">Refresh</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Audit Trail -->
+            <section id="audit" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Audit Trail</h1>
+                    <p class="section-subtitle">Immutable decision log with hash chain verification</p>
+                </div>
+
+                <div class="stats-grid-4">
+                    <div class="stat-card">
+                        <div class="stat-value" id="audit-status">IDLE</div>
+                        <div class="stat-label">Status</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="audit-entries">0</div>
+                        <div class="stat-label">Total Entries</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="audit-sequence">0</div>
+                        <div class="stat-label">Sequence</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value positive" id="audit-verified">-</div>
+                        <div class="stat-label">Chain Integrity</div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="dashboard-left">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Recent Entries</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="audit-feed" class="feed-scroll">
+                                    <div class="empty-state">No audit entries</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-right">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Chain Info</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div class="chain-info">
+                                    <div class="chain-row">
+                                        <span class="chain-label">Last Hash</span>
+                                        <span class="chain-value" id="audit-hash">genesis</span>
+                                    </div>
+                                    <div class="chain-row">
+                                        <span class="chain-label">Storage</span>
+                                        <span class="chain-value" id="audit-storage">data/audit</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Controls</h2>
+                            </div>
+                            <div class="panel-body">
+                                <button class="btn btn-primary btn-block" onclick="verifyAuditChain()">Verify Chain</button>
+                                <button class="btn btn-secondary btn-block" onclick="refreshAudit()">Refresh</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Analytics -->
+            <section id="analytics" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Performance Analytics</h1>
+                    <p class="section-subtitle">Trading performance and metrics</p>
+                </div>
+
+                <div class="stats-grid-4">
+                    <div class="stat-card">
+                        <div class="stat-value" id="analytics-trades">0</div>
+                        <div class="stat-label">Total Trades</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="analytics-winrate">0%</div>
+                        <div class="stat-label">Win Rate</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="analytics-pnl">$0</div>
+                        <div class="stat-label">Total P&L</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="analytics-drawdown">0%</div>
+                        <div class="stat-label">Max Drawdown</div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="dashboard-left">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Recent Trades</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div id="analytics-trades-feed" class="feed-scroll">
+                                    <div class="empty-state">No trades recorded</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-right">
+                        <div class="panel">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Performance Metrics</h2>
+                            </div>
+                            <div class="panel-body">
+                                <div class="metrics-list">
+                                    <div class="metric-row">
+                                        <span class="metric-label">Profit Factor</span>
+                                        <span class="metric-value" id="analytics-pf">0.00</span>
+                                    </div>
+                                    <div class="metric-row">
+                                        <span class="metric-label">Avg Win</span>
+                                        <span class="metric-value positive" id="analytics-avgwin">$0</span>
+                                    </div>
+                                    <div class="metric-row">
+                                        <span class="metric-label">Avg Loss</span>
+                                        <span class="metric-value negative" id="analytics-avgloss">$0</span>
+                                    </div>
+                                    <div class="metric-row">
+                                        <span class="metric-label">Largest Win</span>
+                                        <span class="metric-value" id="analytics-largestwin">$0</span>
+                                    </div>
+                                    <div class="metric-row">
+                                        <span class="metric-label">Largest Loss</span>
+                                        <span class="metric-value" id="analytics-largestloss">$0</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel panel-mt">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Controls</h2>
+                            </div>
+                            <div class="panel-body">
+                                <button class="btn btn-primary btn-block" onclick="refreshAnalytics()">Refresh</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Portfolio -->
+            <section id="portfolio" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Portfolio Management</h1>
+                    <p class="section-subtitle">Position tracking and performance analytics</p>
+                </div>
+
+                <!-- Portfolio Stats -->
+                <div id="portfolio-stats"></div>
+
+                <!-- Positions Table -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Positions</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="portfolio-positions-table"></div>
+                    </div>
+                </div>
+
+                <!-- Allocation Chart -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Asset Allocation</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="allocation-chart-container"></div>
+                    </div>
+                </div>
+
+                <!-- Performance Metrics -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Performance Metrics</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="performance-metrics"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Arbitrage -->
+            <section id="arbitrage" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Arbitrage Engine</h1>
+                    <p class="section-subtitle">Cross-exchange and basis arbitrage opportunities</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="arb-opportunities">0</div>
+                        <div class="stat-label">Opportunities</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value positive" id="arb-potential-profit">$0</div>
+                        <div class="stat-label">Potential Profit</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="arb-scanners-active">0/4</div>
+                        <div class="stat-label">Scanners Active</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value warning" id="arb-execution-status">DISABLED</div>
+                        <div class="stat-label">Execution</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Scanner Status</h2>
+                            <div class="panel-actions">
+                                <button class="btn btn-sm btn-success" onclick="startAllScanners()">Start All</button>
+                                <button class="btn btn-sm btn-danger" onclick="stopAllScanners()">Stop All</button>
+                            </div>
+                        </div>
+                        <div class="panel-body">
+                            <div id="arb-scanners" class="scanner-list">
+                                <div class="scanner-item">
+                                    <span class="scanner-name">Cross-CEX</span>
+                                    <span class="scanner-status stopped">Stopped</span>
+                                    <button class="btn btn-xs" onclick="toggleScanner('cross_cex_scanner')">Toggle</button>
+                                </div>
+                                <div class="scanner-item">
+                                    <span class="scanner-name">DEX-CEX</span>
+                                    <span class="scanner-status stopped">Stopped</span>
+                                    <button class="btn btn-xs" onclick="toggleScanner('dex_cex_scanner')">Toggle</button>
+                                </div>
+                                <div class="scanner-item">
+                                    <span class="scanner-name">Perp-Spot</span>
+                                    <span class="scanner-status stopped">Stopped</span>
+                                    <button class="btn btn-xs" onclick="toggleScanner('perp_spot_scanner')">Toggle</button>
+                                </div>
+                                <div class="scanner-item">
+                                    <span class="scanner-name">Funding Rate</span>
+                                    <span class="scanner-status stopped">Stopped</span>
+                                    <button class="btn btn-xs" onclick="toggleScanner('funding_rate_scanner')">Toggle</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Execution Gate</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div class="gate-status">
+                                <div class="gate-item">
+                                    <span>Execution Enabled</span>
+                                    <span id="gate-enabled" class="badge badge-danger">NO</span>
+                                </div>
+                                <div class="gate-item">
+                                    <span>Kill Switch</span>
+                                    <span id="gate-killswitch" class="badge badge-success">OFF</span>
+                                </div>
+                                <div class="gate-item">
+                                    <span>Daily Executions</span>
+                                    <span id="gate-daily-exec">0/100</span>
+                                </div>
+                                <div class="gate-item">
+                                    <span>Daily Volume</span>
+                                    <span id="gate-daily-vol">$0</span>
+                                </div>
+                            </div>
+                            <div class="gate-controls mt-3">
+                                <button class="btn btn-danger btn-sm" onclick="activateKillSwitch()">Kill Switch</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel panel-mt">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Recent Opportunities</h2>
+                        <button class="btn btn-sm" onclick="refreshArbitrage()">Refresh</button>
+                    </div>
+                    <div class="panel-body">
+                        <div id="arb-opportunities-list" class="opportunities-list">
+                            <div class="empty-state">No opportunities detected. Start scanners to begin.</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Backtest -->
+            <section id="backtest" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Backtesting</h1>
+                    <p class="section-subtitle">Test strategies against historical data</p>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Run Backtest</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div class="form-group">
+                                <label for="backtest-strategy">Strategy</label>
+                                <select id="backtest-strategy" class="form-control" title="Select backtesting strategy">
+                                    <option value="momentum">Momentum</option>
+                                    <option value="mean_reversion">Mean Reversion</option>
+                                    <option value="breakout">Breakout</option>
+                                    <option value="ma_crossover">MA Crossover</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="backtest-symbol">Symbol</label>
+                                <select id="backtest-symbol" class="form-control" title="Select trading symbol">
+                                    <option value="BTC/USDT">BTC/USDT</option>
+                                    <option value="ETH/USDT">ETH/USDT</option>
+                                    <option value="SOL/USDT">SOL/USDT</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="backtest-days">Days</label>
+                                <input type="number" id="backtest-days" class="form-control" value="30" min="7" max="365" title="Number of days to backtest" placeholder="30">
+                            </div>
+                            <button class="btn btn-primary btn-block" onclick="runBacktest()">Run Backtest</button>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Results</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="backtest-results" class="backtest-results">
+                                <div class="empty-state">No backtest results yet</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel panel-mt">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Backtest History</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="backtest-history" class="backtest-history">
+                            <div class="empty-state">No previous backtests</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Alerts -->
+            <section id="alerts" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Alerts & Notifications</h1>
+                    <p class="section-subtitle">Price alerts and system notifications</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="alerts-active">0</div>
+                        <div class="stat-label">Active Alerts</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="alerts-triggered">0</div>
+                        <div class="stat-label">Triggered</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="alerts-unread">0</div>
+                        <div class="stat-label">Unread</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Create Price Alert</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div class="form-group">
+                                <label for="alert-symbol">Symbol</label>
+                                <select id="alert-symbol" class="form-control" title="Select symbol for alert">
+                                    <option value="BTC/USDT">BTC/USDT</option>
+                                    <option value="ETH/USDT">ETH/USDT</option>
+                                    <option value="SOL/USDT">SOL/USDT</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="alert-direction">Direction</label>
+                                <select id="alert-direction" class="form-control" title="Select alert direction">
+                                    <option value="above">Price Above</option>
+                                    <option value="below">Price Below</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="alert-price">Target Price</label>
+                                <input type="number" id="alert-price" class="form-control" placeholder="100000" title="Enter target price for alert">
+                            </div>
+                            <button class="btn btn-primary btn-block" onclick="createAlert()">Create Alert</button>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Active Alerts</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="alerts-list" class="alerts-list">
+                                <div class="empty-state">No active alerts</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel panel-mt">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Notifications</h2>
+                        <button class="btn btn-sm" onclick="markAllRead()">Mark All Read</button>
+                    </div>
+                    <div class="panel-body">
+                        <div id="notifications-list" class="notifications-list">
+                            <div class="empty-state">No notifications</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Monitoring -->
+            <section id="monitoring" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">System Monitoring</h1>
+                    <p class="section-subtitle">Real-time metrics, health checks, and performance tracking</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="mon-cpu">--%</div>
+                        <div class="stat-label">CPU Usage</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="mon-memory">--%</div>
+                        <div class="stat-label">Memory</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="mon-disk">--%</div>
+                        <div class="stat-label">Disk</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="mon-health">--</div>
+                        <div class="stat-label">Health Status</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Health Checks</h2>
+                            <button class="btn btn-sm" onclick="refreshMonitoring()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="health-checks-list" class="health-list">
+                                <div class="empty-state">Loading health checks...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Performance Metrics</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="perf-metrics-list" class="metrics-list">
+                                <div class="empty-state">Loading metrics...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Rate Limits -->
+            <section id="ratelimit" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Rate Limiting</h1>
+                    <p class="section-subtitle">API throttling and request management</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="rl-total-rules">--</div>
+                        <div class="stat-label">Active Rules</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="rl-blocked">--</div>
+                        <div class="stat-label">Blocked IPs</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="rl-throttled">--</div>
+                        <div class="stat-label">Throttled</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="rl-requests">--</div>
+                        <div class="stat-label">Requests/min</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Rate Limit Rules</h2>
+                            <button class="btn btn-sm" onclick="refreshRateLimits()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="ratelimit-rules-list" class="rules-list">
+                                <div class="empty-state">Loading rules...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Blocked Identifiers</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="blocked-list" class="blocked-list">
+                                <div class="empty-state">No blocked identifiers</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Backup -->
+            <section id="backup" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Backup & Recovery</h1>
+                    <p class="section-subtitle">Snapshots, scheduled backups, and disaster recovery</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="backup-total">--</div>
+                        <div class="stat-label">Total Snapshots</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="backup-last">--</div>
+                        <div class="stat-label">Last Backup</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="backup-schedules">--</div>
+                        <div class="stat-label">Schedules</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="backup-recovery">--</div>
+                        <div class="stat-label">Recovery Points</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Snapshots</h2>
+                            <button class="btn btn-sm btn-primary" onclick="createSnapshot()">Create Snapshot</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="snapshots-list" class="snapshots-list">
+                                <div class="empty-state">Loading snapshots...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Backup Schedules</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="backup-schedules-list" class="schedules-list">
+                                <div class="empty-state">Loading schedules...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Plugins -->
+            <section id="plugins" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Plugin System</h1>
+                    <p class="section-subtitle">Extensions, hooks, and sandboxed execution</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="plugins-installed">--</div>
+                        <div class="stat-label">Installed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="plugins-active">--</div>
+                        <div class="stat-label">Active</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="plugins-hooks">--</div>
+                        <div class="stat-label">Hooks</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="plugins-sandbox">--</div>
+                        <div class="stat-label">Sandbox Status</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Installed Plugins</h2>
+                            <button class="btn btn-sm" onclick="discoverPlugins()">Discover</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="plugins-list" class="plugins-list">
+                                <div class="empty-state">No plugins installed</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Available Hooks</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="hooks-list" class="hooks-list">
+                                <div class="empty-state">Loading hooks...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Compliance -->
+            <section id="compliance" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Compliance & Audit</h1>
+                    <p class="section-subtitle">Regulatory reporting, audit logs, and retention policies</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="comp-entries">--</div>
+                        <div class="stat-label">Audit Entries</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="comp-transactions">--</div>
+                        <div class="stat-label">Transactions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="comp-reports">--</div>
+                        <div class="stat-label">Reports</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="comp-retention">--</div>
+                        <div class="stat-label">Retention Days</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Recent Audit Entries</h2>
+                            <button class="btn btn-sm" onclick="refreshCompliance()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="audit-entries-list" class="audit-list">
+                                <div class="empty-state">Loading audit entries...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Compliance Reports</h2>
+                            <button class="btn btn-sm btn-primary" onclick="generateReport()">Generate</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="compliance-reports-list" class="reports-list">
+                                <div class="empty-state">No reports generated</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Wallet -->
+            <section id="wallet" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Wallet & Custody</h1>
+                    <p class="section-subtitle">Key management, vaults, and hardware wallet integration</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="wallet-vaults">--</div>
+                        <div class="stat-label">Vaults</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="wallet-keys">--</div>
+                        <div class="stat-label">Keys</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="wallet-sessions">--</div>
+                        <div class="stat-label">WC Sessions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="wallet-hw">--</div>
+                        <div class="stat-label">Hardware</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Vaults</h2>
+                            <button class="btn btn-sm" onclick="refreshWallet()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="vaults-list" class="vaults-list">
+                                <div class="empty-state">Loading vaults...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">WalletConnect Sessions</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="wc-sessions-list" class="sessions-list">
+                                <div class="empty-state">No active sessions</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Treasury -->
+            <section id="treasury" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Treasury Automation</h1>
+                    <p class="section-subtitle">Yield strategies, drawdown governance, and auto-rebalancing</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="treasury-yield-sources">--</div>
+                        <div class="stat-label">Yield Sources</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="treasury-agents">--</div>
+                        <div class="stat-label">Strategy Agents</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="treasury-proposals">--</div>
+                        <div class="stat-label">Active Proposals</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="treasury-drawdown">--</div>
+                        <div class="stat-label">Drawdown</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Top Yield Sources</h2>
+                            <button class="btn btn-sm" onclick="refreshTreasury()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="yield-sources-list" class="yield-list">
+                                <div class="empty-state">Loading yield sources...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Drawdown Governor</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="drawdown-status" class="drawdown-display">
+                                <div class="empty-state">Loading drawdown status...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Sniping -->
+            <section id="sniping" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Memecoin Sniping</h1>
+                    <p class="section-subtitle">High-risk token detection with safety rails (ALERT-ONLY)</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="sniping-alerts">--</div>
+                        <div class="stat-label">Active Alerts</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="sniping-tokens">--</div>
+                        <div class="stat-label">Detected Tokens</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="sniping-rejected">--</div>
+                        <div class="stat-label">Auto-Rejected</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value safe" id="sniping-mode">ALERT_ONLY</div>
+                        <div class="stat-label">Mode</div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Snipe Alerts</h2>
+                        <button class="btn btn-sm" onclick="refreshSniping()">Refresh</button>
+                    </div>
+                    <div class="panel-body">
+                        <div id="sniping-alerts-list" class="alerts-list">
+                            <div class="empty-state">No active alerts</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Recovery -->
+            <section id="recovery" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Disaster Recovery</h1>
+                    <p class="section-subtitle">Failover, cold-start, and capital freeze management</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="recovery-state">--</div>
+                        <div class="stat-label">System State</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="recovery-frozen">--</div>
+                        <div class="stat-label">Capital Frozen</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="recovery-quarantined">--</div>
+                        <div class="stat-label">Quarantined Agents</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="recovery-points">--</div>
+                        <div class="stat-label">Recovery Points</div>
+                    </div>
+                </div>
+
+                <div class="two-column-grid">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Partial Boot Status</h2>
+                            <button class="btn btn-sm" onclick="refreshRecovery()">Refresh</button>
+                        </div>
+                        <div class="panel-body">
+                            <div id="partial-boot-status" class="boot-status">
+                                <div class="empty-state">Loading boot status...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Shadow Promotion</h2>
+                        </div>
+                        <div class="panel-body">
+                            <div id="shadow-status" class="shadow-display">
+                                <div class="empty-state">Loading shadow status...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Recent Anomalies</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div id="anomalies-list" class="anomalies-list">
+                            <div class="empty-state">No anomalies detected</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section: Spectator -->
+            <section id="spectator" class="content-section">
+                <div class="section-header">
+                    <h1 class="section-title">Spectator Mode</h1>
+                    <p class="section-subtitle">Watch agents perform paper trades in real-time</p>
+                </div>
+
+                <!-- Trading Mode Panel -->
+                <div class="trading-mode-panel">
+                    <div class="trading-mode-header">
+                        <h3>Trading Mode</h3>
+                        <span class="mode-badge mode-paper" id="trading-mode-indicator">PAPER</span>
+                    </div>
+                    <div class="mode-selector">
+                        <button class="mode-btn mode-paper active" onclick="setTradingMode('paper')">Paper</button>
+                        <button class="mode-btn mode-hybrid" onclick="setTradingMode('hybrid')">Hybrid</button>
+                        <button class="mode-btn mode-live" onclick="setTradingMode('live')">Live</button>
+                        <button class="mode-btn mode-autonomous" onclick="setTradingMode('autonomous')">Autonomous</button>
+                    </div>
+                    <div id="trading-mode-stats"></div>
+                    <div class="mode-warning hidden" id="live-warning">
+                        <span class="mode-warning-icon">⚠️</span>
+                        <span>Live mode will execute real trades on connected exchanges. Use with caution.</span>
+                    </div>
+                </div>
+
+                <!-- Spectator Panel -->
+                <div class="spectator-panel">
+                    <div class="spectator-header">
+                        <h3><span class="spectator-live-dot"></span> Live Agent Trades</h3>
+                        <div>
+                            <button class="btn btn-sm" onclick="startSpectatorMode()">Start Watching</button>
+                            <button class="btn btn-sm btn-secondary" onclick="stopSpectatorMode()">Stop</button>
+                        </div>
+                    </div>
+                    <div id="spectator-summary"></div>
+                    <div id="spectator-trades-feed">
+                        <div class="empty-state">Click "Start Watching" to begin spectating agent trades</div>
+                    </div>
+                    <div id="spectator-agents"></div>
+                </div>
+
+                <!-- Spectator Stats -->
+                <div class="panel spectator-stats-panel">
+                    <div class="panel-header">
+                        <h2 class="panel-title">Trading Statistics</h2>
+                        <button class="btn btn-sm" onclick="fetchSpectatorStats()">Refresh</button>
+                    </div>
+                    <div class="panel-body">
+                        <div id="spectator-stats">
+                            <div class="empty-state">No trading statistics available yet</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Blindness Mode Panels (Hidden by default) -->
+    <div id="blindness-overlay" class="blindness-overlay hidden">
+        <div class="blindness-container">
+            <!-- Reality Failure Panel -->
+            <div id="reality-failure-panel" class="blindness-panel">
+                <h2>⚠️ REALITY UNSTABLE</h2>
+                <div class="failure-reason" id="blindness-reason">System entering blindness mode...</div>
+                <div class="failed-assertions" id="failed-assertions-list"></div>
+                <div class="last-known-safe-state" id="last-safe-state"></div>
+            </div>
+
+            <!-- What We Don't Know Panel -->
+            <div id="unknown-panel" class="blindness-panel">
+                <h3>Current Blind Spots</h3>
+                <ul id="blind-spots-detail"></ul>
+                <p class="blindness-note">MERID cannot make decisions without these assertions.</p>
+            </div>
+
+            <!-- Recovery Checklist -->
+            <div id="recovery-checklist" class="blindness-panel">
+                <h3>Recovery Requirements</h3>
+                <ul id="recovery-requirements">
+                    <li class="requirement-pending">Market data feed restored</li>
+                    <li class="requirement-pending">Regime classification stable</li>
+                    <li class="requirement-pending">Execution path verified</li>
+                    <li class="requirement-pending">Treasury state confirmed</li>
+                </ul>
+                <button class="btn btn-danger" onclick="exitBlindnessMode()">Force Exit (Unsafe)</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Lockdown Modal -->
+    <div class="modal" id="lockdown-modal">
+        <div class="modal-content">
+            <div class="modal-header"><h2>System Lockdown</h2><button class="modal-close" onclick="closeLockdownModal()">&times;</button></div>
+            <div class="modal-body">
+                <div class="lockdown-options">
+                    <label class="lockdown-option"><input type="radio" name="lockdown-level" value="partial"><span class="option-label">Partial</span></label>
+                    <label class="lockdown-option"><input type="radio" name="lockdown-level" value="full" checked><span class="option-label">Full</span></label>
+                    <label class="lockdown-option"><input type="radio" name="lockdown-level" value="emergency"><span class="option-label">Emergency</span></label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeLockdownModal()">Cancel</button>
+                <button class="btn btn-danger" onclick="confirmLockdown()">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MERID Unified Control Center - STANDALONE (no external dependencies) -->
+    <script>
+    (function() {
+        'use strict';
+        console.log('[MERID] Unified Control Center initializing...');
+        
+        // ============================================
+        // UTILITIES
+        // ============================================
+        function $(id) { return document.getElementById(id); }
+        function $$(sel) { return document.querySelectorAll(sel); }
+        
+        function render(id, html) {
+            const el = $(id);
+            if (el) { el.innerHTML = html; return true; }
+            return false;
+        }
+        
+        function fmt(n) {
+            if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+            return n.toFixed(2);
+        }
+        
+        function fmtCurrency(n) { return '$' + fmt(n); }
+        
+        async function api(path) {
+            try {
+                const r = await fetch(path);
+                return await r.json();
+            } catch(e) {
+                console.error('[API]', path, e);
+                return null;
+            }
+        }
+        
+        // ============================================
+        // SECTION LOADERS
+        // ============================================
+        
+        // PREDICTIONS
+        async function loadPredictions() {
+            console.log('[MERID] Loading Predictions...');
+            const data = await api('/api/v1/institutional/predictions/markets?limit=30');
+            if (data?.markets?.length) {
+                const html = data.markets.map(m => `
+                    <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:12px;">
+                        <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+                            <span style="color:#8b949e;font-size:11px;text-transform:uppercase;background:#21262d;padding:2px 6px;border-radius:3px;">${m.category||'crypto'}</span>
+                            <span style="color:#8b949e;font-size:11px;">Vol: ${fmtCurrency(m.volume_24h||0)}</span>
+                        </div>
+                        <div style="color:#e6edf3;font-size:14px;font-weight:500;margin-bottom:12px;">${m.question}</div>
+                        <div style="background:#21262d;border-radius:4px;height:6px;overflow:hidden;margin-bottom:8px;">
+                            <div style="background:#238636;height:100%;width:${(m.yes_price||0.5)*100}%;"></div>
+                        </div>
+                        <div style="display:flex;justify-content:space-between;font-size:12px;">
+                            <span style="color:#238636;font-weight:600;">YES ${((m.yes_price||0.5)*100).toFixed(1)}%</span>
+                            <span style="color:#f85149;font-weight:600;">NO ${((m.no_price||0.5)*100).toFixed(1)}%</span>
+                        </div>
+                    </div>
+                `).join('');
+                render('predictions-list', html);
+                render('predictions-feed', html);
+            }
+            
+            // Drift
+            const drift = await api('/api/v1/institutional/predictions/drift');
+            if (drift?.signals?.length) {
+                render('drift-feed', drift.signals.map(s => `
+                    <div style="padding:10px 0;border-bottom:1px solid #21262d;">
+                        <div style="color:#e6edf3;font-size:13px;margin-bottom:4px;">${(s.question||'').substring(0,50)}...</div>
+                        <span style="color:${s.drift_pct>0?'#238636':'#f85149'};font-weight:600;">${s.drift_pct>0?'+':''}${(s.drift_pct||0).toFixed(1)}%</span>
+                    </div>
+                `).join(''));
+            }
+            
+            // Arbitrage
+            const arb = await api('/api/v1/institutional/predictions/arbitrage');
+            if (arb?.opportunities?.length) {
+                render('arb-feed', arb.opportunities.map(o => `
+                    <div style="padding:10px 0;border-bottom:1px solid #21262d;">
+                        <div style="color:#e6edf3;font-size:13px;margin-bottom:4px;">${(o.question||'').substring(0,50)}...</div>
+                        <span style="color:#238636;font-weight:600;">Spread: ${(o.spread_pct||0).toFixed(2)}%</span>
+                    </div>
+                `).join(''));
+            }
+        }
+        
+        // INTELLIGENCE
+        async function loadIntelligence() {
+            console.log('[MERID] Loading Intelligence...');
+            const data = await api('/api/v1/intelligence/news?limit=15');
+            if (data?.news?.length) {
+                const html = data.news.map(n => `
+                    <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:12px;">
+                        <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+                            <span style="color:#58a6ff;font-size:11px;">${n.source}</span>
+                            <span style="color:${n.sentiment?.label==='positive'?'#238636':n.sentiment?.label==='negative'?'#f85149':'#8b949e'};font-size:11px;text-transform:uppercase;">
+                                ${n.sentiment?.label||'neutral'}
+                            </span>
+                        </div>
+                        <div style="color:#e6edf3;font-size:14px;font-weight:500;margin-bottom:8px;">${n.title}</div>
+                        <div style="color:#8b949e;font-size:13px;">${(n.description||'').substring(0,120)}...</div>
+                    </div>
+                `).join('');
+                render('news-feed-list', html);
+            }
+        }
+        
+        // FOUR SYSTEMS
+        async function loadSystems() {
+            console.log('[MERID] Loading Systems...');
+            const data = await api('/api/v1/institutional/systems/status');
+            if (data?.systems) {
+                data.systems.forEach(s => {
+                    const prefix = s.system_id === 'intelligence' ? 'intel' : s.system_id;
+                    const healthEl = $(prefix + '-health');
+                    const intentsEl = $(prefix + '-intents');
+                    if (healthEl) healthEl.textContent = Math.round((s.health_score||1)*100) + '%';
+                    if (intentsEl) intentsEl.textContent = s.allowed_actions || 0;
+                });
+            }
+        }
+        
+        // AGENTS
+        async function loadAgents() {
+            console.log('[MERID] Loading Agents...');
+            const data = await api('/api/v1/institutional/mesh/status');
+            if (data?.agents?.length) {
+                const html = data.agents.map(a => `
+                    <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:12px;display:flex;align-items:center;gap:12px;">
+                        <div style="width:40px;height:40px;background:#238636;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;">🤖</div>
+                        <div style="flex:1;">
+                            <div style="color:#e6edf3;font-weight:600;font-size:14px;">${a.agent_id}</div>
+                            <div style="color:#8b949e;font-size:12px;">${a.model}</div>
+                        </div>
+                        <div style="padding:4px 8px;border-radius:4px;background:${a.running?'#238636':'#f85149'};color:#fff;font-size:11px;font-weight:600;">
+                            ${a.running?'RUNNING':'STOPPED'}
+                        </div>
+                    </div>
+                `).join('');
+                render('agents-grid', html);
+                
+                const totalEl = $('mesh-total');
+                const statusEl = $('mesh-status');
+                if (totalEl) totalEl.textContent = data.agents.length;
+                if (statusEl) statusEl.textContent = data.running ? 'RUNNING' : 'IDLE';
+            }
+        }
+        
+        // CONSENSUS
+        async function loadConsensus() {
+            console.log('[MERID] Loading Consensus...');
+            const data = await api('/api/v1/institutional/consensus/status');
+            if (data) {
+                const statusEl = $('consensus-status');
+                const votesEl = $('consensus-votes');
+                const quorumEl = $('consensus-quorum');
+                if (statusEl) statusEl.textContent = data.running ? 'RUNNING' : 'IDLE';
+                if (votesEl) votesEl.textContent = data.pending_votes || 0;
+                if (quorumEl) quorumEl.textContent = Math.round((data.quorum_threshold||0.67)*100) + '%';
+            }
+        }
+        
+        // SIMULATION
+        async function loadSimulation() {
+            console.log('[MERID] Loading Simulation...');
+            const data = await api('/api/v1/institutional/simulation/status');
+            if (data) {
+                const statusEl = $('sim-status');
+                const blockEl = $('sim-block');
+                if (statusEl) statusEl.textContent = data.running ? 'MINING' : 'IDLE';
+                if (blockEl) blockEl.textContent = data.current_block || 0;
+            }
+        }
+        
+        // SHADOW MERID
+        async function loadShadow() {
+            console.log('[MERID] Loading Shadow...');
+            const data = await api('/api/v1/institutional/shadow/status');
+            if (data?.portfolio) {
+                const balEl = $('shadow-balance');
+                const pnlEl = $('shadow-pnl');
+                if (balEl) balEl.textContent = fmtCurrency(data.portfolio.balance || 100000);
+                if (pnlEl) pnlEl.textContent = fmtCurrency(data.portfolio.total_pnl || 0);
+            }
+        }
+        
+        // RISK
+        async function loadRisk() {
+            console.log('[MERID] Loading Risk...');
+            const data = await api('/api/v1/dashboard/risk/metrics');
+            if (data) {
+                const scoreEl = $('risk-score');
+                const varEl = $('risk-var');
+                const ddEl = $('risk-drawdown');
+                if (scoreEl) scoreEl.textContent = (data.risk_score || 0).toFixed(1);
+                if (varEl) varEl.textContent = fmtCurrency(data.var_95 || 0);
+                if (ddEl) ddEl.textContent = (data.max_drawdown || 0).toFixed(2) + '%';
+            }
+        }
+        
+        // AUDIT
+        async function loadAudit() {
+            console.log('[MERID] Loading Audit...');
+            const data = await api('/api/v1/institutional/audit/recent?limit=10');
+            if (data?.entries?.length) {
+                const html = data.entries.map(e => `
+                    <div style="padding:10px 0;border-bottom:1px solid #21262d;">
+                        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                            <span style="color:#58a6ff;font-size:11px;">${e.event_type}</span>
+                            <span style="color:#8b949e;font-size:11px;">#${e.sequence}</span>
+                        </div>
+                        <div style="color:#8b949e;font-size:12px;">${e.source}</div>
+                    </div>
+                `).join('');
+                render('audit-feed', html);
+            }
+        }
+        
+        // EXECUTION
+        async function loadExecution() {
+            console.log('[MERID] Loading Execution...');
+            const data = await api('/api/v1/dashboard/execution/stats');
+            if (data) {
+                const modeEl = $('exec-mode');
+                const posEl = $('exec-positions');
+                if (modeEl) modeEl.textContent = (data.mode || 'PAPER').toUpperCase();
+                if (posEl) posEl.textContent = data.positions?.open || 0;
+            }
+        }
+        
+        // ANALYTICS
+        async function loadAnalytics() {
+            console.log('[MERID] Loading Analytics...');
+            const data = await api('/api/v1/institutional/analytics/summary');
+            // Render if container exists
+        }
+        
+        // ARBITRAGE (uses predictions arbitrage)
+        async function loadArbitrage() {
+            console.log('[MERID] Loading Arbitrage...');
+            const data = await api('/api/v1/institutional/predictions/arbitrage');
+            if (data?.opportunities?.length) {
+                const html = data.opportunities.map(o => `
+                    <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:12px;">
+                        <div style="color:#e6edf3;font-size:14px;margin-bottom:8px;">${o.question}</div>
+                        <div style="display:flex;gap:16px;">
+                            <span style="color:#8b949e;font-size:12px;">${o.platform_a} vs ${o.platform_b}</span>
+                            <span style="color:#238636;font-weight:600;">Spread: ${(o.spread_pct||0).toFixed(2)}%</span>
+                        </div>
+                    </div>
+                `).join('');
+                render('arbitrage-list', html);
+            }
+        }
+        
+        // PORTFOLIO
+        async function loadPortfolio() {
+            console.log('[MERID] Loading Portfolio...');
+            const data = await api('/api/v1/dashboard/portfolio/summary');
+            if (data) {
+                const valEl = $('portfolio-value');
+                const pnlEl = $('portfolio-pnl');
+                if (valEl) valEl.textContent = fmtCurrency(data.total_value || 100000);
+                if (pnlEl) pnlEl.textContent = fmtCurrency(data.total_pnl || 0);
+            }
+        }
+        
+        // ============================================
+        // NAVIGATION HANDLER
+        // ============================================
+        const sectionLoaders = {
+            'predictions': loadPredictions,
+            'intelligence': loadIntelligence,
+            'systems': loadSystems,
+            'agents': loadAgents,
+            'consensus': loadConsensus,
+            'simulation': loadSimulation,
+            'shadow': loadShadow,
+            'risk': loadRisk,
+            'audit': loadAudit,
+            'execution': loadExecution,
+            'analytics': loadAnalytics,
+            'arbitrage': loadArbitrage,
+            'portfolio': loadPortfolio,
+        };
+        
+        function handleNavigation(section) {
+            console.log('[MERID] Navigating to:', section);
+            
+            // Update sidebar active state
+            $$('.sidebar-link').forEach(l => l.classList.remove('active'));
+            const activeLink = document.querySelector(`[data-section="${section}"]`);
+            if (activeLink) activeLink.classList.add('active');
+            
+            // Show/hide sections
+            $$('.content-section').forEach(s => s.classList.remove('active'));
+            const targetSection = $(section);
+            if (targetSection) targetSection.classList.add('active');
+            
+            // Load section data
+            const loader = sectionLoaders[section];
+            if (loader) {
+                setTimeout(() => loader(), 50);
+            }
+        }
+        
+        // ============================================
+        // INITIALIZATION
+        // ============================================
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('[MERID] DOM Ready - Setting up navigation...');
+            
+            // Bind sidebar clicks
+            $$('.sidebar-link').forEach(link => {
+                link.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    const section = this.getAttribute('data-section');
+                    handleNavigation(section);
+                });
+            });
+            
+            // Start prediction aggregator
+            api('/api/v1/institutional/predictions/start').then(() => {
+                console.log('[MERID] Prediction aggregator started');
+            });
+            
+            // Start agent mesh
+            api('/api/v1/institutional/mesh/start').then(() => {
+                console.log('[MERID] Agent mesh started');
+            });
+            
+            console.log('[MERID] Unified Control Center ready!');
+        });
+        
+        // Expose for debugging
+        window.MERID = { loadPredictions, loadIntelligence, loadAgents, loadSystems, handleNavigation };
+    })();
+    </script>
+</body>
+</html>

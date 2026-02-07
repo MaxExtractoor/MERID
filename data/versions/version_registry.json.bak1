@@ -1,0 +1,54 @@
+{
+  "social_btc_v1": [
+    {
+      "version": "1.0.0",
+      "status": "production",
+      "created_at": 1768955844.3616977,
+      "promoted_at": 1768955844.3616977,
+      "deprecated_at": null,
+      "performance_metrics": {},
+      "config": {},
+      "dependencies": [],
+      "changelog": "Test social strategy"
+    }
+  ],
+  "social_doge_v1": [
+    {
+      "version": "1.0.0",
+      "status": "production",
+      "created_at": 1768955844.3696492,
+      "promoted_at": 1768955844.3696492,
+      "deprecated_at": null,
+      "performance_metrics": {},
+      "config": {},
+      "dependencies": [],
+      "changelog": "Test social strategy"
+    }
+  ],
+  "social_eth_v1": [
+    {
+      "version": "1.0.0",
+      "status": "production",
+      "created_at": 1768955844.3725657,
+      "promoted_at": 1768955844.3725657,
+      "deprecated_at": null,
+      "performance_metrics": {},
+      "config": {},
+      "dependencies": [],
+      "changelog": "Test social strategy"
+    }
+  ],
+  "social_sol_v1": [
+    {
+      "version": "1.0.0",
+      "status": "production",
+      "created_at": 1768955844.3725657,
+      "promoted_at": 1768955844.3725657,
+      "deprecated_at": null,
+      "performance_metrics": {},
+      "config": {},
+      "dependencies": [],
+      "changelog": "Test social strategy"
+    }
+  ]
+}

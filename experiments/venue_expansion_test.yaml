@@ -1,0 +1,20 @@
+# Simple venue expansion experiment
+id: venue-expansion-test-2026-01-24
+description: "Test adding more prediction market venues to increase opportunity pool"
+agent_id: "prediction-arbitrage-analyst"
+runs_per_variant: 3
+filters:
+  min_spread: 0.05
+  min_liquidity: 30000  # Lower threshold to test more opportunities
+  categories: ["crypto", "sports"]
+  max_opportunities: 10  # Increase from 5 to test scalability
+variants:
+  - name: "baseline-venues"
+    description: "Current venue set with standard filters"
+  - name: "expanded-venues"
+    description: "Include additional venues and lower liquidity threshold"
+experiment_config:
+  frequency_hours: 1
+  max_duration_minutes: 10
+  llm_timeout: 30
+  max_retries: 2
