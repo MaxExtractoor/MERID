@@ -191,9 +191,9 @@ production readiness requirements.
 
 ### 6.4 Restart and recovery tested — **2**
 
-- **Exists:** `TestRestartRecovery` (3 tests) — persistence roundtrip, fresh-start, config preservation. `DevSwarmPersistence` saves/loads task history and metadata. `_load_persisted_state()` in DevSwarm constructor.
-- **Missing:** No test for position reconciliation after restart (trading-specific).
-- **Next:** Add a test that simulates open positions → restart → verify position state matches.
+- **Exists:** `TestRestartRecovery` (3 tests) — persistence roundtrip, fresh-start, config preservation. `core/state_recovery.py` `StateManager` with save/load/recovery points. `tests/test_position_reconciliation.py` — 14 tests across 5 classes: position persistence roundtrip (save → restart → load), multi-position consistency, recovery point creation and restore, corrupted JSON graceful handling, checksum integrity validation, status reporting. Covers the full open-positions → restart → verify-state-matches flow.
+- **Missing:** No wall-clock soak test for restart recovery under load.
+- **Next:** Add CI job that runs position reconciliation under simulated load.
 
 **Section 6 total: 8/8**
 
