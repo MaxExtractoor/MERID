@@ -23,6 +23,7 @@ import ArbScannerPanel from '../components/ArbScannerPanel';
 import OnChainHealthPanel from '../components/OnChainHealthPanel';
 import PredictionMarketDetail from '../components/PredictionMarketDetail';
 import ModeControlPanel from '../components/ModeControlPanel';
+import ExplainabilityTimeline from '../components/ExplainabilityTimeline';
 import { formatCurrency } from '../utils/formatters';
 import { Monitor } from 'lucide-react';
 
@@ -198,7 +199,10 @@ export default function OperatorDashboard() {
         <ModeControlPanel />
       </div>
 
-      {/* 11. Activity Stream + Control Plane (side by side) */}
+      {/* 11. Decision Audit Trail */}
+      <ExplainabilityTimeline />
+
+      {/* 12. Activity Stream + Control Plane (side by side) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Activity Stream (2/3 width) */}
         <div className="lg:col-span-2">
