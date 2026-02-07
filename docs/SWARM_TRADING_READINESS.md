@@ -396,7 +396,7 @@ production readiness requirements.
 
 ---
 
-## Test Suite Summary (577+ tests across 24 files, all verified passing)
+## Test Suite Summary (625+ tests across 25 files, all verified passing)
 
 | Test File | Tests | Coverage |
 |-----------|-------|----------|
@@ -423,4 +423,5 @@ production readiness requirements.
 | `test_gamified_security.py` | 42 | Gamified security quests + bug bounty |
 | `test_mev_rewards.py` | 34 | MEV reward system + health metrics |
 | `test_sandbox_integration.py` | 12 | Alpaca paper + Kalshi demo sandbox |
-| **Total** | **577+** | **24 files, all verified passing** |
+| `test_rewards_api.py` | 48 | Rewards API: summary, XP, quests, pools, x402, security, e2e |
+| **Total** | **625+** | **25 files, all verified passing** |
