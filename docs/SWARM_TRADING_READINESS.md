@@ -399,18 +399,18 @@ production readiness requirements.
 
 ## Deferred Items (not required for score, operational improvements)
 
-| Item | Category | Priority |
-|------|----------|----------|
-| Rotate live API keys on exchange dashboards | Security | Medium |
-| Wire Vault/env injection into systemd + CI | Security | Medium |
-| Deploy Celery workers in multi-process topology | Infrastructure | Low |
-| Add Ethereum calldata anchor backend | Infrastructure | Low |
-| Deploy Prometheus + Alertmanager end-to-end | Monitoring | Medium |
-| Deploy Grafana dashboards | Monitoring | Low |
-| Add kill switch to CI smoke test | CI | Low |
-| Wire `AgentCreditLedger` into `DevSwarm.submit_task()` | Integration | Low |
-| Wire `DataContractRegistry` into live data ingestion | Integration | Medium |
-| Add k8s manifests with liveness/readiness probes | Infrastructure | Low |
+| Item | Category | Priority | Status |
+|------|----------|----------|--------|
+| Rotate live API keys on exchange dashboards | Security | Medium | Pending |
+| Wire Vault/env injection into systemd + CI | Security | Medium | Pending |
+| Deploy Celery workers in multi-process topology | Infrastructure | Low | Pending |
+| Add Ethereum calldata anchor backend | Infrastructure | Low | Pending |
+| Deploy Prometheus + Alertmanager end-to-end | Monitoring | Medium | Pending |
+| Deploy Grafana dashboards | Monitoring | Low | Pending |
+| ~~Add kill switch to CI smoke test~~ | CI | Low | ✅ Done — `safety-smoke` job in `test.yml` |
+| ~~Wire `AgentCreditLedger` into `DevSwarm.execute_task()`~~ | Integration | Low | ✅ Done — budget gate + deduction in `dev_swarm.py` |
+| ~~Wire `DataContractRegistry` into live data ingestion~~ | Integration | Medium | ✅ Done — validation in `LivePriceFeed._broadcast_update()` |
+| ~~Add k8s manifests with liveness/readiness probes~~ | Infrastructure | Low | ✅ Done — `deploy/k8s/merid-deployment.yaml` |
 
 ---
 

@@ -58,10 +58,34 @@ class DevSwarm:
         self.agents.append(agent)
         self.logger.info("agent_registered", name=agent.name, role=agent.role.value)
     
+    # Cost estimates per effort level (credits)
+    EFFORT_COST = {"small": 5.0, "medium": 15.0, "large": 40.0}
+
     async def execute_task(self, task: DevTask) -> Dict[str, Any]:
         """Execute a development task through the agent pipeline."""
         self.logger.info("task_started", description=task.description[:50])
-        
+
+        # Budget gate — reject if agents lack credits
+        estimated_cost = self.EFFORT_COST.get(task.estimated_effort, 15.0)
+        try:
+            from core.agent_credit_ledger import get_credit_ledger, InsufficientCreditsError
+            ledger = get_credit_ledger()
+            for agent in self.agents:
+                if not ledger.check_budget(agent.name, estimated_cost):
+                    self.logger.warning(
+                        "task_rejected_budget",
+                        agent=agent.name,
+                        cost=estimated_cost,
+                        balance=ledger.balance(agent.name),
+                    )
+                    return {
+                        "status": "rejected",
+                        "reason": f"Agent {agent.name} has insufficient credits "
+                                  f"(need {estimated_cost}, have {ledger.balance(agent.name):.1f})",
+                    }
+        except ImportError:
+            pass  # ledger module not available — allow execution
+
         # Find appropriate agents
         planner = self._find_agent(DevAgentRole.PLANNER)
         coder = self._find_agent(DevAgentRole.CODER)
@@ -101,6 +125,19 @@ class DevSwarm:
         
         results["status"] = "completed"
         self.logger.info("task_completed", task=task.description[:50])
+
+        # Deduct credits from participating agents
+        try:
+            from core.agent_credit_ledger import get_credit_ledger
+            ledger = get_credit_ledger()
+            for phase in results.get("phases", []):
+                agent_name = phase.get("agent", "")
+                if agent_name:
+                    per_agent_cost = estimated_cost / max(len(results["phases"]), 1)
+                    ledger.deduct(agent_name, per_agent_cost, reason=task.description[:60])
+        except Exception as exc:
+            self.logger.debug("credit_deduction_skipped", error=str(exc))
+
         return results
     
     def _find_agent(self, role: DevAgentRole) -> Optional[DevAgent]:

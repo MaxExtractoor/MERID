@@ -232,3 +232,14 @@ class AgentCreditLedger:
             "balances": dict(self._balances),
             "daily_spend": dict(self._daily_spend),
         }
+
+
+_credit_ledger: Optional[AgentCreditLedger] = None
+
+
+def get_credit_ledger() -> AgentCreditLedger:
+    """Get or create the singleton AgentCreditLedger."""
+    global _credit_ledger
+    if _credit_ledger is None:
+        _credit_ledger = AgentCreditLedger(default_credits=1000.0)
+    return _credit_ledger
