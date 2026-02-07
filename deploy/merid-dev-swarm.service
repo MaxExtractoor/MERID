@@ -1,0 +1,54 @@
+[Unit]
+Description=MERID Dev Swarm - Autonomous Development Agent System
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=merid
+Group=merid
+WorkingDirectory=/opt/merid
+
+# Environment
+Environment="PYTHONUNBUFFERED=1"
+Environment="RUN_MODE=simulation"
+
+# Secrets injection (priority order):
+# 1. HashiCorp Vault agent sidecar (if running)
+EnvironmentFile=-/run/vault-agent/merid.env
+# 2. SOPS-encrypted env (decrypted at boot by ExecStartPre)
+EnvironmentFile=-/opt/merid/.env.decrypted
+# 3. Plain .env fallback (dev/staging only)
+EnvironmentFile=-/opt/merid/.env
+
+# Command
+ExecStart=/opt/merid/venv/bin/python -m uvicorn web.main:app --host 0.0.0.0 --port 8000 --workers 2
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitInterval=300
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=merid-dev-swarm
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/merid/data /opt/merid/logs
+
+# Health check
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

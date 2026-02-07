@@ -12,9 +12,26 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    environment: staging
+    env:
+      MERID_ENV: ci
+      RUN_MODE: simulation
+      SIMULATION_MODE: synthetic_only
     
     steps:
       - uses: actions/checkout@v3
+
+      - name: Inject secrets from Vault (if configured)
+        if: env.VAULT_ADDR != ''
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          token: ${{ secrets.VAULT_TOKEN }}
+          secrets: |
+            secret/data/merid/ci KALSHI_API_KEY | KALSHI_API_KEY ;
+            secret/data/merid/ci TELEGRAM_BOT_TOKEN | TELEGRAM_BOT_TOKEN ;
+            secret/data/merid/ci TELEGRAM_CHAT_ID | TELEGRAM_CHAT_ID
+        continue-on-error: true
       
       - name: Set up Python
         uses: actions/setup-python@v4

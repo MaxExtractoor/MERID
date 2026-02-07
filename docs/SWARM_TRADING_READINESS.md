@@ -74,14 +74,12 @@ production readiness requirements.
 ### 2.3 Blockchain/ledger integration — **2**
 
 - **Exists:** `core/audit_trail.py` uses hash-chained entries (ledger-like). `core/audit_anchor.py` — Merkle-tree audit anchoring: computes Merkle root of audit trail entries, stores anchor receipts to pluggable backends (InMemoryAnchorStore for testing, FileAnchorStore for production, future: on-chain Ethereum/Solana calldata). `AuditAnchor.anchor(entries)` → `AnchorReceipt` with merkle_root, entry_count, sequence range, timestamp. `AuditAnchor.verify(anchor_id, entries)` recomputes root and validates against stored receipt. Tamper detection: modified/missing/extra entries invalidate anchor. `tests/test_audit_anchor.py` — 30 tests across 7 classes: Merkle root computation (empty, single, even, odd, large, deterministic), anchor creation and receipt structure, verification (pass, tamper, missing, extra, unknown, empty), InMemoryAnchorStore CRUD, FileAnchorStore persistence roundtrip (save, load, list, corrupted file), multiple sequential anchors.
-- **Missing:** No live on-chain anchoring backend (Ethereum/Solana).
-- **Next:** Add Ethereum calldata anchor backend for production audit trail anchoring.
+- **Done:** `EthereumCalldataAnchorStore` added — publishes Merkle roots as zero-value Ethereum tx calldata; env-configured (`ETH_ANCHOR_RPC_URL`, `ETH_ANCHOR_PRIVATE_KEY`); graceful fallback to `FileAnchorStore` if web3 unavailable.
 
 ### 2.4 Regulatory and compliance — **2**
 
 - **Exists:** `core/us_compliance_config.py` categorizes venues into US-compliant, blocked, and data-only. `core/constitution_enforcer.py` enforces guardrails. `core/explainability.py` provides replay and rationale for every decision. Kalshi is CFTC-regulated primary venue.
-- **Missing:** No formal compliance report generator for regulators.
-- **Next:** Add a CLI command that exports a compliance summary (trades, rationale, venue classification) for a date range.
+- **Done:** `core/compliance_report.py` — CLI compliance report generator (35 tests in `test_compliance_report.py`).
 
 **Section 2 total: 8/8**
 
@@ -92,8 +90,7 @@ production readiness requirements.
 ### 3.1 Internal credits/accounting — **2**
 
 - **Exists:** `DevSwarm` tracks `daily_cost_usd` per task with `cost_per_token` on agents. `SwarmConfig.max_daily_cost_usd` enforces budget. Cost resets daily. `core/agent_credit_ledger.py` — `AgentCreditLedger` per-agent credit tracking: allocate (default + custom), top-up, deduct with `InsufficientCreditsError`, agent-to-agent transfer (conserves total), daily spending limits with `set_daily_limit()` + `check_budget()`, daily spend reset, full ledger history with `LedgerEntry` audit trail, summary/balances queries. `tests/test_agent_credit_ledger.py` — 35 tests across 7 classes: allocation (default, custom, additive, negative rejection, unknown agent), top-up (success, zero rejection, unknown agent), deduction (success, to-zero, insufficient, negative, unallocated), transfers (success, insufficient, self-transfer, zero, auto-create recipient, conservation), budget enforcement (sufficient, insufficient, daily limit blocks, within budget, reset), ledger history (allocations, deductions, transfers, full history, entry serialization), summary and queries.
-- **Missing:** Not yet wired into DevSwarm task submission as mandatory pre-check.
-- **Next:** Wire `AgentCreditLedger.check_budget()` into `DevSwarm.submit_task()` as a pre-flight check.
+- **Wired:** `DevSwarm.execute_task()` now calls `check_budget()` pre-flight and `deduct()` post-execution via `get_credit_ledger()` singleton. Effort-based cost: small=5, medium=15, large=40 credits.
 
 ### 3.2 Internal vs. real capital boundary — **2**
 
@@ -402,9 +399,9 @@ production readiness requirements.
 | Item | Category | Priority | Status |
 |------|----------|----------|--------|
 | Rotate live API keys on exchange dashboards | Security | Medium | Pending |
-| Wire Vault/env injection into systemd + CI | Security | Medium | Pending |
+| ~~Wire Vault/env injection into systemd + CI~~ | Security | Medium | ✅ Done — systemd 3-tier env loading + Vault action in `dev_swarm_ci.yml` |
 | Deploy Celery workers in multi-process topology | Infrastructure | Low | Pending |
-| Add Ethereum calldata anchor backend | Infrastructure | Low | Pending |
+| ~~Add Ethereum calldata anchor backend~~ | Infrastructure | Low | ✅ Done — `EthereumCalldataAnchorStore` in `core/audit_anchor.py` |
 | Deploy Prometheus + Alertmanager end-to-end | Monitoring | Medium | Pending |
 | Deploy Grafana dashboards | Monitoring | Low | Pending |
 | ~~Add kill switch to CI smoke test~~ | CI | Low | ✅ Done — `safety-smoke` job in `test.yml` |
