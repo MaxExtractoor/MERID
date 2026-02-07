@@ -1,0 +1,75 @@
+name: Nightly Soak Tests
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # daily at 04:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  soak-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      MERID_ENV: ci
+      RUN_MODE: simulation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Audit Trail Soak (5 min, 10K entries)
+        run: |
+          python scripts/audit_trail_soak.py \
+            --entries 10000 \
+            --output audit_soak_results.json
+        timeout-minutes: 10
+
+      - name: Position Reconciliation Under Load
+        run: |
+          pytest tests/test_position_reconciliation.py::TestPositionReconciliationUnderLoad \
+            -v --tb=short
+        timeout-minutes: 10
+
+      - name: Swarm Benchmark (Kalshi scenarios)
+        run: |
+          pytest tests/test_swarm_vs_single_agent_benchmark.py::TestHistoricalKalshiBenchmark \
+            -v --tb=short
+        timeout-minutes: 10
+
+      - name: Extended Test Suite (full)
+        run: |
+          pytest tests/ -v --tb=short --durations=20 \
+            -x --timeout=120
+        timeout-minutes: 45
+
+      - name: Upload soak results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-results-${{ github.run_number }}
+          path: |
+            audit_soak_results.json
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🔴 Nightly Soak Test Failed',
+              body: `The nightly soak test run #${context.runNumber} failed.\n\nSee: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['bug', 'soak-test', 'ci']
+            });
