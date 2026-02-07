@@ -67,6 +67,12 @@ jobs:
         assert len(critical) == 0, f'CRITICAL secrets found: {critical}'
         print('✅ No tracked secrets found')
         "
+    - name: Mode-Gate Enforcement Tests
+      run: |
+        pytest tests/test_mode_gate.py -v --tb=short
+    - name: Circuit Breaker & Trading Halt Tests
+      run: |
+        pytest tests/test_trading_halt.py -v --tb=short
     - name: Alertmanager Config Validation
       run: |
         pip install pyyaml

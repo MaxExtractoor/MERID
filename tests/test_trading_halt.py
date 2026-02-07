@@ -281,5 +281,76 @@ class TestKillSwitchEndpoint(unittest.TestCase):
         self.assertIn("trading_halt", serialized)
 
 
+class TestVenue5xxCircuitBreaker(unittest.TestCase):
+    """End-to-end: venue 5xx errors → circuit breaker opens → trading halt."""
+
+    def test_5xx_errors_open_circuit_breaker(self):
+        """Simulate a venue returning 5xx errors until circuit breaker opens."""
+        cb = CircuitBreaker(name="venue-binance", failure_threshold=3, timeout=60.0)
+
+        async def _failing_call():
+            raise ConnectionError("HTTP 503 Service Unavailable")
+
+        loop = asyncio.new_event_loop()
+        for _ in range(3):
+            with self.assertRaises(ConnectionError):
+                loop.run_until_complete(cb.call(_failing_call))
+
+        self.assertEqual(cb.state.state, "open")
+        loop.close()
+
+    def test_5xx_breakers_trigger_trading_halt(self):
+        """Two open circuit breakers → RiskControlCoordinator halts trading."""
+        coord = RiskControlCoordinator()
+
+        cb1 = CircuitBreaker(name="venue-binance", failure_threshold=2, timeout=60.0)
+        cb2 = CircuitBreaker(name="venue-coinbase", failure_threshold=2, timeout=60.0)
+        coord.register_circuit_breaker(cb1)
+        coord.register_circuit_breaker(cb2)
+
+        async def _failing():
+            raise ConnectionError("HTTP 500")
+
+        loop = asyncio.new_event_loop()
+        # Trip both breakers
+        for cb in (cb1, cb2):
+            for _ in range(2):
+                with self.assertRaises(ConnectionError):
+                    loop.run_until_complete(cb.call(_failing))
+            self.assertEqual(cb.state.state, "open")
+
+        # Check risks — should auto-halt
+        loop.run_until_complete(coord._check_all_risks())
+        self.assertTrue(coord.halt_manager.is_halted)
+        self.assertFalse(coord.can_trade())
+        loop.close()
+
+    def test_single_breaker_does_not_halt(self):
+        """One open circuit breaker alone should NOT halt (threshold is 2)."""
+        coord = RiskControlCoordinator()
+
+        cb1 = CircuitBreaker(name="venue-kraken", failure_threshold=2, timeout=60.0)
+        cb2 = CircuitBreaker(name="venue-alpaca", failure_threshold=2, timeout=60.0)
+        coord.register_circuit_breaker(cb1)
+        coord.register_circuit_breaker(cb2)
+
+        async def _failing():
+            raise ConnectionError("HTTP 502")
+
+        loop = asyncio.new_event_loop()
+        # Trip only cb1
+        for _ in range(2):
+            with self.assertRaises(ConnectionError):
+                loop.run_until_complete(cb1.call(_failing))
+        self.assertEqual(cb1.state.state, "open")
+        self.assertEqual(cb2.state.state, "closed")
+
+        loop.run_until_complete(coord._check_all_risks())
+        # Only 1 breaker open — should NOT halt
+        self.assertFalse(coord.halt_manager.is_halted)
+        self.assertTrue(coord.can_trade())
+        loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()
