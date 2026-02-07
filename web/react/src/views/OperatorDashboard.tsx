@@ -19,6 +19,8 @@ import VenueHealthGrid from '../components/VenueHealthGrid';
 import DataFreshnessPanel from '../components/DataFreshnessPanel';
 import OrchestratorPanel from '../components/OrchestratorPanel';
 import SentimentTimeline from '../components/SentimentTimeline';
+import ArbScannerPanel from '../components/ArbScannerPanel';
+import OnChainHealthPanel from '../components/OnChainHealthPanel';
 import { formatCurrency } from '../utils/formatters';
 import { Monitor } from 'lucide-react';
 
@@ -179,8 +181,14 @@ export default function OperatorDashboard() {
         <SentimentTimeline />
       </div>
 
-      {/* 8. Data Freshness */}
-      <DataFreshnessPanel />
+      {/* 8. Arb Scanner */}
+      <ArbScannerPanel />
+
+      {/* 9. On-Chain Health + Data Freshness */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <OnChainHealthPanel />
+        <DataFreshnessPanel />
+      </div>
 
       {/* 9. Activity Stream + Control Plane (side by side) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
