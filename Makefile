@@ -119,14 +119,26 @@ agents-summary:
 	python -c "from merid.agents.base import get_canonical_registry; import json; print(json.dumps(get_canonical_registry().summary(), indent=2))"
 
 all-pipeline-tests:
-	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_blockchain.py -v
+	python -m pytest tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_blockchain.py tests/test_blockchain_v2.py -v
 
 # ── Blockchain Integration ────────────────────────────────────────────
 blockchain-test:
-	python -m pytest tests/test_blockchain.py -v
+	python -m pytest tests/test_blockchain.py tests/test_blockchain_v2.py -v
 
 blockchain-secrets:
 	python -c "from merid.blockchain.secrets import get_secrets_manager; import json; print(json.dumps(get_secrets_manager().summary(), indent=2))"
 
 blockchain-execution:
 	python -c "from merid.blockchain.execution import get_execution_service; import json; print(json.dumps(get_execution_service().summary(), indent=2))"
+
+blockchain-wallet:
+	python -c "from merid.blockchain.wallet import get_wallet_service; import json; print(json.dumps(get_wallet_service().summary(), indent=2))"
+
+blockchain-compliance:
+	python -c "from merid.blockchain.compliance import get_compliance_registry; import json; print(json.dumps(get_compliance_registry().summary(), indent=2))"
+
+blockchain-gateway:
+	python -c "from merid.blockchain.gateway import get_blockchain_gateway; import json; print(json.dumps(get_blockchain_gateway().summary(), indent=2))"
+
+blockchain-contracts:
+	python -c "from merid.blockchain.contracts import get_contract_registry; import json; print(json.dumps(get_contract_registry().summary(), indent=2))"
