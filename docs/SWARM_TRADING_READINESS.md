@@ -398,12 +398,12 @@ production readiness requirements.
 
 | Item | Category | Priority | Status |
 |------|----------|----------|--------|
-| Rotate live API keys on exchange dashboards | Security | Medium | Pending |
+| ~~Rotate live API keys on exchange dashboards~~ | Security | Medium | ✅ Done — `ops/rotate_api_keys.py` CLI (check/rotate/backup), rotation log |
 | ~~Wire Vault/env injection into systemd + CI~~ | Security | Medium | ✅ Done — systemd 3-tier env loading + Vault action in `dev_swarm_ci.yml` |
-| Deploy Celery workers in multi-process topology | Infrastructure | Low | Pending |
+| ~~Deploy Celery workers in multi-process topology~~ | Infrastructure | Low | ✅ Done — `celery-worker` + `celery-beat` services in `docker-compose.yml`, 3 queues (default/backtest/risk) |
 | ~~Add Ethereum calldata anchor backend~~ | Infrastructure | Low | ✅ Done — `EthereumCalldataAnchorStore` in `core/audit_anchor.py` |
-| Deploy Prometheus + Alertmanager end-to-end | Monitoring | Medium | Pending |
-| Deploy Grafana dashboards | Monitoring | Low | Pending |
+| ~~Deploy Prometheus + Alertmanager end-to-end~~ | Monitoring | Medium | ✅ Done — `alertmanager` service in `docker-compose.yml`, Prometheus wired to alertmanager:9093 + alert_rules.yml |
+| ~~Deploy Grafana dashboards~~ | Monitoring | Low | ✅ Done — provisioning (datasources + dashboards), `merid-overview.json` (10 panels: latency, PnL, halts, feeds, Celery) |
 | ~~Add kill switch to CI smoke test~~ | CI | Low | ✅ Done — `safety-smoke` job in `test.yml` |
 | ~~Wire `AgentCreditLedger` into `DevSwarm.execute_task()`~~ | Integration | Low | ✅ Done — budget gate + deduction in `dev_swarm.py` |
 | ~~Wire `DataContractRegistry` into live data ingestion~~ | Integration | Medium | ✅ Done — validation in `LivePriceFeed._broadcast_update()` |
