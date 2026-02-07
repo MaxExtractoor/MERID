@@ -14,38 +14,15 @@ from pathlib import Path
 from agents.base_agent import BaseAgent
 from monitoring.prediction_analytics import get_arbitrage_opportunities, ArbitrageOpportunity
 from monitoring.prediction_markets import get_prediction_aggregator
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-from utils.logger import get_logger
-from core.event_bus import event_stream
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-=======
 from merid_metrics import compute_brier, compute_bss, brier_decomposition
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-from merid_metrics import compute_brier, compute_bss, brier_decomposition
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-from merid_metrics import compute_brier, compute_bss, brier_decomposition
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-from merid_metrics import compute_brier, compute_bss, brier_decomposition
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 from core.merid_metrics import get_merid_metrics, BrierResult
 from core.brier_metrics_db import get_brier_db
 from core.event_bus import event_stream
 from merid_metrics import compute_brier, compute_bss, brier_decomposition
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 from core.merid_metrics import get_merid_metrics, BrierResult
 from core.brier_metrics_db import get_brier_db
 from core.event_bus import event_stream
 from utils.logger import get_logger
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
 
 # Try to import python-json-logger, fall back to simple JSON
 try:
@@ -53,7 +30,6 @@ try:
     HAS_JSON_LOGGER = True
 except ImportError:
     HAS_JSON_LOGGER = False
-
 
 # Structured logging setup
 SERVICE_NAME = os.getenv("SERVICE_NAME", "merid-agent")
@@ -99,10 +75,8 @@ class AgentJsonFormatter:
             }
             return json.dumps(data, ensure_ascii=False)
 
-
 # Global formatter instance
 _json_formatter = AgentJsonFormatter()
-
 
 def log_agent_run(run: AgentRunLog) -> None:
     """Log agent run using structured JSON logging."""
@@ -159,7 +133,6 @@ def log_agent_run(run: AgentRunLog) -> None:
         logger = get_logger("agents.prediction_arbitrage_analyst")
         logger.warning(f"Failed to log agent run: {e}")
 
-
 @dataclass
 class ArbitrageOpportunitySummary:
     """Structured summary of a single arbitrage opportunity."""
@@ -174,7 +147,6 @@ class ArbitrageOpportunitySummary:
     risk_note: str
     forecast_probability: float  # Agent's confidence this will be profitable
 
-
 @dataclass
 class BucketAnalysis:
     """Analysis of forecast calibration by probability buckets."""
@@ -185,7 +157,6 @@ class BucketAnalysis:
     avg_spread: float
     avg_liquidity: float
 
-
 @dataclass
 class ArbitrageAnalysisResponse:
     """Structured response from the arbitrage analyst agent."""
@@ -195,38 +166,18 @@ class ArbitrageAnalysisResponse:
     total_opportunities_analyzed: int
     analysis_timestamp: float
     bucket_analysis: List[BucketAnalysis]  # Calibration buckets
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-    brier_score: Optional[float] = None  # Overall Brier score if outcomes available
-=======
     brier_score: Optional[float] = None  # Legacy Brier score (deprecated)
     brier_metrics: Optional[Dict[str, Any]] = None  # Canonical Brier metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     brier_score: Optional[float] = None  # Legacy Brier score (deprecated)
     brier_metrics: Optional[Dict[str, Any]] = None  # Canonical Brier metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     brier_score: Optional[float] = None  # Legacy Brier score (deprecated)
     brier_metrics: Optional[Dict[str, Any]] = None  # Canonical Brier metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     brier_score: Optional[float] = None  # Legacy Brier score (deprecated)
     brier_metrics: Optional[Dict[str, Any]] = None  # Canonical Brier metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     brier_score: Optional[float] = None  # Legacy Brier score (deprecated)
     brier_metrics: Optional[Dict[str, Any]] = None  # Canonical Brier metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     brier_score: Optional[float] = None  # Legacy Brier score (deprecated)
     brier_metrics: Optional[Dict[str, Any]] = None  # Canonical Brier metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-
 
 @dataclass
 class AgentRunLog:
@@ -247,77 +198,34 @@ class AgentRunLog:
     status: str = "unknown"  # "success", "error", "timeout"
     error_type: Optional[str] = None
     error_message: Optional[str] = None
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
     llm_mode: Optional[str] = None  # "mock" | "live"
     llm_status: Optional[str] = None  # "ok" | "timeout" | "error" | "skipped"
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-
 
 class PredictionArbitrageAnalystAgent(BaseAgent):
     """Agent that analyzes prediction market arbitrage opportunities and provides structured recommendations."""
@@ -451,148 +359,41 @@ FILTERS APPLIED:
 - Minimum liquidity: ${self.min_liquidity:,.0f}
 - Maximum opportunities to analyze: {self.max_opportunities}
 - Category filter: {self.categories or 'all'}
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-- Total opportunities found: {len(opportunities)}
-- Opportunities after filtering: {len(filtered_opps)}
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
 - Total opportunities found: {len(opportunities) if opportunities else 0}
 - Opportunities after filtering: {len(filtered_opps) if filtered_opps else 0}
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
 
 Please analyze these opportunities and provide your structured recommendations.
 """
             
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-            self.logger.info(f"Prepared {len(filtered_opps)} arbitrage opportunities for analysis")
-=======
             self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            self.logger.info(f"Prepared {len(filtered_opps) if filtered_opps else 0} arbitrage opportunities for analysis")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
             return context
             
         except Exception as exc:
@@ -633,39 +434,6 @@ Please analyze these opportunities and provide your structured recommendations.
         return ", ".join(risk_factors)
     
     def _compute_bucket_analysis(self, opportunities: List[ArbitrageOpportunitySummary]) -> List[BucketAnalysis]:
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-        """Compute calibration buckets for forecast probabilities."""
-        # Define bucket boundaries
-        bucket_edges = [0.0, 0.4, 0.6, 0.8, 1.0]
-        bucket_labels = ["0.0-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0"]
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
         """Compute calibration buckets for forecast probabilities using dynamic boundaries."""
         if not opportunities:
             return []
@@ -690,34 +458,6 @@ Please analyze these opportunities and provide your structured recommendations.
             bucket_edges = [0.0, 0.4, 0.6, 0.8, 1.0]
         
         bucket_labels = [f"{bucket_edges[i]:.2f}-{bucket_edges[i+1]:.2f}" for i in range(len(bucket_edges)-1)]
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
         
         buckets = []
         for i, (lower, upper) in enumerate(zip(bucket_edges[:-1], bucket_edges[1:])):
@@ -751,81 +491,15 @@ Please analyze these opportunities and provide your structured recommendations.
         
         return buckets
     
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-    def _calculate_brier_score(self, opportunities: List[ArbitrageOpportunitySummary]) -> Optional[float]:
-        """Calculate Brier score for forecast probabilities.
-        
-        For now, we use bucket calibration as a proxy for actual outcomes.
-        In the future, this will use real outcome data from sandbox/backtest.
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
     def _calculate_brier_score(self, opportunities: List[ArbitrageOpportunitySummary]) -> Optional[Dict[str, Any]]:
         """Calculate canonical Brier score metrics for forecast probabilities.
         
         Uses industry-standard Brier score, Brier Skill Score, and decomposition.
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-        Replaces bucket calibration proxy with proper probabilistic accuracy metrics.
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
+        Returns None if auditor is in blindness mode.
         """
         if not opportunities:
             return None
         
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-        # Use bucket analysis to get empirical rates as proxy for outcomes
-        buckets = self._compute_bucket_analysis(opportunities)
-        
-        # Calculate Brier score using bucket calibration
-        total_squared_error = 0.0
-        total_count = 0
-        
-        for bucket in buckets:
-            # For each opportunity in this bucket, use the bucket's empirical rate as "outcome"
-            # This is a proxy - in reality we'd have actual binary outcomes per trade
-            empirical_rate = bucket.empirical_success_rate
-            squared_error = (bucket.avg_forecast - empirical_rate) ** 2
-            total_squared_error += squared_error * bucket.count
-            total_count += bucket.count
-        
-        if total_count == 0:
-            return None
-            
-        return total_squared_error / total_count
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-        Returns None if auditor is in blindness mode.
-        """
         # Check auditor mode first - don't calculate metrics when blind
         try:
             from core.reality_auditor import get_reality_auditor, AuditorMode
@@ -858,36 +532,11 @@ Please analyze these opportunities and provide your structured recommendations.
         if not opportunities:
             return None
         
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
         # Extract forecasts and outcomes
         y_prob = []
         y_true = []
         
         for opp in opportunities:
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-            # Use predicted probability as forecast
-            y_prob.append(opp.predicted_probability)
-            
-            # For now, use empirical success rate as proxy for actual outcome
-            # In production, this would be real binary outcomes from backtest
-            # TODO: Replace with actual outcome tracking
-            y_true.append(1.0 if opp.actual_spread > 0 else 0.0)
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
             # Use forecast probability as forecast
             y_prob.append(opp.forecast_probability)
             
@@ -896,16 +545,6 @@ Please analyze these opportunities and provide your structured recommendations.
             # TODO: Replace with actual outcome tracking
             # Higher spread probability indicates higher chance of success
             y_true.append(1.0 if opp.spread_probability > 0.5 else 0.0)
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
         
         # Calculate canonical metrics
         brier_score = compute_brier(y_true, y_prob)
@@ -913,20 +552,6 @@ Please analyze these opportunities and provide your structured recommendations.
         # Calculate BSS vs MERID baseline
         merid_baseline = 0.004316
         baseline_prob = y_true.count(1) / len(y_true)  # Use empirical base rate as baseline
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-        bss_vs_baseline = compute_bss(y_true, y_prob, merid_baseline)
-        bss_vs_climatology = compute_bss(y_true, y_prob, baseline_prob)
-        
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
         
         # Calculate BSS vs climatology (empirical base rate)
         bss_vs_climatology = compute_bss(y_true, y_prob, baseline_prob)
@@ -935,16 +560,6 @@ Please analyze these opportunities and provide your structured recommendations.
         # BSS = 1 - BS_model / BS_baseline
         bss_vs_baseline = 1.0 - brier_score / merid_baseline
         
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
         # Calculate decomposition for diagnostics
         decomp = brier_decomposition(y_true, y_prob, n_bins=4)
         
@@ -957,55 +572,21 @@ Please analyze these opportunities and provide your structured recommendations.
             "brier_skill_score_vs_climatology": bss_vs_climatology,
             "baseline_used": merid_baseline,
             "climatology_baseline": baseline_prob,
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-=======
             "quality_category": quality,
             "n_samples": len(opportunities),
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
             "quality_category": quality,
             "n_samples": len(opportunities),
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
             "quality_category": quality,
             "n_samples": len(opportunities),
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
             "decomposition": {
                 "reliability": decomp["REL"],
                 "resolution": decomp["RES"],
                 "uncertainty": decomp["UNC"],
                 "base_rate": decomp["base_rate"]
             },
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-            "quality_category": quality,
-            "n_samples": len(opportunities)
-        }
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
             "status": "ok",
             "reason": "Metrics calculated successfully"
         }
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            "status": "ok",
-            "reason": "Metrics calculated successfully"
-        }
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            "status": "ok",
-            "reason": "Metrics calculated successfully"
-        }
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
     
     async def process(self, energy: Dict[str, Any], phase: str = "reasoning") -> Dict[str, Any]:
         """Execute the agent reasoning pipeline for arbitrage analysis."""
@@ -1032,72 +613,6 @@ Please analyze these opportunities and provide your structured recommendations.
         prompt = self._build_prompt(energy, phase, research_findings, extra_context)
 
         start_time = time.time()
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-        raw_response = await self._invoke_model(prompt)
-        end_time = time.time()
-        parsed = self._parse_response(raw_response)
-
-        # Log the run
-        try:
-            run_log = AgentRunLog(
-                run_id=energy.get("energy_id", f"run-{int(time.time())}"),
-                timestamp=start_time,
-                agent_id=self.agent_id,
-                agent_version=energy.get("agent_version", self.model_name),
-                run_type=energy.get("run_type", "manual"),
-                experiment_id=energy.get("experiment_id"),
-                filters={
-                    "min_spread": self.min_spread,
-                    "max_opportunities": self.max_opportunities,
-                    "min_liquidity": self.min_liquidity,
-                    "categories": self.categories
-                },
-                brier_score=parsed.get("brier_score"),
-                estimates_only=True,  # Until we have real outcomes
-                bucket_stats=parsed.get("bucket_analysis", []),
-                total_opportunities=parsed.get("total_opportunities_analyzed", 0),
-                recommendations_count=len(parsed.get("top_opportunities", [])),
-                latency_ms=(end_time - start_time) * 1000,
-                status="success"
-            )
-            log_agent_run(run_log)
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
         
         # Create run log and set reference for LLM mode tracking
         run_log = AgentRunLog(
@@ -1113,81 +628,12 @@ Please analyze these opportunities and provide your structured recommendations.
                 "min_liquidity": self.min_liquidity,
                 "categories": self.categories
             },
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-            brier_score=parsed.get("brier_score"),
-            estimates_only=True,  # Until we have real outcomes
-            bucket_stats=parsed.get("bucket_analysis", []),
-            total_opportunities=parsed.get("total_opportunities_analyzed", 0),
-            recommendations_count=len(parsed.get("top_opportunities", [])),
-            latency_ms=(end_time - start_time) * 1000,
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
             brier_score=None,  # Will be set after parsing
             estimates_only=True,  # Until we have real outcomes
             bucket_stats=[],  # Will be set after parsing
             total_opportunities=0,  # Will be set after parsing
             recommendations_count=0,  # Will be set after parsing
             latency_ms=0.0,  # Will be set after LLM call
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
             status="success",
             llm_mode=None,  # Will be set by _invoke_model
             llm_status=None  # Will be set by _invoke_model
@@ -1200,51 +646,7 @@ Please analyze these opportunities and provide your structured recommendations.
         end_time = time.time()
         parsed = self._parse_response(raw_response)
         
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-        # Update latency and final status
-=======
         # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-        # Update run log with actual results
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
         run_log.latency_ms = (end_time - start_time) * 1000
         run_log.brier_score = parsed.get("brier_score")
         run_log.bucket_stats = parsed.get("bucket_analysis", [])
@@ -1256,69 +658,6 @@ Please analyze these opportunities and provide your structured recommendations.
         
         # Clear reference
         delattr(self, '_current_run_log')
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-        except Exception as e:
-            # Don't let logging failures break the agent
-            self.logger.warning(f"Failed to log agent run: {e}")
-            
-            # Log the error with structured data
-            try:
-                error_log_data = {
-                    "agent_id": self.agent_id,
-                    "run_id": energy.get("energy_id", f"run-{int(time.time())}"),
-                    "agent_version": self.model_name,
-                    "run_type": energy.get("run_type", "manual"),
-                    "error_type": "logging_failure",
-                    "error_message": str(e),
-                    "status": "partial_success",
-                    "latency_ms": (end_time - start_time) * 1000
-                }
-                json_log_line = _json_formatter.format_log("agent_run_logging_failed", error_log_data)
-                
-                # Write error log
-                LOG_PATH = Path("logs/agent_runs.jsonl")
-                LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-                with LOG_PATH.open("a", encoding="utf-8") as f:
-                    f.write(json_log_line + "\n")
-                    
-            except Exception as log_error:
-                self.logger.error(f"Failed to log error: {log_error}")
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
 
         # Return arbitrage-specific structure instead of standard agent response
         return {
@@ -1345,126 +684,17 @@ Please analyze these opportunities and provide your structured recommendations.
             # Parse top opportunities
             top_opportunities = []
             for opp_data in parsed.get("top_opportunities", []):
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-                # Calculate forecast probability based on spread and liquidity (heuristic)
-                spread = float(opp_data.get("spread_probability", 0))
-                liquidity = float(opp_data.get("total_liquidity", 0))
-                # Higher spread and liquidity increase confidence
-                base_confidence = min(spread * 5, 0.8)  # Cap at 0.8
-                liquidity_bonus = min(liquidity / 1000000, 0.2)  # Max 0.2 bonus
-                forecast_probability = min(base_confidence + liquidity_bonus, 1.0)
-=======
-                # Calculate forecast probability based on improved heuristics
-=======
                 # Calculate forecast probability based on conservative heuristics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Calculate forecast probability based on ultra-conservative heuristics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Calculate forecast probability based on conservative fine-tuning
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Calculate forecast probability based on conservative fine-tuning
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Calculate forecast probability based on conservative fine-tuning
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Calculate forecast probability based on conservative fine-tuning
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Calculate forecast probability based on conservative fine-tuning
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Calculate forecast probability based on conservative fine-tuning
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Calculate forecast probability based on conservative fine-tuning
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
                 spread = float(opp_data.get("spread_probability", 0))
                 liquidity = float(opp_data.get("total_liquidity", 0))
                 venue_count = int(opp_data.get("venue_count", 2))
                 
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-                # Improved heuristic: weighted spread + liquidity + venue diversity
-                base_confidence = min(spread * 4, 0.7)  # Reduced spread weight
-                liquidity_bonus = min(liquidity / 800000, 0.15)  # Optimized liquidity scaling
-                venue_diversity_bonus = min(venue_count * 0.05, 0.1)  # New venue diversity factor
-                
-                forecast_probability = min(base_confidence + liquidity_bonus + venue_diversity_bonus, 0.95)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
                 # Conservative heuristic: maintain spread importance, reduce venue bonus
                 base_confidence = min(spread * 4.5, 0.75)  # Higher spread weight, higher cap
                 liquidity_bonus = min(liquidity / 1200000, 0.1)  # Higher threshold, lower bonus
                 venue_diversity_bonus = min(venue_count * 0.03, 0.06)  # Reduced venue bonus
                 
-                forecast_probability = min(base_confidence + liquidity_bonus + venue_diversity_bonus, 0.9)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                # Ultra-conservative: maximize spread importance, minimize venue bonus
-                base_confidence = min(spread * 4.8, 0.78)  # Highest spread weight yet
-                liquidity_bonus = min(liquidity / 1500000, 0.08)  # Strict liquidity threshold
-                venue_diversity_bonus = min(venue_count * 0.02, 0.04)  # Minimal venue bonus
-                
                 forecast_probability = min(base_confidence + liquidity_bonus + venue_diversity_bonus, 0.85)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-                # Conservative fine-tuning: slightly higher spread weight within proven framework
-                base_confidence = min(spread * 5.0, 0.80)  # +4% spread weight, higher cap
-                liquidity_bonus = min(liquidity / 1500000, 0.08)  # Maintain strict liquidity threshold
-                venue_diversity_bonus = min(venue_count * 0.02, 0.04)  # Maintain minimal venue bonus
-                
-                forecast_probability = min(base_confidence + liquidity_bonus + venue_diversity_bonus, 0.85)
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
                 
                 opportunity = ArbitrageOpportunitySummary(
                     canonical_question=opp_data.get("canonical_question", ""),
@@ -1493,31 +723,7 @@ Please analyze these opportunities and provide your structured recommendations.
             bucket_analysis = self._compute_bucket_analysis(top_opportunities)
             
             # Calculate Brier score
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-            brier_score = self._calculate_brier_score(top_opportunities)
-=======
             brier_metrics = self._calculate_brier_score(top_opportunities)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            brier_metrics = self._calculate_brier_score(top_opportunities)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            brier_metrics = self._calculate_brier_score(top_opportunities)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            brier_metrics = self._calculate_brier_score(top_opportunities)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            brier_metrics = self._calculate_brier_score(top_opportunities)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-            brier_metrics = self._calculate_brier_score(top_opportunities)
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
             
             # Return structured response
             response = ArbitrageAnalysisResponse(
@@ -1527,37 +733,8 @@ Please analyze these opportunities and provide your structured recommendations.
                 total_opportunities_analyzed=total_opportunities_analyzed,
                 analysis_timestamp=analysis_timestamp,
                 bucket_analysis=bucket_analysis,
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-                brier_score=brier_score
-=======
-                brier_score=brier_metrics["brier_score"] if brier_metrics else None,  # Legacy field
-                brier_metrics=brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                brier_score=brier_metrics["brier_score"] if brier_metrics else None,  # Legacy field
-                brier_metrics=brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                brier_score=brier_metrics["brier_score"] if brier_metrics else None,  # Legacy field
-                brier_metrics=brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                brier_score=brier_metrics["brier_score"] if brier_metrics else None,  # Legacy field
-                brier_metrics=brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                brier_score=brier_metrics["brier_score"] if brier_metrics else None,  # Legacy field
-                brier_metrics=brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                brier_score=brier_metrics["brier_score"] if brier_metrics else None,  # Legacy field
-                brier_metrics=brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
+                brier_score=brier_metrics["brier_score"] if brier_metrics else None,
+                brier_metrics=brier_metrics
             )
             
             # Convert to dict for return
@@ -1592,32 +769,8 @@ Please analyze these opportunities and provide your structured recommendations.
                     }
                     for bucket in response.bucket_analysis
                 ],
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-<<<<<<< C:\Dev\MERID\agents\prediction_arbitrage_analyst.py
-                "brier_score": response.brier_score
-=======
-                "brier_score": response.brier_score,  # Legacy field
-                "brier_metrics": response.brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                "brier_score": response.brier_score,  # Legacy field
-                "brier_metrics": response.brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                "brier_score": response.brier_score,  # Legacy field
-                "brier_metrics": response.brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                "brier_score": response.brier_score,  # Legacy field
-                "brier_metrics": response.brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
-=======
-                "brier_score": response.brier_score,  # Legacy field
-                "brier_metrics": response.brier_metrics  # New canonical metrics
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\agents\prediction_arbitrage_analyst.py
+                "brier_score": response.brier_score,
+                "brier_metrics": response.brier_metrics
             }
             
         except json.JSONDecodeError as exc:
