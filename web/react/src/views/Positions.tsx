@@ -18,18 +18,37 @@ export default function Positions() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Simulated data - replace with real API call
-    const mockPositions: Position[] = [
-      { symbol: 'AAPL', quantity: 150, avgPrice: 180.25, currentPrice: 185.50, marketValue: 27825.00, unrealizedPnl: 787.50, unrealizedPnlPct: 2.91, side: 'long', venue: 'Alpaca' },
-      { symbol: 'TSLA', quantity: 75, avgPrice: 250.00, currentPrice: 245.00, marketValue: 18375.00, unrealizedPnl: -375.00, unrealizedPnlPct: -2.00, side: 'long', venue: 'Alpaca' },
-      { symbol: 'BTC-USD', quantity: 0.75, avgPrice: 42000.00, currentPrice: 42500.00, marketValue: 31875.00, unrealizedPnl: 375.00, unrealizedPnlPct: 1.19, side: 'long', venue: 'Coinbase' },
-      { symbol: 'ETH-USD', quantity: 5.5, avgPrice: 2600.00, currentPrice: 2550.00, marketValue: 14025.00, unrealizedPnl: -275.00, unrealizedPnlPct: -1.92, side: 'long', venue: 'Kraken' },
-    ];
-    
-    setTimeout(() => {
-      setPositions(mockPositions);
+    const fetchPositions = async () => {
+      try {
+        const res = await fetch('/api/v1/trading/portfolio/summary');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.positions && data.positions.length > 0) {
+            setPositions(data.positions.map((p: any) => ({
+              symbol: p.asset || p.symbol || 'Unknown',
+              quantity: p.size || p.quantity || 0,
+              avgPrice: p.avg_price || p.avgPrice || 0,
+              currentPrice: p.current_price || p.currentPrice || 0,
+              marketValue: p.size_usd || p.marketValue || Math.abs(p.size || 0) * (p.current_price || 0),
+              unrealizedPnl: p.pnl || p.unrealizedPnl || 0,
+              unrealizedPnlPct: p.pnl_pct || p.unrealizedPnlPct || 0,
+              side: (p.side || 'long').toLowerCase() as 'long' | 'short',
+              venue: p.venue || 'Paper',
+            })));
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to fetch positions from API, showing empty state');
+      }
+      setPositions([]);
       setLoading(false);
-    }, 500);
+    };
+
+    fetchPositions();
+    const interval = setInterval(fetchPositions, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const totalValue = positions.reduce((sum, p) => sum + p.marketValue, 0);

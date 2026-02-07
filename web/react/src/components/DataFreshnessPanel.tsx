@@ -31,8 +31,11 @@ export default function DataFreshnessPanel() {
       const res = await fetch('/api/v1/data/freshness');
       if (res.ok) {
         const data = await res.json();
-        if (data.feeds) setFeeds(data.feeds);
-        return;
+        if (data.feeds) {
+          setFeeds(data.feeds);
+          setLoading(false);
+          return;
+        }
       }
     } catch {
       // fallback

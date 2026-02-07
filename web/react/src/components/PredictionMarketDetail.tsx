@@ -60,8 +60,9 @@ export default function PredictionMarketDetail({ ticker }: PredictionMarketDetai
           if (!selectedMarket && data.markets.length > 0) {
             setSelectedMarket(data.markets[0]);
           }
+          setLoading(false);
+          return;
         }
-        return;
       }
     } catch {
       // fallback

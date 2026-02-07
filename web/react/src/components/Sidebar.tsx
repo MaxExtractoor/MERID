@@ -17,10 +17,14 @@ import {
   Cpu,
   Building2,
   Package,
-  Monitor
+  Monitor,
+  Zap,
+  Code2,
+  Briefcase,
+  ClipboardList
 } from 'lucide-react';
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator";
+type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders";
 
 interface SidebarProps {
   current: View;
@@ -33,6 +37,9 @@ const navigation = [
   { name: 'Wallet', href: 'wallet', icon: Wallet, color: 'text-yellow-400' },
   { name: 'Treasury', href: 'treasury', icon: Coins, color: 'text-amber-400' },
   { name: 'Live Trading', href: 'trading', icon: Activity, color: 'text-green-400' },
+  { name: 'Trade Floor', href: 'tradefloor', icon: Zap, color: 'text-emerald-400' },
+  { name: 'Positions', href: 'positions', icon: Briefcase, color: 'text-teal-400' },
+  { name: 'Orders', href: 'orders', icon: ClipboardList, color: 'text-violet-400' },
   { name: 'Research', href: 'research', icon: Search, color: 'text-purple-400' },
   { name: 'Prediction Markets', href: 'predictions', icon: TrendingUp, color: 'text-orange-400' },
   { name: 'Betting Markets', href: 'betting', icon: Trophy, color: 'text-yellow-500' },
@@ -43,6 +50,7 @@ const management = [
   { name: 'Operator', href: 'operator', icon: Monitor, color: 'text-orange-400' },
   { name: 'Risk & Health', href: 'risk', icon: Shield, color: 'text-red-400' },
   { name: 'Bots/Agents', href: 'agents', icon: Bot, color: 'text-cyan-400' },
+  { name: 'Dev Swarm', href: 'devswarm', icon: Code2, color: 'text-lime-400' },
   { name: 'Mining', href: 'mining', icon: Cpu, color: 'text-purple-400' },
   { name: 'Institutional', href: 'institutional', icon: Building2, color: 'text-blue-500' },
   { name: 'Plugins', href: 'plugins', icon: Package, color: 'text-indigo-500' },
@@ -68,7 +76,7 @@ export default function Sidebar({ current, onChange, className }: SidebarProps) 
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-4 space-y-8">
+      <nav className="flex-1 p-4 space-y-8 overflow-y-auto">
         {/* Main Navigation */}
         <div>
           <h3 className="px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">
