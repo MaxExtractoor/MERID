@@ -1,15 +1,76 @@
+# ── Secrets & credentials (CRITICAL — never commit) ──────────────────
 .env
-.env.backup
 .env.*
-.venv/
-__pycache__/
+.env.backup
 *.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
 kalshi_private_key.pem
-backups/
-logs/
-tmp/
+secrets/
+vault-token
+.vault-token
 
-# Large binaries / build artifacts (never commit)
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+eggs/
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+.Python
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+
+# ── Virtual environments ─────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+
+# ── IDE & editor ─────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ── OS files ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.lnk
+
+# ── Testing & coverage ──────────────────────────────────────────────
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Large binaries / build artifacts (never commit) ──────────────────
 Ollama/
 build/
 .dart_tool/
@@ -18,3 +79,24 @@ node_modules/
 *.dill.track.dill
 *.cache.dill
 *.cache.dill.track.dill
+
+# ── Deployment & runtime ────────────────────────────────────────────
+backups/
+logs/
+tmp/
+*.log
+*.pid
+*.sock
+celerybeat-schedule
+celerybeat.pid
+
+# ── React / frontend build ──────────────────────────────────────────
+web/react/dist/
+web/react/node_modules/
+web/react/.cache/
+
+# ── Database ─────────────────────────────────────────────────────────
+*.sqlite3
+*.db
+neo4j/data/
+redis-data/
