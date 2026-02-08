@@ -13,6 +13,8 @@ interface UseApiDataResult<T> {
   error: Error | null;
   refetch: () => Promise<void>;
   lastUpdated: Date | null;
+  /** The raw JSON response before any transform — useful for stub detection. */
+  rawResponse: unknown;
 }
 
 export function useApiData<T>(
@@ -30,6 +32,7 @@ export function useApiData<T>(
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<Error | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [rawResponse, setRawResponse] = useState<unknown>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -63,6 +66,7 @@ export function useApiData<T>(
       }
 
       const rawData = await response.json();
+      setRawResponse(rawData);
       const transformedData = transform ? transform(rawData) : rawData;
       
       setData(transformedData);
@@ -118,5 +122,6 @@ export function useApiData<T>(
     error,
     refetch,
     lastUpdated,
+    rawResponse,
   };
 }

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Wallet as WalletIcon, Send, Download, RefreshCw, HardDrive, AlertCircle } from 'lucide-react';
+import StubBanner from '../components/StubBanner';
 
 interface Balance {
   currency: string;
@@ -48,43 +49,6 @@ export default function Wallet() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
-      setWalletData({
-        balances: [
-          { currency: 'USD', available: 125430.50, locked: 5000.00, total: 130430.50 },
-          { currency: 'BTC', available: 0.5234, locked: 0.0100, total: 0.5334 },
-          { currency: 'ETH', available: 12.456, locked: 0.500, total: 12.956 },
-          { currency: 'SOL', available: 450.23, locked: 50.00, total: 500.23 },
-        ],
-        transactions: [
-          {
-            id: '1',
-            type: 'deposit',
-            currency: 'USD',
-            amount: 10000,
-            status: 'completed',
-            timestamp: new Date(Date.now() - 3600000).toISOString(),
-          },
-          {
-            id: '2',
-            type: 'withdrawal',
-            currency: 'BTC',
-            amount: 0.05,
-            status: 'completed',
-            timestamp: new Date(Date.now() - 7200000).toISOString(),
-            address: '1A1zP1...3FYi',
-          },
-          {
-            id: '3',
-            type: 'transfer',
-            currency: 'ETH',
-            amount: 2.5,
-            status: 'pending',
-            timestamp: new Date(Date.now() - 1800000).toISOString(),
-          },
-        ],
-        total_value_usd: 185430.50,
-      });
     } finally {
       setLoading(false);
     }
@@ -143,6 +107,7 @@ export default function Wallet() {
 
   return (
     <div className="p-6 space-y-6">
+      <StubBanner data={walletData} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

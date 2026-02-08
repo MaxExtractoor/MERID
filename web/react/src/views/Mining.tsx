@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Cpu, Zap, DollarSign, TrendingUp, RefreshCw, AlertCircle, Thermometer, Activity } from 'lucide-react';
+import StubBanner from '../components/StubBanner';
 
 interface MiningRig {
   id: string;
@@ -42,6 +43,7 @@ export default function Mining() {
   const [stats, setStats] = useState<MiningStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [rawResponse, setRawResponse] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'rigs' | 'pools' | 'stats'>('rigs');
 
   useEffect(() => {
@@ -55,6 +57,7 @@ export default function Mining() {
       const response = await fetch('/api/v1/mining/overview');
       if (response.ok) {
         const data = await response.json();
+        setRawResponse(data);
         setRigs(data.rigs || []);
         setPools(data.pools || []);
         setStats(data.stats || null);
@@ -168,6 +171,7 @@ export default function Mining() {
 
   return (
     <div className="p-6 space-y-6">
+      <StubBanner data={rawResponse} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
