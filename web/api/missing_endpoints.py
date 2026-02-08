@@ -858,6 +858,25 @@ async def get_telegram_log() -> Dict[str, Any]:
     }, message="Telegram log: store not available")
 
 
+@router.get("/api/v1/notifications/stats")
+async def get_notification_stats() -> Dict[str, Any]:
+    """Lightweight notification store stats for UI health widgets."""
+    try:
+        from core.notifications import get_notification_store
+        store = get_notification_store()
+        return store.get_stats()
+    except Exception:
+        pass
+
+    return _stub({
+        "total": 0,
+        "unread": 0,
+        "last_created_at": None,
+        "by_severity": {},
+        "healthy": False,
+    }, message="Notification store not available")
+
+
 @router.post("/api/v1/logs/clear")
 async def clear_logs() -> Dict[str, Any]:
     """Clear logs."""
@@ -1432,6 +1451,13 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
         get_agent_registry().get_statistics()
     agent_result = _probe_service("agent_swarm", _probe_agents)
     components.append({"component": "Agent Swarm", "status": agent_result["status"], "lastCheck": ts, "latency": agent_result["latency_ms"], "errorRate": 0, "uptime": 0})
+
+    # Notification Store
+    def _probe_notif():
+        from core.notifications import get_notification_store
+        get_notification_store().get_stats()
+    notif_result = _probe_service("notification_store", _probe_notif)
+    components.append({"component": "Notification Store", "status": notif_result["status"], "lastCheck": ts, "latency": notif_result["latency_ms"], "errorRate": 0, "uptime": 0})
 
     # Emit notifications for any offline services
     try:

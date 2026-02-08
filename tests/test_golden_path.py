@@ -15,9 +15,13 @@ Addresses readiness auditor gap S7-02: "no full signal→order→audit test".
 Uses the ``missing_endpoints_client`` fixture from ``conftest.py``.
 """
 
+import os
+import tempfile
 import time
 from datetime import datetime
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +122,24 @@ def _sys_modules_for(engine, feed):
 # The golden-path test
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _fresh_notif_store():
+    """Inject a temp NotificationStore for every test so notifications are isolated."""
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+
+    import core.notifications as notif_mod
+    old_store = notif_mod._store
+    notif_mod._store = notif_mod.NotificationStore(db_path=db_path)
+    yield
+    notif_mod._store = old_store
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
 class TestGoldenPathTradeLoop:
     """Full signal→order→position→PnL→analytics loop through the API."""
 
@@ -180,6 +202,16 @@ class TestGoldenPathTradeLoop:
                     api_server = next(c for c in health if c["component"] == "API Server")
                     assert api_server["status"] == "online"
 
+                    # ── Step 6: Verify trade fill notification was emitted ──
+                    resp = client.get("/api/v1/notifications")
+                    assert resp.status_code == 200
+                    notifs = resp.json()
+                    assert "_stub" not in notifs, "Notifications should be real"
+                    trade_notifs = [n for n in notifs["notifications"] if n["type"] == "trade"]
+                    assert len(trade_notifs) >= 1, "Expected a trade notification after order fill"
+                    assert "BTC-USD" in trade_notifs[0]["title"]
+                    assert trade_notifs[0]["read"] is False
+
     def test_order_rejected_insufficient_balance(self, missing_endpoints_client):
         """Order too large for balance should be rejected gracefully."""
         engine, feed = _build_seeded_engine(price=68000.0)
@@ -200,6 +232,13 @@ class TestGoldenPathTradeLoop:
                     result = resp.json()
                     # Should be rejected, not an error
                     assert result.get("status") == "rejected" or result.get("success") is False
+
+                    # Verify rejection notification was emitted
+                    resp = missing_endpoints_client.get("/api/v1/notifications")
+                    notifs = resp.json()
+                    warn_notifs = [n for n in notifs["notifications"] if n["type"] == "warning"]
+                    assert len(warn_notifs) >= 1, "Expected a warning notification for rejected order"
+                    assert "Rejected" in warn_notifs[0]["title"]
 
     def test_stub_fallback_when_engine_unavailable(self, missing_endpoints_client):
         """When no engine is available, all endpoints return stubs gracefully."""
