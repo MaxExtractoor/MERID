@@ -52,6 +52,24 @@
 
 5. **Integration test fixture** — Added shared `missing_endpoints_client` pytest fixture to `tests/conftest.py`; 6 endpoint tests refactored to use it.
 
+### Readiness Score Snapshot (2026-02-08 16:35 EST)
+
+```
+python -m core.merid_readiness_auditor --all
+```
+
+| Dimension | Score | Max | Pct |
+|-----------|-------|-----|-----|
+| **24/7 Readiness** | 58 | 76 | 76.3% |
+| **Swarm Trading** | 57 | 74 | 77.0% |
+| **Combined** | 115 | 150 | **76.7%** |
+
+Key gaps flagged by auditor:
+- **S7-01**: 0 tests collected by auditor's runner (15 real-first endpoint tests exist but not detected)
+- **S7-02**: "no full signal→order→audit test" — golden-path e2e test needed
+- **T-01**: CI green check reports 0 tests (auditor detection heuristic)
+- **S4-03**: Kill switch not in CI
+
 ---
 
 ## 1. CRITICAL Issues (Fixed)
