@@ -220,8 +220,10 @@ export default function Logs() {
           </div>
           
           <div className="flex items-center gap-2">
-            <label className="text-sm text-slate-400">Refresh:</label>
+            <label htmlFor="log-refresh-interval" className="text-sm text-slate-400">Refresh:</label>
             <select
+              id="log-refresh-interval"
+              name="refreshInterval"
               title="Set refresh interval"
               value={refreshInterval}
               onChange={(e) => setRefreshInterval(Number(e.target.value))}
@@ -279,8 +281,10 @@ export default function Logs() {
       {/* Filters */}
       <div className="flex items-center gap-4">
         <div>
-          <label className="text-sm font-medium text-slate-400">Level:</label>
+          <label htmlFor="log-level-filter" className="text-sm font-medium text-slate-400">Level:</label>
           <select
+            id="log-level-filter"
+            name="logLevel"
             title="Filter by log level"
             value={selectedLevel}
             onChange={(e) => setSelectedLevel(e.target.value)}
@@ -295,8 +299,10 @@ export default function Logs() {
         </div>
 
         <div>
-          <label className="text-sm font-medium text-slate-400">Component:</label>
+          <label htmlFor="log-component-filter" className="text-sm font-medium text-slate-400">Component:</label>
           <select
+            id="log-component-filter"
+            name="logComponent"
             title="Filter by component"
             value={selectedComponent}
             onChange={(e) => setSelectedComponent(e.target.value)}
