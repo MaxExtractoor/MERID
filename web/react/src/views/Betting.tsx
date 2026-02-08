@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Trophy, DollarSign, Clock, RefreshCw, AlertCircle } from 'lucide-react';
+import StubBanner from '../components/StubBanner';
 
 interface BettingMarket {
   id: string;
@@ -47,6 +48,7 @@ export default function Betting() {
   const [stats, setStats] = useState<BettingStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [rawResponse, setRawResponse] = useState<any>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [activeTab, setActiveTab] = useState<'markets' | 'mybets' | 'stats'>('markets');
 
@@ -61,6 +63,7 @@ export default function Betting() {
       const response = await fetch('/api/v1/betting/overview');
       if (response.ok) {
         const data = await response.json();
+        setRawResponse(data);
         setMarkets(data.markets || []);
         setUserBets(data.user_bets || []);
         setStats(data.stats || null);
@@ -225,6 +228,7 @@ export default function Betting() {
 
   return (
     <div className="p-6 space-y-6">
+      <StubBanner data={rawResponse} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

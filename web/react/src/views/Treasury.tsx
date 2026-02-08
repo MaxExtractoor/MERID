@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Coins, TrendingUp, Users, Vote, DollarSign, ArrowUpRight, RefreshCw, AlertCircle } from 'lucide-react';
+import StubBanner from '../components/StubBanner';
 import QuadraticFundingPanel from '../components/QuadraticFundingPanel';
 
 interface TreasuryBalance {
@@ -204,6 +205,7 @@ export default function Treasury() {
 
   return (
     <div className="p-6 space-y-6">
+      <StubBanner data={treasuryData} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

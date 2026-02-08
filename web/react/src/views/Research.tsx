@@ -5,6 +5,7 @@ import { formatCurrency, formatPercent, formatDateTime } from "../utils/formatte
 import MetricCard from "../components/MetricCard";
 import DataTableEnhanced from "../components/DataTableEnhanced";
 import AnalyticsCharts from "../components/AnalyticsCharts";
+import StubGate from "../components/StubGate";
 import { RiskStatus } from "../types/risk";
 
 interface BacktestConfig {
@@ -73,7 +74,7 @@ export default function Research() {
   });
 
   // Fetch backtest results
-  const { data: backtests, refetch } = useApiData<BacktestResult[]>(
+  const { data: backtests, refetch, rawResponse: backtestsRaw } = useApiData<BacktestResult[]>(
     API_ENDPOINTS.BACKTEST_RESULTS,
     { pollingInterval: 5000 }
   );
@@ -247,12 +248,6 @@ export default function Research() {
         </span>
       ),
     },
-    {
-      key: "startTime" as keyof BacktestResult,
-      label: "Start Time",
-      sortable: true,
-      render: (value: string) => value ? formatDateTime(value) : "-",
-    },
   ];
 
   const tradeColumns = [
@@ -361,8 +356,10 @@ export default function Research() {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">Strategy</label>
+                  <label htmlFor="backtest-strategy" className="block text-sm font-medium text-slate-400 mb-1">Strategy</label>
                   <select
+                    id="backtest-strategy"
+                    name="strategy"
                     value={backtestConfig.strategy}
                     onChange={(e) => setBacktestConfig({ ...backtestConfig, strategy: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
@@ -489,12 +486,14 @@ export default function Research() {
               </div>
 
               <div className="flex gap-2 mt-6">
-                <button
-                  onClick={handleRunBacktest}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
-                >
-                  Run Backtest
-                </button>
+                <StubGate data={backtestsRaw} label="Simulation only — backtest disabled">
+                  <button
+                    onClick={handleRunBacktest}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+                  >
+                    Run Backtest
+                  </button>
+                </StubGate>
                 <button
                   onClick={() => setShowBacktestForm(false)}
                   className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium transition-colors"
