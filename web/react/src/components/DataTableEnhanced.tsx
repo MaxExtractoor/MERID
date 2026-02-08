@@ -119,6 +119,8 @@ export default function DataTableEnhanced<T>({
       {showFilter && (
         <div className="mb-4">
           <input
+            id="data-table-filter"
+            name="tableFilter"
             type="text"
             placeholder="Filter table..."
             title="Filter table data"

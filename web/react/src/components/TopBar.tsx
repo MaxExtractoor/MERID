@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { Search, Menu, Sun, Moon, Settings } from "lucide-react";
 import { useTheme } from '../theme';
 import LiveNotifications from './LiveNotifications';
@@ -8,6 +9,30 @@ interface TopBarProps {
 
 export default function TopBar({ onMenuClick }: TopBarProps) {
   const { theme, toggleTheme } = useTheme();
+  const [pnl, setPnl] = useState<{ dailyPnl: number; dailyPnlPct: number } | null>(null);
+
+  useEffect(() => {
+    const fetchPnl = async () => {
+      try {
+        let res = await fetch('/api/v1/portfolio/summary');
+        if (!res.ok) res = await fetch('/api/portfolio/summary');
+        if (res.ok) {
+          const data = await res.json();
+          setPnl({
+            dailyPnl: data.dailyPnl ?? data.pnl_today ?? 0,
+            dailyPnlPct: data.dailyPnlPct ?? data.change_24h_percent ?? 0,
+          });
+        }
+      } catch { /* silent */ }
+    };
+    fetchPnl();
+    const interval = setInterval(fetchPnl, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const dailyPnl = pnl?.dailyPnl ?? 0;
+  const dailyPnlPct = pnl?.dailyPnlPct ?? 0;
+  const pnlPositive = dailyPnl >= 0;
 
   return (
     <header className="h-16 bg-gradient-to-r from-slate-900/95 via-slate-800/95 to-slate-900/95 backdrop-blur-md border-b border-slate-700/50 shadow-xl shadow-black/20 flex items-center justify-between px-4 lg:px-6">
@@ -42,11 +67,19 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
             LIVE
           </span>
           
-          {/* P&L Summary */}
-          <div className="hidden sm:flex items-center gap-3 px-4 py-2 bg-gradient-to-r from-emerald-500/10 via-green-500/10 to-teal-500/10 border border-emerald-500/30 rounded-lg shadow-lg shadow-emerald-500/20">
+          {/* P&L Summary - live data */}
+          <div className={`hidden sm:flex items-center gap-3 px-4 py-2 bg-gradient-to-r rounded-lg shadow-lg ${
+            pnlPositive
+              ? 'from-emerald-500/10 via-green-500/10 to-teal-500/10 border border-emerald-500/30 shadow-emerald-500/20'
+              : 'from-red-500/10 via-red-500/10 to-rose-500/10 border border-red-500/30 shadow-red-500/20'
+          }`}>
             <span className="text-slate-300 text-sm font-medium">Daily P&L:</span>
-            <span className="font-bold text-emerald-400 text-lg">+$12,847.32</span>
-            <span className="text-emerald-400 text-sm font-semibold bg-emerald-500/20 px-2 py-0.5 rounded">(+2.34%)</span>
+            <span className={`font-bold text-lg ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
+              {pnlPositive ? '+' : ''}{dailyPnl.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+            </span>
+            <span className={`text-sm font-semibold px-2 py-0.5 rounded ${pnlPositive ? 'text-emerald-400 bg-emerald-500/20' : 'text-red-400 bg-red-500/20'}`}>
+              ({pnlPositive ? '+' : ''}{dailyPnlPct.toFixed(2)}%)
+            </span>
           </div>
         </div>
       </div>
@@ -56,6 +89,8 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
         <div className="relative group">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-blue-400 transition-colors" />
           <input
+            id="global-search"
+            name="globalSearch"
             type="text"
             placeholder="Search symbols, commands, or actions..."
             className="w-full pl-10 pr-4 py-2.5 bg-slate-800/50 border border-slate-700/50 rounded-lg text-sm text-slate-200 placeholder-slate-400 focus:outline-none focus:border-blue-500 focus:bg-slate-800/70 focus:shadow-lg focus:shadow-blue-500/20 transition-all"

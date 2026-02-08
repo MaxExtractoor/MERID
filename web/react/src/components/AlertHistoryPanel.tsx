@@ -104,6 +104,8 @@ export default function AlertHistoryPanel() {
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
             <input
+              id="alert-history-search"
+              name="alertSearch"
               type="text"
               value={search}
               onChange={e => setSearch(e.target.value)}
