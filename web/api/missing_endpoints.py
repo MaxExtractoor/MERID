@@ -267,20 +267,75 @@ async def create_social_post() -> Dict[str, Any]:
 # Consumer: ConsensusBoard.tsx, ConsensusPanel.tsx, DebateTimeline.tsx, ExplainabilityTimeline.tsx
 # ============================================
 @router.get("/api/v1/consensus/plans")
-async def get_consensus_plans() -> Dict[str, Any]:
-    """Get consensus plans."""
+async def get_consensus_plans(limit: int = 20, status: Optional[str] = None) -> Dict[str, Any]:
+    """Get consensus trade plans from the persistent store."""
+    try:
+        from core.consensus_store import get_consensus_store
+        store = get_consensus_store()
+        plans = store.list_plans(limit=limit, status=status)
+        return {
+            "plans": [p.to_dict() for p in plans],
+            "total": store.plan_count(),
+        }
+    except Exception:
+        pass
+
     return _stub({
-        "plans": [
-            {"id": "plan-001", "title": "BTC Long Entry", "status": "approved", "votes_for": 5, "votes_against": 1, "created_at": (datetime.utcnow() - timedelta(hours=2)).isoformat() + "Z", "agents_involved": ["analyst-gemma", "risk-manager", "strategy-agent"]},
-            {"id": "plan-002", "title": "Reduce ETH Exposure", "status": "pending", "votes_for": 3, "votes_against": 2, "created_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z", "agents_involved": ["risk-manager", "capital-allocator"]},
-        ],
-        "total": 2,
-    }, message="Consensus plans are simulated")
+        "plans": [],
+        "total": 0,
+    }, message="Consensus plans: store not available")
+
+
+@router.post("/api/v1/consensus/plans/{plan_id}/vote")
+async def vote_on_plan(plan_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Vote on a consensus plan."""
+    try:
+        from core.consensus_store import get_consensus_store
+        store = get_consensus_store()
+        agent_id = body.get("agent_id", "operator")
+        vote = body.get("vote", "for")
+        found = store.vote_on_plan(plan_id, agent_id, vote)
+        return {"success": found, "plan_id": plan_id, "vote": vote}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/api/v1/consensus/plans/{plan_id}/status")
+async def update_plan_status(plan_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Update the status of a consensus plan."""
+    try:
+        from core.consensus_store import get_consensus_store
+        store = get_consensus_store()
+        new_status = body.get("status", "approved")
+        found = store.update_plan_status(plan_id, new_status)
+
+        # Emit notification for status changes
+        try:
+            from core.notifications import add_notification
+            add_notification(
+                type="system", severity="info",
+                title=f"Plan {new_status.title()}: {plan_id[:20]}",
+                message=f"Consensus plan {plan_id} status changed to {new_status}",
+                source="consensus",
+            )
+        except Exception:
+            pass
+
+        return {"success": found, "plan_id": plan_id, "status": new_status}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @router.get("/api/v1/consensus/metrics")
 async def get_consensus_metrics() -> Dict[str, Any]:
-    """Get consensus metrics."""
+    """Get consensus metrics from the persistent store."""
+    try:
+        from core.consensus_store import get_consensus_store
+        store = get_consensus_store()
+        return store.get_metrics()
+    except Exception:
+        pass
+
     return _stub({
         "total_decisions": 0,
         "consensus_rate": 0,
@@ -288,20 +343,27 @@ async def get_consensus_metrics() -> Dict[str, Any]:
         "veto_count": 0,
         "unanimous_count": 0,
         "timestamp": int(time.time() * 1000),
-    }, message="Consensus metrics are simulated")
+    }, message="Consensus metrics: store not available")
 
 
 @router.get("/api/v1/consensus/opinions")
-async def get_consensus_opinions(limit: int = 30) -> Dict[str, Any]:
-    """Get consensus opinions/debate timeline."""
+async def get_consensus_opinions(limit: int = 30, since: Optional[int] = None) -> Dict[str, Any]:
+    """Get consensus opinions from the persistent store."""
+    try:
+        from core.consensus_store import get_consensus_store
+        store = get_consensus_store()
+        opinions = store.list_opinions(limit=limit, since_ms=since)
+        return {
+            "opinions": [o.to_dict() for o in opinions],
+            "total": store.opinion_count(),
+        }
+    except Exception:
+        pass
+
     return _stub({
-        "opinions": [
-            {"id": "op-001", "agent": "Gemma Analyst", "position": "bullish", "confidence": 0.82, "reasoning": "Strong momentum indicators on BTC 4H", "timestamp": (datetime.utcnow() - timedelta(minutes=30)).isoformat() + "Z"},
-            {"id": "op-002", "agent": "Skeptic Agent", "position": "neutral", "confidence": 0.55, "reasoning": "Volume declining, wait for confirmation", "timestamp": (datetime.utcnow() - timedelta(minutes=25)).isoformat() + "Z"},
-            {"id": "op-003", "agent": "Risk Manager", "position": "cautious", "confidence": 0.70, "reasoning": "Position size within limits but near daily loss threshold", "timestamp": (datetime.utcnow() - timedelta(minutes=20)).isoformat() + "Z"},
-        ],
-        "total": 3,
-    }, message="Opinions are simulated")
+        "opinions": [],
+        "total": 0,
+    }, message="Consensus opinions: store not available")
 
 
 @router.get("/api/v1/explainability/decisions")
@@ -1120,6 +1182,32 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                     title=f"Order Rejected: {symbol}",
                     message=f"{body.get('side', 'BUY')} {size} {symbol} — insufficient balance or risk limit",
                     source="trading",
+                )
+        except Exception:
+            pass
+
+        # Emit consensus plan + opinion for filled orders
+        try:
+            from core.consensus_store import add_plan, add_opinion
+            if order.status.value == "filled":
+                direction = "long" if side == "buy" else "short"
+                add_plan(
+                    symbol=symbol,
+                    title=f"{symbol} {direction.title()} Entry",
+                    direction=direction,
+                    target_size_usd=order.size_usd,
+                    confidence=0.8,
+                    supporting_agents=["trading-engine"],
+                    status="executed",
+                )
+                add_opinion(
+                    agent_id="trading-engine",
+                    agent_name="Trading Engine",
+                    role="execution",
+                    symbol=symbol,
+                    stance="bullish" if direction == "long" else "bearish",
+                    confidence=0.8,
+                    reasoning=f"Executed {direction} {size} {symbol} @ ${order.fill_price:,.2f}",
                 )
         except Exception:
             pass
