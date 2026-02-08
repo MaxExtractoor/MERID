@@ -27,17 +27,31 @@ from merid.prediction.venue_gate import (
     TradingMode,
     VenueGate,
 )
+from merid.prediction.consensus import (
+    PredictionConsensusStore,
+    PredictionInstrument,
+    PredictionOpinion,
+    PredictionPlan,
+    ResolvedMarket,
+    get_prediction_consensus_store,
+)
 
 __all__ = [
     "ContractState",
     "KalshiStrategy",
     "MarketSnapshot",
+    "PredictionConsensusStore",
+    "PredictionInstrument",
     "PredictionMarketModel",
     "PredictionMarketRisk",
+    "PredictionOpinion",
+    "PredictionPlan",
     "PredictionRiskConfig",
     "PreTradeCheck",
+    "ResolvedMarket",
     "StrategyConfig",
     "StrategySignal",
     "TradingMode",
     "VenueGate",
+    "get_prediction_consensus_store",
 ]

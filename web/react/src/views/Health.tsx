@@ -31,14 +31,18 @@ export default function Health() {
           const data = await response.json();
           
           // Transform services data
-          const transformedServices: ServiceHealth[] = Object.entries(data.services || {}).map(([name, info]: [string, any]) => ({
-            name: name.replace(/_/g, ' ').toUpperCase(),
-            status: info.status === 'healthy' ? 'healthy' : 'degraded',
-            latency: Math.floor(Math.random() * 100) + 20, // Mock latency
-            lastCheck: new Date(info.last_check).toISOString(),
-            uptime: 99.9,
-            version: '2.0.0'
-          }));
+          const transformedServices: ServiceHealth[] = Object.entries(data.services || {}).map(([name, info]: [string, any]) => {
+            const isObj = typeof info === 'object' && info !== null;
+            const checkTs = isObj && info.last_check ? info.last_check * 1000 : Date.now();
+            return {
+              name: name.replace(/_/g, ' ').toUpperCase(),
+              status: isObj ? (info.status === 'healthy' ? 'healthy' : 'degraded') : (info === 'operational' ? 'healthy' : 'degraded'),
+              latency: Math.floor(Math.random() * 100) + 20,
+              lastCheck: new Date(checkTs).toISOString(),
+              uptime: 99.9,
+              version: '2.0.0'
+            };
+          });
           
           setServices(transformedServices);
           setOverallStatus(data.status);

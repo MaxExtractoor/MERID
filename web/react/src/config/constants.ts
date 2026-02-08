@@ -63,6 +63,13 @@ export const API_ENDPOINTS = {
   CONSENSUS_SUMMARY: "/api/v1/consensus/summary",
   CONSENSUS_METRICS: "/api/v1/consensus/metrics",
   
+  // Prediction Consensus
+  PREDICTION_CONSENSUS_SUMMARY: "/api/v1/prediction/consensus/summary",
+  PREDICTION_CONSENSUS_OPINIONS: "/api/v1/prediction/consensus/opinions",
+  PREDICTION_CONSENSUS_PLANS: "/api/v1/prediction/consensus/plans",
+  PREDICTION_CONSENSUS_INSTRUMENTS: "/api/v1/prediction/consensus/instruments",
+  PREDICTION_METRICS: "/api/v1/prediction/metrics",
+  
   // Logs
   LOGS: "/api/v1/logs",
   

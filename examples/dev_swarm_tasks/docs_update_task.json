@@ -1,0 +1,12 @@
+{
+  "description": "Update API documentation for consensus module - add examples, fix outdated information",
+  "target_files": [
+    "docs/API.md",
+    "consensus/consensus_coordinator.py"
+  ],
+  "success_criteria": "Documentation complete, accurate, includes code examples, matches current implementation",
+  "priority": 4,
+  "estimated_effort": "small",
+  "timeout_seconds": 900,
+  "max_cost_usd": 2.0
+}

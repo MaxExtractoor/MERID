@@ -63,7 +63,7 @@ export default function ConsoleViewer() {
   // WebSocket connection for real-time data
   useEffect(() => {
     if (selectedMode === 'orders' || selectedMode === 'risk') {
-      const wsUrl = `ws://localhost:8000/ws/${selectedMode}`;
+      const wsUrl = `ws://${window.location.host}/ws/${selectedMode}`;
       wsRef.current = new WebSocket(wsUrl);
       
       wsRef.current.onmessage = (event) => {

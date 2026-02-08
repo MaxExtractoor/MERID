@@ -155,7 +155,7 @@ export class WebSocketService {
 }
 
 // Create singleton instance
-const wsUrl = (import.meta as any).env?.VITE_WS_URL || 'ws://localhost:8000/ws';
+const wsUrl = (import.meta as any).env?.VITE_WS_URL || `ws://${window?.location?.host || '127.0.0.1:8011'}/ws`;
 export const websocketService = new WebSocketService({ url: wsUrl });
 
 // Auto-connect on import

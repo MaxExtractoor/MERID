@@ -1,0 +1,92 @@
+# =============================================================================
+# MERID Prometheus Configuration
+#
+# Scrapes metrics from:
+# - Flink JobManager and TaskManagers
+# - Redpanda broker
+# - MERID FastAPI backend
+# =============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'merid-streaming'
+
+# =============================================================================
+# ALERTING (optional - configure Alertmanager)
+# =============================================================================
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# =============================================================================
+# RULE FILES (optional - for recording rules and alerts)
+# =============================================================================
+# rule_files:
+#   - "rules/*.yml"
+
+# =============================================================================
+# SCRAPE CONFIGS
+# =============================================================================
+scrape_configs:
+  # -------------------------------------------------------------------------
+  # Prometheus self-monitoring
+  # -------------------------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # -------------------------------------------------------------------------
+  # Flink JobManager metrics
+  # -------------------------------------------------------------------------
+  - job_name: 'flink-jobmanager'
+    static_configs:
+      - targets: ['flink-jobmanager:9249']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'jobmanager'
+
+  # -------------------------------------------------------------------------
+  # Flink TaskManager metrics
+  # -------------------------------------------------------------------------
+  - job_name: 'flink-taskmanager'
+    static_configs:
+      - targets: ['flink-taskmanager:9249']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'taskmanager'
+
+  # -------------------------------------------------------------------------
+  # Flink TaskManagers (scaled) - use DNS service discovery
+  # -------------------------------------------------------------------------
+  - job_name: 'flink-taskmanagers-scaled'
+    dns_sd_configs:
+      - names:
+          - 'tasks.flink-taskmanager'
+        type: 'A'
+        port: 9249
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  # -------------------------------------------------------------------------
+  # Redpanda metrics
+  # -------------------------------------------------------------------------
+  - job_name: 'redpanda'
+    static_configs:
+      - targets: ['redpanda:9644']
+    metrics_path: /public_metrics
+
+  # -------------------------------------------------------------------------
+  # MERID FastAPI backend (if instrumented)
+  # -------------------------------------------------------------------------
+  - job_name: 'merid-backend'
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+    metrics_path: /metrics
+    scrape_interval: 30s

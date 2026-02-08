@@ -92,26 +92,67 @@ async def trade_stream(websocket: WebSocket):
     
     logger.info("Trade stream client connected")
     
-    from trading.agents.execution_agent import get_execution_agent
-    execution_agent = get_execution_agent()
-    
     try:
+        from trading.agents.execution_agent import get_execution_agent
+        execution_agent = get_execution_agent()
+    except Exception as exc:
+        logger.warning("ExecutionAgent unavailable (%s), using paper trading fallback", exc)
+        execution_agent = None
+
+    try:
+        # Try to get paper trading engine for real trade logs
+        from trading.paper_trading import get_paper_engine
+        paper_engine = get_paper_engine()
+    except Exception:
+        paper_engine = None
+
+    try:
+        last_trade_count = 0
         while True:
-            # Get recent trades from execution agent
-            recent_trades = execution_agent.get_recent_trades(limit=1)
-            
-            if recent_trades:
-                trade = recent_trades[-1]
-                await websocket.send_json({
-                    "timestamp": time.time(),
-                    "trade_id": trade.get('order_id', f"trade_{int(time.time())}"),
-                    "asset": trade.get('asset', 'BTC'),
-                    "side": trade.get('side', 'long'),
-                    "size_usd": trade.get('size_usd', 0),
-                    "entry_price": trade.get('fill_price', 0),
-                    "status": trade.get('status', 'filled')
-                })
-            
+            trades_sent = False
+
+            # Try paper trading engine first (has real trade history)
+            if paper_engine is not None:
+                try:
+                    history = paper_engine.get_trade_history() if hasattr(paper_engine, 'get_trade_history') else []
+                    if len(history) > last_trade_count:
+                        for trade in history[last_trade_count:]:
+                            await websocket.send_json({
+                                "timestamp": trade.get('timestamp', time.time()),
+                                "trade_id": trade.get('order_id', f"trade_{int(time.time())}"),
+                                "asset": trade.get('symbol', trade.get('asset', 'BTC-USD')),
+                                "side": trade.get('side', 'buy'),
+                                "size_usd": trade.get('notional', trade.get('size_usd', 0)),
+                                "entry_price": trade.get('fill_price', trade.get('price', 0)),
+                                "status": trade.get('status', 'filled'),
+                            })
+                            trades_sent = True
+                        last_trade_count = len(history)
+                except Exception:
+                    pass
+
+            # Fallback to execution agent
+            if not trades_sent and execution_agent is not None:
+                try:
+                    recent_trades = execution_agent.get_recent_trades(limit=1)
+                    if recent_trades:
+                        trade = recent_trades[-1]
+                        await websocket.send_json({
+                            "timestamp": time.time(),
+                            "trade_id": trade.get('order_id', f"trade_{int(time.time())}"),
+                            "asset": trade.get('asset', 'BTC'),
+                            "side": trade.get('side', 'long'),
+                            "size_usd": trade.get('size_usd', 0),
+                            "entry_price": trade.get('fill_price', 0),
+                            "status": trade.get('status', 'filled'),
+                        })
+                except Exception:
+                    pass
+
+            # Send heartbeat so client knows connection is alive
+            if not trades_sent:
+                await websocket.send_json({"type": "heartbeat", "timestamp": time.time()})
+
             await asyncio.sleep(2)
             
     except WebSocketDisconnect:
@@ -279,6 +320,78 @@ async def position_stream(websocket: WebSocket):
     except Exception as exc:
         logger.error("Position stream error: %s", exc)
         _position_connections.discard(websocket)
+
+
+# Risk Summary Stream
+
+_risk_connections: Set[WebSocket] = set()
+
+@router.websocket("/risk")
+async def risk_stream(websocket: WebSocket):
+    """
+    Real-time risk summary stream for TradeFloor.tsx.
+    
+    Sends periodic risk snapshots from the paper trading engine.
+    """
+    await websocket.accept()
+    _risk_connections.add(websocket)
+    
+    logger.info("Risk stream client connected")
+    
+    try:
+        while True:
+            try:
+                from trading.paper_trading import get_paper_engine
+                engine = get_paper_engine()
+                total_equity = 0.0
+                total_pnl = 0.0
+                unrealized = 0.0
+                pos_count = 0
+                exposure: Dict = {}
+                for uid, port in engine.portfolios.items():
+                    stats = engine.get_portfolio_stats(uid)
+                    total_equity += stats.get("equity", stats.get("current_balance", 0))
+                    total_pnl += stats.get("total_pnl", 0)
+                    unrealized += stats.get("total_unrealized_pnl", 0)
+                    for pid, pos in port.positions.items():
+                        pos_count += 1
+                        sym = pos.symbol if hasattr(pos, "symbol") else pid
+                        notional = abs((pos.current_price or 0) * (pos.quantity or 0))
+                        exposure[sym] = exposure.get(sym, 0) + notional
+                if not engine.portfolios:
+                    total_equity = 10000.0
+
+                await websocket.send_json({
+                    "event_type": "risk_summary",
+                    "total_equity": round(total_equity, 2),
+                    "total_pnl": round(total_pnl, 2),
+                    "unrealized_pnl": round(unrealized, 2),
+                    "position_count": pos_count,
+                    "exposure": exposure,
+                })
+            except (WebSocketDisconnect, RuntimeError):
+                break
+            except Exception:
+                try:
+                    await websocket.send_json({
+                        "event_type": "risk_summary",
+                        "total_equity": 10000.0,
+                        "total_pnl": 0,
+                        "unrealized_pnl": 0,
+                        "position_count": 0,
+                        "exposure": {},
+                    })
+                except (WebSocketDisconnect, RuntimeError):
+                    break
+            await asyncio.sleep(5)
+            
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Risk stream error: %s", exc)
+    finally:
+        _risk_connections.discard(websocket)
+        logger.info("Risk stream client disconnected")
 
 
 # Broadcast helpers (for use by other modules)

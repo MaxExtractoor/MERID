@@ -1,0 +1,30 @@
+{
+  "saved_at": 1770592758.4348989,
+  "portfolios": {
+    "operator": {
+      "starting_balance": 100000.0,
+      "current_balance": 93200.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "BTC-USD_long_perp": {
+          "position_id": "paper_pos_1_1770592758",
+          "user_id": "operator",
+          "asset": "BTC-USD",
+          "side": "long",
+          "size_usd": 6800.0,
+          "entry_price": 68067.99999999999,
+          "current_price": 68000.0,
+          "leverage": 1,
+          "unrealized_pnl": -6.793206793205341,
+          "realized_pnl": 0.0,
+          "opened_at": 1770592758.4348989,
+          "market_type": "perp",
+          "market_id": null
+        }
+      }
+    }
+  }
+}

@@ -41,7 +41,7 @@ async def get_operator_summary() -> Dict[str, Any]:
             "is_live": controller.is_live,
         }
     except Exception as exc:
-        logger.warning("operator_summary_mode_error", error=str(exc))
+        logger.warning(f"operator_summary_mode_error: {exc}")
         result["mode"] = {"name": "UNKNOWN", "is_paper": False, "is_live": False}
 
     # --- Portfolio snapshot ---
@@ -62,7 +62,7 @@ async def get_operator_summary() -> Dict[str, Any]:
             "position_count": position_count,
         }
     except Exception as exc:
-        logger.warning("operator_summary_portfolio_error", error=str(exc))
+        logger.warning(f"operator_summary_portfolio_error: {exc}")
         result["portfolio"] = {
             "total_value": 0,
             "unrealized_pnl": 0,
@@ -86,7 +86,7 @@ async def get_operator_summary() -> Dict[str, Any]:
             "success_rate": round(completed / total * 100, 1) if total else 0.0,
         }
     except Exception as exc:
-        logger.warning("operator_summary_swarm_error", error=str(exc))
+        logger.warning(f"operator_summary_swarm_error: {exc}")
         result["swarm"] = {
             "agents": 0,
             "active_tasks": 0,
@@ -136,7 +136,7 @@ async def get_audit_trail(
             "total": len(trail.entries),
         }
     except Exception as exc:
-        logger.warning("audit_trail_error", error=str(exc))
+        logger.warning(f"audit_trail_error: {exc}")
         return {"entries": [], "total": 0, "error": str(exc)}
 
 
@@ -180,7 +180,7 @@ async def get_equity_series(
                 unrealized_pnl += pnl
         _record_equity_snapshot(total_value + unrealized_pnl, unrealized_pnl)
     except Exception as exc:
-        logger.warning("equity_series_snapshot_error", error=str(exc))
+        logger.warning(f"equity_series_snapshot_error: {exc}")
 
     # Filter by window
     window_seconds = {
@@ -249,7 +249,7 @@ async def get_risk_utilization() -> Dict[str, Any]:
                 "status": "good",
             })
     except Exception as exc:
-        logger.warning("risk_utilization_protections_error", error=str(exc))
+        logger.warning(f"risk_utilization_protections_error: {exc}")
 
     # Add margin utilization from risk metrics
     try:
@@ -280,7 +280,7 @@ async def get_risk_utilization() -> Dict[str, Any]:
                 "status": "critical" if daily_dd > 8 else "warning" if daily_dd > 5 else "good",
             })
     except Exception as exc:
-        logger.warning("risk_utilization_metrics_error", error=str(exc))
+        logger.warning(f"risk_utilization_metrics_error: {exc}")
 
     return {
         "limits": limits,
@@ -335,5 +335,5 @@ async def scale_agent_pool(target_count: int = Query(..., ge=1, le=20, descripti
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("scale_agent_pool_error", error=str(exc))
+        logger.error(f"scale_agent_pool_error: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))

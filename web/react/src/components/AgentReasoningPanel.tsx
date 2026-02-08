@@ -29,7 +29,7 @@ export default function AgentReasoningPanel({ agentId, className = '' }: AgentRe
 
     const connectWebSocket = () => {
       try {
-        ws = new WebSocket('ws://localhost:8000/ws/agents');
+        ws = new WebSocket(`ws://${window.location.host}/ws/agents`);
         
         ws.onopen = () => {
           setWsConnected(true);

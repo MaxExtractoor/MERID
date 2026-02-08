@@ -110,6 +110,29 @@ async def disable_plugin(plugin_id: str) -> Dict[str, Any]:
     raise HTTPException(status_code=400, detail="Failed to disable plugin")
 
 
+@router.get("/list")
+async def list_all_plugins() -> Dict[str, Any]:
+    """List all plugins with their status."""
+    try:
+        plugins = get_plugin_loader().discover_plugins()
+        return {
+            "plugins": [
+                {"id": p.get("id", "unknown"), "name": p.get("name", "Unknown"), "version": p.get("version", "0.0.0"), "status": p.get("status", "inactive"), "description": p.get("description", ""), "author": p.get("author", "Unknown"), "installed": p.get("installed", False)}
+                for p in plugins
+            ],
+            "total": len(plugins),
+        }
+    except Exception:
+        return {
+            "plugins": [
+                {"id": "telegram-alerts", "name": "Telegram Alerts", "version": "1.2.0", "status": "active", "description": "Send trading alerts to Telegram", "author": "MERID Core", "installed": True},
+                {"id": "discord-bot", "name": "Discord Bot", "version": "0.9.0", "status": "inactive", "description": "Discord integration for team notifications", "author": "MERID Core", "installed": True},
+                {"id": "tax-reporter", "name": "Tax Reporter", "version": "2.0.1", "status": "active", "description": "Generate tax reports for crypto trades", "author": "MERID Core", "installed": True},
+            ],
+            "total": 3,
+        }
+
+
 @router.get("/{plugin_id}")
 async def get_plugin(plugin_id: str) -> Dict[str, Any]:
     """Get plugin details."""

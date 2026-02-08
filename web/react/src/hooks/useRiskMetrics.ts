@@ -57,7 +57,7 @@ export function useRiskMetrics(): UseRiskMetricsReturn {
   useEffect(() => {
     if (data) {
       setMetrics(data);
-      setAlerts(data.alerts);
+      setAlerts(Array.isArray(data.alerts) ? data.alerts : []);
       setLastUpdated(new Date());
     }
   }, [data]);

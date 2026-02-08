@@ -22,6 +22,32 @@ export default function LivePortfolioValue() {
     timestamp: Date.now(),
   });
 
+  // REST fallback: fetch portfolio summary when WS is unavailable
+  useEffect(() => {
+    let cancelled = false;
+    const fetchRest = async () => {
+      try {
+        let res = await fetch('/api/v1/portfolio/summary');
+        if (!res.ok) res = await fetch('/api/portfolio/summary');
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          setDisplayData(prev => ({
+            total_value: data.equity ?? data.total_value ?? prev.total_value,
+            change_24h: data.dailyPnl ?? data.change_24h ?? prev.change_24h,
+            change_24h_percent: data.dailyPnlPct ?? data.change_24h_percent ?? prev.change_24h_percent,
+            pnl_today: data.dailyPnl ?? data.pnl_today ?? prev.pnl_today,
+            positions_count: data.activeBots ?? data.positions_count ?? prev.positions_count,
+            timestamp: Date.now(),
+          }));
+        }
+      } catch { /* WS is primary */ }
+    };
+    fetchRest();
+    const interval = setInterval(fetchRest, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // WS updates override REST data
   useEffect(() => {
     if (portfolioData) {
       setDisplayData(portfolioData);
