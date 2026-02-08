@@ -652,6 +652,32 @@ async def get_portfolio_summary():
     }
 
 
+@router.get("/orders/open")
+async def get_open_orders():
+    """Get open/pending orders across all venues."""
+    from trading.paper_trading import get_paper_engine
+
+    paper_engine = get_paper_engine()
+    orders = []
+
+    for user_id, portfolio in paper_engine.portfolios.items():
+        for trade in portfolio.trade_history:
+            if trade.get("status", "filled") in ("open", "pending"):
+                orders.append({
+                    "id": trade.get("trade_id", ""),
+                    "symbol": trade.get("asset", ""),
+                    "side": trade.get("side", "buy"),
+                    "type": trade.get("order_type", "market"),
+                    "quantity": trade.get("size", 0),
+                    "price": trade.get("price"),
+                    "status": trade.get("status", "open"),
+                    "timestamp": trade.get("timestamp", ""),
+                    "venue": trade.get("venue", "Paper"),
+                })
+
+    return {"orders": orders, "total": len(orders)}
+
+
 @router.get("/backtest/results")
 async def get_backtest_results():
     """Get backtest results for dashboard."""

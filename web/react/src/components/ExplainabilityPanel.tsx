@@ -353,7 +353,7 @@ export default function ExplainabilityPanel({ className = '' }: ExplainabilityPa
                 <div>
                   <h4 className="text-white font-semibold mb-3">Decision Factors</h4>
                   <div className="space-y-3">
-                    {decision.factors.map((factor, idx) => (
+                    {(decision.factors || []).map((factor, idx) => (
                       <div key={idx} className="bg-slate-900/50 p-3 rounded">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-white font-medium">{factor.name}</span>
@@ -385,7 +385,7 @@ export default function ExplainabilityPanel({ className = '' }: ExplainabilityPa
                 <div>
                   <h4 className="text-white font-semibold mb-3">Alternative Options Considered</h4>
                   <div className="space-y-2">
-                    {decision.alternatives.map((alt, idx) => (
+                    {(decision.alternatives || []).map((alt, idx) => (
                       <div key={idx} className="bg-slate-900/50 p-3 rounded">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-white font-medium">{alt.action}</span>
@@ -402,7 +402,7 @@ export default function ExplainabilityPanel({ className = '' }: ExplainabilityPa
                 <div>
                   <h4 className="text-white font-semibold mb-3">Data Sources Used</h4>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {decision.data_sources.map((source, idx) => (
+                    {(decision.data_sources || []).map((source, idx) => (
                       <div key={idx} className="bg-slate-900/50 p-3 rounded">
                         <p className="text-white font-medium text-sm">{source.name}</p>
                         <p className="text-xs text-gray-400 mb-2">{source.type}</p>

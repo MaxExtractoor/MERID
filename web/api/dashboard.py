@@ -1,11 +1,11 @@
 """
 Dashboard API Endpoints
-Provides real-time data for the React dashboard
+Provides real-time data for the React dashboard — wired to live sources.
 """
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-import random
+import time
 
 from utils.logger import get_logger
 
@@ -14,21 +14,54 @@ logger = get_logger("api.dashboard")
 router = APIRouter(prefix="/api", tags=["Dashboard"])
 
 
+def _format_volume(vol: float) -> str:
+    """Format volume as human-readable string."""
+    if not vol or vol == 0:
+        return "N/A"
+    if vol >= 1_000_000_000:
+        return f"{vol / 1_000_000_000:.1f}B"
+    if vol >= 1_000_000:
+        return f"{vol / 1_000_000:.1f}M"
+    if vol >= 1_000:
+        return f"{vol / 1_000:.1f}K"
+    return f"{vol:.0f}"
+
+
+def _get_paper_stats() -> Dict[str, Any]:
+    """Pull real stats from the paper trading engine."""
+    from trading.paper_trading import get_paper_engine
+    engine = get_paper_engine()
+    # Use first portfolio or default
+    user_id = next(iter(engine.portfolios), "default")
+    return engine.get_portfolio_stats(user_id)
+
+
 @router.get("/portfolio/summary")
 async def get_portfolio_summary() -> Dict[str, Any]:
     """
-    Get portfolio summary for dashboard overview.
-    Returns equity, P&L, margin, and active bots count.
+    Get portfolio summary from the live paper trading engine.
     """
     try:
-        # TODO: Connect to real portfolio engine
-        # For now, return realistic mock data
+        stats = _get_paper_stats()
+        equity = stats.get("equity", stats.get("current_balance", 10000))
+        starting = stats.get("starting_balance", 10000)
+        total_pnl = stats.get("total_pnl", 0)
+        unrealized = stats.get("total_unrealized_pnl", 0)
+        daily_pnl = total_pnl + unrealized
+        daily_pnl_pct = (daily_pnl / starting * 100) if starting else 0
         return {
-            "equity": 1284732.45,
-            "dailyPnl": 12847.32,
-            "dailyPnlPct": 2.34,
-            "availableMargin": 456231.89,
-            "activeBots": 12
+            "equity": round(equity, 2),
+            "dailyPnl": round(daily_pnl, 2),
+            "dailyPnlPct": round(daily_pnl_pct, 2),
+            "availableMargin": round(stats.get("current_balance", equity), 2),
+            "activeBots": stats.get("open_positions", 0),
+            "totalValue": round(equity, 2),
+            "unrealizedPnl": round(unrealized, 2),
+            "activePositions": stats.get("open_positions", 0),
+            "totalTrades": stats.get("total_trades", 0),
+            "winRate": round(stats.get("win_rate_pct", 0), 1),
+            "roi": round(stats.get("roi_pct", 0), 2),
+            "startingBalance": round(starting, 2),
         }
     except Exception as e:
         logger.error(f"Failed to get portfolio summary: {e}")
@@ -38,63 +71,48 @@ async def get_portfolio_summary() -> Dict[str, Any]:
 @router.get("/prices/live")
 async def get_live_prices(symbols: str) -> Dict[str, Any]:
     """
-    Get live prices for multiple symbols.
-    Query param: symbols (comma-separated, e.g., "BTC-USD,ETH-USD")
+    Get live prices for multiple symbols from the real price feed.
+    Query param: symbols (comma-separated, e.g., "BTC,ETH,SOL")
     """
     try:
         from data.live_price_feed import get_live_price_feed
-        
-        symbol_list = [s.strip() for s in symbols.split(",")]
+        feed = get_live_price_feed()
+        all_prices = feed.get_latest_prices()
+
+        symbol_list = [s.strip().upper() for s in symbols.split(",")]
         prices = []
-        
-        # Try to get real prices from live feed
-        try:
-            feed = get_live_price_feed()
-            for symbol in symbol_list:
-                # Try to get real price
-                price_data = feed.get_latest_price(symbol)
-                if price_data and 'price' in price_data:
-                    prices.append({
-                        "symbol": symbol,
-                        "price": round(price_data['price'], 2),
-                        "change": round(price_data.get('change_24h', 0), 2),
-                        "volume": price_data.get('volume_24h', 'N/A')
-                    })
-                else:
-                    # Fallback to mock data if real price unavailable
-                    raise ValueError(f"No price data for {symbol}")
-        except Exception as e:
-            logger.warning(f"Failed to get real prices, using fallback: {e}")
-            # Fallback mock data
-            base_prices = {
-                "BTC-USD": 103500.00,  # Updated to realistic 2026 price
-                "ETH-USD": 3850.00,
-                "SOL-USD": 145.00,
-                "AAPL": 178.92,
-                "NVDA": 456.78,
-                "TSLA": 234.56,
-                "MSFT": 389.12
-            }
-            
-            for symbol in symbol_list:
-                if symbol in base_prices:
-                    base_price = base_prices[symbol]
-                    variation = random.uniform(-0.02, 0.03)
-                    current_price = base_price * (1 + variation)
-                    change_pct = variation * 100
-                    
-                    if symbol.endswith("-USD"):
-                        volume = f"{random.uniform(0.8, 1.5):.1f}B"
-                    else:
-                        volume = f"{random.randint(400, 600)}M"
-                    
-                    prices.append({
-                        "symbol": symbol,
-                        "price": round(current_price, 2),
-                        "change": round(change_pct, 2),
-                        "volume": volume
-                    })
-        
+
+        for symbol in symbol_list:
+            # Try exact match, then strip -USD suffix
+            key = symbol
+            if key not in all_prices:
+                key = symbol.replace("-USD", "").replace("/USD", "")
+            if key not in all_prices:
+                # Try with /USD suffix (Kraken format)
+                for k in all_prices:
+                    if k.upper().startswith(symbol.replace("-USD", "")):
+                        key = k
+                        break
+
+            if key in all_prices:
+                pd = all_prices[key]
+                prices.append({
+                    "symbol": symbol,
+                    "price": round(pd["price"], 2),
+                    "change": round(pd.get("change_24h", 0), 2),
+                    "volume": _format_volume(pd.get("volume_24h", 0)),
+                    "source": pd.get("source", "unknown"),
+                    "timestamp": pd.get("timestamp"),
+                })
+            else:
+                prices.append({
+                    "symbol": symbol,
+                    "price": 0,
+                    "change": 0,
+                    "volume": "N/A",
+                    "source": "unavailable",
+                })
+
         return {"prices": prices}
     except Exception as e:
         logger.error(f"Failed to get live prices: {e}")
@@ -104,49 +122,32 @@ async def get_live_prices(symbols: str) -> Dict[str, Any]:
 @router.get("/orders/recent")
 async def get_recent_orders(limit: int = 10) -> Dict[str, Any]:
     """
-    Get recent order activity for dashboard.
+    Get recent trades from the paper trading engine.
     """
     try:
-        # TODO: Connect to real order management system
-        # For now, return realistic mock data
-        orders = [
-            {
-                "time": "10:23:45",
-                "action": "BUY BTC",
-                "size": "0.5",
-                "price": "43256.78",
-                "status": "FILLED"
-            },
-            {
-                "time": "10:15:22",
-                "action": "SELL ETH",
-                "size": "2.3",
-                "price": "2234.56",
-                "status": "FILLED"
-            },
-            {
-                "time": "09:58:11",
-                "action": "BUY SOL",
-                "size": "100",
-                "price": "98.45",
-                "status": "FILLED"
-            },
-            {
-                "time": "09:45:33",
-                "action": "BUY AAPL",
-                "size": "50",
-                "price": "178.92",
-                "status": "PARTIAL"
-            },
-            {
-                "time": "09:32:18",
-                "action": "SELL NVDA",
-                "size": "25",
-                "price": "456.78",
-                "status": "FILLED"
-            }
-        ]
-        
+        from trading.paper_trading import get_paper_engine
+        engine = get_paper_engine()
+        user_id = next(iter(engine.portfolios), "default")
+        portfolio = engine.get_portfolio(user_id)
+
+        orders = []
+        # trade_history stores filled PaperOrder objects
+        for order in reversed(portfolio.trade_history[-limit:]):
+            ts = getattr(order, "filled_at", None) or getattr(order, "created_at", time.time())
+            time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S") if isinstance(ts, (int, float)) else str(ts)
+            side = getattr(order, "side", "BUY").upper()
+            asset = getattr(order, "asset", "?")
+            size = getattr(order, "size_usd", getattr(order, "quantity", 0))
+            price = getattr(order, "fill_price", getattr(order, "price", 0))
+            status = getattr(order, "status", "FILLED").upper()
+            orders.append({
+                "time": time_str,
+                "action": f"{side} {asset}",
+                "size": f"{size}",
+                "price": f"{price}",
+                "status": status,
+            })
+
         return {"orders": orders[:limit]}
     except Exception as e:
         logger.error(f"Failed to get recent orders: {e}")
@@ -156,94 +157,45 @@ async def get_recent_orders(limit: int = 10) -> Dict[str, Any]:
 @router.get("/agents/activity")
 async def get_agent_activity() -> Dict[str, Any]:
     """
-    Get current agent activity and status.
+    Get real agent activity from the agent framework registry.
     """
     try:
-        # TODO: Connect to real agent orchestrator
-        # For now, return realistic mock data
-        agents = [
-            {
-                "agent_id": "analyst-gemma-01",
-                "agent_name": "Analyst Gemma",
-                "status": "active",
-                "last_action": "Analyzed BTC market trends",
-                "last_action_time": "2m ago",
-                "tasks_completed": 142,
-                "current_task": "Processing ETH signals"
-            },
-            {
-                "agent_id": "risk-01",
-                "agent_name": "Risk Monitor",
-                "status": "active",
-                "last_action": "Updated exposure limits",
-                "last_action_time": "5m ago",
-                "tasks_completed": 89,
-                "current_task": "Monitoring portfolio risk"
-            },
-            {
-                "agent_id": "strategy-agent-01",
-                "agent_name": "Strategy Agent",
-                "status": "idle",
-                "last_action": "Generated trading signals",
-                "last_action_time": "15m ago",
-                "tasks_completed": 67,
-                "current_task": None
-            },
-            {
-                "agent_id": "analyst-llama-01",
-                "agent_name": "Analyst Llama",
-                "status": "active",
-                "last_action": "Sentiment analysis complete",
-                "last_action_time": "1m ago",
-                "tasks_completed": 156,
-                "current_task": "Analyzing news feeds"
-            },
-            {
-                "agent_id": "skeptic-01",
-                "agent_name": "Skeptic",
-                "status": "active",
-                "last_action": "Validated trade signals",
-                "last_action_time": "3m ago",
-                "tasks_completed": 98,
-                "current_task": "Reviewing risk parameters"
-            },
-            {
-                "agent_id": "synthesizer-01",
-                "agent_name": "Synthesizer",
-                "status": "idle",
-                "last_action": "Aggregated agent insights",
-                "last_action_time": "8m ago",
-                "tasks_completed": 45,
-                "current_task": None
-            },
-            {
-                "agent_id": "archivist-01",
-                "agent_name": "Archivist",
-                "status": "active",
-                "last_action": "Logged system events",
-                "last_action_time": "30s ago",
-                "tasks_completed": 234,
-                "current_task": "Archiving trade history"
-            },
-            {
-                "agent_id": "meta-audit-01",
-                "agent_name": "Meta Auditor",
-                "status": "active",
-                "last_action": "Performance audit complete",
-                "last_action_time": "10m ago",
-                "tasks_completed": 23,
-                "current_task": "Monitoring agent health"
-            }
-        ]
-        
+        from agents.agent_framework import AgentStatus
+        from agents.registry import get_registry
+        registry = get_registry()
+        all_agents = registry.get_all_agents()
+
+        agents = []
+        for agent in all_agents:
+            m = agent.get_metrics()
+            status_str = agent.status.value if hasattr(agent.status, "value") else str(agent.status)
+            # Format uptime
+            uptime_s = m.uptime_seconds if hasattr(m, "uptime_seconds") else 0
+            if uptime_s > 3600:
+                uptime_label = f"{int(uptime_s // 3600)}h ago"
+            elif uptime_s > 60:
+                uptime_label = f"{int(uptime_s // 60)}m ago"
+            else:
+                uptime_label = f"{int(uptime_s)}s ago"
+
+            agents.append({
+                "agent_id": agent.agent_id,
+                "agent_name": getattr(agent, "name", agent.agent_id),
+                "status": status_str,
+                "last_action": getattr(m, "last_action", "") if hasattr(m, "last_action") else "",
+                "last_action_time": uptime_label,
+                "tasks_completed": getattr(m, "tasks_completed", 0) if hasattr(m, "tasks_completed") else 0,
+                "current_task": getattr(agent, "current_task", None),
+            })
+
         return {
             "agents": agents,
             "summary": {
                 "total": len(agents),
-                "active": sum(1 for a in agents if a["status"] == "active"),
+                "active": sum(1 for a in agents if a["status"] in ("active", "running", "idle")),
                 "idle": sum(1 for a in agents if a["status"] == "idle"),
-                "error": sum(1 for a in agents if a["status"] == "error")
-            }
+                "error": sum(1 for a in agents if a["status"] in ("error", "failed")),
+            },
         }
     except Exception as e:
         logger.error(f"Failed to get agent activity: {e}")

@@ -5,6 +5,7 @@ import Overview from "./views/Overview";
 import Trading from "./views/Trading";
 import Agents from "./views/Agents";
 import Predictions from "./views/Predictions";
+import PredictionConsensusView from "./views/PredictionConsensusView";
 import Risk from "./views/Risk";
 import Health from "./views/Health";
 import ApiDashboard from "./views/ApiDashboard";
@@ -26,7 +27,7 @@ import Orders from "./views/Orders";
 import Rewards from "./views/Rewards";
 import { ThemeProvider } from "./theme";
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders" | "rewards";
+type View = "overview" | "trading" | "agents" | "predictions" | "prediction-consensus" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders" | "rewards";
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
@@ -76,11 +77,12 @@ export default function App() {
             {view === "trading" && <Trading />}
             {view === "agents" && <Agents />}
             {view === "predictions" && <Predictions />}
+            {view === "prediction-consensus" && <PredictionConsensusView />}
             {view === "risk" && <Risk />}
             {view === "health" && <Health />}
             {view === "api" && <ApiDashboard />}
             {view === "research" && <Research />}
-            {view === "analytics" && <Logs />}
+            {view === "analytics" && <Research />}
             {view === "logs" && <Logs />}
             {view === "settings" && <Settings />}
             {view === "wallet" && <Wallet />}

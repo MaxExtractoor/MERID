@@ -11,57 +11,90 @@ export interface SystemHealth {
 }
 
 export interface PnLSummary {
-  daily_pnl: number;
-  daily_pnl_pct: number;
-  total_equity: number;
-  available_margin: number;
-  positions_count: number;
+  today_pnl: number;
+  today_pnl_pct: number;
+  mtm_pnl: number;
+  max_drawdown: number;
+  max_drawdown_pct: number;
+  limit_daily_loss: number;
+  limit_utilization_pct: number;
 }
 
 export interface TradingSummary {
-  active_orders: number;
-  filled_today: number;
-  cancelled_today: number;
-  total_volume_24h: number;
-  avg_fill_time_ms: number;
+  active_strategies: number;
+  paused_strategies: number;
+  venues_connected: number;
+  venues: string[];
+  notional_deployed: number;
+  notional_capacity: number;
+  utilization_pct: number;
 }
 
 export interface AgentSummary {
   total_agents: number;
   active_agents: number;
   idle_agents: number;
-  total_tasks_completed: number;
+  tasks_completed: number;
+  tasks_pending: number;
+  average_response_time: number;
+  success_rate: number;
   agents: Array<{
-    agent_id: string;
+    id: string;
     name: string;
-    status: 'active' | 'idle' | 'error';
+    status: string;
+    heartbeat_age_ms: number;
+    strategy: string;
+    state: string;
+    positions_count: number;
+    today_pnl: number;
     tasks_completed: number;
+    uptime: number;
   }>;
+  summary: {
+    total: number;
+    healthy: number;
+    paused: number;
+    unhealthy: number;
+  };
 }
 
 export interface RiskProtections {
+  timestamp: string;
   circuit_breaker: {
     state: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+    state_color: string;
     error_count: number;
+    window_seconds: number;
     threshold: number;
-    last_failure?: number;
+    last_error_at: string | null;
+    opened_at: string | null;
+    cooldown_seconds: number;
+    half_open_successes: number;
   };
   lockdown: {
     trading_suite_enabled: boolean;
-    reason?: string;
+    global_mode: string;
+    spectator_mode: boolean;
+    lockdown_reason: string | null;
   };
-  exposure: {
-    total_exposure: number;
-    max_exposure: number;
-    utilization_pct: number;
+  risk_limits: {
+    max_daily_loss_usd: number;
+    current_daily_pnl: number;
+    daily_loss_utilization_pct: number;
+    max_per_symbol_exposure_usd: number;
+    max_open_orders: number;
+    current_open_orders: number;
   };
+  recent_events: Array<{ timestamp: string; type: string; details: any }>;
 }
 
 export interface PrimeStatus {
-  connected: boolean;
-  last_heartbeat?: number;
-  active_connections: number;
-  message_queue_size: number;
+  status: string;
+  mode: string;
+  market_data_connected: boolean;
+  narrative_available: boolean;
+  last_narrative_timestamp: number;
+  data_feeds: Record<string, { connected: boolean; latency_ms: number }>;
 }
 
 export interface PredictionMarket {

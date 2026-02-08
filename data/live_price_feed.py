@@ -55,7 +55,24 @@ class LivePriceFeed:
         Args:
             symbols: List of symbols to track (e.g., ['BTC/USDT', 'ETH/USDT'])
         """
-        self.symbols = symbols or ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT']
+        self.symbols = symbols or [
+            # Major crypto
+            'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT',
+            # Alt L1/L2
+            'ADA/USDT', 'DOT/USDT', 'ATOM/USDT', 'NEAR/USDT',
+            'APT/USDT', 'SUI/USDT', 'SEI/USDT', 'FTM/USDT',
+            'MATIC/USDT', 'ARB/USDT', 'OP/USDT',
+            # DeFi
+            'LINK/USDT', 'UNI/USDT', 'AAVE/USDT', 'MKR/USDT',
+            'SNX/USDT', 'CRV/USDT', 'LDO/USDT',
+            # Memecoins
+            'DOGE/USDT', 'SHIB/USDT', 'PEPE/USDT', 'WIF/USDT',
+            'BONK/USDT', 'FLOKI/USDT',
+            # Infrastructure / Storage
+            'FIL/USDT', 'AR/USDT', 'RENDER/USDT',
+            # Stablecoins (reference)
+            'USDC/USDT',
+        ]
         self.exchanges = {}
         self.price_cache: Dict[str, PriceData] = {}
         self.subscribers: List[Callable] = []
@@ -525,9 +542,10 @@ class LivePriceFeed:
         for symbol, price_data in self.price_cache.items():
             prices[symbol] = {
                 "price": price_data.price,
-                "change_24h": getattr(price_data, "change_24h", 0.0),
+                "change_24h": getattr(price_data, "change_24h_pct", 0.0),
                 "timestamp": price_data.timestamp.isoformat() if price_data.timestamp else None,
-                "source": price_data.source
+                "source": getattr(price_data, "exchange", "unknown"),
+                "volume_24h": getattr(price_data, "volume_24h", 0.0),
             }
         return prices
 

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <users>
+        <merid>
+            <password_sha256_hex><!-- Set via CLICKHOUSE_PASSWORD env var --></password_sha256_hex>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </merid>
+        <default>
+            <password></password>
+            <networks>
+                <ip>::1</ip>
+                <ip>127.0.0.1</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+        </default>
+    </users>
+</clickhouse>

@@ -1,12 +1,10 @@
-import { useState, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
+import { DollarSign, Activity, BarChart3, Shield, Zap, Clock, ArrowUpRight, ArrowDownRight, Minus, RefreshCw, Wallet, Target, Award } from 'lucide-react';
 import CollapsibleConsole from '../components/CollapsibleConsole';
 import PredictionMarketsPanel from '../components/PredictionMarketsPanel';
 import AgentActivityPanel from '../components/AgentActivityPanel';
 import QuickActionsPanel from '../components/QuickActionsPanel';
-import LivePriceStream from '../components/LivePriceStream';
-import LivePortfolioValue from '../components/LivePortfolioValue';
-import { api } from '../services/api';
 import { 
   SystemHealthCard, 
   PnLCard, 
@@ -16,12 +14,20 @@ import {
   RiskProtectionCard 
 } from '../hooks/useDashboard';
 
+/* ── Types ─────────────────────────────────────────── */
 interface PortfolioSummary {
   equity: number;
   dailyPnl: number;
   dailyPnlPct: number;
   availableMargin: number;
   activeBots: number;
+  totalValue: number;
+  unrealizedPnl: number;
+  activePositions: number;
+  totalTrades: number;
+  winRate: number;
+  roi: number;
+  startingBalance: number;
 }
 
 interface WatchlistItem {
@@ -29,184 +35,464 @@ interface WatchlistItem {
   price: number;
   change: number;
   volume: string;
+  source?: string;
 }
 
-interface RecentActivity {
+interface RecentTrade {
   time: string;
   action: string;
   size: string;
   price: string;
+  status?: string;
 }
 
-// Risk Exposure Hook
-function useRiskExposure() {
-  const [exposure, setExposure] = useState<any>(null);
+interface RiskExposure {
+  total_exposure: number;
+  total_exposure_pct: number;
+  open_orders_count: number;
+  buying_power: number;
+  by_symbol: Array<{ symbol: string; pct_of_equity: number }>;
+}
+
+interface EquityPoint {
+  ts: number;
+  equity: number;
+  pnl: number;
+}
+
+/* ── Hooks ─────────────────────────────────────────── */
+function usePortfolio() {
+  const [data, setData] = useState<PortfolioSummary | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    async function fetchExposure() {
-      try {
-        const response = await fetch('/api/risk/exposure');
-        if (response.ok) {
-          const data = await response.json();
-          setExposure(data);
-        }
-      } catch (e) {
-        console.error('Failed to fetch exposure:', e);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchExposure();
-    const interval = setInterval(fetchExposure, 30000);
-    return () => clearInterval(interval);
+  const fetch_ = useCallback(async () => {
+    try {
+      const res = await fetch('/api/portfolio/summary');
+      if (res.ok) setData(await res.json());
+    } catch { /* silent */ }
+    finally { setLoading(false); }
   }, []);
 
-  return { exposure, loading };
+  useEffect(() => {
+    fetch_();
+    const i = setInterval(fetch_, 15_000);
+    return () => clearInterval(i);
+  }, [fetch_]);
+
+  return { portfolio: data, loading, refresh: fetch_ };
 }
 
-// Exposure Bar Component
-function ExposureBar() {
-  const { exposure, loading } = useRiskExposure();
+function useWatchlist() {
+  const [prices, setPrices] = useState<WatchlistItem[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  if (loading) {
+  const fetch_ = useCallback(async () => {
+    try {
+      const res = await fetch('/api/prices/live?symbols=BTC,ETH,SOL,AVAX');
+      if (res.ok) {
+        const d = await res.json();
+        setPrices(d.prices || []);
+      }
+    } catch { /* silent */ }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    fetch_();
+    const i = setInterval(fetch_, 10_000);
+    return () => clearInterval(i);
+  }, [fetch_]);
+
+  return { prices, loading };
+}
+
+function useRecentTrades() {
+  const [trades, setTrades] = useState<RecentTrade[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetch_ = useCallback(async () => {
+    try {
+      const res = await fetch('/api/orders/recent?limit=8');
+      if (res.ok) {
+        const d = await res.json();
+        setTrades(d.orders || []);
+      }
+    } catch { /* silent */ }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    fetch_();
+    const i = setInterval(fetch_, 30_000);
+    return () => clearInterval(i);
+  }, [fetch_]);
+
+  return { trades, loading };
+}
+
+function useRiskExposure() {
+  const [exposure, setExposure] = useState<RiskExposure | null>(null);
+
+  useEffect(() => {
+    const f = async () => {
+      try {
+        const r = await fetch('/api/risk/exposure');
+        if (r.ok) setExposure(await r.json());
+      } catch { /* silent */ }
+    };
+    f();
+    const i = setInterval(f, 30_000);
+    return () => clearInterval(i);
+  }, []);
+
+  return exposure;
+}
+
+function useEquitySeries() {
+  const [points, setPoints] = useState<EquityPoint[]>([]);
+
+  useEffect(() => {
+    const f = async () => {
+      try {
+        const r = await fetch('/api/operator/equity-series?window=1d');
+        if (r.ok) {
+          const d = await r.json();
+          setPoints(d.points || []);
+        }
+      } catch { /* silent */ }
+    };
+    f();
+    const i = setInterval(f, 60_000);
+    return () => clearInterval(i);
+  }, []);
+
+  return points;
+}
+
+/* ── Helpers ───────────────────────────────────────── */
+function fmtUsd(v: number, compact = false): string {
+  if (compact && Math.abs(v) >= 1_000_000)
+    return `$${(v / 1_000_000).toFixed(2)}M`;
+  if (compact && Math.abs(v) >= 1_000)
+    return `$${(v / 1_000).toFixed(1)}K`;
+  return v.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+}
+
+function PnlBadge({ value, pct }: { value: number; pct?: number }) {
+  const positive = value >= 0;
+  const Icon = positive ? ArrowUpRight : value < 0 ? ArrowDownRight : Minus;
+  const color = positive ? 'text-emerald-400' : 'text-red-400';
+  const bg = positive ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30';
+
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${bg} ${color}`}>
+      <Icon className="w-3 h-3" />
+      {positive ? '+' : ''}{fmtUsd(value)}
+      {pct !== undefined && <span className="ml-1 opacity-75">({positive ? '+' : ''}{pct.toFixed(2)}%)</span>}
+    </span>
+  );
+}
+
+function Skeleton({ className = '' }: { className?: string }) {
+  return <div className={`bg-slate-700/50 rounded animate-pulse ${className}`} />;
+}
+
+/* ── Portfolio Hero Card ──────────────────────────── */
+function PortfolioHero({ portfolio, loading, refresh }: { portfolio: PortfolioSummary | null; loading: boolean; refresh: () => void }) {
+  if (loading || !portfolio) {
     return (
-      <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800 animate-pulse">
-        <div className="h-4 bg-slate-700 rounded mb-2"></div>
-        <div className="h-4 bg-slate-700 rounded"></div>
+      <div className="bg-gradient-to-br from-slate-900 via-blue-950/30 to-slate-900 rounded-2xl border border-blue-500/20 p-6 lg:p-8">
+        <Skeleton className="h-4 w-32 mb-3" />
+        <Skeleton className="h-10 w-48 mb-4" />
+        <div className="grid grid-cols-4 gap-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div>
       </div>
     );
   }
 
-  const maxSymbol = exposure?.by_symbol?.reduce((max: any, s: any) => 
-    s.pct_of_equity > (max?.pct_of_equity || 0) ? s : max, exposure?.by_symbol?.[0]
-  );
+  const pnlPos = portfolio.dailyPnl >= 0;
 
   return (
-    <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-slate-400">Risk Exposure</h3>
-        <span className="text-xs text-slate-500">${((exposure?.total_exposure || 0) / 1000).toFixed(1)}k</span>
-      </div>
-      
-      <div className="grid grid-cols-3 gap-4 mb-3">
-        <div>
-          <div className="text-lg font-semibold text-slate-200">{exposure?.open_orders_count || 0}</div>
-          <div className="text-xs text-slate-500">Open Orders</div>
+    <div className="bg-gradient-to-br from-slate-900 via-blue-950/30 to-slate-900 rounded-2xl border border-blue-500/20 p-6 lg:p-8 relative overflow-hidden">
+      {/* Glow accent */}
+      <div className={`absolute -top-20 -right-20 w-40 h-40 rounded-full blur-3xl opacity-20 ${pnlPos ? 'bg-emerald-500' : 'bg-red-500'}`} />
+
+      <div className="relative">
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-blue-500/20 rounded-lg">
+              <Wallet className="w-4 h-4 text-blue-400" />
+            </div>
+            <span className="text-sm text-slate-400 font-medium">Portfolio Value</span>
+            <span className="flex items-center gap-1 text-xs text-emerald-400">
+              <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" /> Live
+            </span>
+          </div>
+          <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-slate-700/50 transition-colors" title="Refresh">
+            <RefreshCw className="w-4 h-4 text-slate-400" />
+          </button>
         </div>
-        <div>
-          <div className="text-lg font-semibold text-slate-200">{maxSymbol?.symbol || '-'}</div>
-          <div className="text-xs text-slate-500">Top Symbol ({((maxSymbol?.pct_of_equity || 0) * 100).toFixed(1)}%)</div>
+
+        <div className="text-4xl lg:text-5xl font-bold text-white tracking-tight mb-2">
+          {fmtUsd(portfolio.equity)}
         </div>
-        <div>
-          <div className="text-lg font-semibold text-emerald-400">${((exposure?.buying_power || 0) / 1000).toFixed(0)}k</div>
-          <div className="text-xs text-slate-500">Buying Power</div>
+
+        <div className="mb-6">
+          <PnlBadge value={portfolio.dailyPnl} pct={portfolio.dailyPnlPct} />
         </div>
-      </div>
-      
-      <div className="text-xs text-slate-500">
-        Total: {((exposure?.total_exposure_pct || 0) * 100).toFixed(1)}% of equity deployed
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-slate-700/50">
+          <div>
+            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><DollarSign className="w-3 h-3" />Available</div>
+            <div className="text-base font-semibold text-slate-200">{fmtUsd(portfolio.availableMargin, true)}</div>
+          </div>
+          <div>
+            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Activity className="w-3 h-3" />Positions</div>
+            <div className="text-base font-semibold text-slate-200">{portfolio.activePositions}</div>
+          </div>
+          <div>
+            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Target className="w-3 h-3" />Trades</div>
+            <div className="text-base font-semibold text-slate-200">{portfolio.totalTrades}</div>
+          </div>
+          <div>
+            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Award className="w-3 h-3" />Win Rate</div>
+            <div className="text-base font-semibold text-slate-200">{portfolio.winRate}%</div>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-export default function Overview() {
-  const [summary, setSummary] = useState<PortfolioSummary | null>(null);
-  const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
-  const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    async function loadData() {
-      try {
-        // Load portfolio summary
-        try {
-          const summaryData = await api.getPortfolioSummary();
-          setSummary(summaryData as any);
-        } catch (e) {
-          // Fallback data
-          setSummary({
-            equity: 1284732.45,
-            dailyPnl: 12847.32,
-            dailyPnlPct: 2.34,
-            availableMargin: 456231.89,
-            activeBots: 12
-          });
-        }
-
-        // Load watchlist
-        try {
-          const watchlistData = await api.getLivePrices(['BTC-USD', 'ETH-USD', 'SOL-USD', 'AAPL', 'NVDA']);
-          setWatchlist((watchlistData as any).prices || []);
-        } catch (e) {
-          // Fallback data
-          setWatchlist([
-            { symbol: 'BTC-USD', price: 43256.78, change: 2.34, volume: '1.2B' },
-            { symbol: 'ETH-USD', price: 2234.56, change: -1.23, volume: '890M' },
-            { symbol: 'SOL-USD', price: 98.45, change: 5.67, volume: '234M' },
-            { symbol: 'AAPL', price: 178.92, change: 0.45, volume: '567M' },
-            { symbol: 'NVDA', price: 456.78, change: 3.21, volume: '445M' }
-          ]);
-        }
-
-        // Load recent activity
-        try {
-          const activityData = await api.getRecentOrders();
-          setRecentActivity((activityData as any).orders || []);
-        } catch (e) {
-          // Fallback data
-          setRecentActivity([
-            { time: '10:23:45', action: 'BUY BTC', size: '0.5', price: '43256.78' },
-            { time: '10:15:22', action: 'SELL ETH', size: '2.3', price: '2234.56' },
-            { time: '09:58:11', action: 'BUY SOL', size: '100', price: '98.45' }
-          ]);
-        }
-
-        setLoading(false);
-      } catch (error) {
-        console.error('Failed to load overview data:', error);
-        setLoading(false);
-      }
+/* ── Equity Chart ─────────────────────────────────── */
+function EquityChart({ points, portfolio }: { points: EquityPoint[]; portfolio: PortfolioSummary | null }) {
+  const chartData = useMemo(() => {
+    if (points.length > 0) {
+      return points.map(p => ({
+        time: new Date(p.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        equity: p.equity,
+        pnl: p.pnl,
+      }));
     }
+    // Show flat line at current equity if no historical data
+    const eq = portfolio?.equity || 10000;
+    const now = Date.now();
+    return Array.from({ length: 12 }, (_, i) => ({
+      time: new Date(now - (11 - i) * 300_000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      equity: eq,
+      pnl: 0,
+    }));
+  }, [points, portfolio]);
 
-    loadData();
-    const interval = setInterval(loadData, 30000); // Update every 30 seconds
-    return () => clearInterval(interval);
-  }, []);
+  const minVal = Math.min(...chartData.map(d => d.equity)) * 0.9995;
+  const maxVal = Math.max(...chartData.map(d => d.equity)) * 1.0005;
+  const pnlPositive = (portfolio?.dailyPnl ?? 0) >= 0;
 
-  // Chart data
-  const chartData = [
-    { name: 'Mon', value: 545000 },
-    { name: 'Tue', value: 548000 },
-    { name: 'Wed', value: 542000 },
-    { name: 'Thu', value: 551000 },
-    { name: 'Fri', value: 558000 },
-    { name: 'Sat', value: 562000 },
-    { name: 'Sun', value: 562847 },
-  ];
+  return (
+    <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+            <BarChart3 className="w-4 h-4 text-blue-400" />
+            Equity Curve
+          </h3>
+          <p className="text-xs text-slate-500">Live session</p>
+        </div>
+        {portfolio && (
+          <span className={`text-xs font-medium ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
+            ROI: {pnlPositive ? '+' : ''}{portfolio.roi}%
+          </span>
+        )}
+      </div>
+      <div className="h-48">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={chartData}>
+            <defs>
+              <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={pnlPositive ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
+                <stop offset="95%" stopColor={pnlPositive ? '#10b981' : '#ef4444'} stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis dataKey="time" stroke="#475569" tick={{ fontSize: 10 }} />
+            <YAxis domain={[minVal, maxVal]} stroke="#475569" tick={{ fontSize: 10 }} tickFormatter={(v: number) => fmtUsd(v, true)} />
+            <Tooltip
+              contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', fontSize: '12px' }}
+              formatter={(v: number) => [fmtUsd(v), 'Equity']}
+            />
+            <Area type="monotone" dataKey="equity" stroke={pnlPositive ? '#10b981' : '#ef4444'} strokeWidth={2} fill="url(#eqGrad)" />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
 
+/* ── Watchlist Card ────────────────────────────────── */
+function WatchlistCard({ prices, loading }: { prices: WatchlistItem[]; loading: boolean }) {
   if (loading) {
     return (
-      <div className="space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="bg-slate-900/70 rounded-xl p-4 animate-pulse">
-              <div className="h-4 bg-slate-700 rounded mb-2"></div>
-              <div className="h-8 bg-slate-700 rounded mb-2"></div>
-              <div className="h-4 bg-slate-700 rounded"></div>
-            </div>
-          ))}
-        </div>
+      <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
+        <Skeleton className="h-5 w-28 mb-4" />
+        {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-12 mb-2" />)}
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* Top Row - Live System Cards */}
-      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+    <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+          <Zap className="w-4 h-4 text-amber-400" />
+          Live Prices
+        </h3>
+        <span className="text-xs text-slate-500">{prices.length} assets</span>
+      </div>
+      <div className="space-y-1">
+        {prices.map(item => {
+          const up = item.change >= 0;
+          return (
+            <div key={item.symbol} className="flex items-center justify-between py-2.5 px-3 rounded-lg hover:bg-slate-800/50 transition-colors">
+              <div className="flex items-center gap-3">
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold ${
+                  item.symbol.includes('BTC') ? 'bg-orange-500/20 text-orange-400' :
+                  item.symbol.includes('ETH') ? 'bg-blue-500/20 text-blue-400' :
+                  item.symbol.includes('SOL') ? 'bg-purple-500/20 text-purple-400' :
+                  'bg-slate-600/20 text-slate-400'
+                }`}>
+                  {item.symbol.replace('-USD', '').slice(0, 3)}
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-slate-200">{item.symbol}</div>
+                  <div className="text-xs text-slate-500">{item.source || 'Exchange'}</div>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-sm font-semibold text-slate-200">{fmtUsd(item.price)}</div>
+                <div className={`text-xs font-medium ${up ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {up ? '+' : ''}{item.change.toFixed(2)}%
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {prices.length === 0 && (
+          <div className="text-center py-6 text-slate-500 text-sm">Waiting for price data...</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Recent Trades Card ───────────────────────────── */
+function RecentTradesCard({ trades, loading }: { trades: RecentTrade[]; loading: boolean }) {
+  if (loading) {
+    return (
+      <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
+        <Skeleton className="h-5 w-28 mb-4" />
+        {[1, 2, 3].map(i => <Skeleton key={i} className="h-10 mb-2" />)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+          <Clock className="w-4 h-4 text-cyan-400" />
+          Recent Trades
+        </h3>
+        <span className="text-xs text-slate-500">{trades.length} fills</span>
+      </div>
+      <div className="space-y-1">
+        {trades.map((t, i) => {
+          const isBuy = t.action.toUpperCase().startsWith('BUY');
+          return (
+            <div key={i} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-800/50 transition-colors">
+              <div className="flex items-center gap-2">
+                <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${isBuy ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+                  {isBuy ? 'BUY' : 'SELL'}
+                </span>
+                <div>
+                  <div className="text-sm font-medium text-slate-200">{t.action.replace('BUY ', '').replace('SELL ', '')}</div>
+                  <div className="text-xs text-slate-500">{t.size} @ ${t.price}</div>
+                </div>
+              </div>
+              <div className="text-xs text-slate-500">{t.time}</div>
+            </div>
+          );
+        })}
+        {trades.length === 0 && (
+          <div className="text-center py-6 text-slate-500 text-sm">
+            <Activity className="w-5 h-5 mx-auto mb-1 opacity-50" />
+            No trades yet this session
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Risk Exposure Card ───────────────────────────── */
+function RiskExposureCard({ exposure }: { exposure: RiskExposure | null }) {
+  if (!exposure) {
+    return (
+      <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
+        <Skeleton className="h-5 w-28 mb-3" />
+        <Skeleton className="h-16" />
+      </div>
+    );
+  }
+
+  const topSymbol = exposure.by_symbol?.reduce(
+    (max, s) => (s.pct_of_equity > (max?.pct_of_equity || 0) ? s : max),
+    exposure.by_symbol?.[0]
+  );
+  const pctDeployed = ((exposure.total_exposure_pct || 0) * 100);
+
+  return (
+    <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
+      <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
+        <Shield className="w-4 h-4 text-violet-400" />
+        Risk Exposure
+      </h3>
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <div>
+          <div className="text-lg font-semibold text-slate-200">{exposure.open_orders_count}</div>
+          <div className="text-xs text-slate-500">Open Orders</div>
+        </div>
+        <div>
+          <div className="text-lg font-semibold text-slate-200">{topSymbol?.symbol || '—'}</div>
+          <div className="text-xs text-slate-500">Top Exposure</div>
+        </div>
+        <div>
+          <div className="text-lg font-semibold text-emerald-400">{fmtUsd(exposure.buying_power, true)}</div>
+          <div className="text-xs text-slate-500">Buying Power</div>
+        </div>
+      </div>
+      {/* Utilization bar */}
+      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${pctDeployed > 80 ? 'bg-red-500' : pctDeployed > 50 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+          style={{ width: `${Math.min(pctDeployed, 100)}%` }}
+        />
+      </div>
+      <div className="text-xs text-slate-500 mt-1">{pctDeployed.toFixed(1)}% deployed</div>
+    </div>
+  );
+}
+
+/* ── Main Overview ─────────────────────────────────── */
+export default function Overview() {
+  const { portfolio, loading: portfolioLoading, refresh } = usePortfolio();
+  const { prices, loading: pricesLoading } = useWatchlist();
+  const { trades, loading: tradesLoading } = useRecentTrades();
+  const exposure = useRiskExposure();
+  const equityPoints = useEquitySeries();
+
+  return (
+    <div className="space-y-5">
+      {/* Row 1: System Status Cards */}
+      <section className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <SystemHealthCard />
         <PnLCard />
         <TradingOperationsCard />
@@ -215,139 +501,41 @@ export default function Overview() {
         <RiskProtectionCard />
       </section>
 
-      {/* Second Row - Live Portfolio & Prices */}
-      <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <LivePortfolioValue />
-        <LivePriceStream symbols={['BTC', 'ETH', 'SOL']} />
-      </section>
-
-      {/* Third Row - Risk & Exposure */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <ExposureBar />
-        
-        {/* Quick Stats */}
-        <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800">
-          <h3 className="text-sm font-medium text-slate-400 mb-3">Portfolio Summary</h3>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <div className="text-lg font-semibold text-slate-200">${summary?.equity?.toLocaleString() || '...'}</div>
-              <div className="text-xs text-slate-500">Total Equity</div>
-            </div>
-            <div>
-              <div className="text-lg font-semibold text-blue-400">${summary?.availableMargin?.toLocaleString() || '...'}</div>
-              <div className="text-xs text-slate-500">Available Margin</div>
-            </div>
-          </div>
+      {/* Row 2: Portfolio Hero + Live Prices */}
+      <section className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+        <div className="lg:col-span-3">
+          <PortfolioHero portfolio={portfolio} loading={portfolioLoading} refresh={refresh} />
         </div>
-        
-        {/* System Version */}
-        <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800">
-          <h3 className="text-sm font-medium text-slate-400 mb-3">System APIs</h3>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-slate-500">Version</span>
-              <span className="text-slate-300">v2.0.0</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-slate-500">Build</span>
-              <span className="text-slate-300">2025.01.31</span>
-            </div>
-            <a href="/openapi.json" className="text-blue-400 hover:text-blue-300 text-xs">
-              View OpenAPI Docs →
-            </a>
-          </div>
+        <div className="lg:col-span-2">
+          <WatchlistCard prices={prices} loading={pricesLoading} />
         </div>
       </section>
 
-      {/* Portfolio Chart */}
-      <section className="bg-slate-900/70 rounded-xl p-6 border border-slate-800">
-        <div className="mb-4">
-          <h2 className="text-lg font-semibold">Portfolio Performance</h2>
-          <p className="text-sm text-slate-400">Last 7 days</p>
+      {/* Row 3: Equity Chart + Risk + Recent Trades */}
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <div className="lg:col-span-2">
+          <EquityChart points={equityPoints} portfolio={portfolio} />
         </div>
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="name" stroke="#64748b" />
-              <YAxis stroke="#64748b" />
-              <Tooltip 
-                contentStyle={{ 
-                  backgroundColor: '#1e293b', 
-                  border: '1px solid #334155',
-                  borderRadius: '8px'
-                }}
-              />
-              <Line 
-                type="monotone" 
-                dataKey="value" 
-                stroke="#10b981" 
-                strokeWidth={2}
-                dot={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
+        <div className="space-y-5">
+          <RiskExposureCard exposure={exposure} />
+          <RecentTradesCard trades={trades} loading={tradesLoading} />
         </div>
       </section>
 
-      {/* Agent Activity & Quick Actions */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* Row 4: Agent Activity + Quick Actions */}
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2">
           <AgentActivityPanel />
         </div>
         <QuickActionsPanel />
-      </div>
+      </section>
 
-      {/* Three Column Layout - Watchlist, Activity, Prediction Markets */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Watchlist */}
-        <section className="bg-slate-900/70 rounded-xl p-6 border border-slate-800">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold">Live Watchlist</h2>
-            <button className="text-sm text-blue-400 hover:text-blue-300">Add Symbol</button>
-          </div>
-          <div className="space-y-2">
-            {watchlist.map((item) => (
-              <div key={item.symbol} className="flex justify-between items-center py-2 border-b border-slate-800">
-                <div>
-                  <div className="font-medium">{item.symbol}</div>
-                  <div className="text-sm text-slate-400">Vol: {item.volume}</div>
-                </div>
-                <div className="text-right">
-                  <div className="font-medium">${item.price.toLocaleString()}</div>
-                  <div className={`text-sm ${item.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {item.change >= 0 ? '+' : ''}{item.change.toFixed(2)}%
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Recent Activity */}
-        <section className="bg-slate-900/70 rounded-xl p-6 border border-slate-800">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold">Recent Activity</h2>
-            <p className="text-sm text-slate-400">Last 10 trades</p>
-          </div>
-          <div className="space-y-2">
-            {recentActivity.map((activity, index) => (
-              <div key={index} className="flex justify-between items-center py-2 border-b border-slate-800">
-                <div>
-                  <div className="font-medium text-sm">{activity.action}</div>
-                  <div className="text-xs text-slate-400">{activity.size} @ {activity.price}</div>
-                </div>
-                <div className="text-xs text-slate-400">{activity.time}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Prediction Markets */}
+      {/* Row 5: Prediction Markets */}
+      <section>
         <PredictionMarketsPanel />
-      </div>
+      </section>
 
-      {/* Collapsible Console */}
+      {/* Console */}
       <CollapsibleConsole />
     </div>
   );

@@ -20,23 +20,25 @@ export function LiveRiskStrip() {
 
   // Find top exposure symbol
   const topExposure = useMemo(() => {
+    if (!metrics.exposure || typeof metrics.exposure !== 'object') return null;
     const entries = Object.entries(metrics.exposure);
     if (entries.length === 0) return null;
     return entries.sort((a, b) => {
-      const aTotal = a[1].long + a[1].short;
-      const bTotal = b[1].long + b[1].short;
+      const aTotal = (a[1]?.long || 0) + (a[1]?.short || 0);
+      const bTotal = (b[1]?.long || 0) + (b[1]?.short || 0);
       return bTotal - aTotal;
     })[0];
   }, [metrics.exposure]);
 
   // Count alerts by severity
+  const safeAlerts = alerts || [];
   const alertCounts = useMemo(() => {
     return {
-      critical: alerts.filter(a => a.severity === 'CRITICAL').length,
-      warning: alerts.filter(a => a.severity === 'WARNING').length,
-      info: alerts.filter(a => a.severity === 'INFO').length,
+      critical: safeAlerts.filter(a => a.severity === 'CRITICAL').length,
+      warning: safeAlerts.filter(a => a.severity === 'WARNING').length,
+      info: safeAlerts.filter(a => a.severity === 'INFO').length,
     };
-  }, [alerts]);
+  }, [safeAlerts]);
 
   // Get circuit breaker status
   const circuitStatus = useMemo(() => {
@@ -89,7 +91,7 @@ export function LiveRiskStrip() {
         />
         <MetricCard
           label={topExposure ? `Exposure: ${topExposure[0]}` : 'Top Exposure'}
-          value={topExposure ? formatCurrency(topExposure[1].long + topExposure[1].short) : '-'}
+          value={topExposure ? formatCurrency((topExposure[1]?.long || 0) + (topExposure[1]?.short || 0)) : '-'}
           status="GOOD"
         />
         {/* Circuit Breaker Status */}

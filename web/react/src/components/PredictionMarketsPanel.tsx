@@ -56,50 +56,76 @@ export default function PredictionMarketsPanel() {
         </div>
       ) : (
         <div className="space-y-3">
-          {markets.slice(0, 5).map((market, index) => (
-            <div
-              key={market.market_id || `market-${index}`}
-              className="p-4 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-slate-200 mb-1 line-clamp-2">
-                    {market.question}
+          {markets.slice(0, 5).map((market, index) => {
+            const yesPrice = ((market as any).yesPrice ?? market.yes_price ?? 0);
+            const noPrice = ((market as any).noPrice ?? market.no_price ?? 0);
+            const volume = (market as any).volume || market.volume_24h || 0;
+            const endTime = (market as any).endTime || market.close_date;
+            const position = (market as any).ourPosition;
+            const pnl = (market as any).ourPnl;
+            const confidence = (market as any).modelConfidence;
+
+            return (
+              <div
+                key={(market as any).id || market.market_id || `market-${index}`}
+                className="p-4 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
+              >
+                {/* Question */}
+                <p className="text-sm font-medium text-slate-200 mb-2 line-clamp-2 leading-relaxed">
+                  {market.question || (market as any).symbol || 'Market'}
+                </p>
+
+                {/* Tags row */}
+                <div className="flex flex-wrap items-center gap-2 text-xs mb-3">
+                  <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded">
+                    {market.category || (market as any).symbol || 'Prediction'}
+                  </span>
+                  <span className="text-slate-500">{market.platform || 'Kalshi'}</span>
+                  {endTime && (
+                    <>
+                      <span className="text-slate-600">•</span>
+                      <span className="text-slate-500">Closes {new Date(endTime).toLocaleDateString()}</span>
+                    </>
+                  )}
+                </div>
+
+                {/* Prices + Stats row */}
+                <div className="flex items-center gap-4 flex-wrap">
+                  <div className="flex items-center gap-1 text-emerald-400 font-semibold text-sm">
+                    <TrendingUp className="w-3.5 h-3.5" />
+                    <span>YES {(yesPrice * 100).toFixed(0)}¢</span>
                   </div>
-                  <div className="flex items-center gap-2 text-xs text-slate-400">
-                    <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded">
-                      {market.category}
+                  <div className="flex items-center gap-1 text-rose-400 font-semibold text-sm">
+                    <TrendingDown className="w-3.5 h-3.5" />
+                    <span>NO {(noPrice * 100).toFixed(0)}¢</span>
+                  </div>
+
+                  {volume > 0 && (
+                    <span className="text-xs text-slate-500 ml-auto">Vol ${volume.toLocaleString()}</span>
+                  )}
+                </div>
+
+                {/* Position row (if we have one) */}
+                {position && (
+                  <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-700/50 text-xs">
+                    <span className={`font-semibold ${position === 'YES' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      Our position: {position}
                     </span>
-                    <span>•</span>
-                    <span>{market.platform}</span>
+                    {pnl !== undefined && (
+                      <span className={pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                        P&L: {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                      </span>
+                    )}
+                    {confidence !== undefined && (
+                      <span className="text-slate-400 ml-auto">
+                        Confidence: {(confidence * 100).toFixed(0)}%
+                      </span>
+                    )}
                   </div>
-                </div>
-                
-                <div className="flex gap-3 shrink-0">
-                  <div className="text-center">
-                    <div className="flex items-center gap-1 text-emerald-400 font-semibold">
-                      <TrendingUp className="w-3 h-3" />
-                      <span>{(market.yes_price * 100).toFixed(0)}¢</span>
-                    </div>
-                    <div className="text-xs text-slate-500">YES</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="flex items-center gap-1 text-rose-400 font-semibold">
-                      <TrendingDown className="w-3 h-3" />
-                      <span>{(market.no_price * 100).toFixed(0)}¢</span>
-                    </div>
-                    <div className="text-xs text-slate-500">NO</div>
-                  </div>
-                </div>
+                )}
               </div>
-              
-              {market.volume_24h > 0 && (
-                <div className="mt-2 text-xs text-slate-500">
-                  24h Volume: ${market.volume_24h.toLocaleString()}
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

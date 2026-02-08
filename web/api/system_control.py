@@ -110,24 +110,25 @@ async def get_agents_status():
 @router.get("/decisions/recent")
 async def get_recent_decisions(limit: int = 20):
     """Get recent agent decisions."""
-    orchestrator = get_agent_orchestrator()
-    
-    decisions = orchestrator.get_recent_decisions(limit=limit)
-    
-    return {
-        "decisions": [
-            {
-                "agent": d.agent_role.value,
-                "type": d.decision_type,
-                "data": d.data,
-                "confidence": d.confidence,
-                "reasoning": d.reasoning,
-                "timestamp": d.timestamp.isoformat()
-            }
-            for d in decisions
-        ],
-        "total": len(decisions)
-    }
+    try:
+        orchestrator = get_agent_orchestrator()
+        decisions = orchestrator.get_recent_decisions(limit=limit)
+        return {
+            "decisions": [
+                {
+                    "agent": d.agent_role.value,
+                    "type": d.decision_type,
+                    "data": d.data,
+                    "confidence": d.confidence,
+                    "reasoning": d.reasoning,
+                    "timestamp": d.timestamp.isoformat()
+                }
+                for d in decisions
+            ],
+            "total": len(decisions)
+        }
+    except Exception:
+        return {"decisions": [], "total": 0}
 
 
 @router.get("/consensus/history")

@@ -124,12 +124,14 @@ export default function DataFreshnessPanel() {
           </thead>
           <tbody>
             {sortedFeeds.map((feed) => {
-              const cfg = STATUS_CONFIG[feed.status];
+              const cfg = STATUS_CONFIG[feed.status] || STATUS_CONFIG['fresh'];
               const StatusIcon = cfg.icon;
-              const pct = Math.min(100, (feed.stalenessMs / feed.thresholdMs) * 100);
+              const staleness = feed.stalenessMs || 0;
+              const threshold = feed.thresholdMs || 1;
+              const pct = Math.min(100, (staleness / threshold) * 100);
 
               return (
-                <tr key={feed.source} className={`border-b border-slate-700/30 ${cfg.bg}`}>
+                <tr key={feed.source || `feed-${sortedFeeds.indexOf(feed)}`} className={`border-b border-slate-700/30 ${cfg.bg}`}>
                   <td className="px-4 py-2">
                     <span className="text-white font-medium">{feed.name}</span>
                   </td>

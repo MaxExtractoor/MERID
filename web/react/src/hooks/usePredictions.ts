@@ -59,9 +59,37 @@ export function usePredictions(): UsePredictionsReturn {
   // Initialize from REST data
   useEffect(() => {
     if (data) {
-      const newMap = new Map(data.markets.map((m) => [m.id, m]));
+      // Normalize markets - API may not return all fields
+      const normalized = (data.markets || []).map((m: any) => ({
+        id: m.id || '',
+        symbol: m.symbol || '',
+        marketType: m.marketType || 'BINARY',
+        question: m.question || m.symbol || '',
+        endTime: m.endTime || '',
+        status: m.status || 'OPEN',
+        yesPrice: m.yesPrice ?? 0,
+        noPrice: m.noPrice ?? 0,
+        volume: m.volume ?? 0,
+        liquidity: m.liquidity ?? 0,
+        ourPosition: m.ourPosition || 'NONE',
+        ourSize: m.ourSize ?? 0,
+        ourAvgPrice: m.ourAvgPrice ?? 0,
+        ourPnl: m.ourPnl ?? 0,
+        modelConfidence: m.modelConfidence ?? 0,
+        modelPrediction: m.modelPrediction || 'UNCERTAIN',
+        lastUpdated: m.lastUpdated || new Date().toISOString(),
+      } as PredictionMarket));
+      const newMap = new Map(normalized.map((m) => [m.id, m]));
       setMarketsMap(newMap);
-      setMeta(data.meta);
+      if (data.meta) {
+        setMeta({
+          total: data.meta.total ?? 0,
+          open: data.meta.open ?? 0,
+          closed: data.meta.closed ?? 0,
+          totalVolume: data.meta.totalVolume ?? 0,
+          totalPnl: data.meta.totalPnl ?? 0,
+        });
+      }
       setLastUpdated(new Date());
     }
   }, [data]);
