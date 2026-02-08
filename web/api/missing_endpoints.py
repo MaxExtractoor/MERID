@@ -10,7 +10,7 @@ Endpoints returning hardcoded/fake data include ``stub: true`` and
 """
 
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Body, HTTPException
 
@@ -786,29 +786,76 @@ async def update_user_settings() -> Dict[str, Any]:
 # Consumer: NotificationPanel.tsx, TelegramLogViewer.tsx
 # ============================================
 @router.get("/api/v1/notifications")
-async def get_notifications() -> Dict[str, Any]:
-    """Get notifications."""
+async def get_notifications(limit: int = 50, since: Optional[int] = None) -> Dict[str, Any]:
+    """Get notifications from the persistent store.
+
+    Falls back to stub when the store can't be loaded.
+    """
+    try:
+        from core.notifications import get_notification_store
+        store = get_notification_store()
+        notes = store.list(limit=limit, since_ms=since)
+        return {
+            "notifications": [n.to_dict() for n in notes],
+            "unread_count": store.unread_count(),
+            "total": store.total_count(),
+        }
+    except Exception:
+        pass
+
     return _stub({
-        "notifications": [
-            {"id": "n-001", "type": "info", "title": "System Started", "message": "MERID system started successfully", "timestamp": (datetime.utcnow() - timedelta(hours=2)).isoformat() + "Z", "read": True},
-            {"id": "n-002", "type": "warning", "title": "High Volatility", "message": "BTC volatility above threshold (3.5%)", "timestamp": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z", "read": False},
-            {"id": "n-003", "type": "success", "title": "Trade Executed", "message": "BTC-USD long entry at $69,500", "timestamp": (datetime.utcnow() - timedelta(minutes=30)).isoformat() + "Z", "read": False},
-        ],
-        "unread_count": 2,
-        "total": 3,
-    }, message="Notifications are simulated")
+        "notifications": [],
+        "unread_count": 0,
+        "total": 0,
+    }, message="Notification store not available")
+
+
+@router.post("/api/v1/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str) -> Dict[str, Any]:
+    """Mark a single notification as read."""
+    try:
+        from core.notifications import get_notification_store
+        store = get_notification_store()
+        found = store.mark_read(notification_id)
+        return {"success": found, "id": notification_id}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/api/v1/notifications/read-all")
+async def mark_all_notifications_read() -> Dict[str, Any]:
+    """Mark all notifications as read."""
+    try:
+        from core.notifications import get_notification_store
+        store = get_notification_store()
+        count = store.mark_all_read()
+        return {"success": True, "marked": count}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @router.get("/api/v1/notifications/telegram/log")
 async def get_telegram_log() -> Dict[str, Any]:
-    """Get Telegram notification log."""
+    """Get Telegram notification log from the persistent store."""
+    try:
+        from core.notifications import get_notification_store
+        store = get_notification_store()
+        notes = [n for n in store.list(limit=50) if n.source == "telegram"]
+        return {
+            "messages": [
+                {"id": n.id, "chat_id": "merid-alerts", "message": n.message,
+                 "sent_at": n.to_dict()["timestamp"], "status": "delivered"}
+                for n in notes
+            ],
+            "total": len(notes),
+        }
+    except Exception:
+        pass
+
     return _stub({
-        "messages": [
-            {"id": "tg-001", "chat_id": "merid-alerts", "message": "Trade alert: BTC-USD long entry", "sent_at": (datetime.utcnow() - timedelta(minutes=30)).isoformat() + "Z", "status": "delivered"},
-            {"id": "tg-002", "chat_id": "merid-alerts", "message": "Daily P&L report: +$2,340", "sent_at": (datetime.utcnow() - timedelta(hours=6)).isoformat() + "Z", "status": "delivered"},
-        ],
-        "total": 2,
-    }, message="Telegram log is simulated")
+        "messages": [],
+        "total": 0,
+    }, message="Telegram log: store not available")
 
 
 @router.post("/api/v1/logs/clear")
@@ -1037,6 +1084,27 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             order_type=order_type,
             price=price,
         )
+
+        # Emit notification for fills and rejections
+        try:
+            from core.notifications import add_notification
+            if order.status.value == "filled":
+                add_notification(
+                    type="trade", severity="info",
+                    title=f"Order Filled: {symbol}",
+                    message=f"{body.get('side', 'BUY')} {size} {symbol} @ ${order.fill_price:,.2f} (${order.size_usd:,.0f})",
+                    source="trading",
+                )
+            elif order.status.value == "rejected":
+                add_notification(
+                    type="warning", severity="warning",
+                    title=f"Order Rejected: {symbol}",
+                    message=f"{body.get('side', 'BUY')} {size} {symbol} — insufficient balance or risk limit",
+                    source="trading",
+                )
+        except Exception:
+            pass
+
         return {
             "success": True,
             "order_id": order.order_id,
@@ -1364,6 +1432,20 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
         get_agent_registry().get_statistics()
     agent_result = _probe_service("agent_swarm", _probe_agents)
     components.append({"component": "Agent Swarm", "status": agent_result["status"], "lastCheck": ts, "latency": agent_result["latency_ms"], "errorRate": 0, "uptime": 0})
+
+    # Emit notifications for any offline services
+    try:
+        from core.notifications import add_notification
+        for c in components:
+            if c["status"] == "offline":
+                add_notification(
+                    type="health", severity="error",
+                    title=f"{c['component']} Offline",
+                    message=f"{c['component']} is not responding — check service status",
+                    source="health_probe",
+                )
+    except Exception:
+        pass
 
     return components
 

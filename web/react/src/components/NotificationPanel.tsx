@@ -84,14 +84,20 @@ export default function NotificationPanel({ className = '' }: NotificationPanelP
     }
   };
 
-  const markAsRead = (id: string) => {
+  const markAsRead = async (id: string) => {
     setNotifications(notifications.map(n => 
       n.id === id ? { ...n, read: true } : n
     ));
+    try {
+      await fetch(`/api/v1/notifications/${id}/read`, { method: 'POST' });
+    } catch { /* silent */ }
   };
 
-  const markAllAsRead = () => {
+  const markAllAsRead = async () => {
     setNotifications(notifications.map(n => ({ ...n, read: true })));
+    try {
+      await fetch('/api/v1/notifications/read-all', { method: 'POST' });
+    } catch { /* silent */ }
   };
 
   const deleteNotification = (id: string) => {
