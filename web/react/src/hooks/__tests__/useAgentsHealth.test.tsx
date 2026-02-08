@@ -31,6 +31,7 @@ describe('useAgentsHealth', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: null,
+      rawResponse: null,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -70,6 +71,7 @@ describe('useAgentsHealth', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      rawResponse: null,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -105,6 +107,7 @@ describe('useAgentsHealth', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      rawResponse: null,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -155,6 +158,7 @@ describe('useAgentsHealth', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      rawResponse: null,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -183,6 +187,7 @@ describe('useAgentsHealth', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      rawResponse: null,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -219,6 +224,7 @@ describe('useAgentsHealth', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: null,
+      rawResponse: null,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -233,6 +239,7 @@ describe('useAgentsHealth', () => {
       error: new Error('Network error'),
       refetch: jest.fn(),
       lastUpdated: null,
+      rawResponse: null,
     });
 
     const { result } = renderHook(() => useAgentsHealth());

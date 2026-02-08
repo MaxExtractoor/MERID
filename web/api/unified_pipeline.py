@@ -135,6 +135,16 @@ async def disable_domain(req: DomainRequest):
 async def halt_domain(req: DomainHaltRequest):
     rm = get_global_risk_manager()
     rm.halt_domain(req.domain, req.reason or "Manual halt")
+    try:
+        from core.notifications import add_notification
+        add_notification(
+            type="risk", severity="critical",
+            title=f"Domain Halted: {req.domain}",
+            message=f"Trading domain '{req.domain}' halted — {req.reason or 'Manual halt'}",
+            source="risk_manager",
+        )
+    except Exception:
+        pass
     return {"status": "halted", "domain": req.domain, "reason": req.reason}
 
 
@@ -142,6 +152,16 @@ async def halt_domain(req: DomainHaltRequest):
 async def resume_domain(req: DomainRequest):
     rm = get_global_risk_manager()
     rm.resume_domain(req.domain)
+    try:
+        from core.notifications import add_notification
+        add_notification(
+            type="risk", severity="info",
+            title=f"Domain Resumed: {req.domain}",
+            message=f"Trading domain '{req.domain}' resumed — normal operations",
+            source="risk_manager",
+        )
+    except Exception:
+        pass
     return {"status": "resumed", "domain": req.domain}
 
 
