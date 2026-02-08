@@ -326,13 +326,37 @@ async def update_plan_status(plan_id: str, body: Dict[str, Any] = Body(...)) -> 
         return {"success": False, "error": str(e)}
 
 
-@router.get("/api/v1/consensus/metrics")
-async def get_consensus_metrics() -> Dict[str, Any]:
-    """Get consensus metrics from the persistent store."""
+@router.get("/api/v1/consensus/summary")
+async def get_consensus_summary() -> Dict[str, Any]:
+    """Per-symbol consensus summary across all markets.
+
+    Returns stance, confidence, agent counts, and plan counts for every
+    symbol that has recent opinions or plans in the ConsensusStore.
+    """
     try:
         from core.consensus_store import get_consensus_store
         store = get_consensus_store()
-        return store.get_metrics()
+        symbols = store.get_symbol_summaries()
+        return {"symbols": symbols, "stub": False}
+    except Exception:
+        pass
+
+    return _stub({
+        "symbols": [],
+        "stub": True,
+        "message": "No consensus data available",
+    }, message="Consensus summary: store not available")
+
+
+@router.get("/api/v1/consensus/metrics")
+async def get_consensus_metrics() -> Dict[str, Any]:
+    """Get consensus metrics from the persistent store (includes quality index)."""
+    try:
+        from core.consensus_store import get_consensus_store
+        store = get_consensus_store()
+        metrics = store.get_metrics()
+        metrics["quality"] = store.get_quality_index()
+        return metrics
     except Exception:
         pass
 
@@ -342,6 +366,7 @@ async def get_consensus_metrics() -> Dict[str, Any]:
         "average_time_to_consensus_ms": 0,
         "veto_count": 0,
         "unanimous_count": 0,
+        "quality": {"quality_index": 0.0, "band": "neutral", "window_trades": 0},
         "timestamp": int(time.time() * 1000),
     }, message="Consensus metrics: store not available")
 
@@ -1166,32 +1191,14 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             price=price,
         )
 
-        # Emit notification for fills and rejections
-        try:
-            from core.notifications import add_notification
-            if order.status.value == "filled":
-                add_notification(
-                    type="trade", severity="info",
-                    title=f"Order Filled: {symbol}",
-                    message=f"{body.get('side', 'BUY')} {size} {symbol} @ ${order.fill_price:,.2f} (${order.size_usd:,.0f})",
-                    source="trading",
-                )
-            elif order.status.value == "rejected":
-                add_notification(
-                    type="warning", severity="warning",
-                    title=f"Order Rejected: {symbol}",
-                    message=f"{body.get('side', 'BUY')} {size} {symbol} — insufficient balance or risk limit",
-                    source="trading",
-                )
-        except Exception:
-            pass
-
-        # Emit consensus plan + opinion for filled orders
+        # Emit consensus plan + opinion for filled orders (before notification so we can reference plan_id)
+        _fill_plan_id: Optional[str] = None
+        _fill_supporting: list = []
         try:
             from core.consensus_store import add_plan, add_opinion
             if order.status.value == "filled":
                 direction = "long" if side == "buy" else "short"
-                add_plan(
+                plan = add_plan(
                     symbol=symbol,
                     title=f"{symbol} {direction.title()} Entry",
                     direction=direction,
@@ -1200,6 +1207,8 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                     supporting_agents=["trading-engine"],
                     status="executed",
                 )
+                _fill_plan_id = plan.id
+                _fill_supporting = plan.supporting_agents
                 add_opinion(
                     agent_id="trading-engine",
                     agent_name="Trading Engine",
@@ -1208,6 +1217,46 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                     stance="bullish" if direction == "long" else "bearish",
                     confidence=0.8,
                     reasoning=f"Executed {direction} {size} {symbol} @ ${order.fill_price:,.2f}",
+                )
+        except Exception:
+            pass
+
+        # Emit notification for fills and rejections (enriched with plan attribution)
+        try:
+            from core.notifications import add_notification
+            if order.status.value == "filled":
+                msg = f"{body.get('side', 'BUY')} {size} {symbol} @ ${order.fill_price:,.2f} (${order.size_usd:,.0f})"
+                if _fill_plan_id:
+                    msg += f" | plan {_fill_plan_id}"
+                add_notification(
+                    type="trade", severity="info",
+                    title=f"Order Filled: {symbol}",
+                    message=msg,
+                    source="trading",
+                    metadata={
+                        "plan_id": _fill_plan_id,
+                        "supporting_agents": _fill_supporting,
+                    } if _fill_plan_id else None,
+                )
+            elif order.status.value == "rejected":
+                # Enrich with active plan count for the affected symbol
+                _active_note = ""
+                try:
+                    from core.consensus_store import get_consensus_store as _cs
+                    _st = _cs()
+                    _active = sum(
+                        1 for p in _st.list_plans(limit=50)
+                        if p.symbol == symbol and p.status in ("proposed", "approved", "executing")
+                    )
+                    if _active:
+                        _active_note = f" — {_active} active plan(s) affected"
+                except Exception:
+                    pass
+                add_notification(
+                    type="warning", severity="warning",
+                    title=f"Order Rejected: {symbol}",
+                    message=f"{body.get('side', 'BUY')} {size} {symbol} — insufficient balance or risk limit{_active_note}",
+                    source="trading",
                 )
         except Exception:
             pass

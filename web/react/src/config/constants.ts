@@ -10,8 +10,8 @@ const getEnv = (key: string, fallback: string): string => {
   }
 };
 
-export const API_BASE_URL = getEnv('VITE_API_BASE', "http://127.0.0.1:8000");
-export const WS_URL = getEnv('VITE_WS_URL', "ws://127.0.0.1:8000");
+export const API_BASE_URL = getEnv('VITE_API_BASE', "");
+export const WS_URL = getEnv('VITE_WS_URL', `ws://${window?.location?.host || '127.0.0.1:8011'}`);
 
 // API Endpoints
 export const API_ENDPOINTS = {
@@ -59,6 +59,10 @@ export const API_ENDPOINTS = {
   BACKTEST: "/api/v1/research/backtest",
   BACKTEST_RESULTS: "/api/v1/research/backtest/results",
   
+  // Consensus
+  CONSENSUS_SUMMARY: "/api/v1/consensus/summary",
+  CONSENSUS_METRICS: "/api/v1/consensus/metrics",
+  
   // Logs
   LOGS: "/api/v1/logs",
   
@@ -94,8 +98,16 @@ export const DEFAULTS = {
     AGENTS: 10000,   // 10 seconds
     RISK: 30000,     // 30 seconds
   },
-  SYMBOLS: ["BTC-USD", "ETH-USD", "SOL-USD", "MATIC-USD"],
-  VENUES: ["Coinbase", "Kraken", "Binance", "Gemini"],
+  SYMBOLS: [
+    "BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD",
+    "ADA-USD", "DOT-USD", "ATOM-USD", "NEAR-USD",
+    "APT-USD", "SUI-USD", "LINK-USD", "UNI-USD",
+    "DOGE-USD", "SHIB-USD", "PEPE-USD", "WIF-USD",
+    "ARB-USD", "OP-USD", "MATIC-USD", "FIL-USD",
+    "AAVE-USD", "MKR-USD", "RENDER-USD",
+  ],
+  VENUES: ["Coinbase", "Kraken", "Binance", "Alpaca", "Kalshi", "IBKR"],
+  ASSET_CLASSES: ["crypto", "prediction_markets", "equities", "forex", "memecoins", "defi", "rwa"],
   ORDER_TYPES: ["MARKET", "LIMIT", "STOP", "BRACKET"],
   SIDES: ["BUY", "SELL"],
 } as const;

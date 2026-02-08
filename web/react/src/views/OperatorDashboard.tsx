@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useOperatorSummary } from '../hooks/useOperatorSummary';
 import { OperatorStatusBar } from './OperatorStatusBar';
 import { OperatorControlPlane } from './OperatorControlPlane';
@@ -29,9 +30,24 @@ import AlertHistoryPanel from '../components/AlertHistoryPanel';
 import DomainPnLChart from '../components/DomainPnLChart';
 import StrategyLeaderboard from '../components/StrategyLeaderboard';
 import CompliancePanel from '../components/CompliancePanel';
+import ConsensusTable from '../components/ConsensusTable';
 import TradingHaltBanner from '../components/TradingHaltBanner';
+import { useConsensusSummary } from '../hooks/useConsensusSummary';
 import { formatCurrency } from '../utils/formatters';
-import { Monitor } from 'lucide-react';
+import {
+  Monitor, BarChart3, Shield, Brain, Server, Sliders,
+} from 'lucide-react';
+
+/* ── Tab Definitions ──────────────────────────────── */
+const TABS = [
+  { id: 'overview',     label: 'Overview',      icon: BarChart3 },
+  { id: 'trading',      label: 'Trading',       icon: Sliders },
+  { id: 'risk',         label: 'Risk',          icon: Shield },
+  { id: 'intelligence', label: 'Intelligence',  icon: Brain },
+  { id: 'system',       label: 'System',        icon: Server },
+] as const;
+
+type TabId = typeof TABS[number]['id'];
 
 export default function OperatorDashboard() {
   const {
@@ -45,6 +61,9 @@ export default function OperatorDashboard() {
     switchMode,
   } = useOperatorSummary(5000);
 
+  const consensusSummary = useConsensusSummary();
+  const [activeTab, setActiveTab] = useState<TabId>('overview');
+
   if (loading && !data) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -54,9 +73,10 @@ export default function OperatorDashboard() {
   }
 
   return (
-    <div className="space-y-4 p-6 max-w-[1600px] mx-auto">
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-2">
+    <div className="space-y-5 p-4 lg:p-6 max-w-[1800px] mx-auto">
+
+      {/* ─── Header ─────────────────────────────── */}
+      <div className="flex items-center gap-3">
         <Monitor className="w-6 h-6 text-blue-400" />
         <h1 className="text-xl font-bold text-slate-100">Operator Dashboard</h1>
         {error && (
@@ -74,175 +94,206 @@ export default function OperatorDashboard() {
         </div>
       </div>
 
-      {/* 0. Trading Halt Banner */}
+      {/* ─── Trading Halt Banner ────────────────── */}
       <TradingHaltBanner />
 
-      {/* 1. Status Bar */}
-      <OperatorStatusBar
-        summary={data}
-        lastUpdated={lastUpdated}
-      />
+      {/* ─── Status Bar ─────────────────────────── */}
+      <OperatorStatusBar summary={data} lastUpdated={lastUpdated} />
 
-      {/* 2. Portfolio & Risk + 3. Swarm Health (side by side) */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Left: Portfolio & Risk */}
-        <div className="space-y-4">
-          {/* Portfolio Summary Cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <MetricCard
-              label="Portfolio Value"
-              value={data?.portfolio ? formatCurrency(data.portfolio.total_value) : '--'}
-              status={data?.portfolio && data.portfolio.total_value > 0 ? 'GOOD' : 'WARNING'}
-            />
-            <MetricCard
-              label="Unrealized P&L"
-              value={data?.portfolio ? formatCurrency(data.portfolio.unrealized_pnl) : '--'}
-              status={
-                data?.portfolio
-                  ? data.portfolio.unrealized_pnl >= 0
-                    ? 'GOOD'
-                    : 'BAD'
-                  : undefined
-              }
-              delta={data?.portfolio?.unrealized_pnl}
-            />
-            <MetricCard
-              label="Positions"
-              value={String(data?.portfolio?.position_count ?? 0)}
-            />
-            <MetricCard
-              label="Success Rate"
-              value={`${data?.swarm?.success_rate?.toFixed(1) ?? '0'}%`}
-              status={
-                (data?.swarm?.success_rate ?? 0) >= 80
-                  ? 'GOOD'
-                  : (data?.swarm?.success_rate ?? 0) >= 50
-                    ? 'WARNING'
-                    : 'BAD'
-              }
-            />
+      {/* ─── Key Metrics (always visible) ────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3">
+        <MetricCard
+          label="Portfolio Value"
+          value={data?.portfolio ? formatCurrency(data.portfolio.total_value) : '--'}
+          status={data?.portfolio && data.portfolio.total_value > 0 ? 'GOOD' : 'WARNING'}
+        />
+        <MetricCard
+          label="Unrealized P&L"
+          value={data?.portfolio ? formatCurrency(data.portfolio.unrealized_pnl) : '--'}
+          status={
+            data?.portfolio
+              ? data.portfolio.unrealized_pnl >= 0 ? 'GOOD' : 'BAD'
+              : undefined
+          }
+          delta={data?.portfolio?.unrealized_pnl}
+        />
+        <MetricCard
+          label="Positions"
+          value={String(data?.portfolio?.position_count ?? 0)}
+        />
+        <MetricCard
+          label="Success Rate"
+          value={`${data?.swarm?.success_rate?.toFixed(1) ?? '0'}%`}
+          status={
+            (data?.swarm?.success_rate ?? 0) >= 80 ? 'GOOD'
+              : (data?.swarm?.success_rate ?? 0) >= 50 ? 'WARNING' : 'BAD'
+          }
+        />
+        <MetricCard
+          label="Agents"
+          value={String(data?.swarm?.agents ?? 0)}
+          status="GOOD"
+        />
+        <MetricCard
+          label="Active Tasks"
+          value={String(data?.swarm?.active_tasks ?? 0)}
+          status={(data?.swarm?.active_tasks ?? 0) > 0 ? 'GOOD' : undefined}
+        />
+        <MetricCard
+          label="Completed"
+          value={String(data?.swarm?.completed ?? 0)}
+        />
+        <MetricCard
+          label="Failed"
+          value={String(data?.swarm?.failed ?? 0)}
+          status={(data?.swarm?.failed ?? 0) > 0 ? 'WARNING' : 'GOOD'}
+        />
+      </div>
+
+      {/* ─── Tab Navigation ─────────────────────── */}
+      <nav className="flex items-center gap-1 bg-slate-900/60 rounded-xl p-1 border border-slate-800">
+        {TABS.map(tab => {
+          const Icon = tab.icon;
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                isActive
+                  ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30 shadow-lg shadow-blue-500/10'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              <span className="hidden sm:inline">{tab.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* ─── Tab Content ────────────────────────── */}
+      <div className="min-h-[600px]">
+
+        {/* ═══ OVERVIEW TAB ═══ */}
+        {activeTab === 'overview' && (
+          <div className="space-y-6">
+            {/* Risk Strip */}
+            <LiveRiskStrip />
+
+            {/* Equity Chart + Agent Health */}
+            <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
+              <div className="xl:col-span-3">
+                <EquityPnLChart />
+              </div>
+              <div className="xl:col-span-2">
+                <LiveAgentHealthPanel />
+              </div>
+            </div>
+
+            {/* Domain PnL + Strategy Leaderboard */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <DomainPnLChart />
+              <StrategyLeaderboard />
+            </div>
+
+            {/* Activity Stream + Control Plane */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <OperatorActivityStream />
+              </div>
+              <OperatorControlPlane
+                summary={data}
+                onPauseSwarm={pauseSwarm}
+                onResumeSwarm={resumeSwarm}
+                onSwitchMode={switchMode}
+                onRefresh={refetch}
+              />
+            </div>
           </div>
+        )}
 
-          {/* Live Risk Strip */}
-          <LiveRiskStrip />
+        {/* ═══ TRADING TAB ═══ */}
+        {activeTab === 'trading' && (
+          <div className="space-y-6">
+            {/* Domain Control + Venue Health */}
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <DomainControlPanel />
+              <VenueHealthGrid />
+            </div>
 
-          {/* Streaming Equity / PnL Chart */}
-          <EquityPnLChart />
-        </div>
+            {/* Mode Control + Prediction Markets */}
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <ModeControlPanel />
+              <PredictionMarketDetail />
+            </div>
 
-        {/* Right: Swarm Health */}
-        <div className="space-y-4">
-          {/* Swarm Summary Cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <MetricCard
-              label="Agents"
-              value={String(data?.swarm?.agents ?? 0)}
-              status="GOOD"
-            />
-            <MetricCard
-              label="Active Tasks"
-              value={String(data?.swarm?.active_tasks ?? 0)}
-              status={
-                (data?.swarm?.active_tasks ?? 0) > 0 ? 'GOOD' : undefined
-              }
-            />
-            <MetricCard
-              label="Completed"
-              value={String(data?.swarm?.completed ?? 0)}
-            />
-            <MetricCard
-              label="Failed"
-              value={String(data?.swarm?.failed ?? 0)}
-              status={(data?.swarm?.failed ?? 0) > 0 ? 'WARNING' : 'GOOD'}
-            />
+            {/* Decision Audit Trail */}
+            <ExplainabilityTimeline />
           </div>
+        )}
 
-          {/* Agent Health Panel */}
-          <LiveAgentHealthPanel />
-        </div>
-      </div>
+        {/* ═══ RISK TAB ═══ */}
+        {activeTab === 'risk' && (
+          <div className="space-y-6">
+            {/* Cross-Market Consensus */}
+            <ConsensusTable summary={consensusSummary} />
 
-      {/* 3. Risk Visualization Row */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <RiskLimitBars />
-        <RiskHeatmapWidget />
-        <DrawdownCard />
-      </div>
+            {/* Risk Visualization */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <RiskLimitBars />
+              <RiskHeatmapWidget />
+              <DrawdownCard />
+            </div>
 
-      {/* 4. Instrument Radar + Risk TreeMap */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <InstrumentRadar />
-        <RiskTreeMap />
-      </div>
+            {/* Instrument Radar + Risk TreeMap */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <InstrumentRadar />
+              <RiskTreeMap />
+            </div>
 
-      {/* 5. Breach Log + Latency */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <BreachAlertLog />
-        <LatencyChart />
-      </div>
+            {/* Breach Log + Latency */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <BreachAlertLog />
+              <LatencyChart />
+            </div>
+          </div>
+        )}
 
-      {/* 6. Domain Control + Venue Health */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <DomainControlPanel />
-        <VenueHealthGrid />
-      </div>
+        {/* ═══ INTELLIGENCE TAB ═══ */}
+        {activeTab === 'intelligence' && (
+          <div className="space-y-6">
+            {/* Orchestrator + Sentiment */}
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <OrchestratorPanel />
+              <SentimentTimeline />
+            </div>
 
-      {/* 7. Orchestrator + Sentiment */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <OrchestratorPanel />
-        <SentimentTimeline />
-      </div>
+            {/* Arb Scanner */}
+            <ArbScannerPanel />
+          </div>
+        )}
 
-      {/* 8. Arb Scanner */}
-      <ArbScannerPanel />
+        {/* ═══ SYSTEM TAB ═══ */}
+        {activeTab === 'system' && (
+          <div className="space-y-6">
+            {/* On-Chain Health + Data Freshness */}
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <OnChainHealthPanel />
+              <DataFreshnessPanel />
+            </div>
 
-      {/* 9. On-Chain Health + Data Freshness */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <OnChainHealthPanel />
-        <DataFreshnessPanel />
-      </div>
+            {/* Alert History + Compliance */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <AlertHistoryPanel />
+              <CompliancePanel />
+            </div>
 
-      {/* 10. Prediction Markets + Mode Control */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <PredictionMarketDetail />
-        <ModeControlPanel />
-      </div>
+            {/* Telegram Log */}
+            <TelegramLogViewer />
+          </div>
+        )}
 
-      {/* 11. Decision Audit Trail */}
-      <ExplainabilityTimeline />
-
-      {/* 12. Domain PnL + Strategy Leaderboard */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <DomainPnLChart />
-        <StrategyLeaderboard />
-      </div>
-
-      {/* 13. Alert History + Compliance */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <AlertHistoryPanel />
-        <CompliancePanel />
-      </div>
-
-      {/* 14. Telegram Log */}
-      <TelegramLogViewer />
-
-      {/* 15. Activity Stream + Control Plane (side by side) */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Activity Stream (2/3 width) */}
-        <div className="lg:col-span-2">
-          <OperatorActivityStream />
-        </div>
-
-        {/* Control Plane (1/3 width) */}
-        <div>
-          <OperatorControlPlane
-            summary={data}
-            onPauseSwarm={pauseSwarm}
-            onResumeSwarm={resumeSwarm}
-            onSwitchMode={switchMode}
-            onRefresh={refetch}
-          />
-        </div>
       </div>
     </div>
   );
