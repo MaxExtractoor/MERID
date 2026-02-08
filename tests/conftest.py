@@ -2,6 +2,9 @@
 import pytest
 from unittest.mock import MagicMock
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 
 @pytest.fixture(autouse=True)
 def disable_network_calls(monkeypatch):
@@ -35,3 +38,19 @@ def mock_websocket():
     ws.recv = MagicMock()
     ws.close = MagicMock()
     return ws
+
+
+@pytest.fixture
+def missing_endpoints_client():
+    """Minimal FastAPI TestClient containing only the missing_endpoints router.
+
+    Usage in tests::
+
+        def test_something(missing_endpoints_client):
+            resp = missing_endpoints_client.get("/api/v1/some/endpoint")
+            assert resp.status_code == 200
+    """
+    from web.api.missing_endpoints import router as missing_router
+    app = FastAPI()
+    app.include_router(missing_router)
+    return TestClient(app)
