@@ -11,6 +11,8 @@ Covers:
   4. POST /api/v1/consensus/plans/{id}/vote — vote recording
   5. POST /api/v1/consensus/plans/{id}/status — status update + notification
   6. Golden-path: trade fill → consensus opinion + plan emitted
+  7. WebSocket stream: seeded opinions/plans appear in WS payload
+  8. Golden-path agent insight: agents → decision → plan → REST + WS
 """
 
 import os
@@ -18,6 +20,8 @@ import tempfile
 from unittest.mock import patch, MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 
 # ---------------------------------------------------------------------------
@@ -320,3 +324,205 @@ class TestConsensusTradeIntegration:
         trade_plans = [p for p in data["plans"] if p["status"] == "executed"]
         assert len(trade_plans) >= 1
         assert "BTC-USD" in trade_plans[0]["symbol"]
+
+
+# ---------------------------------------------------------------------------
+# WebSocket: consensus stream delivers real opinions/plans
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ws_client():
+    """TestClient that mounts a minimal app with the consensus WS endpoint.
+
+    We can't import ``web.main`` directly because it has heavy transitive deps.
+    Instead we register a local copy of the consensus WS handler that exercises
+    the same ConsensusStore path.
+    """
+    import asyncio, uuid as _uuid
+    from datetime import datetime as _dt
+    from fastapi import WebSocket as _WS, WebSocketDisconnect as _WSD
+    from web.api.missing_endpoints import router as missing_router
+
+    app = FastAPI()
+    app.include_router(missing_router)
+
+    @app.websocket("/api/v1/consensus/ws/stream")
+    async def _consensus_ws(websocket: _WS):
+        await websocket.accept()
+        _sent_op: set = set()
+        _sent_pl: set = set()
+
+        await websocket.send_json({
+            "event_id": str(_uuid.uuid4()),
+            "event_type": "connected",
+            "timestamp": int(_dt.utcnow().timestamp() * 1000),
+            "source": "consensus",
+            "payload": {"message": "Connected to consensus stream"},
+        })
+
+        try:
+            from core.consensus_store import get_consensus_store
+            store = get_consensus_store()
+            for op in store.list_opinions(limit=20):
+                d = op.to_dict()
+                await websocket.send_json({
+                    "event_id": d["id"], "event_type": "opinion",
+                    "timestamp": op.created_at, "source": "consensus",
+                    "payload": d,
+                })
+                _sent_op.add(d["id"])
+            for plan in store.list_plans(limit=20):
+                d = plan.to_dict()
+                await websocket.send_json({
+                    "event_id": d["id"], "event_type": "trade_plan",
+                    "timestamp": plan.created_at, "source": "consensus",
+                    "payload": d,
+                })
+                _sent_pl.add(d["id"])
+        except Exception:
+            pass
+
+        # Send a sentinel so the test knows the snapshot is complete
+        await websocket.send_json({
+            "event_id": "snapshot_done",
+            "event_type": "snapshot_complete",
+            "timestamp": int(_dt.utcnow().timestamp() * 1000),
+            "source": "consensus",
+            "payload": {},
+        })
+
+        try:
+            while True:
+                await asyncio.sleep(10)
+        except _WSD:
+            pass
+
+    return TestClient(app)
+
+
+class TestConsensusWebSocket:
+
+    @staticmethod
+    def _collect_until_sentinel(ws) -> list:
+        """Read WS messages until snapshot_complete sentinel."""
+        msgs = []
+        for _ in range(30):
+            msg = ws.receive_json()
+            if msg.get("event_type") == "snapshot_complete":
+                break
+            msgs.append(msg)
+        return msgs
+
+    def test_seeded_opinions_appear_in_ws_stream(self, ws_client):
+        """Opinions seeded into the store appear in the WS initial snapshot."""
+        from core.consensus_store import add_opinion
+
+        add_opinion(
+            agent_id="gemma-1", agent_name="Gemma Analyst",
+            symbol="BTC-USD", stance="bullish", confidence=0.82,
+            reasoning="Strong momentum on 4H",
+        )
+        add_opinion(
+            agent_id="skeptic-1", agent_name="Skeptic Agent",
+            symbol="ETH-USD", stance="bearish", confidence=0.6,
+            reasoning="Volume declining",
+        )
+
+        with ws_client.websocket_connect("/api/v1/consensus/ws/stream") as ws:
+            msgs = self._collect_until_sentinel(ws)
+
+            welcome = [m for m in msgs if m.get("event_type") == "connected"]
+            assert len(welcome) == 1
+
+            opinion_msgs = [m for m in msgs if m.get("event_type") == "opinion"]
+            assert len(opinion_msgs) >= 2, f"Expected 2 opinions, got {len(opinion_msgs)}"
+
+            agents = {m["payload"]["agent_id"] for m in opinion_msgs}
+            assert "gemma-1" in agents
+            assert "skeptic-1" in agents
+
+    def test_seeded_plans_appear_in_ws_stream(self, ws_client):
+        """Plans seeded into the store appear in the WS initial snapshot."""
+        from core.consensus_store import add_plan
+
+        add_plan(
+            symbol="BTC-USD", title="BTC Long Entry", direction="long",
+            confidence=0.85, supporting_agents=["gemma-1", "strategy-1"],
+            status="approved",
+        )
+
+        with ws_client.websocket_connect("/api/v1/consensus/ws/stream") as ws:
+            msgs = self._collect_until_sentinel(ws)
+
+            plan_msgs = [m for m in msgs if m.get("event_type") == "trade_plan"]
+            assert len(plan_msgs) >= 1, f"Expected 1 plan, got {len(plan_msgs)}"
+            assert plan_msgs[0]["payload"]["symbol"] == "BTC-USD"
+            assert plan_msgs[0]["payload"]["status"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Golden-path: agents → decision → plan → REST + WS (full pipeline)
+# ---------------------------------------------------------------------------
+
+class TestConsensusGoldenPath:
+
+    def test_agent_insight_pipeline(self, ws_client, missing_endpoints_client):
+        """End-to-end: seed agent opinions → create plan → vote → approve →
+        verify via REST *and* WS stream."""
+        from core.consensus_store import add_opinion, add_plan, get_consensus_store
+
+        # Step 1: Agents emit opinions
+        add_opinion(
+            agent_id="analyst-gemma", agent_name="Gemma Analyst", role="bull_analyst",
+            symbol="BTC-USD", stance="bullish", confidence=0.85,
+            reasoning="RSI crossed 50 with volume confirmation",
+        )
+        add_opinion(
+            agent_id="risk-mgr", agent_name="Risk Manager", role="risk_manager",
+            symbol="BTC-USD", stance="cautious", confidence=0.7,
+            reasoning="Position size within limits but near daily loss threshold",
+        )
+
+        # Step 2: Consensus produces a trade plan
+        plan = add_plan(
+            symbol="BTC-USD", title="BTC Long Entry", direction="long",
+            target_size_usd=5000.0, confidence=0.8,
+            supporting_agents=["analyst-gemma"], status="proposed",
+        )
+
+        # Step 3: Agents vote on the plan
+        store = get_consensus_store()
+        store.vote_on_plan(plan.id, "analyst-gemma", "for")
+        store.vote_on_plan(plan.id, "risk-mgr", "for")
+
+        # Step 4: Plan is approved
+        store.update_plan_status(plan.id, "approved")
+
+        # ── Verify via REST ──────────────────────────────────────────
+        resp = missing_endpoints_client.get("/api/v1/consensus/opinions")
+        data = resp.json()
+        assert data["total"] == 2
+        assert any(o["agent_id"] == "analyst-gemma" for o in data["opinions"])
+
+        resp = missing_endpoints_client.get("/api/v1/consensus/plans")
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["plans"][0]["status"] == "approved"
+        assert data["plans"][0]["votes_for"] == 2
+
+        resp = missing_endpoints_client.get("/api/v1/consensus/metrics")
+        metrics = resp.json()
+        assert metrics["total_opinions"] == 2
+        assert metrics["total_decisions"] == 1
+        assert metrics["approved"] == 1
+
+        # ── Verify via WebSocket ─────────────────────────────────────
+        with ws_client.websocket_connect("/api/v1/consensus/ws/stream") as ws:
+            msgs = TestConsensusWebSocket._collect_until_sentinel(ws)
+
+            opinion_msgs = [m for m in msgs if m.get("event_type") == "opinion"]
+            plan_msgs = [m for m in msgs if m.get("event_type") == "trade_plan"]
+
+            assert len(opinion_msgs) >= 2, "Both opinions should stream via WS"
+            assert len(plan_msgs) >= 1, "Approved plan should stream via WS"
+            assert plan_msgs[0]["payload"]["status"] == "approved"
