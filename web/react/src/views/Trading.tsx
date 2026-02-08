@@ -11,6 +11,8 @@ import ArbitragePanel from "../components/ArbitragePanel";
 import { OpenOrdersPanel } from "./OpenOrdersPanel";
 import { LiveRiskStrip } from "./LiveRiskStrip";
 import StubGate from "../components/StubGate";
+import ConsensusPill from "../components/ConsensusPill";
+import { useConsensusSummary } from "../hooks/useConsensusSummary";
 import {
   TrendingUp, Send, Wallet, FileText, Zap,
   Shield, RefreshCw, AlertTriangle, CheckCircle2,
@@ -82,6 +84,9 @@ export default function Trading() {
   const [orderErrors, setOrderErrors] = useState<string[]>([]);
   const [orderSuccess, setOrderSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // Consensus summary for the selected symbol
+  const consensusSummary = useConsensusSummary();
 
   // Fetch data
   const { data: positions, refetch: refetchPositions, rawResponse: positionsRaw } = useApiData<Position[]>(
@@ -213,7 +218,10 @@ export default function Trading() {
           </div>
           <div>
             <h1 className="text-2xl font-bold text-white">Live Trading</h1>
-            <p className="text-sm text-slate-400">Paper trading · Real-time prices · Multi-venue</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <p className="text-sm text-slate-400">Paper trading · Real-time prices · Multi-venue</p>
+              <ConsensusPill symbol={orderForm.symbol} summary={consensusSummary} />
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-3">

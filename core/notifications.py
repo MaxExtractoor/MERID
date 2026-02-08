@@ -12,6 +12,7 @@ emit events that surface in the operator UI via ``/api/v1/notifications``.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -42,9 +43,10 @@ class Notification:
     source: str = ""
     created_at: float = field(default_factory=time.time)
     read: bool = False
+    metadata: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "id": self.id,
             "type": self.type,
             "severity": self.severity,
@@ -54,6 +56,9 @@ class Notification:
             "timestamp": datetime.fromtimestamp(self.created_at, tz=timezone.utc).isoformat(),
             "read": self.read,
         }
+        if self.metadata:
+            d["metadata"] = self.metadata
+        return d
 
 
 # ── SQLite store ─────────────────────────────────────────────────────
@@ -70,7 +75,8 @@ CREATE TABLE IF NOT EXISTS notifications (
     message     TEXT NOT NULL DEFAULT '',
     source      TEXT NOT NULL DEFAULT '',
     created_at  REAL NOT NULL,
-    read        INTEGER NOT NULL DEFAULT 0
+    read        INTEGER NOT NULL DEFAULT 0,
+    metadata    TEXT NOT NULL DEFAULT '{}'
 );
 """
 
@@ -106,11 +112,12 @@ class NotificationStore:
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT INTO notifications (id, type, severity, title, message, source, created_at, read) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO notifications (id, type, severity, title, message, source, created_at, read, metadata) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (notification.id, notification.type, notification.severity,
                      notification.title, notification.message, notification.source,
-                     notification.created_at, int(notification.read)),
+                     notification.created_at, int(notification.read),
+                     json.dumps(notification.metadata or {})),
                 )
         return notification
 
@@ -185,6 +192,8 @@ class NotificationStore:
 
     @staticmethod
     def _row_to_notification(row: sqlite3.Row) -> Notification:
+        md_raw = row["metadata"] if "metadata" in row.keys() else "{}"
+        md = json.loads(md_raw) if md_raw else {}
         return Notification(
             id=row["id"],
             type=row["type"],
@@ -194,6 +203,7 @@ class NotificationStore:
             source=row["source"],
             created_at=row["created_at"],
             read=bool(row["read"]),
+            metadata=md or None,
         )
 
 
@@ -218,6 +228,7 @@ def add_notification(
     message: str = "",
     source: str = "",
     severity: str = "info",
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Notification:
     """Add a notification to the store. Call from anywhere in the codebase."""
     n = Notification(
@@ -226,6 +237,7 @@ def add_notification(
         title=title,
         message=message,
         source=source,
+        metadata=metadata,
     )
     return get_notification_store().add(n)
 

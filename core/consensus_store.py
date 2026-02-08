@@ -302,6 +302,170 @@ class ConsensusStore:
             "timestamp": int(time.time() * 1000),
         }
 
+    # ── Per-symbol summary ──────────────────────────────────────────
+
+    def get_symbol_summaries(self) -> List[Dict[str, Any]]:
+        """Aggregate opinions and plans per symbol for the /summary endpoint.
+
+        For each symbol with recent data, computes:
+        - net stance (strong_long / weak_long / neutral / weak_short / strong_short)
+        - average confidence
+        - supporting / opposing agent counts (from most recent active plan)
+        - plan counts by status
+        """
+        with self._connect() as conn:
+            # All distinct symbols across opinions and plans
+            sym_rows = conn.execute(
+                "SELECT DISTINCT symbol FROM opinions "
+                "UNION SELECT DISTINCT symbol FROM plans"
+            ).fetchall()
+            symbols = [r[0] for r in sym_rows if r[0]]
+
+        summaries: List[Dict[str, Any]] = []
+        for symbol in sorted(symbols):
+            summaries.append(self._build_symbol_summary(symbol))
+        return summaries
+
+    def _build_symbol_summary(self, symbol: str) -> Dict[str, Any]:
+        with self._connect() as conn:
+            # ── Opinions aggregation ─────────────────────────────
+            op_rows = conn.execute(
+                "SELECT stance, confidence, agent_id, created_at FROM opinions "
+                "WHERE symbol = ? ORDER BY created_at DESC LIMIT 50",
+                (symbol,),
+            ).fetchall()
+
+            long_count = 0
+            short_count = 0
+            neutral_count = 0
+            total_confidence = 0.0
+            last_opinion_at: Optional[float] = None
+
+            for r in op_rows:
+                stance = r[0]
+                conf = r[1]
+                total_confidence += conf
+                if last_opinion_at is None:
+                    last_opinion_at = r[3]
+                if stance in ("bullish", "strong_bull", "bull"):
+                    long_count += 1
+                elif stance in ("bearish", "strong_bear", "bear"):
+                    short_count += 1
+                else:
+                    neutral_count += 1
+
+            n_opinions = len(op_rows)
+            avg_confidence = (total_confidence / n_opinions) if n_opinions else 0.0
+
+            # Classify stance
+            stance = self._classify_stance(long_count, short_count, neutral_count, avg_confidence)
+
+            # ── Plans aggregation ────────────────────────────────
+            plan_rows = conn.execute(
+                "SELECT id, status, supporting_agents, opposing_agents FROM plans "
+                "WHERE symbol = ? ORDER BY created_at DESC",
+                (symbol,),
+            ).fetchall()
+
+            plan_counts = {"proposed": 0, "approved": 0, "executing": 0}
+            supporting_agents = 0
+            opposing_agents = 0
+            last_plan_id: Optional[str] = None
+
+            for r in plan_rows:
+                st = r[1]
+                if st in plan_counts:
+                    plan_counts[st] += 1
+                if last_plan_id is None:
+                    last_plan_id = r[0]
+                    supporting_agents = len(json.loads(r[2]))
+                    opposing_agents = len(json.loads(r[3]))
+
+        # ── Asset class heuristic ────────────────────────────
+        asset_class = _infer_asset_class(symbol)
+
+        summary: Dict[str, Any] = {
+            "symbol": symbol,
+            "asset_class": asset_class,
+            "stance": stance,
+            "confidence": round(avg_confidence, 3),
+            "supporting_agents": supporting_agents,
+            "opposing_agents": opposing_agents,
+            "active_plans": plan_counts,
+            "last_plan_id": last_plan_id,
+        }
+        if last_opinion_at is not None:
+            summary["last_opinion_at"] = datetime.fromtimestamp(
+                last_opinion_at, tz=timezone.utc
+            ).isoformat()
+        return summary
+
+    @staticmethod
+    def _classify_stance(
+        long_count: int, short_count: int, neutral_count: int, avg_confidence: float
+    ) -> str:
+        total = long_count + short_count + neutral_count
+        if total == 0:
+            return "neutral"
+
+        long_ratio = long_count / total
+        short_ratio = short_count / total
+
+        if long_ratio > short_ratio:
+            if long_ratio >= 0.6 and avg_confidence >= 0.7:
+                return "strong_long"
+            elif long_ratio > short_ratio:
+                return "weak_long"
+        elif short_ratio > long_ratio:
+            if short_ratio >= 0.6 and avg_confidence >= 0.7:
+                return "strong_short"
+            elif short_ratio > long_ratio:
+                return "weak_short"
+        return "neutral"
+
+    # ── Consensus quality index ───────────────────────────────────
+
+    def get_quality_index(self, window: int = 25) -> Dict[str, Any]:
+        """Compute a lightweight consensus quality metric.
+
+        Looks at the last *window* decided plans (approved / rejected / executed)
+        and produces a 0-1 index based on:
+        - approval rate (approved or executed vs total decided)
+        - average confidence of decided plans
+        - unanimous rate (no opposing votes)
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT status, confidence, votes_for, votes_against FROM plans "
+                "WHERE status IN ('approved', 'rejected', 'executed') "
+                "ORDER BY created_at DESC LIMIT ?",
+                (window,),
+            ).fetchall()
+
+        n = len(rows)
+        if n == 0:
+            return {"quality_index": 0.0, "band": "neutral", "window_trades": 0}
+
+        approved = sum(1 for r in rows if r[0] in ("approved", "executed"))
+        unanimous = sum(1 for r in rows if r[3] == 0 and r[2] > 0)
+        avg_conf = sum(r[1] for r in rows) / n
+
+        approval_rate = approved / n
+        unanimous_rate = unanimous / n
+
+        # Weighted blend: 50% approval rate, 30% confidence, 20% unanimity
+        qi = 0.5 * approval_rate + 0.3 * avg_conf + 0.2 * unanimous_rate
+        qi = round(min(max(qi, 0.0), 1.0), 3)
+
+        if qi >= 0.65:
+            band = "good"
+        elif qi >= 0.4:
+            band = "neutral"
+        else:
+            band = "poor"
+
+        return {"quality_index": qi, "band": band, "window_trades": n}
+
     # ── Row converters ───────────────────────────────────────────────
 
     @staticmethod
@@ -336,6 +500,30 @@ class ConsensusStore:
             votes_against=row["votes_against"],
             created_at=row["created_at"],
         )
+
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+_CRYPTO_SUFFIXES = ("-USD", "/USDT", "/USD", "-USDT", "-PERP", "/BTC")
+_FX_PAIRS = {"EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD"}
+_INDEX_SYMBOLS = {"SPX", "NDX", "DJI", "VIX", "RUT"}
+
+
+def _infer_asset_class(symbol: str) -> str:
+    """Best-effort asset class from the symbol string."""
+    upper = symbol.upper().replace(" ", "")
+    if upper in _FX_PAIRS or (len(upper) == 6 and upper[:3].isalpha() and upper[3:].isalpha()):
+        return "fx"
+    if upper in _INDEX_SYMBOLS:
+        return "index"
+    for suf in _CRYPTO_SUFFIXES:
+        if upper.endswith(suf.upper()):
+            return "crypto"
+    if any(c in upper for c in ("-", "/")):
+        return "crypto"
+    if upper.isalpha() and len(upper) <= 5:
+        return "equity"
+    return "other"
 
 
 # ── Singleton ────────────────────────────────────────────────────────

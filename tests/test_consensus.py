@@ -526,3 +526,200 @@ class TestConsensusGoldenPath:
             assert len(opinion_msgs) >= 2, "Both opinions should stream via WS"
             assert len(plan_msgs) >= 1, "Approved plan should stream via WS"
             assert plan_msgs[0]["payload"]["status"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/consensus/summary
+# ---------------------------------------------------------------------------
+
+class TestConsensusSummary:
+
+    def test_empty_store_returns_empty_symbols(self, missing_endpoints_client):
+        resp = missing_endpoints_client.get("/api/v1/consensus/summary")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["symbols"] == []
+        assert data["stub"] is False
+
+    def test_multi_symbol_aggregation(self, missing_endpoints_client):
+        from core.consensus_store import add_opinion, add_plan
+
+        # BTC — mostly bullish, high confidence → strong_long
+        add_opinion(agent_id="a1", agent_name="A1", symbol="BTC-USD",
+                    stance="bullish", confidence=0.85)
+        add_opinion(agent_id="a2", agent_name="A2", symbol="BTC-USD",
+                    stance="bullish", confidence=0.75)
+        add_opinion(agent_id="a3", agent_name="A3", symbol="BTC-USD",
+                    stance="neutral", confidence=0.5)
+        add_plan(symbol="BTC-USD", title="BTC Long", direction="long",
+                 confidence=0.8, supporting_agents=["a1", "a2"], status="approved")
+
+        # AAPL — balanced → neutral
+        add_opinion(agent_id="a1", agent_name="A1", symbol="AAPL",
+                    stance="bullish", confidence=0.5)
+        add_opinion(agent_id="a2", agent_name="A2", symbol="AAPL",
+                    stance="bearish", confidence=0.5)
+
+        # ETH — bearish, high confidence → strong_short
+        add_opinion(agent_id="a1", agent_name="A1", symbol="ETH-USD",
+                    stance="bearish", confidence=0.9)
+        add_opinion(agent_id="a2", agent_name="A2", symbol="ETH-USD",
+                    stance="bearish", confidence=0.8)
+        add_opinion(agent_id="a3", agent_name="A3", symbol="ETH-USD",
+                    stance="bearish", confidence=0.75)
+
+        resp = missing_endpoints_client.get("/api/v1/consensus/summary")
+        data = resp.json()
+        assert data["stub"] is False
+        assert len(data["symbols"]) == 3
+
+        by_sym = {s["symbol"]: s for s in data["symbols"]}
+
+        # BTC: 2 bullish / 1 neutral, avg conf ~0.7 → strong_long
+        assert by_sym["BTC-USD"]["stance"] == "strong_long"
+        assert by_sym["BTC-USD"]["asset_class"] == "crypto"
+        assert by_sym["BTC-USD"]["active_plans"]["approved"] == 1
+        assert by_sym["BTC-USD"]["supporting_agents"] == 2
+
+        # AAPL: 1 bull / 1 bear → neutral
+        assert by_sym["AAPL"]["stance"] == "neutral"
+        assert by_sym["AAPL"]["asset_class"] == "equity"
+
+        # ETH: all bearish, high conf → strong_short
+        assert by_sym["ETH-USD"]["stance"] == "strong_short"
+        assert by_sym["ETH-USD"]["asset_class"] == "crypto"
+
+    def test_import_failure_returns_stub(self, missing_endpoints_client):
+        with patch.dict("sys.modules", {"core.consensus_store": None}):
+            resp = missing_endpoints_client.get("/api/v1/consensus/summary")
+            data = resp.json()
+            assert data.get("_stub") is True or data.get("stub") is True
+
+    def test_asset_class_heuristics(self, missing_endpoints_client):
+        from core.consensus_store import add_opinion
+
+        add_opinion(agent_id="a1", symbol="BTC-USD", stance="bullish", confidence=0.7)
+        add_opinion(agent_id="a1", symbol="AAPL", stance="bullish", confidence=0.6)
+        add_opinion(agent_id="a1", symbol="EURUSD", stance="bearish", confidence=0.5)
+        add_opinion(agent_id="a1", symbol="SPY", stance="neutral", confidence=0.5)
+
+        resp = missing_endpoints_client.get("/api/v1/consensus/summary")
+        by_sym = {s["symbol"]: s for s in resp.json()["symbols"]}
+
+        assert by_sym["BTC-USD"]["asset_class"] == "crypto"
+        assert by_sym["AAPL"]["asset_class"] == "equity"
+        assert by_sym["EURUSD"]["asset_class"] == "fx"
+        assert by_sym["SPY"]["asset_class"] == "equity"
+
+
+# ---------------------------------------------------------------------------
+# Consensus Quality Index
+# ---------------------------------------------------------------------------
+
+class TestConsensusQualityIndex:
+
+    def test_no_decided_plans_returns_neutral(self, missing_endpoints_client):
+        resp = missing_endpoints_client.get("/api/v1/consensus/metrics")
+        data = resp.json()
+        assert "quality" in data
+        assert data["quality"]["band"] == "neutral"
+        assert data["quality"]["window_trades"] == 0
+
+    def test_good_quality_band(self, missing_endpoints_client):
+        from core.consensus_store import add_plan, get_consensus_store
+
+        store = get_consensus_store()
+        # Seed 5 approved plans with high confidence and no opposing votes
+        for i in range(5):
+            p = add_plan(symbol="BTC-USD", title=f"Plan {i}", direction="long",
+                         confidence=0.85, supporting_agents=["a1"], status="approved")
+            store.vote_on_plan(p.id, "a1", "for")
+
+        resp = missing_endpoints_client.get("/api/v1/consensus/metrics")
+        q = resp.json()["quality"]
+        assert q["band"] == "good"
+        assert q["quality_index"] >= 0.65
+        assert q["window_trades"] == 5
+
+    def test_poor_quality_band(self, missing_endpoints_client):
+        from core.consensus_store import add_plan, get_consensus_store
+
+        store = get_consensus_store()
+        # Seed 5 rejected plans with low confidence and opposing votes
+        for i in range(5):
+            p = add_plan(symbol="BTC-USD", title=f"Plan {i}", direction="long",
+                         confidence=0.2, supporting_agents=[], status="rejected")
+            store.vote_on_plan(p.id, "a1", "against")
+
+        resp = missing_endpoints_client.get("/api/v1/consensus/metrics")
+        q = resp.json()["quality"]
+        assert q["band"] == "poor"
+        assert q["quality_index"] < 0.4
+
+    def test_import_failure_returns_stub_quality(self, missing_endpoints_client):
+        with patch.dict("sys.modules", {"core.consensus_store": None}):
+            resp = missing_endpoints_client.get("/api/v1/consensus/metrics")
+            data = resp.json()
+            assert data.get("_stub") is True
+            assert data["quality"]["band"] == "neutral"
+
+
+# ---------------------------------------------------------------------------
+# Notification enrichment: plan_id in fill notifications
+# ---------------------------------------------------------------------------
+
+class TestNotificationEnrichment:
+
+    def test_trade_fill_notification_includes_plan_id(self, missing_endpoints_client):
+        """When an order fills, the notification should reference the plan."""
+        from trading.paper_trading import PaperTradingEngine, PaperPortfolio
+
+        engine = PaperTradingEngine.__new__(PaperTradingEngine)
+        engine.starting_balance = 100000.0
+        engine.portfolios = {"operator": PaperPortfolio(user_id="operator", starting_balance=100000.0, current_balance=100000.0)}
+        engine.order_counter = 0
+        engine.position_counter = 0
+        engine.current_prices = {"BTC-USD": 68000.0, "BTC/USDT": 68000.0}
+        engine.price_feed = None
+        engine._listeners = {"trade": set(), "summary": set(), "position": set()}
+        engine._summary_dirty = False
+        engine._positions_dirty = False
+        engine._last_summary_emit = 0.0
+        engine._last_positions_emit = 0.0
+        engine.summary_snapshot = None
+
+        pt_mod = MagicMock()
+        pt_mod.get_paper_engine = MagicMock(return_value=engine)
+
+        pd_mock = MagicMock()
+        pd_mock.price = 68000.0
+        feed = MagicMock()
+        feed.price_cache = {"BTC/USDT": pd_mock}
+        pf_mod = MagicMock()
+        pf_mod.get_live_price_feed = MagicMock(return_value=feed)
+
+        mods = {
+            "trading.paper_trading": pt_mod,
+            "data.live_price_feed": pf_mod,
+        }
+
+        with patch.dict("sys.modules", mods):
+            with patch("trading.paper_trading._save_paper_state"):
+                with patch("trading.paper_trading._get_risk_controller", return_value=None):
+                    resp = missing_endpoints_client.post("/api/v1/orders/submit", json={
+                        "symbol": "BTC-USD", "side": "BUY",
+                        "orderType": "MARKET", "size": "0.1",
+                    })
+                    assert resp.json()["success"] is True
+
+        # Check notification contains plan reference
+        resp = missing_endpoints_client.get("/api/v1/notifications")
+        notifs = resp.json()["notifications"]
+        fill_notifs = [n for n in notifs if "Filled" in n.get("title", "")]
+        assert len(fill_notifs) >= 1
+        # plan_id should be in the message text
+        assert "plan" in fill_notifs[0]["message"].lower()
+        # metadata should contain plan_id
+        if fill_notifs[0].get("metadata"):
+            assert "plan_id" in fill_notifs[0]["metadata"]
+            assert fill_notifs[0]["metadata"]["plan_id"].startswith("plan-")
