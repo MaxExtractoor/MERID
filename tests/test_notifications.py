@@ -226,3 +226,52 @@ class TestTradeNotificationIntegration:
         trade_notifs = [n for n in data["notifications"] if n["type"] == "trade"]
         assert len(trade_notifs) >= 1
         assert "Order Filled" in trade_notifs[0]["title"]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/notifications/stats
+# ---------------------------------------------------------------------------
+
+class TestNotificationStats:
+
+    def test_stats_empty_store(self, notif_client):
+        """Empty store returns zero counts and healthy=True."""
+        resp = notif_client.get("/api/v1/notifications/stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "_stub" not in data
+        assert data["total"] == 0
+        assert data["unread"] == 0
+        assert data["healthy"] is True
+        assert data["last_created_at"] is None
+
+    def test_stats_with_data(self, notif_client):
+        """Stats reflect added notifications and severity breakdown."""
+        from core.notifications import add_notification
+
+        add_notification(type="info", title="A", message="", source="test", severity="info")
+        add_notification(type="warning", title="B", message="", source="test", severity="warning")
+        add_notification(type="error", title="C", message="", source="test", severity="error")
+
+        resp = notif_client.get("/api/v1/notifications/stats")
+        data = resp.json()
+        assert data["total"] == 3
+        assert data["unread"] == 3
+        assert data["last_created_at"] is not None
+        assert data["by_severity"]["info"] == 1
+        assert data["by_severity"]["warning"] == 1
+        assert data["by_severity"]["error"] == 1
+        assert data["healthy"] is True
+
+    def test_stats_import_failure_returns_stub(self, missing_endpoints_client):
+        """When notification store can't be imported, stub fallback fires."""
+        broken = MagicMock()
+        broken.get_notification_store.side_effect = ImportError("no module")
+
+        with patch.dict("sys.modules", {"core.notifications": broken}):
+            resp = missing_endpoints_client.get("/api/v1/notifications/stats")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("_stub") is True
+        assert data["healthy"] is False

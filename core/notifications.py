@@ -159,6 +159,30 @@ class NotificationStore:
             row = conn.execute("SELECT COUNT(*) FROM notifications").fetchone()
             return row[0] if row else 0
 
+    def get_stats(self) -> Dict[str, Any]:
+        """Return lightweight stats for the notification store."""
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0]
+            unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE read = 0").fetchone()[0]
+            last_row = conn.execute(
+                "SELECT created_at FROM notifications ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            last_created_at = last_row[0] if last_row else None
+
+            severity_rows = conn.execute(
+                "SELECT severity, COUNT(*) FROM notifications GROUP BY severity"
+            ).fetchall()
+            by_severity = {row[0]: row[1] for row in severity_rows}
+
+        return {
+            "total": total,
+            "unread": unread,
+            "last_created_at": last_created_at,
+            "by_severity": by_severity,
+            "store_path": self._db_path,
+            "healthy": True,
+        }
+
     @staticmethod
     def _row_to_notification(row: sqlite3.Row) -> Notification:
         return Notification(

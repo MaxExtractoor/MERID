@@ -11,9 +11,31 @@ When the engine/cache is empty the stub path is exercised instead.
 Uses the ``missing_endpoints_client`` fixture from ``conftest.py``.
 """
 
+import os
+import tempfile
 import time
 from datetime import datetime
 from unittest.mock import patch, MagicMock
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fresh_notif_store():
+    """Inject a temp NotificationStore so health-probe notifications are isolated."""
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+
+    import core.notifications as notif_mod
+    old_store = notif_mod._store
+    notif_mod._store = notif_mod.NotificationStore(db_path=db_path)
+    yield
+    notif_mod._store = old_store
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -227,12 +249,13 @@ class TestSystemHealthRealFirst:
         assert "Trading Engine" in names
         assert "Risk Engine" in names
         assert "Agent Swarm" in names
+        assert "Notification Store" in names
         for c in data:
             assert "status" in c
             assert "latency" in c
 
     def test_some_probes_fail_still_returns_array(self, missing_endpoints_client):
-        """When some probes fail, those components show offline."""
+        """When some probes fail, those components show offline and a notification is emitted."""
         mods = _mock_all_probes_online()
         # Break price feed
         mods["data.live_price_feed"].get_live_price_feed.side_effect = Exception("down")
@@ -247,6 +270,13 @@ class TestSystemHealthRealFirst:
         # API Server is always online
         api = next(c for c in data if c["component"] == "API Server")
         assert api["status"] == "online"
+
+        # Verify that an offline notification was emitted for Price Feed
+        resp = missing_endpoints_client.get("/api/v1/notifications")
+        notifs = resp.json()
+        health_notifs = [n for n in notifs["notifications"] if n["type"] == "health"]
+        assert len(health_notifs) >= 1, "Expected a health notification for offline service"
+        assert "Price Feed" in health_notifs[0]["title"]
 
     def test_all_imports_fail_still_returns_array(self, missing_endpoints_client):
         """Even if every probe import fails, endpoint returns valid array."""
