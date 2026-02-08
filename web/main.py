@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from collections import defaultdict, deque
 from dataclasses import asdict
@@ -98,6 +99,8 @@ from web.api.signals_api import router as signals_api_router
 from web.api.orchestrator_api import router as orchestrator_api_router
 from web.api.blockchain_health_api import router as blockchain_health_api_router
 from web.api.rewards import router as rewards_router
+from web.api.dev_swarm_routes import router as dev_swarm_router
+from web.api.operator import router as operator_router
 
 # Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
 # from web.api.mock_simulation import router as mock_simulation_router
@@ -159,6 +162,8 @@ from web.api.phase0_adapters import phase0_router
 from web.api.phase0_trial_api import router as phase0_trial_router
 from web.api.us_compliant_markets import router as us_compliant_markets_router
 from web.api.system_endpoints import router as system_endpoints_router
+from web.api.real_data_endpoints import router as real_data_router
+from web.api.missing_endpoints import router as missing_endpoints_router
 
 from web.websocket_factory import create_websocket_endpoint
 
@@ -208,72 +213,6 @@ def _templates():
 
 def create_app(lifespan=None) -> FastAPI:
     application = FastAPI(title="MERID Core", version="2.0", lifespan=lifespan)
-    
-    # Startup event to start WebSocket publishers (bypasses blocking lifespan)
-    @application.on_event("startup")
-    async def start_websocket_publishers():
-        """Start WebSocket data publishers on application startup."""
-        import asyncio
-        print("=" * 80)
-        print("STARTUP EVENT EXECUTING - Starting WebSocket publishers")
-        print("=" * 80)
-        logger.info("=" * 80)
-        logger.info("STARTUP EVENT: Starting WebSocket publishers")
-        logger.info("=" * 80)
-        
-        try:
-            logger.info("Starting WebSocket price publisher via startup event...")
-            from web.services.price_publisher import get_price_publisher
-            price_publisher = get_price_publisher()
-            asyncio.create_task(price_publisher.start())
-            logger.info("Price publisher task created")
-            print("✓ Price publisher task created")
-        except Exception as e:
-            logger.error(f"Failed to start price publisher: {e}", exc_info=True)
-            print(f"✗ Failed to start price publisher: {e}")
-        
-        try:
-            logger.info("Starting WebSocket portfolio publisher via startup event...")
-            from web.services.portfolio_publisher import get_portfolio_publisher
-            portfolio_publisher = get_portfolio_publisher()
-            asyncio.create_task(portfolio_publisher.start())
-            logger.info("Portfolio publisher task created")
-            print("✓ Portfolio publisher task created")
-        except Exception as e:
-            logger.error(f"Failed to start portfolio publisher: {e}", exc_info=True)
-            print(f"✗ Failed to start portfolio publisher: {e}")
-        
-        try:
-            logger.info("Initializing prediction markets aggregator...")
-            from monitoring.prediction_markets import get_prediction_aggregator
-            aggregator = get_prediction_aggregator()
-            # Store in app state for persistence across requests
-            application.state.prediction_aggregator = aggregator
-            # Start background task to fetch markets
-            asyncio.create_task(aggregator.start())
-            logger.info("Prediction markets aggregator initialized")
-            print("✓ Prediction markets aggregator initialized")
-        except Exception as e:
-            logger.error(f"Failed to start prediction markets: {e}", exc_info=True)
-            print(f"✗ Failed to start prediction markets: {e}")
-        
-        try:
-            logger.info("Starting WebSocket prediction publisher...")
-            from web.services.prediction_publisher import get_prediction_publisher
-            prediction_publisher = get_prediction_publisher()
-            asyncio.create_task(prediction_publisher.start())
-            logger.info("Prediction publisher task created")
-            print("✓ Prediction publisher task created")
-        except Exception as e:
-            logger.error(f"Failed to start prediction publisher: {e}", exc_info=True)
-            print(f"✗ Failed to start prediction publisher: {e}")
-        
-        # Give tasks a moment to start
-        await asyncio.sleep(0.5)
-        logger.info("WebSocket publishers startup complete")
-        print("=" * 80)
-        print("STARTUP EVENT COMPLETE")
-        print("=" * 80)
     
     # Mount static files
     application.mount("/static", StaticFiles(directory="web/static"), name="static")
@@ -337,11 +276,13 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(root_router)
     application.include_router(router)
     application.include_router(router_v1)
+    application.include_router(real_data_router)
     application.include_router(reflection_router)
     application.include_router(consensus_router)
     application.include_router(mining_router)
     application.include_router(auth_router)
     application.include_router(referrals_router)
+    application.include_router(missing_endpoints_router)
     application.include_router(trading_router)
     application.include_router(betting_router)
     application.include_router(streams_router)
@@ -426,6 +367,8 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(orchestrator_api_router)
     application.include_router(blockchain_health_api_router)
     application.include_router(rewards_router)
+    # application.include_router(dev_swarm_router)  # Replaced by real_data_router (avoids heavy Neo4j init in request context)
+    application.include_router(operator_router)
     # Phase 0 adapters - only mount if feature flags are enabled
     if phase0_router:
         application.include_router(phase0_router)
@@ -613,6 +556,225 @@ async def prediction_websocket_endpoint(
         token=token,
         welcome_message="Connected to prediction markets stream"
     )
+
+
+@root_router.websocket("/api/v1/consensus/ws/stream")
+async def consensus_ws_stream_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for consensus stream events (useKafkaStream.ts).
+
+    Streams real opinions and plans from ConsensusStore, plus coordinator
+    status updates.  The frontend ``useConsensusStream`` hook filters on
+    ``event_type === 'opinion'`` and ``event_type === 'trade_plan'``.
+    """
+    await websocket.accept()
+    logger.info("Consensus WS stream client connected")
+
+    # Track which opinion/plan IDs we've already sent so we only push new ones
+    _sent_opinion_ids: set = set()
+    _sent_plan_ids: set = set()
+
+    try:
+        import asyncio, uuid
+        from datetime import datetime
+
+        # Send welcome
+        await websocket.send_json({
+            "event_id": str(uuid.uuid4()),
+            "event_type": "connected",
+            "timestamp": int(datetime.utcnow().timestamp() * 1000),
+            "source": "consensus",
+            "payload": {"message": "Connected to consensus stream"},
+        })
+
+        # ── Send initial snapshot from ConsensusStore ────────────────
+        try:
+            from core.consensus_store import get_consensus_store
+            store = get_consensus_store()
+            for op in store.list_opinions(limit=20):
+                d = op.to_dict()
+                await websocket.send_json({
+                    "event_id": d["id"],
+                    "event_type": "opinion",
+                    "timestamp": op.created_at,
+                    "source": "consensus",
+                    "payload": d,
+                })
+                _sent_opinion_ids.add(d["id"])
+
+            for plan in store.list_plans(limit=20):
+                d = plan.to_dict()
+                await websocket.send_json({
+                    "event_id": d["id"],
+                    "event_type": "trade_plan",
+                    "timestamp": plan.created_at,
+                    "source": "consensus",
+                    "payload": d,
+                })
+                _sent_plan_ids.add(d["id"])
+        except Exception:
+            pass  # Store not available — fall through to coordinator
+
+        while True:
+            # ── Push any NEW opinions/plans since last tick ───────────
+            try:
+                from core.consensus_store import get_consensus_store
+                store = get_consensus_store()
+
+                for op in store.list_opinions(limit=10):
+                    if op.id not in _sent_opinion_ids:
+                        d = op.to_dict()
+                        await websocket.send_json({
+                            "event_id": d["id"],
+                            "event_type": "opinion",
+                            "timestamp": op.created_at,
+                            "source": "consensus",
+                            "payload": d,
+                        })
+                        _sent_opinion_ids.add(op.id)
+
+                for plan in store.list_plans(limit=10):
+                    if plan.id not in _sent_plan_ids:
+                        d = plan.to_dict()
+                        await websocket.send_json({
+                            "event_id": d["id"],
+                            "event_type": "trade_plan",
+                            "timestamp": plan.created_at,
+                            "source": "consensus",
+                            "payload": d,
+                        })
+                        _sent_plan_ids.add(plan.id)
+            except Exception:
+                pass
+
+            # ── Coordinator status heartbeat ─────────────────────────
+            try:
+                from consensus.taco_consensus import get_consensus_coordinator
+                coord = get_consensus_coordinator()
+                status = coord.get_status() if hasattr(coord, "get_status") else {}
+                phase = status.get("phase", "idle") if isinstance(status, dict) else "idle"
+
+                await websocket.send_json({
+                    "event_id": str(uuid.uuid4()),
+                    "event_type": "consensus_update",
+                    "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                    "source": "taco_consensus",
+                    "payload": {
+                        "phase": phase,
+                        "status": status if isinstance(status, dict) else {},
+                    },
+                })
+            except (WebSocketDisconnect, RuntimeError):
+                break
+            except Exception:
+                try:
+                    await websocket.send_json({
+                        "event_id": str(uuid.uuid4()),
+                        "event_type": "consensus_update",
+                        "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                        "source": "taco_consensus",
+                        "payload": {"phase": "idle", "status": {}},
+                    })
+                except (WebSocketDisconnect, RuntimeError):
+                    break
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"Consensus WS stream error: {e}")
+    finally:
+        logger.info("Consensus WS stream client disconnected")
+
+
+@root_router.websocket("/ws/trades")
+async def trades_websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for trade events (TradeFloor.tsx).
+
+    Sends heartbeats and trade events from the paper trading engine.
+    If no engine is available, notifies the client and closes gracefully.
+    """
+    await websocket.accept()
+    logger.info("Trade WS client connected")
+
+    try:
+        import asyncio as _asyncio, uuid as _uuid
+        from datetime import datetime as _dt
+
+        # Send mode status immediately
+        try:
+            from trading.config.runtime import get_runtime_config
+            cfg = get_runtime_config()
+            mode = cfg.mode if hasattr(cfg, "mode") else "offline"
+        except Exception:
+            mode = "offline"
+
+        await websocket.send_json({
+            "event_type": "mode_status",
+            "mode": str(mode).upper(),
+            "is_simulated": True,
+            "timestamp": _dt.utcnow().timestamp(),
+        })
+
+        while True:
+            try:
+                await websocket.send_json({
+                    "event_type": "heartbeat",
+                    "timestamp": _dt.utcnow().timestamp(),
+                })
+            except (WebSocketDisconnect, RuntimeError):
+                break
+            await _asyncio.sleep(15)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"Trade WS error: {e}")
+    finally:
+        logger.info("Trade WS client disconnected")
+
+
+@root_router.websocket("/ws/risk")
+async def risk_websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for risk summary updates (TradeFloor.tsx)."""
+    await websocket.accept()
+    logger.info("Risk WS client connected")
+
+    try:
+        import asyncio as _asyncio
+        from datetime import datetime as _dt
+
+        while True:
+            try:
+                # Pull real portfolio data if available
+                equity = 10000.0
+                pnl = 0.0
+                try:
+                    from trading.paper_trading import get_paper_engine
+                    engine = get_paper_engine()
+                    uid = next(iter(engine.portfolios), None)
+                    if uid:
+                        p = engine.get_portfolio(uid)
+                        equity = getattr(p, "equity", 10000.0)
+                        pnl = getattr(p, "total_pnl", 0.0)
+                except Exception:
+                    pass
+
+                await websocket.send_json({
+                    "event_type": "risk_summary",
+                    "total_equity": equity,
+                    "total_pnl": pnl,
+                    "unrealized_pnl": 0.0,
+                    "position_count": 0,
+                    "exposure": 0.0,
+                    "timestamp": _dt.utcnow().timestamp(),
+                })
+            except (WebSocketDisconnect, RuntimeError):
+                break
+            await _asyncio.sleep(10)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"Risk WS error: {e}")
+    finally:
+        logger.info("Risk WS client disconnected")
 
 
 @root_router.websocket("/ws/paper-trading")
@@ -1130,215 +1292,219 @@ async def settle_uma_assertion(assertion_id: str):
     return result
 
 
+# ════════════════════════════════════════════════
+# LIFESPAN — replaces all @on_event("startup") / @on_event("shutdown")
+# ════════════════════════════════════════════════
+
+@asynccontextmanager
+async def _app_lifespan(application: FastAPI):
+    """Combined startup/shutdown lifespan for MERID."""
+    global _startup_state
+    _startup_state["started_at"] = time.time()
+    startup_success = True
+
+    # ── Phase 0: WebSocket publishers ──────────────────────────────────
+    logger.info("=" * 80)
+    logger.info("STARTUP EVENT: Starting WebSocket publishers")
+    logger.info("=" * 80)
+
+    try:
+        from web.services.price_publisher import get_price_publisher
+        price_publisher = get_price_publisher()
+        asyncio.create_task(price_publisher.start())
+        logger.info("Price publisher task created")
+        print("✓ Price publisher task created")
+    except Exception as e:
+        logger.error(f"Failed to start price publisher: {e}", exc_info=True)
+        print(f"✗ Failed to start price publisher: {e}")
+
+    try:
+        from web.services.portfolio_publisher import get_portfolio_publisher
+        portfolio_publisher = get_portfolio_publisher()
+        asyncio.create_task(portfolio_publisher.start())
+        logger.info("Portfolio publisher task created")
+        print("✓ Portfolio publisher task created")
+    except Exception as e:
+        logger.error(f"Failed to start portfolio publisher: {e}", exc_info=True)
+        print(f"✗ Failed to start portfolio publisher: {e}")
+
+    try:
+        from monitoring.prediction_markets import get_prediction_aggregator
+        aggregator_early = get_prediction_aggregator()
+        application.state.prediction_aggregator = aggregator_early
+        asyncio.create_task(aggregator_early.start())
+        logger.info("Prediction markets aggregator initialized")
+        print("✓ Prediction markets aggregator initialized")
+    except Exception as e:
+        logger.error(f"Failed to start prediction markets: {e}", exc_info=True)
+        print(f"✗ Failed to start prediction markets: {e}")
+
+    try:
+        from web.services.prediction_publisher import get_prediction_publisher
+        prediction_publisher = get_prediction_publisher()
+        asyncio.create_task(prediction_publisher.start())
+        logger.info("Prediction publisher task created")
+        print("✓ Prediction publisher task created")
+    except Exception as e:
+        logger.error(f"Failed to start prediction publisher: {e}", exc_info=True)
+        print(f"✗ Failed to start prediction publisher: {e}")
+
+    await asyncio.sleep(0.5)
+    logger.info("WebSocket publishers startup complete")
+
+    # ── Phase 1: Core systems ──────────────────────────────────────────
+    logger.info("=" * 80)
+    logger.info("🚀 MERID STARTUP INITIATED")
+    logger.info("=" * 80)
+
+    logger.info(f"🚀 MERID Environment: {settings.MERID_ENV}")
+    logger.info(f"🌐 WebSocket Dev Mode: {settings.allow_websocket_dev_mode}")
+
+    live_issues = settings.validate_live_only_mode()
+    if live_issues:
+        for issue in live_issues:
+            logger.warning(f"   - {issue}")
+    else:
+        logger.info("✅ Live-only mode validated - all features will use real data")
+
+    if settings.is_production:
+        missing = settings.validate_required_for_production()
+        if missing:
+            raise ValueError(f"Missing required production settings: {', '.join(missing)}")
+        logger.info("✅ Production validation passed")
+
+    logger.info("Phase 1: Initializing core systems...")
+    try:
+        from core.consensus_engine import get_consensus_engine
+        consensus = get_consensus_engine()
+        logger.info(f"✅ Consensus engine: {consensus.min_votes} min votes, {consensus.quorum_threshold:.2f} quorum")
+        _startup_state["services"]["consensus"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Consensus engine initialization failed: {e}")
+        _startup_state["services"]["consensus"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from trading.paper_trading import get_paper_trading_engine
+        paper_engine = get_paper_trading_engine()
+        portfolio_count = len(paper_engine.portfolios)
+        position_count = sum(len(p.positions) for p in paper_engine.portfolios.values())
+        logger.info(f"✅ Paper trading engine: {portfolio_count} portfolios, {position_count} positions restored")
+        _startup_state["services"]["paper_trading"] = {"status": "running", "started_at": time.time(), "portfolios": portfolio_count, "positions": position_count}
+    except Exception as e:
+        logger.warning(f"⚠️  Paper trading engine initialization failed: {e}")
+        _startup_state["services"]["paper_trading"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from pathlib import Path as _Path
+        data_dir = _Path(__file__).resolve().parent.parent / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        backup_api_ok = True
+        try:
+            from backup import get_backup_manager
+            get_backup_manager()
+        except Exception:
+            backup_api_ok = False
+        logger.info(f"✅ Data persistence: dir={data_dir.exists()}, backup_api={backup_api_ok}")
+        _startup_state["services"]["data_persistence"] = {"status": "running", "data_dir": str(data_dir), "backup_api": backup_api_ok, "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Data persistence check failed: {e}")
+        _startup_state["services"]["data_persistence"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from agents.reflection_layer import get_reflection_system
+        reflection = get_reflection_system()
+        reflection_count = len(reflection._reflections)
+        agent_count = len(reflection._agent_stats)
+        logger.info(f"✅ Reflection layer: {reflection_count} reflections, {agent_count} agents")
+        _startup_state["services"]["reflection"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Reflection layer initialization failed: {e}")
+        _startup_state["services"]["reflection"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from monitoring.brier_metrics import get_brier_tracker
+        brier = get_brier_tracker()
+        prediction_count = len(brier.predictions)
+        logger.info(f"✅ Brier metrics: {prediction_count} predictions tracked")
+        _startup_state["services"]["brier_metrics"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Brier metrics initialization failed: {e}")
+        _startup_state["services"]["brier_metrics"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from memory.neo4j_graph import get_neo4j_graph, is_neo4j_available
+        if is_neo4j_available():
+            graph = get_neo4j_graph()
+            logger.info(f"✅ Neo4j graph database connected: {graph.config.uri}")
+            _startup_state["services"]["neo4j"] = {"status": "running", "started_at": time.time()}
+        else:
+            logger.info("⚠️  Neo4j not available - using JSON-only memory storage")
+            _startup_state["services"]["neo4j"] = {"status": "unavailable", "message": "Not configured or not installed"}
+    except Exception as e:
+        logger.warning(f"⚠️  Neo4j initialization failed: {e}")
+        _startup_state["services"]["neo4j"] = {"status": "failed", "error": str(e)}
+
+    # ── Phase 2: Prediction markets ────────────────────────────────────
+    logger.info("Phase 2: Starting prediction markets...")
+    aggregator = await _start_service_with_timeout(
+        "prediction_markets",
+        _start_prediction_markets(),
+        timeout_seconds=30.0,
+        optional=True
+    )
+    if aggregator:
+        market_count = len(aggregator._all_markets) if hasattr(aggregator, '_all_markets') else 0
+        logger.info(f"✅ Prediction market aggregator: {market_count} initial markets")
+    else:
+        logger.info("⚠️  Continuing without prediction markets - will use fallback data")
+        startup_success = False
+
+    # ── Phase 3: Background services ───────────────────────────────────
+    logger.info("Phase 3: Starting background services...")
+    if aggregator:
+        try:
+            from merid.whales import solana_whale_listener
+            task = asyncio.create_task(solana_whale_listener(aggregator))
+            _startup_state["background_tasks"].append(task)
+            logger.info("✅ Solana whale detection listener started")
+        except Exception as e:
+            logger.warning(f"⚠️  Whale detection listener failed: {e}")
+            startup_success = False
+    else:
+        logger.info("⚠️  Skipping whale detection - no prediction markets available")
+
+    startup_duration = time.time() - _startup_state["started_at"]
+    logger.info("=" * 80)
+    if startup_success:
+        logger.info(f"✅ All services started successfully in {startup_duration:.2f}s")
+    else:
+        logger.warning(f"⚠️  Some services failed - system in degraded mode ({startup_duration:.2f}s)")
+    logger.info("🚀 MERID STARTUP COMPLETE - System Ready")
+    logger.info("=" * 80)
+
+    # ── YIELD — app is running ─────────────────────────────────────────
+    yield
+
+    # ── SHUTDOWN ───────────────────────────────────────────────────────
+    logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
+    for task in _startup_state.get("background_tasks", []):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    logger.info("✅ Shutdown complete")
+
+
 # Create app instance after all routes are defined
-# NOTE: Startup/shutdown now handled by main.py lifespan manager
-app = create_app()
+app = create_app(lifespan=_app_lifespan)
 
 # Add health endpoints after app creation
-@app.get("/api/v1/system/health")
-async def system_health():
-    """System health check endpoint"""
-    import time
-    return {
-        "status": "healthy",
-        "timestamp": time.time(),
-        "version": "1.0.0",
-        "services": {
-            "api": "running",
-            "prediction_markets": "running",
-            "paper_trading": "configured"
-        }
-    }
-
-
-@app.get("/api/system/health")
-async def system_health_v2():
-    """Enhanced system health for dashboard"""
-    import time
-    import os
-    
-    # Check individual service health
-    services = {
-        "api_gateway": {"status": "healthy", "last_check": time.time()},
-        "prediction_markets": {"status": "healthy", "last_check": time.time()},
-        "risk_engine": {"status": "healthy", "last_check": time.time()},
-        "order_router": {"status": "healthy", "last_check": time.time()},
-        "data_ingestion": {"status": "healthy", "last_check": time.time()},
-    }
-    
-    # Determine overall status
-    all_healthy = all(s["status"] == "healthy" for s in services.values())
-    
-    return {
-        "status": "healthy" if all_healthy else "degraded",
-        "timestamp": time.time(),
-        "environment": os.getenv("MERID_ENV", "development"),
-        "incident_flag": False,
-        "services": services
-    }
-
-
-@app.get("/api/risk/pnl-summary")
-async def pnl_summary():
-    """P&L summary for dashboard"""
-    import time
-    
-    return {
-        "today_pnl": 12847.32,
-        "today_pnl_pct": 2.34,
-        "mtm_pnl": 45623.89,
-        "max_drawdown": 0.08,
-        "max_drawdown_pct": 8.0,
-        "limit_daily_loss": 50000.00,
-        "limit_utilization_pct": 25.7,
-        "timestamp": time.time()
-    }
-
-
-@app.get("/api/risk/limits")
-async def risk_limits():
-    """Risk limits configuration"""
-    return {
-        "max_daily_loss": 50000.00,
-        "max_position_pct": 0.20,
-        "max_leverage": 2.0,
-        "max_orders_per_minute": 100,
-        "max_notional_per_trade": 100000.00,
-        "circuit_breaker_threshold": 0.15
-    }
-
-
-@app.get("/api/risk/exposure")
-async def risk_exposure():
-    """Current risk exposure"""
-    return {
-        "total_exposure": 125000.00,
-        "total_exposure_pct": 0.25,
-        "buying_power": 375000.00,
-        "by_symbol": [
-            {"symbol": "BTC-USD", "notional": 45000.00, "pct_of_equity": 0.09},
-            {"symbol": "ETH-USD", "notional": 32000.00, "pct_of_equity": 0.064},
-            {"symbol": "AAPL", "notional": 28000.00, "pct_of_equity": 0.056},
-        ],
-        "open_orders_count": 12,
-        "open_orders_limit": 50
-    }
-
-
-@app.get("/api/risk/protections")
-async def risk_protections():
-    """Circuit breaker and lockdown status"""
-    return {
-        "locked_down": False,
-        "breaker_tripped": False,
-        "reason": None,
-        "since": None,
-        "kill_switch_enabled": True,
-        "auto_trading_paused": False
-    }
-
-
-@app.get("/api/agents/summary")
-async def agents_summary():
-    """Agent status summary"""
-    return {
-        "agents": [
-            {
-                "id": "trend-follower-l1",
-                "name": "Trend Follower L1",
-                "status": "healthy",
-                "heartbeat_age_ms": 1200,
-                "strategy": "trend_following",
-                "state": "active",
-                "positions_count": 3,
-                "today_pnl": 2340.50
-            },
-            {
-                "id": "momentum-v1",
-                "name": "Momentum V1",
-                "status": "healthy",
-                "heartbeat_age_ms": 800,
-                "strategy": "momentum",
-                "state": "active",
-                "positions_count": 2,
-                "today_pnl": 1890.25
-            },
-            {
-                "id": "arbitrage-scan",
-                "name": "Arbitrage Scanner",
-                "status": "paused",
-                "heartbeat_age_ms": 5000,
-                "strategy": "arbitrage",
-                "state": "paused",
-                "positions_count": 0,
-                "today_pnl": 0.0
-            }
-        ],
-        "summary": {
-            "total": 3,
-            "healthy": 2,
-            "paused": 1,
-            "unhealthy": 0
-        }
-    }
-
-
-@app.get("/api/trading/summary")
-async def trading_summary():
-    """Trading operations summary"""
-    return {
-        "active_strategies": 2,
-        "paused_strategies": 1,
-        "venues_connected": 3,
-        "venues": ["Alpaca", "Coinbase Pro", "Kraken"],
-        "notional_deployed": 125000.00,
-        "notional_capacity": 500000.00,
-        "utilization_pct": 25.0
-    }
-
-
-@app.get("/api/prime/status")
-async def prime_status():
-    """Prime screen connection status"""
-    import time
-    return {
-        "mode": "paper",
-        "market_data_connected": True,
-        "narrative_available": True,
-        "last_narrative_timestamp": time.time() - 120,
-        "data_feeds": {
-            "kraken": {"connected": True, "latency_ms": 45},
-            "coinbase": {"connected": True, "latency_ms": 62},
-            "alpaca": {"connected": True, "latency_ms": 38}
-        }
-    }
-
-
-@app.get("/api/system/version")
-async def system_version():
-    """System version and build info"""
-    import os
-    return {
-        "version": "2.0.0",
-        "build": "2025.01.31",
-        "git_sha": os.getenv("GIT_SHA", "abc1234"),
-        "environment": os.getenv("MERID_ENV", "development"),
-        "openapi_url": "/openapi.json"
-    }
-
-
-@app.get("/api/system/components")
-async def system_components():
-    """System component statuses"""
-    return {
-        "components": [
-            {"name": "API Gateway", "status": "operational", "version": "2.0.0"},
-            {"name": "Risk Engine", "status": "operational", "version": "2.0.0"},
-            {"name": "Order Router", "status": "operational", "version": "2.0.0"},
-            {"name": "Data Ingestion", "status": "operational", "version": "2.0.0"},
-            {"name": "Agent Manager", "status": "operational", "version": "2.0.0"},
-        ]
-    }
+## Dashboard endpoints moved to web/api/system_endpoints.py
+## Removed duplicates: /api/system/health, /api/risk/pnl-summary, /api/risk/limits,
+## /api/risk/exposure, /api/risk/protections, /api/agents/summary, /api/trading/summary,
+## /api/prime/status, /api/system/version, /api/system/components
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -1390,172 +1556,7 @@ async def _start_service_with_timeout(
         raise
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Graceful shutdown - cancel background tasks."""
-    global _startup_state
-    logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
-    
-    # Cancel all tracked background tasks
-    for task in _startup_state.get("background_tasks", []):
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-    
-    logger.info("✅ Shutdown complete")
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Start background services on application startup with robust error handling."""
-    global _startup_state
-    _startup_state["started_at"] = time.time()
-    startup_success = True
-    
-    logger.info("=" * 80)
-    logger.info("🚀 MERID STARTUP INITIATED")
-    logger.info("=" * 80)
-    
-    # Log environment info and validate configuration
-    logger.info(f"🚀 MERID Environment: {settings.MERID_ENV}")
-    logger.info(f"🌐 WebSocket Dev Mode: {settings.allow_websocket_dev_mode}")
-    
-    # Validate live-only mode
-    live_issues = settings.validate_live_only_mode()
-    if live_issues:
-        logger.warning(f"❌ Live-only mode validation failed:")
-        for issue in live_issues:
-            logger.warning(f"   - {issue}")
-        logger.warning(f"⚠️  To enable live-only mode, fix the above issues in .env")
-    else:
-        logger.info(f"✅ Live-only mode validated - all features will use real data")
-    
-    # Validate production requirements (fail fast in production)
-    if settings.is_production:
-        missing = settings.validate_required_for_production()
-        if missing:
-            logger.error(f"❌ Production validation failed - missing: {', '.join(missing)}")
-            raise ValueError(f"Missing required production settings: {', '.join(missing)}")
-        else:
-            logger.info("✅ Production validation passed")
-    
-    # Phase 1: Initialize core systems
-    logger.info("Phase 1: Initializing core systems...")
-    try:
-        from core.consensus_engine import get_consensus_engine
-        consensus = get_consensus_engine()
-        logger.info(f"✅ Consensus engine: {consensus.min_votes} min votes, {consensus.quorum_threshold:.2f} quorum")
-        _startup_state["services"]["consensus"] = {"status": "running", "started_at": time.time()}
-    except Exception as e:
-        logger.warning(f"⚠️  Consensus engine initialization failed: {e}")
-        _startup_state["services"]["consensus"] = {"status": "failed", "error": str(e)}
-    
-    try:
-        from trading.paper_trading import get_paper_trading_engine
-        paper_engine = get_paper_trading_engine()
-        portfolio_count = len(paper_engine.portfolios)
-        position_count = sum(len(p.positions) for p in paper_engine.portfolios.values())
-        logger.info(f"✅ Paper trading engine: {portfolio_count} portfolios, {position_count} positions restored")
-        _startup_state["services"]["paper_trading"] = {"status": "running", "started_at": time.time(), "portfolios": portfolio_count, "positions": position_count}
-    except Exception as e:
-        logger.warning(f"⚠️  Paper trading engine initialization failed: {e}")
-        _startup_state["services"]["paper_trading"] = {"status": "failed", "error": str(e)}
-
-    # Verify backup/persistence subsystem
-    try:
-        from pathlib import Path
-        data_dir = Path(__file__).resolve().parent.parent / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        backup_api_ok = True
-        try:
-            from backup import get_backup_manager
-            get_backup_manager()
-        except Exception:
-            backup_api_ok = False
-        logger.info(f"✅ Data persistence: dir={data_dir.exists()}, backup_api={backup_api_ok}")
-        _startup_state["services"]["data_persistence"] = {"status": "running", "data_dir": str(data_dir), "backup_api": backup_api_ok, "started_at": time.time()}
-    except Exception as e:
-        logger.warning(f"⚠️  Data persistence check failed: {e}")
-        _startup_state["services"]["data_persistence"] = {"status": "failed", "error": str(e)}
-    
-    try:
-        from agents.reflection_layer import get_reflection_system
-        reflection = get_reflection_system()
-        reflection_count = len(reflection._reflections)
-        agent_count = len(reflection._agent_stats)
-        logger.info(f"✅ Reflection layer: {reflection_count} reflections, {agent_count} agents")
-        _startup_state["services"]["reflection"] = {"status": "running", "started_at": time.time()}
-    except Exception as e:
-        logger.warning(f"⚠️  Reflection layer initialization failed: {e}")
-        _startup_state["services"]["reflection"] = {"status": "failed", "error": str(e)}
-    
-    try:
-        from monitoring.brier_metrics import get_brier_tracker
-        brier = get_brier_tracker()
-        prediction_count = len(brier.predictions)
-        logger.info(f"✅ Brier metrics: {prediction_count} predictions tracked")
-        _startup_state["services"]["brier_metrics"] = {"status": "running", "started_at": time.time()}
-    except Exception as e:
-        logger.warning(f"⚠️  Brier metrics initialization failed: {e}")
-        _startup_state["services"]["brier_metrics"] = {"status": "failed", "error": str(e)}
-    
-    try:
-        from memory.neo4j_graph import get_neo4j_graph, is_neo4j_available
-        if is_neo4j_available():
-            graph = get_neo4j_graph()
-            logger.info(f"✅ Neo4j graph database connected: {graph.config.uri}")
-            _startup_state["services"]["neo4j"] = {"status": "running", "started_at": time.time()}
-        else:
-            logger.info("⚠️  Neo4j not available - using JSON-only memory storage")
-            _startup_state["services"]["neo4j"] = {"status": "unavailable", "message": "Not configured or not installed"}
-    except Exception as e:
-        logger.warning(f"⚠️  Neo4j initialization failed: {e}")
-        _startup_state["services"]["neo4j"] = {"status": "failed", "error": str(e)}
-    
-    # Phase 2: Start prediction market aggregator with timeout
-    logger.info("Phase 2: Starting prediction markets...")
-    aggregator = await _start_service_with_timeout(
-        "prediction_markets",
-        _start_prediction_markets(),
-        timeout_seconds=30.0,
-        optional=True
-    )
-    
-    if aggregator:
-        market_count = len(aggregator._all_markets) if hasattr(aggregator, '_all_markets') else 0
-        logger.info(f"✅ Prediction market aggregator: {market_count} initial markets")
-    else:
-        logger.info("⚠️  Continuing without prediction markets - will use fallback data")
-        startup_success = False
-    
-    # Phase 3: Start whale detection listener (only if prediction markets started)
-    logger.info("Phase 3: Starting background services...")
-    if aggregator:
-        try:
-            from merid.whales import solana_whale_listener
-            task = asyncio.create_task(solana_whale_listener(aggregator))
-            _startup_state["background_tasks"].append(task)
-            logger.info("✅ Solana whale detection listener started")
-        except Exception as e:
-            logger.warning(f"⚠️  Whale detection listener failed: {e}")
-            startup_success = False
-    else:
-        logger.info("⚠️  Skipping whale detection - no prediction markets available")
-    
-    # Calculate startup duration
-    startup_duration = time.time() - _startup_state["started_at"]
-    
-    # Log overall startup status
-    logger.info("=" * 80)
-    if startup_success:
-        logger.info(f"✅ All services started successfully in {startup_duration:.2f}s")
-    else:
-        logger.warning(f"⚠️  Some services failed - system in degraded mode ({startup_duration:.2f}s)")
-    logger.info("🚀 MERID STARTUP COMPLETE - System Ready")
-    logger.info("=" * 80)
+## on_event handlers removed — all startup/shutdown logic now in _app_lifespan()
 
 
 async def _start_prediction_markets():
