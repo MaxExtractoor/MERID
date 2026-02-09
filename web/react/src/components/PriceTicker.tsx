@@ -37,16 +37,7 @@ export default function PriceTicker({
   // Simulate price updates (in real app, this would come from WebSocket)
   useEffect(() => {
     if (!initialData) {
-      // Mock data for demonstration
-      const mockData: PriceData = {
-        symbol,
-        last: 42000 + Math.random() * 1000,
-        change: (Math.random() - 0.5) * 500,
-        changePercent: (Math.random() - 0.5) * 2,
-        volume: Math.floor(Math.random() * 1000000),
-        timestamp: new Date().toISOString(),
-      };
-      setPriceData(mockData);
+      // No live data — keep default zeros
     } else {
       // Update state when initialData prop changes
       setPriceData(initialData);
