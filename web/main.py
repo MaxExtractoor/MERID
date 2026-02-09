@@ -1469,8 +1469,149 @@ async def _app_lifespan(application: FastAPI):
         logger.info("⚠️  Continuing without prediction markets - will use fallback data")
         startup_success = False
 
-    # ── Phase 3: Background services ───────────────────────────────────
-    logger.info("Phase 3: Starting background services...")
+    # ── Phase 3: Streaming & background services ─────────────────────
+    logger.info("Phase 3: Starting streaming & background services...")
+
+    # Live price feed streaming
+    try:
+        from data.live_price_feed import get_live_price_feed
+        price_feed = get_live_price_feed()
+        task = asyncio.create_task(price_feed.start_streaming())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Live price feed streaming started")
+        _startup_state["services"]["price_feed"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Live price feed failed: {e}")
+        _startup_state["services"]["price_feed"] = {"status": "failed", "error": str(e)}
+
+    # Agent orchestrator
+    try:
+        from core.agent_orchestrator import get_agent_orchestrator
+        orchestrator = get_agent_orchestrator()
+        task = asyncio.create_task(orchestrator.start())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Agent orchestrator started")
+        _startup_state["services"]["agent_orchestrator"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Agent orchestrator failed: {e}")
+        _startup_state["services"]["agent_orchestrator"] = {"status": "failed", "error": str(e)}
+
+    # Execution engine
+    try:
+        from trading.execution import get_optimal_executor
+        execution = get_optimal_executor()
+        task = asyncio.create_task(execution.start())
+        _startup_state["background_tasks"].append(task)
+        # Wire execution engine to live price feed
+        try:
+            price_feed = get_live_price_feed()
+            def on_execution_price_update(price_data):
+                execution.update_price(price_data.symbol, price_data.price)
+            price_feed.subscribe(on_execution_price_update)
+            logger.info("✅ Execution engine started + wired to price feed")
+        except Exception:
+            logger.info("✅ Execution engine started (price feed wire skipped)")
+        _startup_state["services"]["execution"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Execution engine failed: {e}")
+        _startup_state["services"]["execution"] = {"status": "failed", "error": str(e)}
+
+    # Agent mesh
+    try:
+        from agents.agent_mesh import agent_mesh
+        asyncio.create_task(agent_mesh.initialize())
+        task = asyncio.create_task(agent_mesh.start())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Agent mesh started")
+        _startup_state["services"]["agent_mesh"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Agent mesh failed: {e}")
+        _startup_state["services"]["agent_mesh"] = {"status": "failed", "error": str(e)}
+
+    # Consensus engine streaming
+    try:
+        from core.consensus_engine import get_consensus_engine
+        consensus = get_consensus_engine()
+        task = asyncio.create_task(consensus.start())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Consensus engine streaming started")
+    except Exception as e:
+        logger.warning(f"⚠️  Consensus engine streaming failed: {e}")
+
+    # Continuous miner
+    try:
+        from simulation.continuous_miner import get_continuous_miner
+        miner = get_continuous_miner()
+        task = asyncio.create_task(miner.start())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Continuous miner started")
+        _startup_state["services"]["miner"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Continuous miner failed: {e}")
+        _startup_state["services"]["miner"] = {"status": "failed", "error": str(e)}
+
+    # Audit trail
+    try:
+        from core.audit_trail import get_audit_trail
+        audit = get_audit_trail()
+        task = asyncio.create_task(audit.start())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Audit trail started")
+        _startup_state["services"]["audit_trail"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Audit trail failed: {e}")
+        _startup_state["services"]["audit_trail"] = {"status": "failed", "error": str(e)}
+
+    # Intelligence news aggregation
+    try:
+        from web.api.intelligence import aggregate_news
+        task = asyncio.create_task(aggregate_news())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Intelligence news aggregation started")
+    except Exception as e:
+        logger.warning(f"⚠️  Intelligence news aggregation failed: {e}")
+
+    # API live data fetching
+    try:
+        from web.api.live_data import fetch_live_prices as fetch_api_prices
+        task = asyncio.create_task(fetch_api_prices())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ API live data feed started")
+    except Exception as e:
+        logger.warning(f"⚠️  API live data feed failed: {e}")
+
+    # Alert manager
+    try:
+        from core.alerts import get_alert_manager
+        alert_mgr = get_alert_manager()
+        task = asyncio.create_task(alert_mgr.start())
+        _startup_state["background_tasks"].append(task)
+        try:
+            price_feed = get_live_price_feed()
+            def on_alert_price_update(price_data):
+                alert_mgr.update_price(price_data.symbol, price_data.price)
+            price_feed.subscribe(on_alert_price_update)
+            logger.info("✅ Alert manager started + wired to price feed")
+        except Exception:
+            logger.info("✅ Alert manager started (price feed wire skipped)")
+        _startup_state["services"]["alerts"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Alert manager failed: {e}")
+        _startup_state["services"]["alerts"] = {"status": "failed", "error": str(e)}
+
+    # Health monitor
+    try:
+        from core.health import get_health_monitor
+        health_mon = get_health_monitor()
+        task = asyncio.create_task(health_mon.start())
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Health monitor started")
+        _startup_state["services"]["health_monitor"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Health monitor failed: {e}")
+        _startup_state["services"]["health_monitor"] = {"status": "failed", "error": str(e)}
+
+    # Whale listener
     if aggregator:
         try:
             from merid.whales import solana_whale_listener
