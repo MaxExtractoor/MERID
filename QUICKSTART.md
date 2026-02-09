@@ -1,184 +1,116 @@
-# MERID v2.0 - Quick Start Guide
+# MERID v2.0 — Quick Start Guide
 
-**Get MERID running in 5 minutes**
-
----
-
-## Step 1: Install Flutter (5 min)
-
-### Windows
-```powershell
-# Download Flutter SDK
-# https://flutter.dev/docs/get-started/install/windows
-
-# Extract to C:\src\flutter
-# Add to PATH
-setx PATH "%PATH%;C:\src\flutter\bin"
-
-# Verify
-flutter doctor
-```
+**Get MERID running in 5 minutes.**
 
 ---
 
-## Step 2: Install Fonts (1 min)
-
-1. Download **JetBrains Mono**: https://www.jetbrains.com/lp/mono/
-2. Extract and copy to `C:\Dev\MERID\assets\fonts\`:
-   - `JetBrainsMono-Regular.ttf`
-   - `JetBrainsMono-Bold.ttf`
-
----
-
-## Step 3: Install Dependencies (1 min)
+## Step 1: Install Dependencies (2 min)
 
 ```powershell
 cd C:\Dev\MERID
-flutter pub get
+pip install -r requirements.txt
 ```
 
 ---
 
-## Step 4: Run MERID (30 sec)
+## Step 2: Run the Golden Path (2 min)
 
 ```powershell
-# Development mode
-flutter run
-
-# Or build release APK
-flutter build apk --release
+make golden-path
 ```
 
-**Output**: `build/app/outputs/flutter-apk/app-release.apk`
+This runs 490 tests across the full pipeline: E2E trade loop, signal layer, live feeds, prediction markets, unified pipeline, canonical agents, and hardening.
 
 ---
 
-## 🎮 Quick Test
+## Step 3: Start the System (1 min)
 
-### Test 1: Status Report
-1. Launch app
-2. Enter "Status Report" in Distillation Gate
-3. Press Enter
-4. See raw cognition + distilled output + EKG metrics
-
-### Test 2: Market Exploit
-1. Tap "Market Exploit" button
-2. Tap "Scan for Exploits"
-3. See time-gap detection + front-run simulation
-
-### Test 3: Quantum Mode
-1. Tap "Quantum Mode" button
-2. Tap "Run QAOA"
-3. See quantum vs classical comparison
-
-### Test 4: Lockdown
-1. Tap red "LOCKDOWN" button
-2. See system freeze + red overlay
-3. Tap again to release
-
----
-
-## 📱 Device/Emulator Setup
-
-### Android Studio
 ```powershell
-# List devices
-flutter devices
+# Terminal 1: Backend API
+make serve
 
-# Run on connected device
-flutter run -d <device-id>
+# Terminal 2: React dashboard
+cd web/react
+npm install
+npm run dev
 ```
 
-### iOS (macOS only)
-```bash
-open -a Simulator
-flutter run
-```
+- **API**: http://127.0.0.1:8000 (Swagger docs at `/docs`)
+- **Dashboard**: http://localhost:5173
 
 ---
 
-## 🐛 Troubleshooting
+## Quick Test
 
-### "Flutter not found"
+### Test 1: Preflight Check
 ```powershell
-# Add to PATH
-setx PATH "%PATH%;C:\src\flutter\bin"
-# Restart terminal
+make preflight
 ```
+Runs golden path + readiness auditor + codebase drift audit + live RiskContext snapshot.
 
-### "Fonts not loading"
-```
-1. Check files exist: C:\Dev\MERID\assets\fonts\JetBrainsMono-*.ttf
-2. Run: flutter pub get
-3. Restart app completely
-```
-
-### "Build fails"
+### Test 2: Risk Context
 ```powershell
-flutter clean
-flutter pub get
-flutter run
+make risk-context
 ```
+Prints the current system risk state: CQI, scale factor, approval boost, kill switch status.
+
+### Test 3: Start the Loop
+```powershell
+make loop-start
+```
+Runs the MeridLoop orchestrator in observe mode: live feeds → agents → consensus → arb → plans → CQI → reconciliation.
+
+### Test 4: Paper Trading
+```powershell
+make loop-start-execute
+```
+Same as above but with execution enabled. Paper mode by default — no real capital at risk.
 
 ---
 
-## 📚 Learn More
+## Key Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/pipeline/summary` | Full pipeline status |
+| `GET /api/v1/pipeline/risk` | Risk limits and exposure |
+| `GET /api/v1/pipeline/risk-context` | Live RiskContext snapshot |
+| `GET /api/v1/prediction-markets/summary` | Prediction markets dashboard |
+| `GET /api/v1/wallet/balances` | Wallet balances (live) |
+| `GET /api/v1/treasury/overview` | Treasury overview (live) |
+| `GET /api/operator/summary` | Operator dashboard data |
+
+---
+
+## Key Features
+
+- **MeridLoop**: Persistent orchestrator running full tick cycle (feeds → agents → consensus → risk → execution → CQI)
+- **RiskContext**: System-level stress bridge — scales order sizes and raises approval thresholds
+- **ExecutionGuard**: Kill switch, CQI throttle, per-domain caps
+- **Unified Pipeline**: TradeRouter → GlobalRiskManager → ModeManager → VenueAdapter
+- **Signal Layer**: Decay-aware features, arb scanner, CQI dashboard
+- **28 Dashboard Views**: Operator, Wallet, Treasury, Trading, Positions, Predictions, Betting, Flow Radar, Signal Layer, and more
+
+---
+
+## Troubleshooting
+
+| Issue | Fix |
+|-------|-----|
+| `ModuleNotFoundError` | Run `pip install -r requirements.txt` |
+| `make` not found (Windows) | Install via `choco install make` or run Python commands directly |
+| Tests fail | Check Python 3.11+ and re-install deps |
+| API returns errors | Ensure `make serve` is running |
+
+---
+
+## Learn More
 
 - **Full Documentation**: `README.md`
-- **Trading System Guide**: `README_TRADING_SYSTEM.md`
-- **Deployment Guide**: `BUILD.md`
-- **Build Summary**: `PROJECT_SUMMARY.md`
-- **Charter v2.0**: Launch app → Tap "CHARTER v2.0" badge
+- **Go-Live Checklist**: `docs/GO_LIVE_CHECKLIST.md`
+- **Getting Started (1hr)**: `docs/GETTING_STARTED.md`
+- **Readiness Scorecard**: `docs/SWARM_TRADING_READINESS.md`
 
 ---
 
-## 💰 Trading System Quick Start
-
-### Backend Server
-```powershell
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Start server
-python -m uvicorn web.main:app --host 127.0.0.1 --port 8001 --reload
-```
-
-### Access Trading Interfaces
-- **Main Dashboard**: http://127.0.0.1:8001/
-- **Perps Trading**: http://127.0.0.1:8001/trading/perps
-- **Prediction Markets**: http://127.0.0.1:8001/trading/markets
-- **Consensus Betting**: http://127.0.0.1:8001/betting
-
-### Paper Trading (Default)
-- **Safe testing** with virtual $10,000 balance
-- **No real capital** at risk
-- **Toggle badge** in perps interface (blue = paper, red = live)
-- **Full documentation**: See `README_TRADING_SYSTEM.md`
-
----
-
-## 🎯 Key Features
-
-- **Bus Hierarchy**: Mixer console with 6 agents, 6 layers, master fader
-- **Distillation Gate**: Raw cognition → distilled output + EKG
-- **Quantum Sim**: QAOA/VQE optimization with comparison gate
-- **Market Exploit**: Time-gap detection + front-run simulation
-- **Intuition**: Sentiment divergence + gut feel analysis
-- **Manifestation**: 1000-scenario multiverse testing
-- **Lockdown**: Freeze all execution (SLP-1)
-
----
-
-## 🔐 Security
-
-- **No Backend**: Fully offline/local
-- **No Cloud**: Zero external dependencies
-- **Governance**: All execution gated by human approval
-- **Lockdown**: One-tap system freeze
-- **Hostile-Default**: All ports treated as compromised
-
----
-
-**You're ready! Launch MERID v2.0 and explore the control room.**
-
-MERID v2.0 // LOCAL ⚡
+MERID v2.0 // LOCAL

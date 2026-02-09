@@ -37,22 +37,22 @@ export default function Health() {
             return {
               name: name.replace(/_/g, ' ').toUpperCase(),
               status: isObj ? (info.status === 'healthy' ? 'healthy' : 'degraded') : (info === 'operational' ? 'healthy' : 'degraded'),
-              latency: Math.floor(Math.random() * 100) + 20,
+              latency: isObj && info.latency_ms ? info.latency_ms : 0,
               lastCheck: new Date(checkTs).toISOString(),
-              uptime: 99.9,
-              version: '2.0.0'
+              uptime: isObj && info.uptime ? info.uptime : 99.9,
+              version: isObj && info.version ? info.version : '2.0.0'
             };
           });
           
           setServices(transformedServices);
           setOverallStatus(data.status);
           
-          // Mock metrics
+          // System metrics from API (falls back to estimates if not provided)
           setMetrics({
-            cpuUsage: 45.2,
-            memoryUsage: 62.8,
-            diskUsage: 34.1,
-            networkLatency: 23
+            cpuUsage: data.metrics?.cpu_usage ?? 0,
+            memoryUsage: data.metrics?.memory_usage ?? 0,
+            diskUsage: data.metrics?.disk_usage ?? 0,
+            networkLatency: data.metrics?.network_latency ?? 0
           });
         }
       } catch (e) {

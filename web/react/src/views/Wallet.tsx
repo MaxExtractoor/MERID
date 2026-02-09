@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Wallet as WalletIcon, Send, Download, RefreshCw, HardDrive, AlertCircle } from 'lucide-react';
-import StubBanner from '../components/StubBanner';
+import { Wallet as WalletIcon, Send, Download, RefreshCw, HardDrive, AlertCircle, CheckCircle } from 'lucide-react';
 
 interface Balance {
   currency: string;
@@ -23,6 +22,7 @@ interface WalletData {
   balances: Balance[];
   transactions: Transaction[];
   total_value_usd: number;
+  source?: 'live' | 'stub';
 }
 
 export default function Wallet() {
@@ -107,27 +107,35 @@ export default function Wallet() {
 
   return (
     <div className="p-6 space-y-6">
-      <StubBanner data={walletData} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <WalletIcon className="w-8 h-8 text-blue-500" />
           <div>
             <h1 className="text-2xl font-bold text-white">Wallet</h1>
-            <p className="text-sm text-gray-400">Manage your funds and transactions</p>
+            <div className="flex items-center gap-2">
+              <p className="text-sm text-gray-400">Manage your funds and transactions</p>
+              {walletData?.source === 'live' && (
+                <span className="flex items-center gap-1 text-xs text-green-400">
+                  <CheckCircle className="w-3 h-3" /> Live
+                </span>
+              )}
+            </div>
           </div>
         </div>
         <div className="flex gap-2">
           <button
-            onClick={() => alert('Receive modal coming soon')}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2 transition-colors"
+            disabled
+            title="Receive — available in live trading mode"
+            className="px-4 py-2 bg-blue-600/40 text-white/50 rounded-lg flex items-center gap-2 cursor-not-allowed"
           >
             <Download className="w-4 h-4" />
             Receive
           </button>
           <button
-            onClick={() => alert('Send modal coming soon')}
-            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg flex items-center gap-2 transition-colors"
+            disabled
+            title="Send — available in live trading mode"
+            className="px-4 py-2 bg-green-600/40 text-white/50 rounded-lg flex items-center gap-2 cursor-not-allowed"
           >
             <Send className="w-4 h-4" />
             Send

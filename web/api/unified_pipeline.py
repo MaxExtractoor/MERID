@@ -193,3 +193,18 @@ async def disable_venue(req: VenueRequest):
     mm = get_mode_manager()
     mm.disable_venue(req.venue)
     return {"status": "ok", "venue": req.venue, "enabled": False}
+
+
+# ── Risk Context ────────────────────────────────────────────────────
+
+@router.get("/risk-context")
+async def pipeline_risk_context():
+    """System-state risk context snapshot.
+
+    Aggregates caps, CQI, drawdown, and exposure from ExecutionGuard,
+    OperatorSession, GlobalRiskManager, and DrawdownGovernor.
+    Returns derived size_scale_factor and approval_threshold_boost that
+    consensus and risk checks use to adjust plan sizing and approval.
+    """
+    from merid.pipeline.risk_context import get_risk_context
+    return get_risk_context().to_dict()

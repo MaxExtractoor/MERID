@@ -63,6 +63,30 @@ export const API_ENDPOINTS = {
   CONSENSUS_SUMMARY: "/api/v1/consensus/summary",
   CONSENSUS_METRICS: "/api/v1/consensus/metrics",
   
+  // Flow Domain (Memecoins, Whales, KOLs, Snipers, MEV)
+  FLOW_RADAR: "/api/v1/flow/radar",
+  FLOW_TOKENS: "/api/v1/flow/tokens",
+  FLOW_ENTITIES: "/api/v1/flow/entities",
+  FLOW_EVENTS: "/api/v1/flow/events",
+  FLOW_PLANS: "/api/v1/flow/plans",
+  FLOW_SNIPER_STATUS: "/api/v1/flow/sniper/status",
+  FLOW_SNIPER_FILLS: "/api/v1/flow/sniper/fills",
+  FLOW_RISK: "/api/v1/flow/risk",
+  FLOW_METRICS: "/api/v1/flow/metrics",
+
+  // Signal Layer (Decay, Features, Arbs, Drift, CQI)
+  SIGNAL_FEATURES: "/api/v1/signal-layer/features",
+  SIGNAL_SOCIAL: "/api/v1/signal-layer/social",
+  SIGNAL_MACRO: "/api/v1/signal-layer/macro",
+  SIGNAL_ONCHAIN: "/api/v1/signal-layer/onchain",
+  SIGNAL_SNAPSHOT: "/api/v1/signal-layer/snapshot",
+  SIGNAL_ARBS: "/api/v1/signal-layer/arbs",
+  SIGNAL_ARB_PLANS: "/api/v1/signal-layer/arb-plans",
+  SIGNAL_DRIFT: "/api/v1/signal-layer/drift",
+  SIGNAL_CQI: "/api/v1/signal-layer/cqi",
+  SIGNAL_METRICS: "/api/v1/signal-layer/metrics",
+  SIGNAL_DECAY_CONFIGS: "/api/v1/signal-layer/decay-configs",
+
   // Betting Consensus
   BETTING_CONSENSUS_SUMMARY: "/api/v1/betting/consensus/summary",
   BETTING_CONSENSUS_LIVE: "/api/v1/betting/consensus/live",

@@ -13,7 +13,7 @@ docker-compose up -d postgres redis neo4j ollama wiremock prometheus grafana
 docker exec merid-ollama ollama pull llama3
 
 # Start MERID API
-uvicorn merid_api:app --host 0.0.0.0 --port 8000 --reload
+uvicorn web.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Start React dashboard (in another terminal)
 cd web/react && npm run dev
@@ -24,9 +24,9 @@ cd web/react && npm run dev
 | Service | URL | Credentials | Purpose |
 |---------|-----|-------------|---------|
 | MERID API | http://localhost:8000 | - | FastAPI backend |
-| React Dashboard | http://localhost:3000 | - | Frontend UI |
+| React Dashboard | http://localhost:5173 | - | Frontend UI (Vite dev server) |
 | Neo4j | http://localhost:7474 | neo4j/merid | Graph database |
-| PostgreSQL | localhost:5432 | merid/merid_local_dev | Relational data |
+| PostgreSQL | localhost:5432 | merid/merid_local_dev | Relational data (optional, not currently used) |
 | Redis | localhost:6379 | - | Cache & pub/sub |
 | Prometheus | http://localhost:9090 | - | Metrics |
 | Grafana | http://localhost:3001 | admin/merid_local | Dashboards |
@@ -62,17 +62,14 @@ KALSHI_BASE_URL=http://localhost:8080
 ## Running Tests
 
 ```bash
-# Unit tests with mocked dependencies
+# Golden path suite (490 tests)
+make golden-path
+
+# Full preflight (tests + readiness + drift + risk context)
+make preflight
+
+# Unit tests directly
 pytest tests/ -v --tb=short
-
-# Integration tests with local services
-pytest tests/integration/ -v --tb=short
-
-# Coverage report
-pytest --cov=core --cov=trading --cov-report=html
-
-# Run specific test category
-pytest tests/integration/test_contracts.py -v
 ```
 
 ## Mock Broker APIs

@@ -1,7 +1,7 @@
 # MERID Makefile
 # Common development commands
 
-.PHONY: help test coverage run-paper-demo smoke-test lint
+.PHONY: help test coverage run-paper-demo smoke-test lint golden-path preflight risk-context serve
 
 help:
 	@echo "MERID Development Commands"
@@ -159,3 +159,88 @@ blockchain-gateway:
 
 blockchain-contracts:
 	python -c "from merid.blockchain.contracts import get_contract_registry; import json; print(json.dumps(get_contract_registry().summary(), indent=2))"
+
+# ── Golden Path CI (canonical test suites only) ─────────────────────
+golden-path:
+	python -m pytest tests/test_e2e_golden_path.py tests/test_signal_layer.py tests/test_live_feeds.py tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_hardening.py -v --tb=short
+
+# ── Execution Guard ─────────────────────────────────────────────────
+guard-test:
+	python -m pytest tests/test_hardening.py -v
+
+guard-status:
+	python -c "from merid.execution_guard import get_execution_guard; import json; print(json.dumps(get_execution_guard().summary(), indent=2))"
+
+guard-kill:
+	python -c "from merid.execution_guard import get_execution_guard; g=get_execution_guard(); g.activate_kill_switch('operator'); print('KILL SWITCH ACTIVATED')"
+
+guard-unkill:
+	python -c "from merid.execution_guard import get_execution_guard; g=get_execution_guard(); g.deactivate_kill_switch(); print('Kill switch deactivated')"
+
+# ── Tick Log ────────────────────────────────────────────────────────
+tick-log-summary:
+	python -c "from merid.tick_log import get_tick_log; import json; print(json.dumps(get_tick_log().summary(), indent=2))"
+
+tick-log-recent:
+	python -c "from merid.tick_log import get_tick_log; import json; print(json.dumps(get_tick_log().recent(20), indent=2))"
+
+# ── WebSocket Feed ──────────────────────────────────────────────────
+ws-feed-status:
+	python -c "from merid.signals.ws_price_feed import get_ws_feed_manager; import json; print(json.dumps(get_ws_feed_manager().status(), indent=2))"
+
+# ── Main Loop ───────────────────────────────────────────────────────
+loop-start:
+	python -m merid.loop
+
+loop-start-execute:
+	python -m merid.loop --execute
+
+loop-status:
+	python -c "from merid.loop import get_merid_loop; import json; print(json.dumps(get_merid_loop().status(), indent=2))"
+
+# ── Signal Layer ────────────────────────────────────────────────────
+signal-test:
+	python -m pytest tests/test_signal_layer.py tests/test_live_feeds.py -v
+
+# ── Codebase Drift ──────────────────────────────────────────────────
+codebase-drift-audit:
+	python -m core.codebase_drift_auditor
+
+codebase-drift-audit-json:
+	python -m core.codebase_drift_auditor --json
+
+codebase-drift-audit-fix:
+	python -m core.codebase_drift_auditor --fix
+
+# ── Readiness ───────────────────────────────────────────────────────
+readiness:
+	python -m core.merid_readiness_auditor --all
+
+readiness-json:
+	python -m core.merid_readiness_auditor --all --json
+
+# ── Risk Context ───────────────────────────────────────────────────
+risk-context:
+	python -c "from merid.pipeline.risk_context import build_risk_context; import json; print(json.dumps(build_risk_context().to_dict(), indent=2))"
+
+# ── Readiness + Hardening (combined pre-flight) ───────────────────
+preflight:
+	@echo "=== MERID Pre-Flight Check ==="
+	@echo ""
+	@echo "Step 1: Golden path tests..."
+	python -m pytest tests/test_e2e_golden_path.py tests/test_signal_layer.py tests/test_live_feeds.py tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_hardening.py -v --tb=short
+	@echo ""
+	@echo "Step 2: Readiness auditor..."
+	python -m core.merid_readiness_auditor --all
+	@echo ""
+	@echo "Step 3: Codebase drift audit..."
+	python -m core.codebase_drift_auditor
+	@echo ""
+	@echo "Step 4: Risk context snapshot..."
+	python -c "from merid.pipeline.risk_context import build_risk_context; ctx=build_risk_context(); print(f'CQI={ctx.avg_cqi:.2f} scale={ctx.size_scale_factor:.2f} boost={ctx.approval_threshold_boost:.2f} kill={ctx.global_kill_switch}')"
+	@echo ""
+	@echo "=== Pre-Flight Complete ==="
+
+# ── Web Server ─────────────────────────────────────────────────────
+serve:
+	uvicorn web.main:create_app --factory --host 0.0.0.0 --port 8000 --reload

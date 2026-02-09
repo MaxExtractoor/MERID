@@ -107,6 +107,38 @@ async def get_operator_summary() -> Dict[str, Any]:
     except Exception:
         result["system"] = {"cpu_percent": 0, "memory_percent": 0}
 
+    # --- Execution guard ---
+    try:
+        from merid.execution_guard import get_execution_guard
+        guard = get_execution_guard()
+        result["guard"] = {
+            "kill_switch_active": guard.kill_switch_active,
+            "last_cqi": {k: round(v, 4) for k, v in guard._last_cqi.items()},
+            "domain_caps": {
+                k: {"remaining_usd": round(v.remaining_notional(), 2), "kill": v.kill_switch}
+                for k, v in guard._domain_caps.items()
+            },
+            "recent_verdicts_count": len(guard._trade_log),
+        }
+    except Exception as exc:
+        logger.warning(f"operator_summary_guard_error: {exc}")
+        result["guard"] = {"kill_switch_active": False, "error": str(exc)}
+
+    # --- Loop metrics ---
+    try:
+        from merid.loop import get_merid_loop
+        loop = get_merid_loop()
+        result["loop"] = {
+            "running": loop._running,
+            "total_ticks": loop.metrics.total_ticks,
+            "total_errors": loop.metrics.total_errors,
+            "plans_executed": loop.metrics.plans_executed,
+            "last_tick_duration_ms": round(loop.metrics.last_tick_duration_ms, 1),
+        }
+    except Exception as exc:
+        logger.warning(f"operator_summary_loop_error: {exc}")
+        result["loop"] = {"running": False, "error": str(exc)}
+
     return result
 
 

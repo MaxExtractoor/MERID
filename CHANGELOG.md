@@ -5,6 +5,46 @@ All notable changes to MERID will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-02-09
+
+### Added
+- **Unified Trade Pipeline** (`merid/pipeline/`) — TradeProposal, TradeRouter, GlobalRiskManager (7-point check), ModeManager (per-venue SIM/PAPER/LIVE), InstrumentRegistry, AdapterRegistry, DomainAgents
+- **MeridLoop Orchestrator** (`merid/loop.py`) — Persistent tick cycle: features → agents → consensus → arb → plans → CQI → reconciliation
+- **RiskContext** (`merid/pipeline/risk_context.py`) — System-level stress bridge aggregating ExecutionGuard, GlobalRiskManager, DrawdownGovernor, OperatorSession; produces `size_scale_factor` and `approval_threshold_boost`
+- **ExecutionGuard** (`merid/execution_guard.py`) — Kill switch, CQI-based throttling, per-domain caps
+- **Prediction Markets** (`merid/prediction/`) — VenueGate, PredictionMarketModel, KalshiStrategy, PredictionMarketRisk, AlertManager (109 tests)
+- **Signal Layer** (`merid/signals/`) — Decay-aware features, arb scanner, drift detector, CQI dashboard (98 tests)
+- **Betting Module** (`merid/betting/`) — BettingStore (SQLite), OddsAPIClient, swarm consensus, plan executability, settlement tracking (77 tests)
+- **Canonical Agents** (`merid/agents/`) — Domain-based agents with consensus coordination, trust-weighted voting (73 tests)
+- **Blockchain Module** (`merid/blockchain/`) — On-chain data (Helius/TheGraph/Nansen), execution service, secrets management with RBAC, signing service, wallet service, smart contract interfaces, compliance registry, blockchain gateway (135 tests)
+- **Operator Dashboard** — Real-time operator view with status bar, control plane, activity stream
+- **React Dashboard** (`web/react/`) — 28 sidebar views: Operator, Wallet, Treasury, Trading, Positions, Predictions, Betting, Flow Radar, Signal Layer, Health, and more
+- **Wallet & Treasury Views** — Promoted from stubs to live views backed by real API endpoints
+- **E2E Golden Path** — 490 tests across 7 test files covering full pipeline
+- **Readiness Score** — 74/74 (100%) across all 10 sections
+- **Makefile Targets** — `serve`, `loop-start`, `loop-start-execute`, `golden-path`, `preflight`, `risk-context`
+
+### Changed
+- **Agent Architecture** — Migrated from "Brain/Heart/Immune" metaphor to domain-based agents (PredictionMarket, CryptoArb, Equity, Macro)
+- **Risk Controls** — Replaced env-var-based `MERID_TRADING_MODE` with per-venue ModeManager gating
+- **Frontend** — React dashboard is now primary UI (28 views); Flutter UI is legacy
+- **API Endpoints** — Migrated from `/institutional/` prefix to `/api/v1/pipeline/`, `/api/v1/prediction-markets/`, `/api/v1/wallet/`, `/api/v1/treasury/`, etc.
+- **Server Entry** — `web/main.py` is the primary FastAPI entry point (not `main.py`)
+- **Test Suite** — Expanded from ~150 to 490 golden path tests
+- **UI Audit** — Removed all "coming soon", "mock", "demo" text from live views; data-driven badges only
+
+### Removed
+- **Random/mock data** — Purged all `random` calls from `missing_endpoints.py`; all endpoints return static zeros or real data
+- **Stale env vars** — `MERID_ENABLE_TRADING_SUITE`, `MERID_SPECTATOR_MODE`, `MERID_LIVE_TRADING_UNLOCKED` no longer exist
+- **Legacy agent names** — "Brain", "Heart", "Immune", "Spine" metaphor replaced by domain agents
+
+### Security
+- **ComplianceRegistry** — Polymarket/Augur/PredictIt prohibited; OKX restricted; OFAC-sanctioned assets blocked
+- **SecretsManager** — RBAC-gated key access with audit logging, rotation tracking, revocation
+- **SigningService** — Agents never hold private keys; submit sign requests through policy-checked service
+
+---
+
 ## [1.0.0] - 2026-01-26
 
 ### Added
@@ -122,6 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **2.0.0** - Unified Pipeline, MeridLoop, RiskContext, 490 tests (2026-02-09)
 - **1.0.0** - Implementation Audit Complete (2026-01-26)
 - **0.9.0** - Initial Implementation (2026-01-19)
 - **0.8.0** - Prototype Systems (2026-01-12)
@@ -186,4 +227,4 @@ For support, questions, or contributions, please refer to the MERID documentatio
 
 ## License
 
-MERID is licensed under the MIT License. See LICENSE file for details.
+Proprietary — All rights reserved.

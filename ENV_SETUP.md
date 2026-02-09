@@ -11,37 +11,44 @@ cp .env.example .env
 
 3. Start the system:
 ```bash
-python main.py
+make serve              # FastAPI on port 8000
+make loop-start         # MeridLoop orchestrator
 ```
 
 ## Key Environment Variables
 
 ### **Required for Basic Operation**
-- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` - Graph database connection
-- `REDIS_URL` - Caching and session storage
-- `OLLAMA_BASE_URL` - LLM service endpoint
+- None — MERID runs in SIM mode with zero configuration.
 
-### **Trading & Market Data**
-- `COINBASE_API_KEY`, `COINBASE_API_SECRET` - Coinbase exchange
-- `KRAKEN_API_KEY`, `KRAKEN_API_SECRET` - Kraken exchange
-- `ALPACA_API_KEY`, `ALPACA_API_SECRET` - Alpaca trading
+### **Exchange Credentials (for paper/live trading)**
+- `ALPACA_API_KEY`, `ALPACA_API_SECRET` — Alpaca equities
+- `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH` — Kalshi prediction markets
+- `BINANCE_API_KEY`, `BINANCE_API_SECRET` — Binance crypto
+- `COINBASE_API_KEY`, `COINBASE_API_SECRET` — Coinbase
+- `KRAKEN_API_KEY`, `KRAKEN_PRIVATE_KEY` — Kraken
+- `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE` — OKX
 
-### **LLM & AI Services**
-- `OPENAI_API_KEY` - OpenAI GPT models
-- `ANTHROPIC_API_KEY` - Claude models
-- `GOOGLE_API_KEY` - Google AI models
+### **Market Data APIs (optional, enhances live feeds)**
+- `FINNHUB_API_KEY` — Finnhub market data
+- `POLYGON_API_KEY` — Polygon market data
+- `ALPHA_VANTAGE_API_KEY` — Alpha Vantage
 
-### **System Configuration**
-- `CORS_ORIGINS` - Allowed frontend origins
-- `LOG_LEVEL` - System logging level
-- `MODE` - Trading mode (offline/simulation/live)
+### **Capital & Risk Configuration**
+- `MERID_TOTAL_CAPITAL_USD` — Total capital (default: 50000)
+- `MERID_MAX_PORTFOLIO_NOTIONAL_USD` — Max portfolio notional (default: 50000)
+- `MERID_PM_TRADING_MODE` — Prediction market mode: sim/paper/live (default: sim)
+- `MERID_PM_MAX_DAILY_LOSS` — PM daily loss limit (default: 250)
+
+### **Optional Services**
+- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` — Graph database (optional)
+- `REDIS_URL` — Caching and pub/sub (optional)
 
 ## Documentation Links
 
-- **Architecture**: [MASTER_DOCUMENTATION.md](MASTER_DOCUMENTATION.md)
-- **UI Hardening**: [docs/MERID_UI_HARDENING_CHECKLIST.md](docs/MERID_UI_HARDENING_CHECKLIST.md)
-- **API Reference**: [web/api/](web/api/)
-- **Troubleshooting**: [docs/](docs/)
+- **Quick Start**: [QUICKSTART.md](QUICKSTART.md)
+- **Getting Started (1hr)**: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)
+- **Go-Live Checklist**: [docs/GO_LIVE_CHECKLIST.md](docs/GO_LIVE_CHECKLIST.md)
+- **API Reference**: [web/api/](web/api/) (or `/docs` when server is running)
 
 ## Development Notes
 
@@ -49,3 +56,4 @@ python main.py
 - Never commit `.env` to version control
 - All sensitive values should use your secrets manager
 - See `.env.example` for complete variable list
+- Run `make preflight` before committing

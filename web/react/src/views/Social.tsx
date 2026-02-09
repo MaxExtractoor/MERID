@@ -78,7 +78,7 @@ export default function Social() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
+      // Fallback data when API is unreachable
       setPosts([
         {
           id: '1',

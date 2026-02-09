@@ -80,6 +80,8 @@ from web.api.prediction import router as prediction_router
 from web.api.prediction_markets import router as prediction_markets_router
 from web.api.prediction_consensus_api import router as prediction_consensus_router
 from web.api.betting_consensus_api import router as betting_consensus_router
+from web.api.flow_api import flow_router
+from web.api.signal_layer_api import signal_layer_router
 from web.api.unified_pipeline import router as unified_pipeline_router
 from web.api.wallet import router as wallet_router
 from web.api.offline import router as offline_router
@@ -103,6 +105,7 @@ from web.api.blockchain_health_api import router as blockchain_health_api_router
 from web.api.rewards import router as rewards_router
 from web.api.dev_swarm_routes import router as dev_swarm_router
 from web.api.operator import router as operator_router
+from web.api.loop_api import loop_api_router
 
 # Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
 # from web.api.mock_simulation import router as mock_simulation_router
@@ -350,6 +353,8 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(prediction_markets_router)
     application.include_router(prediction_consensus_router)
     application.include_router(betting_consensus_router)
+    application.include_router(flow_router)
+    application.include_router(signal_layer_router)
     application.include_router(unified_pipeline_router)
     application.include_router(simulation_router)
     application.include_router(neo4j_memory_router)
@@ -373,6 +378,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(rewards_router)
     # application.include_router(dev_swarm_router)  # Replaced by real_data_router (avoids heavy Neo4j init in request context)
     application.include_router(operator_router)
+    application.include_router(loop_api_router)
     # Phase 0 adapters - only mount if feature flags are enabled
     if phase0_router:
         application.include_router(phase0_router)

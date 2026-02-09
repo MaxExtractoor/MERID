@@ -201,8 +201,18 @@ class GlobalRiskManager:
 
     # ── Risk check ───────────────────────────────────────────────────
 
-    def check_proposal(self, proposal: TradeProposal) -> RiskCheckResult:
-        """Run all risk checks on a proposal.  Returns RiskCheckResult."""
+    def check_proposal(
+        self,
+        proposal: TradeProposal,
+        risk_context: Optional["RiskContext"] = None,
+    ) -> RiskCheckResult:
+        """Run all risk checks on a proposal.  Returns RiskCheckResult.
+
+        If *risk_context* is supplied, the order notional is scaled down by
+        ``risk_context.size_scale_factor`` before limit checks.  This allows
+        system-level stress (poor CQI, drawdown, high exposure) to reduce
+        position sizing automatically.
+        """
         domain = proposal.domain
         venue = proposal.venue
         domain_str = domain.value if isinstance(domain, TradeDomain) else str(domain)
@@ -241,6 +251,20 @@ class GlobalRiskManager:
             )
         elif proposal.qty:
             order_notional = proposal.qty  # fallback: treat qty as notional
+
+        # Apply RiskContext size scaling (system-level stress reduction)
+        if risk_context is not None and risk_context.size_scale_factor < 1.0:
+            scaled = (order_notional * Decimal(str(risk_context.size_scale_factor))).quantize(
+                Decimal("0.01"), ROUND_HALF_UP
+            )
+            if scaled <= 0:
+                return RiskCheckResult(
+                    approved=False,
+                    reason=f"RiskContext size_scale_factor={risk_context.size_scale_factor:.2f} "
+                           f"reduced notional to $0 (system stress).",
+                    domain=domain_str, venue=venue,
+                )
+            order_notional = scaled
 
         # 2. Single order size
         if order_notional > cfg.max_single_order_usd:

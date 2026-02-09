@@ -1,0 +1,137 @@
+name: MERID CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  MERID_ENV: "test"
+
+jobs:
+  # ── Backend golden path tests ─────────────────────────────────────
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run golden path tests
+        run: |
+          python -m pytest tests/test_e2e_golden_path.py \
+                           tests/test_signal_layer.py \
+                           tests/test_live_feeds.py \
+                           tests/test_prediction_markets.py \
+                           tests/test_unified_pipeline.py \
+                           tests/test_canonical_agents.py \
+                           tests/test_hardening.py \
+                           -v --tb=short --junitxml=reports/backend.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-report
+          path: reports/backend.xml
+
+  # ── Frontend tests ────────────────────────────────────────────────
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/react/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web/react
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: web/react
+        run: npx jest --ci --reporters=default --reporters=jest-junit
+        env:
+          JEST_JUNIT_OUTPUT_DIR: ../../reports
+          JEST_JUNIT_OUTPUT_NAME: frontend.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-report
+          path: reports/frontend.xml
+
+  # ── Security scan ─────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for secrets in tracked files
+        run: |
+          echo "Checking for tracked secrets..."
+          if git ls-files | grep -E '\.(pem|key|p12|pfx)$'; then
+            echo "::error::Secret files found in git index!"
+            exit 1
+          fi
+          if git ls-files | grep -E '\.env\.backup$'; then
+            echo "::error::.env.backup tracked in git!"
+            exit 1
+          fi
+          echo "No secrets found in tracked files."
+
+      - name: Verify .gitignore coverage
+        run: |
+          LINES=$(wc -l < .gitignore)
+          echo ".gitignore has $LINES entries"
+          if [ "$LINES" -lt 50 ]; then
+            echo "::warning::.gitignore has fewer than 50 entries — review for gaps"
+          fi
+
+  # ── Lint ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check (non-blocking)
+        run: ruff check . --select E9,F63,F7,F82 --exit-zero
+        # Only check for syntax errors and critical issues
+        # Full lint enforcement can be added incrementally
