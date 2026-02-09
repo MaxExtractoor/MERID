@@ -129,7 +129,7 @@ export default function ArbitragePanel({ className = '' }: ArbitragePanelProps) 
         {error && (
           <div className="mb-4 p-3 bg-yellow-900/20 border border-yellow-600/50 rounded-lg flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-yellow-500" />
-            <span className="text-sm text-yellow-500">Using fallback data: {error}</span>
+            <span className="text-sm text-yellow-500">Data unavailable: {error}</span>
           </div>
         )}
 

@@ -157,7 +157,7 @@ export default function ExplainabilityPanel({ className = '' }: ExplainabilityPa
         <div className="bg-yellow-900/20 border border-yellow-600/50 rounded-lg p-4 flex items-center gap-3">
           <AlertTriangle className="w-5 h-5 text-yellow-500" />
           <div>
-            <p className="text-yellow-500 font-medium">Using fallback data</p>
+            <p className="text-yellow-500 font-medium">Data unavailable</p>
             <p className="text-sm text-gray-400">{error}</p>
           </div>
         </div>
