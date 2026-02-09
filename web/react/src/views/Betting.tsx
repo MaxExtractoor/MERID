@@ -73,92 +73,9 @@ export default function Betting() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
-      setMarkets([
-        {
-          id: '1',
-          title: 'Super Bowl 2026 Winner',
-          category: 'sports',
-          description: 'Which team will win Super Bowl LX?',
-          total_volume: 2500000,
-          outcomes: [
-            { id: '1a', name: 'Kansas City Chiefs', odds: 2.5, probability: 0.40, volume: 1000000 },
-            { id: '1b', name: 'San Francisco 49ers', odds: 3.0, probability: 0.33, volume: 825000 },
-            { id: '1c', name: 'Buffalo Bills', odds: 4.5, probability: 0.22, volume: 550000 },
-            { id: '1d', name: 'Other', odds: 8.0, probability: 0.05, volume: 125000 },
-          ],
-          closes_at: new Date(Date.now() + 86400000 * 30).toISOString(),
-          status: 'open',
-        },
-        {
-          id: '2',
-          title: 'BTC Reaches $150K in 2026',
-          category: 'crypto',
-          description: 'Will Bitcoin reach $150,000 before end of 2026?',
-          total_volume: 1800000,
-          outcomes: [
-            { id: '2a', name: 'Yes', odds: 2.2, probability: 0.45, volume: 810000 },
-            { id: '2b', name: 'No', odds: 1.8, probability: 0.55, volume: 990000 },
-          ],
-          closes_at: new Date(Date.now() + 86400000 * 180).toISOString(),
-          status: 'open',
-        },
-        {
-          id: '3',
-          title: '2026 Presidential Election',
-          category: 'politics',
-          description: 'Who will win the 2026 US Presidential Election?',
-          total_volume: 5000000,
-          outcomes: [
-            { id: '3a', name: 'Candidate A', odds: 2.0, probability: 0.50, volume: 2500000 },
-            { id: '3b', name: 'Candidate B', odds: 2.5, probability: 0.40, volume: 2000000 },
-            { id: '3c', name: 'Other', odds: 10.0, probability: 0.10, volume: 500000 },
-          ],
-          closes_at: new Date(Date.now() + 86400000 * 90).toISOString(),
-          status: 'open',
-        },
-      ]);
-      setUserBets([
-        {
-          id: '1',
-          market_title: 'BTC Reaches $150K in 2026',
-          outcome: 'Yes',
-          amount: 500,
-          odds: 2.2,
-          potential_payout: 1100,
-          status: 'pending',
-          placed_at: new Date(Date.now() - 86400000).toISOString(),
-        },
-        {
-          id: '2',
-          market_title: 'Super Bowl 2026 Winner',
-          outcome: 'Kansas City Chiefs',
-          amount: 250,
-          odds: 2.5,
-          potential_payout: 625,
-          status: 'pending',
-          placed_at: new Date(Date.now() - 172800000).toISOString(),
-        },
-        {
-          id: '3',
-          market_title: 'NBA Finals 2025',
-          outcome: 'Boston Celtics',
-          amount: 300,
-          odds: 3.0,
-          potential_payout: 900,
-          status: 'won',
-          placed_at: new Date(Date.now() - 2592000000).toISOString(),
-          settled_at: new Date(Date.now() - 1296000000).toISOString(),
-        },
-      ]);
-      setStats({
-        total_bets: 15,
-        active_bets: 2,
-        total_wagered: 3750,
-        total_winnings: 4200,
-        win_rate: 0.60,
-        roi: 0.12,
-      });
+      setMarkets([]);
+      setUserBets([]);
+      setStats(null);
     } finally {
       setLoading(false);
     }

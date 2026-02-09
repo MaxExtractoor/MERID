@@ -15,6 +15,10 @@ interface UseApiDataResult<T> {
   lastUpdated: Date | null;
   /** The raw JSON response before any transform — useful for stub detection. */
   rawResponse: unknown;
+  /** True when the backend returned fallback/offline data (has _stub flag). */
+  isStub: boolean;
+  /** Reason string from the backend when data is a stub. */
+  stubMessage: string;
 }
 
 export function useApiData<T>(
@@ -116,6 +120,9 @@ export function useApiData<T>(
     };
   }, []);
 
+  const isStub = !!(rawResponse && typeof rawResponse === 'object' && (rawResponse as any)._stub);
+  const stubMessage = isStub ? ((rawResponse as any)._stub_message || 'Offline data') : '';
+
   return {
     data,
     loading,
@@ -123,5 +130,7 @@ export function useApiData<T>(
     refetch,
     lastUpdated,
     rawResponse,
+    isStub,
+    stubMessage,
   };
 }

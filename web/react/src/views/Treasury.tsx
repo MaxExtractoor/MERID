@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Coins, TrendingUp, Users, Vote, DollarSign, ArrowUpRight, RefreshCw, AlertCircle, CheckCircle } from 'lucide-react';
 import QuadraticFundingPanel from '../components/QuadraticFundingPanel';
+import StubBanner from '../components/StubBanner';
 
 interface TreasuryBalance {
   currency: string;
@@ -71,87 +72,7 @@ export default function Treasury() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback data when API is unreachable
-      setTreasuryData({
-        total_value_usd: 2450000,
-        balances: [
-          { currency: 'USDC', amount: 1500000, value_usd: 1500000 },
-          { currency: 'ETH', amount: 150, value_usd: 577500 },
-          { currency: 'BTC', amount: 3.5, value_usd: 367500 },
-          { currency: 'MERID', amount: 50000, value_usd: 5000 },
-        ],
-        proposals: [
-          {
-            id: '1',
-            title: 'Expand Trading Infrastructure to 5 New Venues',
-            description: 'Integrate Bybit, Gate.io, and 3 other exchanges to increase market coverage',
-            proposer: '0x1234...5678',
-            status: 'active',
-            votes_for: 125000,
-            votes_against: 15000,
-            total_votes: 140000,
-            amount_requested: 50000,
-            category: 'Infrastructure',
-            created_at: new Date(Date.now() - 172800000).toISOString(),
-            ends_at: new Date(Date.now() + 259200000).toISOString(),
-          },
-          {
-            id: '2',
-            title: 'Fund AI Research for Prediction Market Analysis',
-            description: 'Develop advanced ML models for prediction market arbitrage',
-            proposer: '0x8765...4321',
-            status: 'active',
-            votes_for: 98000,
-            votes_against: 42000,
-            total_votes: 140000,
-            amount_requested: 75000,
-            category: 'Research',
-            created_at: new Date(Date.now() - 86400000).toISOString(),
-            ends_at: new Date(Date.now() + 432000000).toISOString(),
-          },
-          {
-            id: '3',
-            title: 'Community Grants Program Q1 2026',
-            description: 'Allocate funds for community-driven development projects',
-            proposer: '0xabcd...ef01',
-            status: 'passed',
-            votes_for: 180000,
-            votes_against: 20000,
-            total_votes: 200000,
-            amount_requested: 100000,
-            category: 'Community',
-            created_at: new Date(Date.now() - 604800000).toISOString(),
-            ends_at: new Date(Date.now() - 86400000).toISOString(),
-          },
-        ],
-        funding_rounds: [
-          {
-            id: '1',
-            name: 'Quadratic Funding Round #5',
-            total_pool: 250000,
-            contributions: 1250,
-            projects: 23,
-            status: 'active',
-            ends_at: new Date(Date.now() + 604800000).toISOString(),
-          },
-          {
-            id: '2',
-            name: 'Agent Development Fund',
-            total_pool: 150000,
-            contributions: 890,
-            projects: 15,
-            status: 'active',
-            ends_at: new Date(Date.now() + 1209600000).toISOString(),
-          },
-        ],
-        governance_stats: {
-          total_holders: 5420,
-          total_voting_power: 10000000,
-          active_proposals: 2,
-          participation_rate: 0.68,
-        },
-        source: 'stub' as const,
-      });
+      setTreasuryData(null);
     } finally {
       setLoading(false);
     }
@@ -206,6 +127,7 @@ export default function Treasury() {
 
   return (
     <div className="p-6 space-y-6">
+      <StubBanner data={treasuryData} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
