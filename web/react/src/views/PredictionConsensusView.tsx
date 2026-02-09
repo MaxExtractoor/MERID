@@ -440,7 +440,15 @@ function BrierSidebar({
     );
   }
 
-  const brier = metrics.brier;
+  const brier = {
+    swarm_brier: metrics.brier?.swarm_brier ?? null,
+    market_brier: metrics.brier?.market_brier ?? null,
+    swarm_vs_market: metrics.brier?.swarm_vs_market ?? null,
+    agent_ranking: metrics.brier?.agent_ranking ?? [],
+    resolved_count: metrics.brier?.resolved_count ?? 0,
+    total_pnl_usd: metrics.brier?.total_pnl_usd ?? 0,
+    calibration: metrics.brier?.calibration ?? [],
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -529,13 +537,13 @@ function BrierSidebar({
         </h3>
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div className="text-slate-500">Active</div>
-          <div className="text-right text-white">{metrics.universe.active_instruments}</div>
+          <div className="text-right text-white">{metrics.universe?.active_instruments ?? 0}</div>
           <div className="text-slate-500">Total</div>
-          <div className="text-right text-white">{metrics.universe.total_instruments}</div>
+          <div className="text-right text-white">{metrics.universe?.total_instruments ?? 0}</div>
           <div className="text-slate-500">Plans (exec)</div>
-          <div className="text-right text-emerald-400">{metrics.plans.executing}</div>
+          <div className="text-right text-emerald-400">{metrics.plans?.executing ?? 0}</div>
           <div className="text-slate-500">Plans (approved)</div>
-          <div className="text-right text-blue-400">{metrics.plans.approved}</div>
+          <div className="text-right text-blue-400">{metrics.plans?.approved ?? 0}</div>
         </div>
       </div>
     </div>
