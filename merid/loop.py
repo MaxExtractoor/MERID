@@ -258,9 +258,7 @@ class MeridLoop:
         """Step 2: Run canonical agents per category."""
         try:
             registry = self._agent_registry()
-            results = await asyncio.get_event_loop().run_in_executor(
-                None, registry.run_all
-            )
+            results = await registry.run_all()
             self.metrics.agent_cycles_run += 1
             summary["actions"].append(f"agent_cycles:{len(results)}agents")
         except Exception as e:
