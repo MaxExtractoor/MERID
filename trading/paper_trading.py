@@ -672,6 +672,25 @@ class PaperTradingEngine:
             self._mark_summary_dirty()
             self._mark_positions_dirty()
     
+    def get_positions(self) -> List[Dict[str, Any]]:
+        """Return all open positions across every portfolio.
+
+        Used by the reconciliation module to compare MERID's internal
+        state against venue-reported positions.
+        """
+        positions: List[Dict[str, Any]] = []
+        for portfolio in self.portfolios.values():
+            for position in portfolio.positions.values():
+                positions.append({
+                    "symbol": position.asset,
+                    "quantity": position.size_usd / position.entry_price if position.entry_price else 0.0,
+                    "entry_price": position.entry_price,
+                    "side": position.side,
+                    "market_type": position.market_type,
+                    "user_id": position.user_id,
+                })
+        return positions
+
     def get_portfolio_stats(self, user_id: str) -> Dict:
         """Get portfolio statistics."""
         portfolio = self.get_portfolio(user_id)
@@ -766,7 +785,7 @@ def _load_paper_state(engine: PaperTradingEngine) -> None:
     try:
         data = json.loads(_PERSIST_FILE.read_text())
         for uid, pdata in data.get("portfolios", {}).items():
-            portfolio = engine._get_or_create_portfolio(uid)
+            portfolio = engine.get_portfolio(uid)
             portfolio.starting_balance = pdata.get("starting_balance", 10000.0)
             portfolio.current_balance = pdata.get("current_balance", 10000.0)
             portfolio.total_pnl = pdata.get("total_pnl", 0.0)
