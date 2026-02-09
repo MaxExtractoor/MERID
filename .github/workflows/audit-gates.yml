@@ -4,11 +4,7 @@
 
 name: MERID Audit Gates
 
-on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
+on: workflow_dispatch  # Legacy — use ci.yml for active CI
 
 env:
   PYTHON_VERSION: '3.11'
