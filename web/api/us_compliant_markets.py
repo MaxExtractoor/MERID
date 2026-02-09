@@ -262,94 +262,15 @@ async def get_prediction_markets():
                     logger.warning(f"Failed to format market {market_id}: {e}", exc_info=True)
                     continue
         else:
-            # Fallback: Use sample prediction markets data in frontend format
-            logger.warning("No Kalshi markets available, using sample data")
-            sample_markets = [
-                {
-                    "id": "PRES-2024-01",
-                    "symbol": "PRES24",
-                    "question": "Will Donald Trump win the 2024 Presidential Election?",
-                    "yesPrice": 0.52,
-                    "noPrice": 0.48,
-                    "ourPosition": "YES",
-                    "ourSize": 50,
-                    "ourPnl": 125.00,
-                    "modelConfidence": 0.78,
-                    "endTime": "2024-11-05T23:59:59",
-                    "status": "OPEN",
-                    "volume": 1250000
-                },
-                {
-                    "id": "BTC-100K-2024",
-                    "symbol": "BTC100K",
-                    "question": "Will Bitcoin reach $100,000 by end of 2024?",
-                    "yesPrice": 0.68,
-                    "noPrice": 0.32,
-                    "ourPosition": "NONE",
-                    "ourSize": 0,
-                    "ourPnl": 0.00,
-                    "modelConfidence": 0.85,
-                    "endTime": "2024-12-31T23:59:59",
-                    "status": "OPEN",
-                    "volume": 890000
-                },
-                {
-                    "id": "FED-RATE-MAR",
-                    "symbol": "FEDMAR",
-                    "question": "Will the Fed cut rates in March 2024?",
-                    "yesPrice": 0.45,
-                    "noPrice": 0.55,
-                    "ourPosition": "NO",
-                    "ourSize": 75,
-                    "ourPnl": -50.00,
-                    "modelConfidence": 0.72,
-                    "endTime": "2024-03-20T14:00:00",
-                    "status": "OPEN",
-                    "volume": 650000
-                },
-                {
-                    "id": "ETH-5K-2024",
-                    "symbol": "ETH5K",
-                    "question": "Will Ethereum reach $5,000 by end of 2024?",
-                    "yesPrice": 0.58,
-                    "noPrice": 0.42,
-                    "ourPosition": "YES",
-                    "ourSize": 100,
-                    "ourPnl": 320.00,
-                    "modelConfidence": 0.81,
-                    "endTime": "2024-12-31T23:59:59",
-                    "status": "OPEN",
-                    "volume": 720000
-                },
-                {
-                    "id": "TECH-LAYOFFS-Q1",
-                    "symbol": "TECHLAY",
-                    "question": "Will tech layoffs exceed 50,000 in Q1 2024?",
-                    "yesPrice": 0.35,
-                    "noPrice": 0.65,
-                    "ourPosition": "NONE",
-                    "ourSize": 0,
-                    "ourPnl": 0.00,
-                    "modelConfidence": 0.65,
-                    "endTime": "2024-03-31T23:59:59",
-                    "status": "OPEN",
-                    "volume": 420000
-                }
-            ]
-            
-            # Add slight random variations to make it feel live
-            for market in sample_markets:
-                variation = random.uniform(-0.03, 0.03)
-                market["yesPrice"] = max(0.01, min(0.99, market["yesPrice"] + variation))
-                market["noPrice"] = 1.0 - market["yesPrice"]
-                formatted_markets.append(market)
+            # No live markets available — return empty with offline flag
+            logger.warning("No Kalshi markets available — returning offline state")
         
         # Calculate meta statistics
         total_pnl = sum(m["ourPnl"] for m in formatted_markets)
         total_volume = sum(m["volume"] for m in formatted_markets)
         open_markets = sum(1 for m in formatted_markets if m["status"] == "OPEN")
         
-        return {
+        result = {
             "markets": formatted_markets,
             "meta": {
                 "total": len(formatted_markets),
@@ -359,6 +280,11 @@ async def get_prediction_markets():
             },
             "lastUpdated": datetime.now().isoformat()
         }
+        if not formatted_markets:
+            result["_stub"] = True
+            result["_stub_message"] = "No live prediction markets available — Kalshi feed offline"
+            result["data_mode"] = "offline"
+        return result
         
     except Exception as e:
         logger.error(f"Error fetching prediction markets: {e}")

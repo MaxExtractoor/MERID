@@ -27,6 +27,13 @@ router = APIRouter(tags=["real-data"])
 # Helpers
 # ────────────────────────────────────────────────
 
+def _offline(data: Dict[str, Any], *, reason: str = "Service unavailable") -> Dict[str, Any]:
+    """Tag a fallback response so the frontend knows it is NOT live data."""
+    data["_stub"] = True
+    data["_stub_message"] = reason
+    data["data_mode"] = "offline"
+    return data
+
 def _get_paper_engine():
     from trading.paper_trading import get_paper_engine
     return get_paper_engine()
@@ -115,7 +122,7 @@ async def get_consensus_status() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Consensus status error: {e}")
-        return {
+        return _offline({
             "symbols": [],
             "metrics": {},
             "total_opinions": 0,
@@ -123,7 +130,7 @@ async def get_consensus_status() -> Dict[str, Any]:
             "consensus_cycles": 0,
             "agent_count": 0,
             "active_plans": 0,
-        }
+        }, reason="Consensus coordinator unavailable")
 
 
 @router.get("/api/v1/consensus/plans")
@@ -135,7 +142,7 @@ async def get_consensus_plans() -> Dict[str, Any]:
         return {"plans": plans, "count": len(plans)}
     except Exception as e:
         logger.error(f"Consensus plans error: {e}")
-        return {"plans": [], "count": 0}
+        return _offline({"plans": [], "count": 0}, reason="Consensus coordinator unavailable")
 
 
 @router.get("/api/v1/consensus/opinions")
@@ -147,7 +154,7 @@ async def get_consensus_opinions(limit: int = 30, symbol: Optional[str] = None) 
         return {"opinions": opinions, "count": len(opinions)}
     except Exception as e:
         logger.error(f"Consensus opinions error: {e}")
-        return {"opinions": [], "count": 0}
+        return _offline({"opinions": [], "count": 0}, reason="Consensus coordinator unavailable")
 
 
 @router.get("/api/v1/consensus/recent")
@@ -158,7 +165,7 @@ async def get_consensus_recent() -> Dict[str, Any]:
         plans = cc.get_active_plans()
         return {"results": plans, "count": len(plans)}
     except Exception:
-        return {"results": [], "count": 0}
+        return _offline({"results": [], "count": 0}, reason="Consensus coordinator unavailable")
 
 
 @router.get("/api/v1/consensus/debate/latest")
@@ -175,7 +182,7 @@ async def get_consensus_debate_latest() -> Dict[str, Any]:
             "plan_count": len(plans),
         }
     except Exception:
-        return {"opinions": [], "plans": [], "opinion_count": 0, "plan_count": 0}
+        return _offline({"opinions": [], "plans": [], "opinion_count": 0, "plan_count": 0}, reason="Consensus coordinator unavailable")
 
 
 # ════════════════════════════════════════════════
@@ -205,7 +212,7 @@ async def get_trade_floor_status() -> Dict[str, Any]:
             "active_agents": len(engine.portfolios),
         }
     except Exception:
-        return {
+        return _offline({
             "mode": "OFFLINE",
             "is_simulated": True,
             "connected": False,
@@ -213,7 +220,7 @@ async def get_trade_floor_status() -> Dict[str, Any]:
             "total_orders": 0,
             "total_pnl": 0,
             "active_agents": 0,
-        }
+        }, reason="Paper trading engine unavailable")
 
 
 @router.get("/api/v1/trade-floor/active-trades")
@@ -239,7 +246,7 @@ async def get_trade_floor_active_trades() -> Dict[str, Any]:
                 })
         return {"trades": trades, "count": len(trades)}
     except Exception:
-        return {"trades": [], "count": 0}
+        return _offline({"trades": [], "count": 0}, reason="Paper trading engine unavailable")
 
 
 @router.get("/api/v1/trade-floor/signals")
@@ -261,7 +268,7 @@ async def get_trade_floor_signals() -> Dict[str, Any]:
             })
         return {"signals": signals, "count": len(signals)}
     except Exception:
-        return {"signals": [], "count": 0}
+        return _offline({"signals": [], "count": 0}, reason="Consensus coordinator unavailable")
 
 
 # ════════════════════════════════════════════════
@@ -298,7 +305,7 @@ async def get_agents_real() -> List[Dict[str, Any]]:
 
         # If registry is empty (agents not started), return framework-aware defaults
         if not result:
-            result = _get_fallback_agents()
+            return _get_fallback_agents()
 
         return result
     except Exception as e:
@@ -348,17 +355,17 @@ def _get_fallback_agents() -> List[Dict[str, Any]]:
     except Exception:
         pass
 
-    # Hard fallback: all 8 agents from the roster
+    # Hard fallback: all 8 agents from the roster — marked as NOT_STARTED
     now = datetime.utcnow()
     return [
-        {"id": "analyst-gemma-01", "name": "Analyst Gemma", "role": "analyst", "status": "online", "confidence": 85, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "Monitoring", "lastDecisionTime": now.isoformat() + "Z", "charter": "analyst"},
-        {"id": "analyst-llama-01", "name": "Analyst Llama", "role": "analyst", "status": "online", "confidence": 82, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "Monitoring", "lastDecisionTime": now.isoformat() + "Z", "charter": "analyst"},
-        {"id": "skeptic-01", "name": "Skeptic Agent", "role": "risk_manager", "status": "online", "confidence": 88, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "Monitoring", "lastDecisionTime": now.isoformat() + "Z", "charter": "risk_manager"},
-        {"id": "risk-01", "name": "Risk Agent", "role": "risk_manager", "status": "online", "confidence": 90, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "Monitoring", "lastDecisionTime": now.isoformat() + "Z", "charter": "risk_manager"},
-        {"id": "synthesizer-01", "name": "Synthesizer", "role": "coordinator", "status": "online", "confidence": 85, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "Monitoring", "lastDecisionTime": now.isoformat() + "Z", "charter": "coordinator"},
-        {"id": "archivist-01", "name": "Archivist", "role": "researcher", "status": "online", "confidence": 80, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "Monitoring", "lastDecisionTime": now.isoformat() + "Z", "charter": "researcher"},
-        {"id": "strategy-agent-01", "name": "Strategy Agent", "role": "trader", "status": "online", "confidence": 85, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "Monitoring", "lastDecisionTime": now.isoformat() + "Z", "charter": "trader"},
-        {"id": "meta-audit-01", "name": "Meta Auditor", "role": "governance", "status": "online", "confidence": 92, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "Monitoring", "lastDecisionTime": now.isoformat() + "Z", "charter": "governance"},
+        {"id": "analyst-gemma-01", "name": "Analyst Gemma", "role": "analyst", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "analyst", "_stub": True, "data_mode": "offline"},
+        {"id": "analyst-llama-01", "name": "Analyst Llama", "role": "analyst", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "analyst", "_stub": True, "data_mode": "offline"},
+        {"id": "skeptic-01", "name": "Skeptic Agent", "role": "risk_manager", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "risk_manager", "_stub": True, "data_mode": "offline"},
+        {"id": "risk-01", "name": "Risk Agent", "role": "risk_manager", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "risk_manager", "_stub": True, "data_mode": "offline"},
+        {"id": "synthesizer-01", "name": "Synthesizer", "role": "coordinator", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "coordinator", "_stub": True, "data_mode": "offline"},
+        {"id": "archivist-01", "name": "Archivist", "role": "researcher", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "researcher", "_stub": True, "data_mode": "offline"},
+        {"id": "strategy-agent-01", "name": "Strategy Agent", "role": "trader", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "trader", "_stub": True, "data_mode": "offline"},
+        {"id": "meta-audit-01", "name": "Meta Auditor", "role": "governance", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "governance", "_stub": True, "data_mode": "offline"},
     ]
 
 
@@ -449,13 +456,13 @@ async def get_wallet_balances_real() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Wallet balances error: {e}")
-        return {
-            "balances": [{"currency": "USD", "available": 10000.0, "locked": 0, "total": 10000.0}],
-            "transactions": [{"id": "init", "type": "deposit", "currency": "USD", "amount": 10000, "status": "completed", "timestamp": now.isoformat() + "Z"}],
-            "total_value_usd": 10000.0,
-            "totalValueUsd": 10000.0,
+        return _offline({
+            "balances": [],
+            "transactions": [],
+            "total_value_usd": 0,
+            "totalValueUsd": 0,
             "lastUpdated": now.isoformat() + "Z",
-        }
+        }, reason="Paper trading engine unavailable — wallet data offline")
 
 
 # ════════════════════════════════════════════════
@@ -522,12 +529,12 @@ async def get_risk_metrics_real() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Risk metrics error: {e}")
-        return {
-            "marginUsed": 0, "marginAvailable": 10000, "marginCallLevel": 80,
-            "portfolioValue": 10000, "totalExposure": 0, "var95": -200, "var99": -400,
+        return _offline({
+            "marginUsed": 0, "marginAvailable": 0, "marginCallLevel": 0,
+            "portfolioValue": 0, "totalExposure": 0, "var95": 0, "var99": 0,
             "sharpeRatio": 0, "leverage": 0, "totalPnL": 0, "dailyDrawdown": 0,
             "maxDrawdown": 0, "exposure": {}, "alerts": [], "positionCount": 0,
-        }
+        }, reason="Paper trading engine unavailable — risk metrics offline")
 
 
 # ════════════════════════════════════════════════
@@ -559,7 +566,7 @@ async def get_positions_summary() -> Dict[str, Any]:
             "bySymbol": by_symbol,
         }
     except Exception:
-        return {"totalPositions": 0, "totalPnl": 0, "bySymbol": {}}
+        return _offline({"totalPositions": 0, "totalPnl": 0, "bySymbol": {}}, reason="Paper trading engine unavailable")
 
 
 # ════════════════════════════════════════════════
@@ -589,7 +596,7 @@ async def get_orders_summary() -> Dict[str, Any]:
             "filledOrders": filled_count,
         }
     except Exception:
-        return {"totalOrders": 0, "openOrders": 0, "filledOrders": 0}
+        return _offline({"totalOrders": 0, "openOrders": 0, "filledOrders": 0}, reason="Paper trading engine unavailable")
 
 
 # ════════════════════════════════════════════════
@@ -687,12 +694,12 @@ async def get_dev_swarm_status() -> Dict[str, Any]:
         telem = get_swarm_telemetry()
         return telem.get_metrics()
     except Exception:
-        return {
+        return _offline({
             "status": "idle",
             "active_agents": 0,
             "tasks_completed": 0,
             "uptime_seconds": 0,
-        }
+        }, reason="Dev swarm telemetry unavailable")
 
 
 @router.get("/api/dev-swarm/agents")
@@ -874,14 +881,14 @@ async def get_operator_system_status() -> Dict[str, Any]:
             "uptime": int(time.time()),
         }
     except Exception:
-        return {
+        return _offline({
             "mode": "offline",
             "status": "degraded",
             "totalPnl": 0,
             "activePositions": 0,
             "pendingOrders": 0,
             "agentCount": 0,
-        }
+        }, reason="Paper trading engine unavailable")
 
 
 # ════════════════════════════════════════════════
@@ -910,7 +917,7 @@ async def get_prediction_markets_positions() -> Dict[str, Any]:
                     })
         return {"positions": positions, "count": len(positions)}
     except Exception:
-        return {"positions": [], "count": 0}
+        return _offline({"positions": [], "count": 0}, reason="Paper trading engine unavailable")
 
 
 # ════════════════════════════════════════════════
@@ -962,7 +969,7 @@ async def get_risk_alerts_real() -> List[Dict[str, Any]]:
 
         return alerts
     except Exception:
-        return []
+        return []  # Empty alerts is a valid state, not offline
 
 
 # ════════════════════════════════════════════════
@@ -1061,7 +1068,7 @@ async def get_agents_summary_real() -> Dict[str, Any]:
             "byStatus": stats.get("agents_by_status", {}),
         }
     except Exception:
-        return {"total": 0, "byRole": {}, "byStatus": {}}
+        return _offline({"total": 0, "byRole": {}, "byStatus": {}}, reason="Agent registry unavailable")
 
 
 # ════════════════════════════════════════════════
@@ -1152,8 +1159,8 @@ async def get_blockchain_health_real() -> Dict[str, Any]:
             })
     except Exception:
         providers = [
-            {"name": "Kraken", "chain": "multi", "status": "unknown", "latency_ms": 0, "last_check": now_ms},
-            {"name": "Coinbase", "chain": "multi", "status": "unknown", "latency_ms": 0, "last_check": now_ms},
+            {"name": "Kraken", "chain": "multi", "status": "offline", "latency_ms": 0, "last_check": now_ms},
+            {"name": "Coinbase", "chain": "multi", "status": "offline", "latency_ms": 0, "last_check": now_ms},
         ]
 
     return {
@@ -1323,11 +1330,11 @@ async def get_consensus_metrics_real() -> Dict[str, Any]:
             "timestamp": int(time.time() * 1000),
         }
     except Exception:
-        return {
+        return _offline({
             "total_decisions": 0, "consensus_rate": 0,
             "average_time_to_consensus_ms": 0, "veto_count": 0,
             "unanimous_count": 0, "timestamp": int(time.time() * 1000),
-        }
+        }, reason="Consensus coordinator unavailable")
 
 
 # ════════════════════════════════════════════════
@@ -1475,11 +1482,7 @@ async def get_dev_swarm_readiness() -> Dict[str, Any]:
             })
     except Exception:
         checks = [
-            {"area": "system", "item": "Backend Online", "status": "OK", "evidence": "API responding", "fix_plan": ""},
-            {"area": "agents", "item": "Agent Registry", "status": "OK", "evidence": "Registry loaded", "fix_plan": ""},
-            {"area": "trading", "item": "Paper Engine", "status": "OK", "evidence": "Engine initialized", "fix_plan": ""},
-            {"area": "data", "item": "Price Feed", "status": "OK", "evidence": "32 symbols tracked", "fix_plan": ""},
-            {"area": "consensus", "item": "TaCo Coordinator", "status": "OK", "evidence": "Coordinator available", "fix_plan": ""},
+            {"area": "system", "item": "Drift Auditor", "status": "UNKNOWN", "evidence": "Auditor failed to run", "fix_plan": "Check CodebaseDriftAuditor import"},
         ]
 
     drift_count = sum(1 for c in checks if c["status"] not in ("OK",))
@@ -1532,7 +1535,7 @@ async def get_codebase_drift() -> Dict[str, Any]:
             })
     except Exception:
         items = [
-            {"id": "sys-online", "domain": "system", "category": "health", "severity": "OK", "summary": "Backend running", "current_value": "online", "baseline_value": "online", "fix_plan": ""},
+            {"id": "drift-err", "domain": "system", "category": "health", "severity": "UNKNOWN", "summary": "Drift auditor unavailable", "current_value": "error", "baseline_value": "online", "fix_plan": "Check CodebaseDriftAuditor import"},
         ]
 
     critical = sum(1 for it in items if it["severity"] == "CRITICAL")
