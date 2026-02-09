@@ -16,6 +16,7 @@ import Wallet from "./views/Wallet";
 import Treasury from "./views/Treasury";
 import Social from "./views/Social";
 import Betting from "./views/Betting";
+import BettingConsensusView from "./views/BettingConsensusView";
 import Mining from "./views/Mining";
 import Institutional from "./views/Institutional";
 import Plugins from "./views/Plugins";
@@ -27,7 +28,7 @@ import Orders from "./views/Orders";
 import Rewards from "./views/Rewards";
 import { ThemeProvider } from "./theme";
 
-type View = "overview" | "trading" | "agents" | "predictions" | "prediction-consensus" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders" | "rewards";
+type View = "overview" | "trading" | "agents" | "predictions" | "prediction-consensus" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "betting-consensus" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders" | "rewards";
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
@@ -89,6 +90,7 @@ export default function App() {
             {view === "treasury" && <Treasury />}
             {view === "social" && <Social />}
             {view === "betting" && <Betting />}
+            {view === "betting-consensus" && <BettingConsensusView />}
             {view === "mining" && <Mining />}
             {view === "institutional" && <Institutional />}
             {view === "plugins" && <Plugins />}

@@ -26,7 +26,7 @@ import {
   Target
 } from 'lucide-react';
 
-type View = "overview" | "trading" | "agents" | "predictions" | "prediction-consensus" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders" | "rewards";
+type View = "overview" | "trading" | "agents" | "predictions" | "prediction-consensus" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "betting-consensus" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "positions" | "orders" | "rewards";
 
 interface SidebarProps {
   current: View;
@@ -46,6 +46,7 @@ const navigation = [
   { name: 'Prediction Markets', href: 'predictions', icon: TrendingUp, color: 'text-orange-400' },
   { name: 'Prediction Consensus', href: 'prediction-consensus', icon: Target, color: 'text-blue-400' },
   { name: 'Betting Markets', href: 'betting', icon: Trophy, color: 'text-yellow-500' },
+  { name: 'Swarm Betting', href: 'betting-consensus', icon: Zap, color: 'text-yellow-400' },
   { name: 'Rewards', href: 'rewards', icon: Star, color: 'text-amber-400' },
   { name: 'Social Feed', href: 'social', icon: Twitter, color: 'text-sky-400' },
 ];
