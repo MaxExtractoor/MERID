@@ -158,7 +158,7 @@ export default function AgentReasoningPanel({ agentId, className = '' }: AgentRe
           <AlertCircle className="w-5 h-5 text-yellow-500" />
           <div>
             <p className="text-yellow-500 font-medium">Connection Issue</p>
-            <p className="text-sm text-gray-400">{error} - Using fallback data</p>
+            <p className="text-sm text-gray-400">{error} - Data unavailable</p>
           </div>
         </div>
       )}
