@@ -22,6 +22,7 @@ def _stub(data: Dict[str, Any], *, message: str = "Simulated data") -> Dict[str,
     data["_stub"] = True
     data["_implementation_status"] = "NOT_IMPLEMENTED"
     data["_stub_message"] = message
+    data["data_mode"] = "offline"
     return data
 
 
@@ -32,6 +33,7 @@ def _stub_list(data: List[Dict[str, Any]], *, message: str = "Simulated data") -
         "_stub": True,
         "_implementation_status": "NOT_IMPLEMENTED",
         "_stub_message": message,
+        "data_mode": "offline",
     }
 
 
