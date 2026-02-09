@@ -81,36 +81,9 @@ export default function AgentReasoningPanel({ agentId, className = '' }: AgentRe
 
     connectWebSocket();
 
-    // Fallback mock data if WebSocket fails
-    const mockTimeout = setTimeout(() => {
+    // Stop loading after timeout even if WS never connects
+    const loadingTimeout = setTimeout(() => {
       if (!wsConnected && activity.length === 0) {
-        setActivity([
-          {
-            timestamp: Date.now() - 60000,
-            agent_id: 'analyst_gemma',
-            vote: 'bullish',
-            confidence: 0.85,
-            reasoning: 'Strong technical indicators suggest upward momentum. RSI showing oversold conditions with bullish divergence.',
-            research: [
-              { source: 'TradingView', snippet: 'BTC breaking resistance at $105k' },
-              { source: 'CoinDesk', snippet: 'Institutional buying pressure increasing' }
-            ],
-            trust: 0.92,
-            energy: 1.0
-          },
-          {
-            timestamp: Date.now() - 120000,
-            agent_id: 'analyst_llama',
-            vote: 'neutral',
-            confidence: 0.65,
-            reasoning: 'Mixed signals from market. Volume declining but price holding support.',
-            research: [
-              { source: 'Glassnode', snippet: 'On-chain metrics showing consolidation' }
-            ],
-            trust: 0.88,
-            energy: 0.95
-          }
-        ]);
         setLoading(false);
       }
     }, 3000);
@@ -118,7 +91,7 @@ export default function AgentReasoningPanel({ agentId, className = '' }: AgentRe
     return () => {
       if (ws) ws.close();
       clearTimeout(reconnectTimeout);
-      clearTimeout(mockTimeout);
+      clearTimeout(loadingTimeout);
     };
   }, [agentId, wsConnected, activity.length]);
 

@@ -63,40 +63,8 @@ export default function ReflectionPanel({ className = '' }: ReflectionPanelProps
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch reflection data');
-      // Fallback mock data
-      setSummary({
-        total_reflections: 156,
-        active_agents: 5,
-        agents: [
-          { agent_id: 'analyst_gemma', total_decisions: 45, accuracy: 78.5, avg_reality_gap: 12.3, recent_learnings: 8 },
-          { agent_id: 'analyst_llama', total_decisions: 38, accuracy: 72.1, avg_reality_gap: 15.8, recent_learnings: 6 },
-          { agent_id: 'skeptic', total_decisions: 32, accuracy: 85.2, avg_reality_gap: 8.4, recent_learnings: 12 },
-          { agent_id: 'synthesizer', total_decisions: 28, accuracy: 81.0, avg_reality_gap: 10.1, recent_learnings: 5 },
-          { agent_id: 'risk_monitor', total_decisions: 13, accuracy: 69.2, avg_reality_gap: 18.5, recent_learnings: 3 },
-        ]
-      });
-      setRecentReflections([
-        {
-          agent_id: 'analyst_gemma',
-          energy_id: 'energy_btc_001',
-          decision: 'BULLISH',
-          confidence: 0.82,
-          reasoning: 'Strong momentum indicators with increasing volume',
-          outcome: 'CORRECT',
-          reality_gap: 0.08,
-          timestamp: new Date(Date.now() - 3600000).toISOString()
-        },
-        {
-          agent_id: 'skeptic',
-          energy_id: 'energy_eth_002',
-          decision: 'NEUTRAL',
-          confidence: 0.65,
-          reasoning: 'Mixed signals from on-chain metrics',
-          outcome: 'CORRECT',
-          reality_gap: 0.12,
-          timestamp: new Date(Date.now() - 7200000).toISOString()
-        }
-      ]);
+      setSummary(null);
+      setRecentReflections([]);
     } finally {
       setLoading(false);
     }

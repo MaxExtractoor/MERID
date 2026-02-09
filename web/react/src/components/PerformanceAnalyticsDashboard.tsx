@@ -45,22 +45,7 @@ export default function PerformanceAnalyticsDashboard({ userId = 'default', clas
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
-      setMetrics({
-        user_id: userId,
-        portfolio_value: 10450.25,
-        total_pnl: 450.25,
-        roi_percent: 4.50,
-        total_trades: 12,
-        winning_trades: 8,
-        losing_trades: 4,
-        win_rate_percent: 66.67,
-        avg_win: 85.50,
-        avg_loss: 42.25,
-        profit_factor: 2.02,
-        max_drawdown_percent: 8.5,
-        sharpe_ratio: 1.45
-      });
+      setMetrics(null);
     } finally {
       setLoading(false);
     }

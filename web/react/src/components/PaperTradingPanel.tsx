@@ -66,54 +66,7 @@ export default function PaperTradingPanel({ className = '', userId = 'default' }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
-      setStats({
-        user_id: userId,
-        starting_balance: 10000,
-        current_balance: 10450.25,
-        total_pnl: 450.25,
-        total_trades: 12,
-        winning_trades: 8,
-        losing_trades: 4,
-        positions: [
-          {
-            position_id: 'pos_1',
-            asset: 'BTC-USD',
-            side: 'long',
-            size_usd: 1000,
-            entry_price: 105000,
-            current_price: 105500,
-            leverage: 2,
-            unrealized_pnl: 9.52,
-            opened_at: Date.now() - 3600000,
-            market_type: 'perp'
-          },
-          {
-            position_id: 'pos_2',
-            asset: 'ETH-USD',
-            side: 'long',
-            size_usd: 500,
-            entry_price: 3850,
-            current_price: 3880,
-            leverage: 1,
-            unrealized_pnl: 3.90,
-            opened_at: Date.now() - 7200000,
-            market_type: 'perp'
-          }
-        ],
-        orders: [
-          {
-            order_id: 'order_1',
-            asset: 'SOL-USD',
-            side: 'long',
-            order_type: 'limit',
-            size_usd: 300,
-            price: 144.50,
-            status: 'pending',
-            created_at: Date.now() - 1800000
-          }
-        ]
-      });
+      setStats(null);
     } finally {
       setLoading(false);
     }
