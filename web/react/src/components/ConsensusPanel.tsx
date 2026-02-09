@@ -81,33 +81,9 @@ export default function ConsensusPanel({ className = '' }: ConsensusPanelProps) 
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch consensus data');
-      // Fallback mock data
-      setStatus({
-        running: true,
-        pending_votes: 4,
-        min_votes_required: 3,
-        quorum_threshold: 0.67,
-        consensus_interval: 10,
-        vote_window: 5,
-        time_until_next: 6.5,
-        vote_distribution: { bullish: 45, bearish: 30, neutral: 25 },
-        trust_scores: {}
-      });
-      setVotes([
-        { agent_id: 'analyst_gemma', proposal: 'btc_trade', signal: 'bullish', confidence: 0.85, energy: 1.0, trust: 0.92, weight: 0.78, timestamp: Date.now() / 1000 },
-        { agent_id: 'analyst_llama', proposal: 'btc_trade', signal: 'bullish', confidence: 0.78, energy: 0.95, trust: 0.88, weight: 0.65, timestamp: Date.now() / 1000 },
-        { agent_id: 'skeptic', proposal: 'btc_trade', signal: 'neutral', confidence: 0.65, energy: 1.0, trust: 0.95, weight: 0.62, timestamp: Date.now() / 1000 },
-        { agent_id: 'risk_monitor', proposal: 'btc_trade', signal: 'bearish', confidence: 0.72, energy: 0.9, trust: 0.85, weight: 0.55, timestamp: Date.now() / 1000 },
-      ]);
-      setMetrics({
-        total_rounds: 156,
-        successful_consensus: 142,
-        vetoed_decisions: 8,
-        rerounds_requested: 6,
-        avg_vote_count: 4.2,
-        avg_confidence: 0.78,
-        quorum_rate: 0.91
-      });
+      setStatus(null);
+      setVotes([]);
+      setMetrics(null);
     } finally {
       setLoading(false);
     }

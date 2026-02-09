@@ -45,29 +45,7 @@ export default function AnalyticsCharts({ className = '' }: AnalyticsChartsProps
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
-      setAnalyticsData({
-        trading_volume: {
-          labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-          values: [125000, 142000, 138000, 156000, 148000, 132000, 145000],
-        },
-        pnl_history: {
-          labels: ['Week 1', 'Week 2', 'Week 3', 'Week 4'],
-          values: [12500, 15800, 14200, 18900],
-        },
-        agent_performance: {
-          labels: ['Analyst Gemma', 'Analyst Llama', 'Skeptic', 'Risk Monitor', 'Synthesizer'],
-          values: [142, 156, 98, 89, 45],
-        },
-        market_distribution: {
-          labels: ['BTC', 'ETH', 'SOL', 'Stocks', 'Predictions'],
-          values: [35, 28, 15, 12, 10],
-        },
-        success_rate: 0.68,
-        total_trades: 1247,
-        avg_profit: 145.32,
-        best_performer: 'Analyst Llama',
-      });
+      setAnalyticsData(null);
     } finally {
       setLoading(false);
     }

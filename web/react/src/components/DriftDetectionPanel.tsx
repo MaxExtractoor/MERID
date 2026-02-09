@@ -43,48 +43,7 @@ export default function DriftDetectionPanel({ className = '' }: DriftDetectionPa
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
-      setSignals([
-        {
-          signal_id: 'drift_001',
-          market_id: 'kalshi_btc_100k',
-          platform: 'kalshi',
-          question: 'Will Bitcoin reach $100,000 by December 31, 2024?',
-          old_probability: 62.5,
-          new_probability: 68.2,
-          drift_pct: 9.12,
-          direction: 'up',
-          time_window_seconds: 3600,
-          volume_in_window: 125000,
-          detected_at: new Date(Date.now() - 1800000).toISOString()
-        },
-        {
-          signal_id: 'drift_002',
-          market_id: 'kalshi_fed_rate',
-          platform: 'kalshi',
-          question: 'Will the Fed cut rates in Q1 2025?',
-          old_probability: 48.0,
-          new_probability: 42.5,
-          drift_pct: -11.46,
-          direction: 'down',
-          time_window_seconds: 3600,
-          volume_in_window: 85000,
-          detected_at: new Date(Date.now() - 3600000).toISOString()
-        },
-        {
-          signal_id: 'drift_003',
-          market_id: 'kalshi_eth_5k',
-          platform: 'kalshi',
-          question: 'Will Ethereum reach $5,000 by March 2025?',
-          old_probability: 35.0,
-          new_probability: 41.2,
-          drift_pct: 17.71,
-          direction: 'up',
-          time_window_seconds: 3600,
-          volume_in_window: 62000,
-          detected_at: new Date(Date.now() - 7200000).toISOString()
-        }
-      ]);
+      setSignals([]);
     } finally {
       setLoading(false);
     }

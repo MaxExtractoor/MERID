@@ -65,68 +65,7 @@ export default function BrierMetricsPanel({ className = '' }: BrierMetricsPanelP
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
-      setMetricsData({
-        agent_scores: [
-          {
-            agent_name: 'Analyst Gemma',
-            overall_score: 0.142,
-            total_predictions: 247,
-            calibration_score: 0.089,
-            resolution_score: 0.053,
-            trend: 'improving',
-            change_percent: -8.2,
-          },
-          {
-            agent_name: 'Analyst Llama',
-            overall_score: 0.156,
-            total_predictions: 312,
-            calibration_score: 0.095,
-            resolution_score: 0.061,
-            trend: 'stable',
-            change_percent: -1.3,
-          },
-          {
-            agent_name: 'Skeptic',
-            overall_score: 0.178,
-            total_predictions: 189,
-            calibration_score: 0.112,
-            resolution_score: 0.066,
-            trend: 'declining',
-            change_percent: 4.7,
-          },
-          {
-            agent_name: 'Synthesizer',
-            overall_score: 0.134,
-            total_predictions: 156,
-            calibration_score: 0.082,
-            resolution_score: 0.052,
-            trend: 'improving',
-            change_percent: -12.5,
-          },
-        ],
-        calibration_curve: [
-          { confidence_bucket: '0-10%', predicted_probability: 0.05, actual_frequency: 0.08, count: 23, brier_contribution: 0.012 },
-          { confidence_bucket: '10-20%', predicted_probability: 0.15, actual_frequency: 0.18, count: 34, brier_contribution: 0.015 },
-          { confidence_bucket: '20-30%', predicted_probability: 0.25, actual_frequency: 0.22, count: 45, brier_contribution: 0.018 },
-          { confidence_bucket: '30-40%', predicted_probability: 0.35, actual_frequency: 0.38, count: 56, brier_contribution: 0.021 },
-          { confidence_bucket: '40-50%', predicted_probability: 0.45, actual_frequency: 0.43, count: 67, brier_contribution: 0.024 },
-          { confidence_bucket: '50-60%', predicted_probability: 0.55, actual_frequency: 0.57, count: 78, brier_contribution: 0.026 },
-          { confidence_bucket: '60-70%', predicted_probability: 0.65, actual_frequency: 0.62, count: 89, brier_contribution: 0.028 },
-          { confidence_bucket: '70-80%', predicted_probability: 0.75, actual_frequency: 0.78, count: 92, brier_contribution: 0.025 },
-          { confidence_bucket: '80-90%', predicted_probability: 0.85, actual_frequency: 0.82, count: 76, brier_contribution: 0.022 },
-          { confidence_bucket: '90-100%', predicted_probability: 0.95, actual_frequency: 0.93, count: 54, brier_contribution: 0.019 },
-        ],
-        historical_scores: [
-          { date: 'Week 1', score: 0.168 },
-          { date: 'Week 2', score: 0.162 },
-          { date: 'Week 3', score: 0.155 },
-          { date: 'Week 4', score: 0.148 },
-        ],
-        best_performer: 'Synthesizer',
-        worst_performer: 'Skeptic',
-        average_score: 0.152,
-      });
+      setMetricsData(null);
     } finally {
       setLoading(false);
     }

@@ -43,41 +43,7 @@ export default function NotificationPanel({ className = '' }: NotificationPanelP
         const data = await response.json();
         setNotifications(data.notifications || []);
       } else {
-        // Fallback mock data
-        setNotifications([
-          {
-            id: '1',
-            type: 'success',
-            title: 'Order Filled',
-            message: 'BUY 0.5 BTC at $105,042 filled successfully',
-            timestamp: new Date(Date.now() - 300000).toISOString(),
-            read: false,
-          },
-          {
-            id: '2',
-            type: 'warning',
-            title: 'Risk Alert',
-            message: 'Portfolio exposure to BTC exceeds 30% threshold',
-            timestamp: new Date(Date.now() - 600000).toISOString(),
-            read: false,
-          },
-          {
-            id: '3',
-            type: 'info',
-            title: 'Agent Update',
-            message: 'Analyst Gemma completed market analysis',
-            timestamp: new Date(Date.now() - 900000).toISOString(),
-            read: true,
-          },
-          {
-            id: '4',
-            type: 'success',
-            title: 'Prediction Market',
-            message: 'BTC $100K market resolved - You won $1,250',
-            timestamp: new Date(Date.now() - 1800000).toISOString(),
-            read: true,
-          },
-        ]);
+        setNotifications([]);
       }
     } catch (error) {
       console.error('Failed to fetch notifications:', error);
