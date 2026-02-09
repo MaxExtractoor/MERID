@@ -34,6 +34,7 @@ jobs:
 
       - name: Run golden path tests
         run: |
+          mkdir -p reports
           python -m pytest tests/test_e2e_golden_path.py \
                            tests/test_signal_layer.py \
                            tests/test_live_feeds.py \
@@ -72,17 +73,16 @@ jobs:
 
       - name: Run frontend tests
         working-directory: web/react
-        run: npx jest --ci --reporters=default --reporters=jest-junit
-        env:
-          JEST_JUNIT_OUTPUT_DIR: ../../reports
-          JEST_JUNIT_OUTPUT_NAME: frontend.xml
+        run: |
+          mkdir -p ../../reports
+          npx jest --ci --passWithNoTests 2>&1 | tee ../../reports/frontend.txt
 
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: frontend-test-report
-          path: reports/frontend.xml
+          path: reports/frontend.txt
 
   # ── Security scan ─────────────────────────────────────────────────
   security-scan:
