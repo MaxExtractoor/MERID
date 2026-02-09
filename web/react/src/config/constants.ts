@@ -63,6 +63,13 @@ export const API_ENDPOINTS = {
   CONSENSUS_SUMMARY: "/api/v1/consensus/summary",
   CONSENSUS_METRICS: "/api/v1/consensus/metrics",
   
+  // Betting Consensus
+  BETTING_CONSENSUS_SUMMARY: "/api/v1/betting/consensus/summary",
+  BETTING_CONSENSUS_LIVE: "/api/v1/betting/consensus/live",
+  BETTING_CONSENSUS_EVENTS: "/api/v1/betting/consensus/events",
+  BETTING_CONSENSUS_PLANS: "/api/v1/betting/consensus/plans",
+  BETTING_CONSENSUS_METRICS: "/api/v1/betting/consensus/metrics",
+
   // Prediction Consensus
   PREDICTION_CONSENSUS_SUMMARY: "/api/v1/prediction/consensus/summary",
   PREDICTION_CONSENSUS_OPINIONS: "/api/v1/prediction/consensus/opinions",
