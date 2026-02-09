@@ -1,5 +1,5 @@
 name: MERID Tier 1 Coverage
-on: [push, pull_request]
+on: workflow_dispatch  # Legacy — use ci.yml for active CI
 
 jobs:
   tier1-coverage:

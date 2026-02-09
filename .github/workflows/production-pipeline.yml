@@ -1,9 +1,5 @@
 name: MERID Production Pipeline - Runtime Primitive
-on:
-  push:
-    branches: [ main, develop, 'feature/*', 'release/*' ]
-  pull_request:
-    branches: [ main, develop ]
+on: workflow_dispatch  # Legacy — no K8s/Docker infra yet
 
 env:
   REGISTRY: ghcr.io

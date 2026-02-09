@@ -1,9 +1,5 @@
 name: Swarm Reliability CI Check
-on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
+on: workflow_dispatch  # Legacy — use ci.yml for active CI
 
 jobs:
   swarm-reliability:

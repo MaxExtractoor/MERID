@@ -1,9 +1,5 @@
 name: Reality Layer Validation
-on:
-  push:
-    branches: [ main, develop, 'feature/*' ]
-  pull_request:
-    branches: [ main, develop ]
+on: workflow_dispatch  # Legacy — use ci.yml for active CI
 
 jobs:
   # Stage 1: Commit & Build

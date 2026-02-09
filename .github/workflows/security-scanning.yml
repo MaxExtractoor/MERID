@@ -2,14 +2,7 @@
 # Implements Trivy, Snyk, and secrets scanning for fintech compliance
 
 name: Security Scanning
-on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
-  schedule:
-    # Run daily security scans at 2 AM UTC
-    - cron: '0 2 * * *'
+on: workflow_dispatch  # Legacy — use ci.yml security-scan job
 
 jobs:
   # Trivy Container and Filesystem Scanning

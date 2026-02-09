@@ -1,12 +1,5 @@
 name: Red-Team Security Validation
-on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
-  schedule:
-    # Run red-team tests weekly on Sundays at 4 AM UTC
-    - cron: '0 4 * * 0'
+on: workflow_dispatch  # Legacy — red-team tests not yet implemented
 
 jobs:
   # Red-Team: Priority Manager Bypass Attempts

@@ -1,14 +1,6 @@
 name: Frontend CI/CD
 
-on:
-  push:
-    branches: [main, develop]
-    paths:
-      - 'web/react/**'
-  pull_request:
-    branches: [main, develop]
-    paths:
-      - 'web/react/**'
+on: workflow_dispatch  # Legacy — use ci.yml frontend-tests job
 
 jobs:
   lint-and-typecheck:
