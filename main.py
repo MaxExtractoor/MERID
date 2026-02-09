@@ -275,8 +275,8 @@ async def lifespan(app: FastAPI):
     logger.info("All components stopped - shutdown complete")
 
 
-# Create app WITHOUT lifespan - use startup events instead to avoid blocking
-app = create_app(lifespan=None)
+# Create app WITH lifespan — boots all streaming components on startup
+app = create_app(lifespan=lifespan)
 
 # Add test page router
 app.include_router(test_page.router, tags=["test"])
