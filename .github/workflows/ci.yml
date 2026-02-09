@@ -1,5 +1,6 @@
 name: MERID CI
 # Single active CI workflow — all legacy workflows set to workflow_dispatch
+# Actions permissions fixed 2026-02-09
 
 on:
   push:
