@@ -28,27 +28,9 @@ export default function DomainPnLChart() {
         const json = await res.json();
         if (json.data) { setData(json.data); return; }
       }
-    } catch { /* fallback */ }
+    } catch { /* no data available */ }
 
-    const now = Date.now();
-    const points: PnLDataPoint[] = [];
-    let predPnl = 0, cryptoPnl = 0, eqPnl = 0;
-    const intervals = timeRange === '1h' ? 12 : timeRange === '4h' ? 48 : timeRange === '24h' ? 96 : 168;
-    const stepMs = timeRange === '1h' ? 300000 : timeRange === '4h' ? 300000 : timeRange === '24h' ? 900000 : 3600000;
-
-    for (let i = intervals; i >= 0; i--) {
-      predPnl += (Math.random() - 0.45) * 8;
-      cryptoPnl += (Math.random() - 0.42) * 15;
-      eqPnl += (Math.random() - 0.48) * 5;
-      points.push({
-        timestamp: new Date(now - i * stepMs).toISOString(),
-        prediction: Math.round(predPnl * 100) / 100,
-        crypto: Math.round(cryptoPnl * 100) / 100,
-        equity: Math.round(eqPnl * 100) / 100,
-        total: Math.round((predPnl + cryptoPnl + eqPnl) * 100) / 100,
-      });
-    }
-    setData(points);
+    setData([]);
     setLoading(false);
   }, [timeRange]);
 
