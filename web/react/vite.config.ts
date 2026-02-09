@@ -15,18 +15,18 @@ export default defineConfig({
     host: true,
     proxy: {
       '/api/v1/consensus/ws': {
-        target: 'ws://127.0.0.1:8011',
+        target: 'ws://127.0.0.1:8000',
         ws: true,
         changeOrigin: true,
       },
       '/api': {
-        target: 'http://127.0.0.1:8011',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
         secure: false,
         ws: true,
       },
       '/ws': {
-        target: 'ws://127.0.0.1:8011',
+        target: 'ws://127.0.0.1:8000',
         ws: true,
         changeOrigin: true,
       },
