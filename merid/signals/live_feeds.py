@@ -259,8 +259,17 @@ class LiveFeedManager:
         "LINK": "chainlink",
     }
 
+    _cg_backoff_until: float = 0.0   # timestamp until which CoinGecko calls are suppressed
+    _cg_consecutive_429s: int = 0    # consecutive 429 counter for exponential backoff
+
     async def _fetch_coingecko(self, symbols: List[str], now: float):
         """Fetch crypto market data from CoinGecko (free tier)."""
+        # Respect backoff window from previous 429s
+        if now < self._cg_backoff_until:
+            remaining = int(self._cg_backoff_until - now)
+            logger.debug(f"CoinGecko: backing off for {remaining}s more (rate-limited)")
+            return
+
         # Map symbols to CoinGecko IDs
         ids = []
         sym_map = {}
@@ -288,6 +297,9 @@ class LiveFeedManager:
             resp.raise_for_status()
             coins = resp.json()
 
+            # Success — reset backoff state
+            self._cg_consecutive_429s = 0
+
             for coin in coins:
                 cg_id = coin.get("id", "")
                 sym = sym_map.get(cg_id, cg_id.upper())
@@ -311,7 +323,18 @@ class LiveFeedManager:
 
         except httpx.HTTPStatusError as e:
             self._stats["errors"] += 1
-            logger.warning(f"CoinGecko HTTP error: {e.response.status_code}")
+            status = e.response.status_code
+            if status == 429:
+                self._cg_consecutive_429s += 1
+                # Exponential backoff: 60s, 120s, 240s, … capped at 600s
+                backoff_secs = min(60 * (2 ** (self._cg_consecutive_429s - 1)), 600)
+                self._cg_backoff_until = now + backoff_secs
+                logger.warning(
+                    f"CoinGecko rate-limited (429). Backing off {backoff_secs}s "
+                    f"(attempt {self._cg_consecutive_429s})"
+                )
+            else:
+                logger.warning(f"CoinGecko HTTP error: {status}")
         except Exception as e:
             self._stats["errors"] += 1
             logger.warning(f"CoinGecko fetch failed: {e}")

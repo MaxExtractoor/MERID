@@ -7,7 +7,6 @@ Provides real-time cryptocurrency prices with health monitoring and latency trac
 
 import asyncio
 import time
-import json
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
@@ -102,64 +101,56 @@ class CoinGeckoOracle(BaseOracle):
         try:
             # Apply rate limiting
             await self._rate_limiter.acquire()
-            
+
             # Map symbol to CoinGecko format
             coingecko_symbol = self._symbol_map.get(symbol)
             if not coingecko_symbol:
                 self._logger.warning(f"Unsupported symbol: {symbol}")
                 return None
-            
-            # Simulate API call with mock data
-            await asyncio.sleep(0.05)  # Simulate network latency
-            
-            # Generate mock price data
-            mock_price = self._generate_mock_price(coingecko_symbol)
-            
-            # Create OraclePrice object
+
+            import httpx
+            url = f"{self.config.base_url}/simple/price"
+            params = {
+                "ids": coingecko_symbol,
+                "vs_currencies": "usd",
+                "include_last_updated_at": "true",
+            }
+            headers = {}
+            if self.config.api_key:
+                headers["x-cg-demo-key"] = self.config.api_key
+
+            async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                resp = await client.get(url, params=params, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+
+            coin_data = data.get(coingecko_symbol)
+            if not coin_data or "usd" not in coin_data:
+                self._logger.warning(f"No price data returned for {symbol}")
+                return None
+
+            live_price = float(coin_data["usd"])
+            source_ts = coin_data.get("last_updated_at", time.time())
+
             price = OraclePrice(
                 oracle_id=self._oracle_id,
                 symbol=symbol,
-                price=mock_price,
+                price=live_price,
                 timestamp=time.time(),
-                confidence=0.95,  # High confidence for mock data
-                source_timestamp=time.time(),
+                confidence=0.95,
+                source_timestamp=float(source_ts),
                 metadata={
                     "source": "coingecko",
                     "coin_id": coingecko_symbol,
-                    "mock": True
                 }
             )
-            
-            self._logger.debug(f"Fetched price for {symbol}: ${mock_price:.2f}")
+
+            self._logger.debug(f"Fetched price for {symbol}: ${live_price:.2f}")
             return price
-            
+
         except Exception as e:
             self._logger.error(f"Price fetch failed for {symbol}: {e}")
             return None
-    
-    def _generate_mock_price(self, coingecko_symbol: str) -> float:
-        """Generate realistic mock price data."""
-        # Base prices for major cryptocurrencies (as of 2024)
-        base_prices = {
-            "bitcoin": 45000.0,
-            "ethereum": 3000.0,
-            "solana": 100.0,
-            "binancecoin": 300.0,
-            "cardano": 0.5,
-            "ripple": 0.6,
-            "polkadot": 7.0,
-            "dogecoin": 0.08,
-            "avalanche-2": 35.0,
-            "matic-network": 0.9
-        }
-        
-        base_price = base_prices.get(coingecko_symbol, 1.0)
-        
-        # Add some realistic variation (-5% to +5%)
-        import random
-        variation = random.uniform(-0.05, 0.05)
-        
-        return base_price * (1 + variation)
     
     async def get_price_with_retry(self, symbol: str) -> Optional[OraclePrice]:
         """Get price with retry logic."""
