@@ -25,6 +25,19 @@ export interface OperatorSummary {
     cpu_percent: number;
     memory_percent: number;
   };
+  guard?: {
+    kill_switch_active: boolean;
+    last_cqi: Record<string, number>;
+    domain_caps: Record<string, { remaining_usd: number; kill: boolean }>;
+    recent_verdicts_count: number;
+  };
+  loop?: {
+    running: boolean;
+    total_ticks: number;
+    total_errors: number;
+    plans_executed: number;
+    last_tick_duration_ms: number;
+  };
 }
 
 interface UseOperatorSummaryResult {
@@ -36,6 +49,7 @@ interface UseOperatorSummaryResult {
   pauseSwarm: () => Promise<boolean>;
   resumeSwarm: () => Promise<boolean>;
   switchMode: (mode: string, reason: string) => Promise<boolean>;
+  toggleKillSwitch: (activate: boolean, reason?: string) => Promise<boolean>;
 }
 
 export function useOperatorSummary(pollingMs = 5000): UseOperatorSummaryResult {
@@ -104,5 +118,21 @@ export function useOperatorSummary(pollingMs = 5000): UseOperatorSummaryResult {
     }
   }, [fetchSummary]);
 
-  return { data, loading, error, refetch: fetchSummary, lastUpdated, pauseSwarm, resumeSwarm, switchMode };
+  const toggleKillSwitch = useCallback(async (activate: boolean, reason = 'operator'): Promise<boolean> => {
+    try {
+      const endpoint = activate ? '/api/v1/loop/guard/kill' : '/api/v1/loop/guard/unkill';
+      const res = await fetch(`${API_BASE_URL}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      });
+      if (!res.ok) return false;
+      await fetchSummary();
+      return true;
+    } catch {
+      return false;
+    }
+  }, [fetchSummary]);
+
+  return { data, loading, error, refetch: fetchSummary, lastUpdated, pauseSwarm, resumeSwarm, switchMode, toggleKillSwitch };
 }

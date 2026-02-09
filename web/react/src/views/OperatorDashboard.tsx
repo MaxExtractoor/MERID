@@ -59,6 +59,7 @@ export default function OperatorDashboard() {
     pauseSwarm,
     resumeSwarm,
     switchMode,
+    toggleKillSwitch,
   } = useOperatorSummary(5000);
 
   const consensusSummary = useConsensusSummary();
@@ -277,6 +278,87 @@ export default function OperatorDashboard() {
         {/* ═══ SYSTEM TAB ═══ */}
         {activeTab === 'system' && (
           <div className="space-y-6">
+            {/* Execution Guard + Loop Status */}
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              {/* Kill Switch & Guard */}
+              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-sm font-semibold text-slate-300">Execution Guard</h3>
+                  <button
+                    onClick={() => toggleKillSwitch(!data?.guard?.kill_switch_active)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                      data?.guard?.kill_switch_active
+                        ? 'bg-red-600 hover:bg-red-500 text-white'
+                        : 'bg-green-600/20 hover:bg-green-600/40 text-green-400 border border-green-500/30'
+                    }`}
+                  >
+                    {data?.guard?.kill_switch_active ? '🛑 KILL SWITCH ON — Click to Deactivate' : '✅ Execution Enabled'}
+                  </button>
+                </div>
+                {data?.guard && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      {Object.entries(data.guard.last_cqi || {}).map(([domain, cqi]) => (
+                        <div key={domain} className="bg-slate-800/50 rounded-lg p-3">
+                          <div className="text-xs text-slate-500 uppercase">{domain} CQI</div>
+                          <div className={`text-lg font-bold ${
+                            cqi >= 0.65 ? 'text-green-400' : cqi >= 0.35 ? 'text-yellow-400' : 'text-red-400'
+                          }`}>{(cqi * 100).toFixed(1)}%</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      {Object.entries(data.guard.domain_caps || {}).map(([domain, cap]) => (
+                        <div key={domain} className="flex items-center justify-between bg-slate-800/50 rounded-lg p-2 text-xs">
+                          <span className="text-slate-400">{domain}</span>
+                          <span className="text-slate-300">${cap.remaining_usd.toLocaleString()} left</span>
+                          {cap.kill && <span className="text-red-400 font-bold">KILLED</span>}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {data.guard.recent_verdicts_count} recent verdicts
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Loop Status */}
+              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-slate-300 mb-4">Loop Status</h3>
+                {data?.loop ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${data.loop.running ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`} />
+                      <span className="text-sm text-slate-300">{data.loop.running ? 'Running' : 'Stopped'}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-slate-800/50 rounded-lg p-3">
+                        <div className="text-xs text-slate-500">Total Ticks</div>
+                        <div className="text-lg font-bold text-slate-200">{data.loop.total_ticks.toLocaleString()}</div>
+                      </div>
+                      <div className="bg-slate-800/50 rounded-lg p-3">
+                        <div className="text-xs text-slate-500">Plans Executed</div>
+                        <div className="text-lg font-bold text-blue-400">{data.loop.plans_executed}</div>
+                      </div>
+                      <div className="bg-slate-800/50 rounded-lg p-3">
+                        <div className="text-xs text-slate-500">Errors</div>
+                        <div className={`text-lg font-bold ${data.loop.total_errors > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                          {data.loop.total_errors}
+                        </div>
+                      </div>
+                      <div className="bg-slate-800/50 rounded-lg p-3">
+                        <div className="text-xs text-slate-500">Last Tick</div>
+                        <div className="text-lg font-bold text-slate-200">{data.loop.last_tick_duration_ms}ms</div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-slate-500">Loop not initialized</div>
+                )}
+              </div>
+            </div>
+
             {/* On-Chain Health + Data Freshness */}
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
               <OnChainHealthPanel />

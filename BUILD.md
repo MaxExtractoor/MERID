@@ -1,305 +1,118 @@
-# MERID v2.0 - Build & Deployment Guide
+# MERID v2.0 — Build & Development Guide
 
 ## Prerequisites
 
-### 1. Install Flutter
-```bash
-# Windows
-# Download Flutter SDK from https://flutter.dev/docs/get-started/install/windows
-# Extract to C:\src\flutter
-# Add to PATH: C:\src\flutter\bin
-
-# Verify installation
-flutter doctor
-```
-
-### 2. Install Android Studio (for Android deployment)
-- Download from https://developer.android.com/studio
-- Install Android SDK
-- Accept licenses: `flutter doctor --android-licenses`
-
-### 3. Install Xcode (for iOS deployment - macOS only)
-- Download from Mac App Store
-- Install command line tools: `xcode-select --install`
-
-### 4. Install Fonts
-Download **JetBrains Mono** from:
-https://www.jetbrains.com/lp/mono/
-
-Place TTF files in `assets/fonts/`:
-- `JetBrainsMono-Regular.ttf`
-- `JetBrainsMono-Bold.ttf`
+- **Python 3.11+** (required)
+- **Node.js 18+** (for React dashboard)
+- **make** (Windows: `choco install make`, or use Python commands directly)
 
 ---
 
-## Development
+## Backend Setup
 
-### Install Dependencies
 ```bash
 cd C:\Dev\MERID
-flutter pub get
+pip install -r requirements.txt
+cp .env.example .env   # fill in exchange credentials
 ```
 
-### Run on Emulator/Device
+### Run Tests
+
 ```bash
-# List available devices
-flutter devices
+# Golden path suite (490 tests)
+make golden-path
 
-# Run on connected device
-flutter run
-
-# Run with hot reload
-flutter run --hot
+# Full preflight (tests + readiness + drift + risk context)
+make preflight
 ```
 
-### Debug Mode
-```bash
-# Run with debug output
-flutter run --verbose
+### Start the Server
 
-# Run with DevTools
-flutter run --observatory-port=8888
+```bash
+make serve              # FastAPI on http://127.0.0.1:8000
+```
+
+API docs available at http://127.0.0.1:8000/docs (Swagger UI).
+
+---
+
+## Frontend Setup
+
+```bash
+cd web/react
+npm install
+npm run dev             # Vite dev server on http://localhost:5173
+```
+
+### Production Build
+
+```bash
+cd web/react
+npm run build           # Output in web/react/dist/
 ```
 
 ---
 
-## Production Build
+## MeridLoop (Orchestrator)
 
-### Android APK
 ```bash
-# Build release APK
-flutter build apk --release
+# Observe mode (no execution)
+make loop-start
 
-# Build split APKs by ABI (smaller size)
-flutter build apk --split-per-abi --release
+# With execution enabled (paper mode by default)
+make loop-start-execute
 
-# Output location
-# build/app/outputs/flutter-apk/app-release.apk
-```
-
-### Android App Bundle (for Google Play)
-```bash
-flutter build appbundle --release
-
-# Output location
-# build/app/outputs/bundle/release/app-release.aab
-```
-
-### iOS
-```bash
-# Build iOS app (macOS only)
-flutter build ios --release
-
-# Build for App Store
-flutter build ipa --release
-
-# Output location
-# build/ios/iphoneos/Runner.app
-# build/ios/ipa/merid.ipa
+# Custom domains/symbols
+python -m merid.loop --domains crypto,prediction --symbols BTC,ETH,SOL
 ```
 
 ---
 
-## Testing
+## Makefile Quick Reference
 
-### Run Unit Tests
-```bash
-flutter test
-```
-
-### Run Widget Tests
-```bash
-flutter test test/widget_test.dart
-```
-
-### Run Integration Tests
-```bash
-flutter drive --target=test_driver/app.dart
-```
+| Command | Description |
+|---------|-------------|
+| `make serve` | Start FastAPI server (port 8000) |
+| `make loop-start` | Start MeridLoop (observe mode) |
+| `make loop-start-execute` | Start MeridLoop with execution |
+| `make golden-path` | Run 490-test golden path suite |
+| `make preflight` | Tests + readiness + drift + RiskContext |
+| `make risk-context` | Print live RiskContext JSON |
+| `make readiness` | Run readiness auditor |
+| `make codebase-drift-audit` | Check codebase drift |
+| `make pm-test` | Run prediction market tests |
+| `make pipeline-test` | Run pipeline tests |
 
 ---
 
-## Code Quality
+## Environment Variables
 
-### Analyze Code
-```bash
-flutter analyze
-```
+Create `.env` file (see `ENV_SETUP.md` for full reference):
 
-### Format Code
-```bash
-flutter format lib/
-```
+```env
+# Exchange credentials (for paper/live trading)
+ALPACA_API_KEY=your-key
+ALPACA_API_SECRET=your-secret
+KALSHI_API_KEY_ID=your-key-id
+KALSHI_PRIVATE_KEY_PATH=/path/to/key.pem
 
-### Check for Updates
-```bash
-flutter pub outdated
-flutter pub upgrade
-```
-
----
-
-## Platform-Specific Configuration
-
-### Android
-Edit `android/app/src/main/AndroidManifest.xml`:
-```xml
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.merid.app">
-    
-    <uses-permission android:name="android.permission.INTERNET"/>
-    
-    <application
-        android:label="MERID"
-        android:icon="@mipmap/ic_launcher">
-        ...
-    </application>
-</manifest>
-```
-
-Edit `android/app/build.gradle`:
-```gradle
-android {
-    compileSdkVersion 34
-    
-    defaultConfig {
-        applicationId "com.merid.app"
-        minSdkVersion 21
-        targetSdkVersion 34
-        versionCode 1
-        versionName "2.0.0"
-    }
-}
-```
-
-### iOS
-Edit `ios/Runner/Info.plist`:
-```xml
-<key>CFBundleDisplayName</key>
-<string>MERID</string>
-<key>CFBundleVersion</key>
-<string>1</string>
-<key>CFBundleShortVersionString</key>
-<string>2.0.0</string>
+# Capital configuration
+MERID_TOTAL_CAPITAL_USD=50000
+MERID_PM_TRADING_MODE=sim
 ```
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
-
-**Issue**: Flutter not recognized
-```bash
-# Windows: Add to PATH
-setx PATH "%PATH%;C:\src\flutter\bin"
-```
-
-**Issue**: Android licenses not accepted
-```bash
-flutter doctor --android-licenses
-```
-
-**Issue**: Gradle build fails
-```bash
-cd android
-./gradlew clean
-cd ..
-flutter clean
-flutter pub get
-```
-
-**Issue**: iOS build fails
-```bash
-cd ios
-pod install
-cd ..
-flutter clean
-flutter build ios
-```
-
-**Issue**: Fonts not loading
-- Verify font files exist in `assets/fonts/`
-- Check `pubspec.yaml` has correct font paths
-- Run `flutter pub get`
-- Restart app completely
+| Issue | Fix |
+|-------|-----|
+| `ModuleNotFoundError` | Run `pip install -r requirements.txt` |
+| `make` not found (Windows) | Install via `choco install make` or run Python commands directly |
+| Tests fail with import errors | Check Python 3.11+ and re-install deps |
+| API returns errors | Ensure `make serve` is running |
+| React build fails | Run `npm install` in `web/react/` |
 
 ---
 
-## Performance Optimization
-
-### Enable ProGuard (Android)
-Edit `android/app/build.gradle`:
-```gradle
-buildTypes {
-    release {
-        minifyEnabled true
-        proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-    }
-}
-```
-
-### Reduce APK Size
-```bash
-# Split APKs by ABI
-flutter build apk --split-per-abi --release
-
-# Enable tree shaking
-flutter build apk --release --tree-shake-icons
-```
-
-### Profile Performance
-```bash
-flutter run --profile
-```
-
----
-
-## Deployment
-
-### Google Play Store
-1. Build app bundle: `flutter build appbundle --release`
-2. Upload to Google Play Console
-3. Complete store listing
-4. Submit for review
-
-### Apple App Store
-1. Build IPA: `flutter build ipa --release`
-2. Open `build/ios/archive/Runner.xcarchive` in Xcode
-3. Distribute to App Store
-4. Submit via App Store Connect
-
----
-
-## Environment Variables
-
-Create `.env` file (ignored by git):
-```env
-# API Keys (if needed for future features)
-QUANTUM_API_KEY=xxx
-BLOCKCHAIN_RPC_URL=xxx
-```
-
----
-
-## Continuous Integration
-
-### GitHub Actions (example)
-```yaml
-name: Build
-on: [push]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: subosito/flutter-action@v2
-      - run: flutter pub get
-      - run: flutter analyze
-      - run: flutter test
-      - run: flutter build apk --release
-```
-
----
-
-**MERID v2.0 - Built for Sovereignty**
+**MERID v2.0 — Built for Sovereignty**

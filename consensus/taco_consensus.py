@@ -98,12 +98,21 @@ class AgentOpinion:
     data_sources: List[str] = field(default_factory=list)
     supporting_data: Dict[str, Any] = field(default_factory=dict)
     
+    # Signal layer: decay metadata (§7 integration)
+    signal_snapshot_id: str = ""           # ID of the SignalSnapshot that drove this opinion
+    signal_freshness: float = 1.0          # avg decay weight of driving signals (0-1)
+    signal_stale_count: int = 0            # number of stale signals in snapshot
+    decay_metadata: Dict[str, Any] = field(default_factory=dict)  # domain→decay_weight
+    
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentOpinion":
-        return cls(**data)
+        # Handle optional new fields for backward compat
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
 
 
 @dataclass
@@ -143,12 +152,20 @@ class TradePlan:
     horizon: str = "short"
     ttl_seconds: float = 300.0  # Plan expires after 5 minutes
     
+    # Signal layer: decay metadata (§7 integration)
+    signal_snapshot_id: str = ""           # ID of the driving SignalSnapshot
+    avg_signal_freshness: float = 1.0      # avg decay weight across all opinions' signals
+    decay_adjusted_confidence: float = 0.0 # confidence * avg_signal_freshness
+    signal_summary: Dict[str, Any] = field(default_factory=dict)  # aggregated signal info
+    
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TradePlan":
-        return cls(**data)
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
     
     def is_expired(self) -> bool:
         return time.time() > (self.timestamp + self.ttl_seconds)
@@ -333,9 +350,13 @@ class TaCoConsensusCoordinator:
         supporting = []
         opposing = []
         
+        freshness_vals = []
         for opinion in opinions:
             weight = self._get_agent_weight(opinion.agent_id)
-            weighted_score = opinion.score * weight * opinion.confidence
+            # §7: decay-aware consensus — scale by signal freshness
+            freshness = getattr(opinion, "signal_freshness", 1.0)
+            freshness_vals.append(freshness)
+            weighted_score = opinion.score * weight * opinion.confidence * freshness
             weighted_scores.append(weighted_score)
             
             if opinion.score > 0:
@@ -346,7 +367,8 @@ class TaCoConsensusCoordinator:
         # Calculate consensus score
         if not weighted_scores:
             return None
-            
+        
+        avg_signal_freshness = sum(freshness_vals) / max(len(freshness_vals), 1)
         total_weight = sum(abs(w) for w in weighted_scores)
         consensus_score = sum(weighted_scores) / max(1, len(weighted_scores))
         
@@ -371,6 +393,9 @@ class TaCoConsensusCoordinator:
         base_size = 1000.0  # Base position size USD
         target_size = base_size * confidence
         
+        # §7: decay-adjusted confidence = confidence * avg freshness
+        decay_adjusted_conf = confidence * avg_signal_freshness
+        
         # Create trade plan
         plan = TradePlan(
             plan_id=f"plan_{uuid.uuid4().hex[:12]}",
@@ -383,6 +408,8 @@ class TaCoConsensusCoordinator:
             supporting_agents=supporting,
             opposing_agents=opposing,
             horizon=opinions[0].horizon if opinions else "short",
+            avg_signal_freshness=avg_signal_freshness,
+            decay_adjusted_confidence=decay_adjusted_conf,
         )
         
         self._active_plans[plan.plan_id] = plan

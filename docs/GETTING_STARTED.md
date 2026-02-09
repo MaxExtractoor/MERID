@@ -7,7 +7,7 @@
 ## Prerequisites
 
 - **Python 3.11+** with `pip`
-- **Docker + Docker Compose** (for Redis, Neo4j, Prometheus, Grafana)
+- **Docker + Docker Compose** (optional — for Redis, Neo4j, Prometheus, Grafana)
 - **Git** (to clone the repo)
 - A terminal (PowerShell, bash, or zsh)
 
@@ -79,8 +79,8 @@ python -m core.demo_runner --fast
 ## 4. Run the Test Suite (10 min)
 
 ```bash
-# Full suite (488+ tests)
-pytest tests/ -v --tb=short
+# Golden path suite (490 tests)
+make golden-path
 
 # Quick smoke test
 pytest tests/test_mode_gate.py tests/test_trading_halt.py -v
@@ -98,7 +98,8 @@ python -m core.merid_readiness_auditor --all
 ## 5. Start the API Server (5 min)
 
 ```bash
-uvicorn web.main:app --reload --host 0.0.0.0 --port 8000
+make serve
+# Or directly: uvicorn web.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Key endpoints:
@@ -174,4 +175,4 @@ Research Agents → Strategy Agents → Consensus Engine → Risk Gate → Trade
 
 ---
 
-*Last updated: 2026-02-07*
+*Last updated: 2026-02-09*

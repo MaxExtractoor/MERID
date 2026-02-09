@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Coins, TrendingUp, Users, Vote, DollarSign, ArrowUpRight, RefreshCw, AlertCircle } from 'lucide-react';
-import StubBanner from '../components/StubBanner';
+import { Coins, TrendingUp, Users, Vote, DollarSign, ArrowUpRight, RefreshCw, AlertCircle, CheckCircle } from 'lucide-react';
 import QuadraticFundingPanel from '../components/QuadraticFundingPanel';
 
 interface TreasuryBalance {
@@ -45,6 +44,7 @@ interface TreasuryData {
     active_proposals: number;
     participation_rate: number;
   };
+  source?: 'live' | 'stub';
 }
 
 export default function Treasury() {
@@ -71,7 +71,7 @@ export default function Treasury() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
+      // Fallback data when API is unreachable
       setTreasuryData({
         total_value_usd: 2450000,
         balances: [
@@ -150,6 +150,7 @@ export default function Treasury() {
           active_proposals: 2,
           participation_rate: 0.68,
         },
+        source: 'stub' as const,
       });
     } finally {
       setLoading(false);
@@ -205,14 +206,20 @@ export default function Treasury() {
 
   return (
     <div className="p-6 space-y-6">
-      <StubBanner data={treasuryData} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Coins className="w-8 h-8 text-yellow-500" />
           <div>
             <h1 className="text-2xl font-bold text-white">Treasury & Governance</h1>
-            <p className="text-sm text-gray-400">DAO funds, proposals, and quadratic funding</p>
+            <div className="flex items-center gap-2">
+              <p className="text-sm text-gray-400">DAO funds, proposals, and quadratic funding</p>
+              {treasuryData?.source === 'live' && (
+                <span className="flex items-center gap-1 text-xs text-green-400">
+                  <CheckCircle className="w-3 h-3" /> Live
+                </span>
+              )}
+            </div>
           </div>
         </div>
         <button

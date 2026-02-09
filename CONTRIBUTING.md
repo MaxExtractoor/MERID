@@ -36,8 +36,8 @@ git checkout -b feature/your-feature-name
 
 ### 3. Test Your Changes
 ```bash
-python -m pytest tests/
-python meridctl_simple.py status
+make golden-path          # 490-test golden path suite
+make preflight            # Tests + readiness + drift + RiskContext
 ```
 
 ### 4. Commit and Push
@@ -123,14 +123,14 @@ git checkout -m -- path/to/file.py
 2. **Validate after each fix** - Use `python -m py_compile`
 3. **Stage immediately** - `git add` marks conflict resolved
 4. **Test imports** - Ensure import chain works
-5. **Verify system health** - Run `meridctl_simple.py status`
+5. **Verify system health** - Run `make preflight`
 
 ### **Pattern 5: Final Verification**
 
 After resolving all conflicts:
 ```bash
 git status  # Should show no "unmerged paths"
-python meridctl_simple.py status  # Verify system health
+make golden-path  # Verify no regressions
 git commit  # Complete the merge
 ```
 
@@ -157,21 +157,20 @@ git commit  # Complete the merge
 
 ### **Run Tests Before Committing**
 ```bash
-python -m pytest tests/ -v
-python -m py_compile merid_logging_config.py
-python meridctl_simple.py status
+make golden-path           # 490-test golden path suite
+make preflight             # Full preflight (tests + readiness + drift + risk context)
 ```
 
 ### **Health Checks**
 ```bash
-# Basic health check
-python meridctl_simple.py status
+# Risk context snapshot
+make risk-context
 
-# Save health snapshot
-python meridctl_simple.py status --save
+# Readiness auditor
+make readiness
 
-# Custom output path
-python meridctl_simple.py status --output /tmp/health.json
+# Codebase drift audit
+make codebase-drift-audit
 ```
 
 ---
@@ -185,7 +184,7 @@ python meridctl_simple.py status --output /tmp/health.json
 - Keep lines under 100 characters
 
 ### **MERID Specific**
-- Use `merid_logging_config` for all logging
+- Use `utils.logger.get_logger()` for all logging (f-string format, not structlog kwargs)
 - Follow existing import patterns
 - Maintain backward compatibility
 - Add health checks for new components
@@ -201,8 +200,8 @@ python -m py_compile path/to/problem_file.py
 
 ### **Health Monitoring**
 ```bash
-python meridctl_simple.py status --save
-cat merid_simple_health_*.json
+make risk-context           # Print live RiskContext
+make readiness              # Run readiness auditor
 ```
 
 ### **Git Status**
@@ -220,9 +219,9 @@ git status  # Show overall status
 - [Git merge](https://git-scm.com/docs/git-merge)
 
 ### **MERID Documentation**
-- [MERID Logging Rules of the Road](docs/MERID_LOGGING_RULES_OF_THE_ROAD.md)
-- [MERID Safety One-Pager](docs/MERID_SAFETY_ONE_PAGER.md)
-- [MERID Implementation Checklist](MERID_IMPLEMENTATION_CHECKLIST.md)
+- [Getting Started](docs/GETTING_STARTED.md)
+- [Go-Live Checklist](docs/GO_LIVE_CHECKLIST.md)
+- [Readiness Scorecard](docs/SWARM_TRADING_READINESS.md)
 
 ### **Help Tools**
 ```bash
@@ -230,7 +229,7 @@ git status  # Show overall status
 python tools/merid-git-help.py
 
 # Health monitoring
-python meridctl_simple.py --help
+make preflight
 ```
 
 ---
@@ -244,9 +243,9 @@ python meridctl_simple.py --help
 4. Create an issue with details about the conflict
 
 ### **For System Issues**
-1. Run `python meridctl_simple.py status` for health check
-2. Check the logs in the `logs/` directory
-3. Review the implementation checklist
+1. Run `make preflight` for full health check
+2. Run `make risk-context` for risk state
+3. Check API docs at http://localhost:8000/docs
 
 ---
 
@@ -255,7 +254,7 @@ python meridctl_simple.py --help
 ### **Before Submitting PR**
 - [ ] All tests pass
 - [ ] No merge conflicts
-- [ ] Health check passes (`meridctl_simple.py status`)
+- [ ] Health check passes (`make preflight`)
 - [ ] Documentation updated
 - [ ] Code follows style guidelines
 
@@ -264,22 +263,16 @@ Run these checks before merging or pushing to ensure system integrity:
 
 ```bash
 # Quick validation
-python meridctl_simple.py pre-merge-checklist
+make golden-path
 
-# Or run manually:
-python -m py_compile agents/__init__.py
-python -m py_compile core/settings.py
-python -m py_compile db/neo4j.py
-python -m py_compile merid_logging_config.py
-python meridctl_simple.py status
+# Or full preflight:
+make preflight
 ```
 
 **Automation Tip:** Add to your pre-commit hook:
 ```bash
 #!/bin/bash
-python -m py_compile agents/__init__.py core/settings.py db/neo4j.py merid_logging_config.py
-python meridctl_simple.py status
-python -m pytest tests/smoke -q
+make golden-path
 ```
 
 ### **PR Review Checklist**

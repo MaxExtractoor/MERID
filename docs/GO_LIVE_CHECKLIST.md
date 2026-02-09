@@ -7,31 +7,34 @@
 ### 1. Configuration Validation
 
 ```bash
-# Validate all settings
-make validate-config
+# Run preflight checks
+make preflight
 
-# Expected output for paper mode:
-# Mode: paper
-# Env: development
-# Ready: True
+# Inspect risk context
+make risk-context
 ```
 
 ### 2. Environment Variables
 
-| Variable | Paper | Live | Description |
-|----------|-------|------|-------------|
-| `MERID_TRADING_MODE` | `paper` | `live` | Trading mode |
-| `MERID_LIVE_TRADING_UNLOCKED` | `false` | `true` | Explicit unlock |
-| `MERID_ENV` | `development` | `production` | Environment |
+Trading mode is controlled per-venue via `ModeManager`, not a global env var.
+
+Use `make risk-context` to inspect current system state.
+
+| Setting | Description |
+|---------|-------------|
+| Venue mode (SIM/PAPER/LIVE) | Set via `/api/v1/pipeline/venue/mode` or `ModeManager` |
+| Domain enable/disable | Set via `/api/v1/pipeline/domain/enable` |
+| Kill switch | Via `ExecutionGuard` or `/risk/kill-switch/enable` |
 
 ### 3. Safety Interlocks
 
-| Setting | Default | Recommended Live | Description |
-|---------|---------|------------------|-------------|
-| `MERID_MAX_ORDER_SIZE_USD` | 100 | Start with 100 | Max single order |
-| `MERID_MAX_DAILY_LOSS_USD` | 500 | Start with 500 | Daily loss limit |
-| `MERID_MAX_POSITION_SIZE_USD` | 1000 | Start with 1000 | Max position per market |
-| `MERID_REQUIRE_CONFIRMATION` | true | Keep true initially | Order confirmation |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `MERID_TOTAL_CAPITAL_USD` | 50000 | Total capital across all domains |
+| `MERID_CRYPTO_MAX_NOTIONAL_USD` | 25000 | Crypto domain max notional |
+| `MERID_CRYPTO_MAX_DAILY_LOSS_USD` | 1000 | Crypto daily loss limit |
+| `MERID_EQUITY_MAX_NOTIONAL_USD` | 20000 | Equity domain max notional |
+| `MERID_PM_MAX_DAILY_LOSS` | 250 | Prediction market daily loss limit |
 
 ---
 
@@ -40,21 +43,25 @@ make validate-config
 ### Step 1: Run Dry-Run
 
 ```bash
-make go-live-dry-run
+make preflight
 ```
 
 This validates:
-- [ ] Configuration is correct
-- [ ] Paper trading smoke tests pass
-- [ ] Order flow simulation works
+- [ ] 490 golden path tests pass
+- [ ] Readiness auditor passes (24/7 + swarm)
+- [ ] Codebase drift audit clean
+- [ ] RiskContext snapshot healthy
 
 ### Step 2: Extended Paper Test (1-7 days)
 
 Run MERID in paper mode with real market data:
 
 ```bash
-# Start paper trading
-MERID_TRADING_MODE=paper python -m merid.run
+# Start MeridLoop in observe mode (no execution)
+make loop-start
+
+# Or with execution enabled (paper mode by default)
+make loop-start-execute
 ```
 
 Verify:
@@ -87,13 +94,7 @@ export KALSHI_PRIVATE_KEY_PATH="/path/to/key.pem"
 export KALSHI_PRIVATE_KEY_PEM="-----BEGIN PRIVATE KEY-----..."
 ```
 
-**Polymarket:**
-```bash
-export POLYMARKET_API_KEY="your-key"
-export POLYMARKET_API_SECRET="your-secret"
-export POLYMARKET_WALLET_ADDRESS="0x..."
-export POLYMARKET_PRIVATE_KEY="your-private-key"
-```
+**Note:** Polymarket/Augur/PredictIt are **prohibited** by ComplianceRegistry (US compliance).
 
 **Alpaca:**
 ```bash
@@ -104,7 +105,8 @@ export ALPACA_API_SECRET="your-secret"
 ### Step 2: Validate Credentials
 
 ```bash
-make validate-config
+make preflight
+curl http://127.0.0.1:8000/api/v1/pipeline/venues | jq
 ```
 
 All credential errors should be resolved.
@@ -113,34 +115,38 @@ All credential errors should be resolved.
 
 Start with conservative limits:
 
+Risk limits are configured in `merid/settings.py` (Pydantic Settings) or via env vars:
+
 ```bash
-export MERID_MAX_ORDER_SIZE_USD=50      # Small orders first
-export MERID_MAX_DAILY_LOSS_USD=100     # Tight loss limit
-export MERID_MAX_POSITION_SIZE_USD=200  # Small positions
-export MERID_REQUIRE_CONFIRMATION=true  # Require confirmation
+export MERID_TOTAL_CAPITAL_USD=10000           # Start with reduced capital
+export MERID_CRYPTO_MAX_DAILY_LOSS_USD=250     # Tight loss limit
+export MERID_PM_MAX_DAILY_LOSS=100             # Small PM loss limit
 ```
 
-### Step 4: Unlock Live Trading
+### Step 4: Switch Venue to LIVE
+
+Venue modes are set per-venue via the API or ModeManager:
 
 ```bash
-export MERID_TRADING_MODE=live
-export MERID_LIVE_TRADING_UNLOCKED=true
+# Switch Alpaca to LIVE
+curl -X POST http://127.0.0.1:8000/api/v1/pipeline/venue/mode \
+  -H "Content-Type: application/json" \
+  -d '{"venue": "alpaca", "mode": "live"}'
 ```
 
 ### Step 5: Final Validation
 
 ```bash
-make validate-config
-# Should show:
-# Mode: live
-# Ready: True
+make risk-context
+# Check: kill_switch_active=false, size_scale_factor > 0
+curl http://127.0.0.1:8000/api/v1/pipeline/summary | jq
 ```
 
 ### Step 6: Start with Monitoring
 
 ```bash
-# Run with verbose logging
-MERID_LOG_LEVEL=DEBUG python -m merid.run
+# Start the loop with execution
+make loop-start-execute
 ```
 
 Monitor:
@@ -160,21 +166,23 @@ If issues occur:
 # Kill the process
 Ctrl+C
 
-# Or set mode back to paper
-export MERID_TRADING_MODE=paper
-export MERID_LIVE_TRADING_UNLOCKED=false
+# Or switch venue back to paper via API
+curl -X POST http://127.0.0.1:8000/api/v1/pipeline/venue/mode \
+  -H "Content-Type: application/json" \
+  -d '{"venue": "alpaca", "mode": "paper"}'
+
+# Or activate kill switch
+curl -X POST http://127.0.0.1:8000/risk/kill-switch/enable
 ```
 
 ### Cancel Open Orders
 
-```python
-from merid.event_venues.kalshi.client import KalshiVenueClient
+Use the ExecutionGuard kill switch:
 
-client = KalshiVenueClient()
-await client.connect()
-orders = await client.get_open_orders()
-for order in orders:
-    await client.cancel_order(order.order_id)
+```python
+from merid.execution_guard import ExecutionGuard
+guard = ExecutionGuard()
+guard.activate_kill_switch(reason="Operator intervention")
 ```
 
 ### Review Logs
@@ -216,10 +224,11 @@ export MERID_MAX_DAILY_LOSS_USD=1000
 
 | Command | Description |
 |---------|-------------|
-| `make validate-config` | Validate all settings |
-| `make go-live-dry-run` | Full dry run (no real orders) |
-| `make show-mode` | Show current trading mode |
-| `make smoke-test` | Run smoke tests |
+| `make preflight` | Tests + readiness + drift + RiskContext |
+| `make golden-path` | 490-test golden path suite |
+| `make risk-context` | Print live RiskContext JSON |
+| `make loop-start` | Start MeridLoop (observe) |
+| `make loop-start-execute` | Start MeridLoop with execution |
 
 ## Safety Reminders
 
@@ -247,29 +256,24 @@ MERID includes hard safety controls that automatically halt trading when limits 
 ### Using Kill Switches
 
 ```python
-from merid.risk import can_trade, emergency_stop, get_risk_status, risk_controller
+from merid.execution_guard import ExecutionGuard
 
-# Check before every trade
-if not can_trade():
-    print("Trading halted!")
-    print(get_risk_status())
+guard = ExecutionGuard()
 
-# Emergency stop (manual)
-emergency_stop("Operator intervention - suspicious activity")
+# Check before every trade (done automatically by MeridLoop)
+result = guard.pre_trade_check(domain="crypto", notional_usd=100.0)
+if not result.allowed:
+    print(f"Blocked: {result.reason}")
+
+# Emergency stop
+guard.activate_kill_switch(reason="Operator intervention")
 
 # Check status
-status = get_risk_status()
-# {
-#   'state': 'triggered',
-#   'kill_reason': 'daily_loss',
-#   'daily_pnl': -520.0,
-#   'daily_loss_limit': 500.0,
-#   'daily_pnl_pct': 104.0,
-#   ...
-# }
+print(guard.summary())
 
-# Reset after investigation (requires explicit call)
-risk_controller.reset(operator="chris")
+# Or via API:
+# POST /risk/kill-switch/enable
+# GET /api/v1/pipeline/risk-context
 ```
 
 ### Monitoring Kill Switches
@@ -277,49 +281,38 @@ risk_controller.reset(operator="chris")
 Add to your monitoring dashboard:
 
 ```python
-from merid.risk import get_risk_status
+from merid.pipeline.risk_context import build_risk_context
 
 def check_risk_health():
-    status = get_risk_status()
+    ctx = build_risk_context()
     
-    # Alert if close to limits
-    if status["daily_pnl_pct"] > 80:
-        alert(f"Daily loss at {status['daily_pnl_pct']:.0f}% of limit")
+    # Alert if scale factor is low (system under stress)
+    if ctx.size_scale_factor < 0.5:
+        alert(f"Scale factor low: {ctx.size_scale_factor:.2f}")
     
     # Alert if killed
-    if status["state"] == "triggered":
-        alert(f"TRADING HALTED: {status['kill_reason']}")
+    if ctx.kill_switch_active:
+        alert("TRADING HALTED: Kill switch active")
 ```
 
 ### Kill Switch Callbacks
 
 Register callbacks for alerts:
 
-```python
-from merid.risk import risk_controller, KillSwitchEvent
+Kill switch events are logged to the OperatorSession and visible in the Operator Dashboard view.
 
-def on_kill(event: KillSwitchEvent):
-    send_telegram(f"🚨 KILL SWITCH: {event.reason} - {event.details}")
-    send_email("Trading Halted", str(event))
-
-risk_controller.on_kill(on_kill)
+Monitor via:
+```bash
+make risk-context    # CLI
+curl http://127.0.0.1:8000/api/v1/pipeline/risk-context | jq  # API
 ```
 
 ### Integration with Resilience Layer
 
 Kill switches integrate with circuit breakers:
 
-```python
-from merid.risk import risk_controller
-from merid.resilience import get_all_breakers
-
-# Check if all venues are circuit-broken
-breakers = get_all_breakers()
-all_open = all(b.state.value == "open" for b in breakers.values())
-
-if all_open:
-    risk_controller.emergency_stop("All venues circuit-broken")
-```
+The ExecutionGuard integrates with per-domain circuit breakers. When CQI drops
+below threshold, the guard automatically throttles execution via `size_scale_factor`.
 
 ---
 
@@ -334,17 +327,17 @@ if all_open:
 **Workaround**: Run the Python commands directly:
 
 ```powershell
-# Instead of: make validate-config
-python -c "from merid.settings import settings; r = settings.validate_for_go_live(); print('Mode:', r['mode']); print('Env:', r['env']); print('Ready:', r['ready']); [print('  ERROR:', i) for i in r['issues']]; [print('  WARN:', w) for w in r['warnings']]"
+# Instead of: make golden-path
+python -m pytest tests/test_e2e_golden_path.py tests/test_signal_layer.py tests/test_live_feeds.py tests/test_prediction_markets.py tests/test_unified_pipeline.py tests/test_canonical_agents.py tests/test_hardening.py -v
 
-# Instead of: make show-mode
-python -c "from merid.settings import settings; print(f'Trading Mode: {settings.MERID_TRADING_MODE}'); print(f'Live Unlocked: {settings.MERID_LIVE_TRADING_UNLOCKED}')"
+# Instead of: make serve
+uvicorn web.main:app --host 0.0.0.0 --port 8000
 
-# Instead of: make smoke-test
-pytest tests/smoke/ -m smoke -q --tb=short
+# Instead of: make loop-start
+python -m merid.loop
 
-# Instead of: make run-paper-demo
-python scripts/run_paper_demo.py
+# Instead of: make risk-context
+python -c "from merid.pipeline.risk_context import build_risk_context; import json; print(json.dumps(build_risk_context().__dict__, indent=2, default=str))"
 ```
 
 **Alternative**: Install `make` via Chocolatey (`choco install make`) or use WSL.
@@ -375,20 +368,21 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="neo4j")
 
 **Note**: `validate-config` will show errors for venues you don't plan to use. To validate only specific venues:
 
-```python
-from merid.settings import settings
-result = settings.validate_for_go_live(venues=["kalshi"])  # Only check Kalshi
+```bash
+# Check specific venue status
+curl http://127.0.0.1:8000/api/v1/pipeline/venues | jq '.[] | select(.name=="kalshi")'
 ```
 
 ### Circuit Breaker Inspection
 
 To check circuit breaker status for a venue client:
 
-```python
-from merid.event_venues.kalshi.client import KalshiVenueClient
-client = KalshiVenueClient()
-print(client.get_circuit_status())
-# {'name': 'kalshi_...', 'state': 'closed', 'failure_count': 0, ...}
+```bash
+# Check risk context (includes CQI, scale factor, domain exposure)
+make risk-context
+
+# Or via API
+curl http://127.0.0.1:8000/api/v1/pipeline/risk-context | jq
 ```
 
 ### Dry-Run Flag

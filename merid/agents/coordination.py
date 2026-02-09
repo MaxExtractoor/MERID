@@ -117,8 +117,19 @@ class ConsensusCoordinatorAgent(CanonicalAgent):
             confidence=0.9,
         )
 
-    def aggregate(self, proposal_id: str, votes: List[AgentVote]) -> ConsensusResult:
-        """Aggregate votes into a consensus decision."""
+    def aggregate(
+        self,
+        proposal_id: str,
+        votes: List[AgentVote],
+        risk_context: Optional["RiskContext"] = None,
+    ) -> ConsensusResult:
+        """Aggregate votes into a consensus decision.
+
+        If *risk_context* is supplied, the effective approval threshold is
+        raised by ``risk_context.approval_threshold_boost``.  This makes the
+        swarm more conservative when system state is stressed (poor CQI,
+        elevated drawdown, high exposure).
+        """
         if not votes:
             return ConsensusResult(
                 proposal_id=proposal_id, decision="no_quorum",
@@ -156,12 +167,24 @@ class ConsensusCoordinatorAgent(CanonicalAgent):
         approval_pct = approve_score / total_weight
         rejection_pct = reject_score / total_weight
 
-        decision = "approved" if approval_pct >= self.approval_threshold else "rejected"
+        # Apply RiskContext threshold boost (system-level stress)
+        effective_threshold = self.approval_threshold
+        boost = 0.0
+        if risk_context is not None and risk_context.approval_threshold_boost > 0:
+            boost = risk_context.approval_threshold_boost
+            effective_threshold = min(
+                self.approval_threshold + boost, 0.95
+            )
+
+        decision = "approved" if approval_pct >= effective_threshold else "rejected"
+        rationale = f"Approval: {approval_pct:.1%}, threshold: {effective_threshold:.1%}."
+        if boost > 0:
+            rationale += f" (base {self.approval_threshold:.1%} + risk boost {boost:.1%})"
         return ConsensusResult(
             proposal_id=proposal_id, decision=decision,
             approval_score=approval_pct, rejection_score=rejection_pct,
             votes=votes,
-            rationale=f"Approval: {approval_pct:.1%}, threshold: {self.approval_threshold:.1%}.",
+            rationale=rationale,
         )
 
 

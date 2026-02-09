@@ -19,6 +19,7 @@ from merid.pipeline.adapter import UnifiedVenueAdapter, AdapterRegistry
 from merid.pipeline.instruments import InstrumentRegistry, Instrument
 from merid.pipeline.mode_manager import ModeManager, VenueConfig, TradingMode
 from merid.pipeline.risk_manager import GlobalRiskManager, DomainRiskConfig
+from merid.pipeline.risk_context import RiskContext, build_risk_context, get_risk_context
 from merid.pipeline.router import TradeRouter
 
 __all__ = [
@@ -30,10 +31,13 @@ __all__ = [
     "InstrumentRegistry",
     "ModeManager",
     "ProposalStatus",
+    "RiskContext",
     "TradeDomain",
     "TradeProposal",
     "TradeRouter",
     "TradingMode",
     "UnifiedVenueAdapter",
     "VenueConfig",
+    "build_risk_context",
+    "get_risk_context",
 ]

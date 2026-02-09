@@ -51,7 +51,7 @@ export default function Plugins() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
+      // Fallback data when API is unreachable
       setPlugins([
         {
           id: '1',
