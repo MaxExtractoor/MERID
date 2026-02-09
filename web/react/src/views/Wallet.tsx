@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Wallet as WalletIcon, Send, Download, RefreshCw, HardDrive, AlertCircle, CheckCircle } from 'lucide-react';
+import StubBanner from '../components/StubBanner';
 
 interface Balance {
   currency: string;
@@ -107,6 +108,7 @@ export default function Wallet() {
 
   return (
     <div className="p-6 space-y-6">
+      <StubBanner data={walletData} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

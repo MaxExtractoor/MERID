@@ -67,77 +67,9 @@ export default function Mining() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback mock data
-      setRigs([
-        {
-          id: '1',
-          name: 'Rig Alpha',
-          status: 'active',
-          hashrate: 95.5,
-          power_consumption: 1200,
-          temperature: 68,
-          uptime: 99.8,
-          shares_accepted: 15420,
-          shares_rejected: 45,
-          pool: 'Ethermine',
-        },
-        {
-          id: '2',
-          name: 'Rig Beta',
-          status: 'active',
-          hashrate: 88.2,
-          power_consumption: 1100,
-          temperature: 72,
-          uptime: 98.5,
-          shares_accepted: 14230,
-          shares_rejected: 52,
-          pool: 'Ethermine',
-        },
-        {
-          id: '3',
-          name: 'Rig Gamma',
-          status: 'idle',
-          hashrate: 0,
-          power_consumption: 50,
-          temperature: 45,
-          uptime: 95.2,
-          shares_accepted: 12890,
-          shares_rejected: 38,
-          pool: 'F2Pool',
-        },
-      ]);
-      setPools([
-        {
-          id: '1',
-          name: 'Ethermine',
-          url: 'eth.ethermine.org:4444',
-          algorithm: 'Ethash',
-          workers: 2,
-          hashrate: 183.7,
-          balance: 0.245,
-          last_payout: new Date(Date.now() - 86400000).toISOString(),
-        },
-        {
-          id: '2',
-          name: 'F2Pool',
-          url: 'eth.f2pool.com:6688',
-          algorithm: 'Ethash',
-          workers: 0,
-          hashrate: 0,
-          balance: 0.089,
-          last_payout: new Date(Date.now() - 259200000).toISOString(),
-        },
-      ]);
-      setStats({
-        total_hashrate: 183.7,
-        total_power: 2350,
-        daily_revenue: 45.80,
-        daily_cost: 11.28,
-        daily_profit: 34.52,
-        efficiency: 0.078,
-        active_rigs: 2,
-        total_rigs: 3,
-      });
+      setRigs([]);
+      setPools([]);
+      setStats(null);
     } finally {
       setLoading(false);
     }

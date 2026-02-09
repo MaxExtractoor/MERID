@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Package, Download, Trash2, Settings, RefreshCw, AlertCircle, CheckCircle, Star, ExternalLink } from 'lucide-react';
+import StubBanner from '../components/StubBanner';
 
 interface Plugin {
   id: string;
@@ -29,6 +30,7 @@ export default function Plugins() {
   const [stats, setStats] = useState<PluginStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [rawData, setRawData] = useState<any>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [activeTab, setActiveTab] = useState<'installed' | 'available'>('installed');
 
@@ -43,6 +45,7 @@ export default function Plugins() {
       const response = await fetch('/api/v1/plugins/list');
       if (response.ok) {
         const data = await response.json();
+        setRawData(data);
         setPlugins(data.plugins || []);
         setStats(data.stats || null);
         setError(null);
@@ -51,101 +54,9 @@ export default function Plugins() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback data when API is unreachable
-      setPlugins([
-        {
-          id: '1',
-          name: 'Advanced Technical Indicators',
-          version: '2.1.0',
-          author: 'TradingTools Inc',
-          description: 'Professional-grade technical indicators including custom oscillators, momentum indicators, and volatility measures.',
-          category: 'trading',
-          status: 'installed',
-          rating: 4.8,
-          downloads: 15420,
-          size: '2.4 MB',
-          last_updated: new Date(Date.now() - 86400000 * 7).toISOString(),
-          dependencies: ['chart-lib', 'math-utils'],
-          enabled: true,
-        },
-        {
-          id: '2',
-          name: 'ML Price Predictor',
-          version: '1.5.2',
-          author: 'AI Labs',
-          description: 'Machine learning models for price prediction using LSTM and transformer architectures.',
-          category: 'analytics',
-          status: 'installed',
-          rating: 4.6,
-          downloads: 8930,
-          size: '15.8 MB',
-          last_updated: new Date(Date.now() - 86400000 * 3).toISOString(),
-          dependencies: ['tensorflow-js', 'data-processor'],
-          enabled: true,
-        },
-        {
-          id: '3',
-          name: 'Binance Data Feed',
-          version: '3.0.1',
-          author: 'Exchange Connectors',
-          description: 'Real-time and historical data feed from Binance exchange with WebSocket support.',
-          category: 'data',
-          status: 'installed',
-          rating: 4.9,
-          downloads: 22150,
-          size: '1.2 MB',
-          last_updated: new Date(Date.now() - 86400000 * 2).toISOString(),
-          enabled: false,
-        },
-        {
-          id: '4',
-          name: 'Portfolio Optimizer',
-          version: '1.2.0',
-          author: 'QuantTools',
-          description: 'Advanced portfolio optimization using modern portfolio theory and risk parity strategies.',
-          category: 'analytics',
-          status: 'available',
-          rating: 4.7,
-          downloads: 6780,
-          size: '3.5 MB',
-          last_updated: new Date(Date.now() - 86400000 * 5).toISOString(),
-          enabled: false,
-        },
-        {
-          id: '5',
-          name: 'Telegram Notifications',
-          version: '2.0.0',
-          author: 'NotifyHub',
-          description: 'Send trading alerts and notifications directly to your Telegram account.',
-          category: 'integration',
-          status: 'available',
-          rating: 4.5,
-          downloads: 12340,
-          size: '0.8 MB',
-          last_updated: new Date(Date.now() - 86400000 * 10).toISOString(),
-          enabled: false,
-        },
-        {
-          id: '6',
-          name: 'CSV Export Tool',
-          version: '1.0.5',
-          author: 'DataUtils',
-          description: 'Export trading data, positions, and analytics to CSV format for external analysis.',
-          category: 'utility',
-          status: 'available',
-          rating: 4.3,
-          downloads: 5620,
-          size: '0.5 MB',
-          last_updated: new Date(Date.now() - 86400000 * 15).toISOString(),
-          enabled: false,
-        },
-      ]);
-      setStats({
-        total_installed: 3,
-        total_enabled: 2,
-        total_available: 3,
-        updates_available: 1,
-      });
+      setRawData({ _stub: true, _stub_message: 'Plugin system unavailable', data_mode: 'offline' });
+      setPlugins([]);
+      setStats(null);
     } finally {
       setLoading(false);
     }
@@ -208,6 +119,7 @@ export default function Plugins() {
 
   return (
     <div className="p-6 space-y-6">
+      <StubBanner data={rawData} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

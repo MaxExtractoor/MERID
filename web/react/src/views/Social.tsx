@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Twitter, Send, Heart, MessageCircle, Repeat2, TrendingUp, RefreshCw, AlertCircle, Filter, Bot, Clock, ChevronDown, ChevronUp } from 'lucide-react';
+import StubBanner from '../components/StubBanner';
 
 interface SocialPost {
   id: string;
@@ -38,6 +39,7 @@ export default function Social() {
   const [metrics, setMetrics] = useState<SocialMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [rawData, setRawData] = useState<any>(null);
   const [newPost, setNewPost] = useState('');
   const [activeTab, setActiveTab] = useState<'feed' | 'schedule' | 'analytics'>('feed');
   const [topicFilter, setTopicFilter] = useState<string | null>(null);
@@ -69,6 +71,7 @@ export default function Social() {
       const response = await fetch('/api/v1/social/feed');
       if (response.ok) {
         const data = await response.json();
+        setRawData(data);
         setPosts(data.posts || []);
         setScheduledPosts(data.scheduled || []);
         setMetrics(data.metrics || null);
@@ -78,72 +81,10 @@ export default function Social() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-      // Fallback data when API is unreachable
-      setPosts([
-        {
-          id: '1',
-          platform: 'twitter',
-          content: '🚀 BTC just broke $105K! Our AI agents predicted this move 3 hours ago with 87% confidence. #Bitcoin #Trading',
-          timestamp: new Date(Date.now() - 1800000).toISOString(),
-          author: 'MERID Bot',
-          likes: 342,
-          retweets: 89,
-          replies: 45,
-          sentiment: 'positive',
-          topics: ['BTC', 'Trading', 'AI'],
-          engagement_score: 0.82,
-        },
-        {
-          id: '2',
-          platform: 'twitter',
-          content: '⚠️ Risk Alert: Portfolio exposure to ETH approaching 30% limit. Rebalancing recommended. #RiskManagement',
-          timestamp: new Date(Date.now() - 3600000).toISOString(),
-          author: 'MERID Bot',
-          likes: 156,
-          retweets: 34,
-          replies: 23,
-          sentiment: 'neutral',
-          topics: ['ETH', 'Risk', 'Portfolio'],
-          engagement_score: 0.65,
-        },
-        {
-          id: '3',
-          platform: 'twitter',
-          content: '📊 Weekly Performance: +12.5% returns, 68% win rate, Sharpe ratio 2.1. Outperforming market by 8.3%. #Performance',
-          timestamp: new Date(Date.now() - 7200000).toISOString(),
-          author: 'MERID Bot',
-          likes: 523,
-          retweets: 145,
-          replies: 67,
-          sentiment: 'positive',
-          topics: ['Performance', 'Trading', 'Stats'],
-          engagement_score: 0.91,
-        },
-      ]);
-      setScheduledPosts([
-        {
-          id: '1',
-          content: '🔮 Market prediction for tomorrow: BTC consolidation expected around $104K-$106K range.',
-          scheduled_time: new Date(Date.now() + 3600000).toISOString(),
-          platform: 'twitter',
-          status: 'pending',
-        },
-        {
-          id: '2',
-          content: '📈 Daily summary will be posted at 5 PM EST with full performance metrics.',
-          scheduled_time: new Date(Date.now() + 7200000).toISOString(),
-          platform: 'twitter',
-          status: 'pending',
-        },
-      ]);
-      setMetrics({
-        total_posts: 247,
-        total_engagement: 15420,
-        avg_sentiment: 0.72,
-        top_topic: 'BTC',
-        followers: 3420,
-        growth_rate: 8.5,
-      });
+      setRawData({ _stub: true, _stub_message: 'Social feed unavailable', data_mode: 'offline' });
+      setPosts([]);
+      setScheduledPosts([]);
+      setMetrics(null);
     } finally {
       setLoading(false);
     }
@@ -208,6 +149,7 @@ export default function Social() {
 
   return (
     <div className="p-6 space-y-6">
+      <StubBanner data={rawData} />
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
