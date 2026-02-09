@@ -11,7 +11,7 @@ const getEnv = (key: string, fallback: string): string => {
 };
 
 export const API_BASE_URL = getEnv('VITE_API_BASE', "");
-export const WS_URL = getEnv('VITE_WS_URL', `ws://${window?.location?.host || '127.0.0.1:8011'}`);
+export const WS_URL = getEnv('VITE_WS_URL', `ws://${window?.location?.host || '127.0.0.1:8000'}`);
 
 // API Endpoints
 export const API_ENDPOINTS = {
