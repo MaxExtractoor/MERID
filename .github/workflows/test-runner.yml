@@ -1,0 +1,10 @@
+name: Test Runner Assignment
+on:
+  push:
+    branches: [develop]
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Hello from GitHub Actions runner"
