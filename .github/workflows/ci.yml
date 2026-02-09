@@ -1,4 +1,5 @@
 name: MERID CI
+# Single active CI workflow — all legacy workflows set to workflow_dispatch
 
 on:
   push:
