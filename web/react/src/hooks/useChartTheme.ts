@@ -46,15 +46,15 @@ export function updateChartTheme(chart: Chart) {
   chart.update();
 }
 
-export function createThemedChart(ctx: CanvasRenderingContext2D, config: any) {
+export function createThemedChart(ctx: CanvasRenderingContext2D, config: Record<string, unknown>) {
   const colors = getChartThemeColors();
 
-  const options = config.options || {};
-  const plugins = options.plugins || {};
-  const scales = options.scales || {};
+  const options = (config.options ?? {}) as Record<string, unknown>;
+  const plugins = (options.plugins ?? {}) as Record<string, unknown>;
+  const scales = (options.scales ?? {}) as Record<string, unknown>;
 
   return new Chart(ctx, {
-    ...config,
+    ...(config as Parameters<typeof Chart>[1]),
     options: {
       ...options,
       plugins: {

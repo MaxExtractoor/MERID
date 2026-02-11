@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Bell, X, CheckCircle, AlertCircle, Info, TrendingUp } from 'lucide-react';
 import { useRealtimeSubscription } from '../hooks/useRealtimeData';
 
-interface Notification {
+interface LiveNotification {
   id: string;
   type: 'success' | 'warning' | 'info' | 'trade';
   title: string;
@@ -12,16 +12,16 @@ interface Notification {
 }
 
 export default function LiveNotifications() {
-  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [notifications, setNotifications] = useState<LiveNotification[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
 
-  const handleNotification = useCallback((newNotification: Notification) => {
+  const handleNotification = useCallback((newNotification: LiveNotification) => {
     setNotifications(prev => [newNotification, ...prev].slice(0, 50));
     setUnreadCount(prev => prev + 1);
   }, []);
 
-  const [isConnected] = useRealtimeSubscription<Notification>('notification', handleNotification);
+  const [isConnected] = useRealtimeSubscription<LiveNotification>('notification', handleNotification);
 
   useEffect(() => {
     const count = notifications.filter(n => !n.read).length;
@@ -63,7 +63,7 @@ export default function LiveNotifications() {
 
   return (
     <div className="relative">
-      <button
+      <button type="button"
         onClick={() => setIsOpen(!isOpen)}
         className="relative p-2 hover:bg-slate-700 rounded-lg transition-colors"
         title="Notifications"
@@ -84,6 +84,7 @@ export default function LiveNotifications() {
           <div
             className="fixed inset-0 z-40"
             onClick={() => setIsOpen(false)}
+            role="button" tabIndex={0} aria-label="Close" onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setIsOpen(false); } }}
           />
           <div className="absolute right-0 mt-2 w-96 bg-slate-800 rounded-lg border border-slate-700 shadow-xl z-50 max-h-[600px] flex flex-col">
             <div className="p-4 border-b border-slate-700 flex items-center justify-between">
@@ -92,10 +93,10 @@ export default function LiveNotifications() {
                 <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`} />
               </div>
               {unreadCount > 0 && (
-                <button
+                <button type="button"
                   onClick={markAllAsRead}
                   className="text-xs text-blue-400 hover:text-blue-300"
-                >
+                 title="Mark all read">
                   Mark all read
                 </button>
               )}
@@ -119,7 +120,7 @@ export default function LiveNotifications() {
                         !notification.read ? 'bg-slate-700/30' : ''
                       }`}
                       onClick={() => markAsRead(notification.id)}
-                    >
+                     role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => markAsRead(notification.id))(); } }}>
                       <div className="flex items-start gap-3">
                         <div className="flex-shrink-0 mt-1">
                           {getIcon(notification.type)}
@@ -129,7 +130,7 @@ export default function LiveNotifications() {
                             <h4 className="text-sm font-medium text-white">
                               {notification.title}
                             </h4>
-                            <button
+                            <button type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 removeNotification(notification.id);

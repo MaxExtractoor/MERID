@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { DEFAULTS } from "../config/constants";
 import {
   Clock, DollarSign, BarChart3, RefreshCw
 } from 'lucide-react';
@@ -101,7 +102,7 @@ export default function PredictionMarketDetail({ ticker }: PredictionMarketDetai
 
   useEffect(() => {
     fetchMarkets();
-    const interval = setInterval(fetchMarkets, 5000);
+    const interval = setInterval(fetchMarkets, DEFAULTS.POLLING_INTERVALS.STANDARD);
     return () => clearInterval(interval);
   }, [fetchMarkets]);
 
@@ -133,11 +134,11 @@ export default function PredictionMarketDetail({ ticker }: PredictionMarketDetai
           <h3 className="text-lg font-bold text-white">Prediction Markets</h3>
           <span className="text-sm text-gray-400">{markets.length} active</span>
         </div>
-        <button
+        <button type="button"
           onClick={fetchMarkets}
           className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
           title="Refresh markets"
-        >
+         aria-label="Refresh">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -150,7 +151,7 @@ export default function PredictionMarketDetail({ ticker }: PredictionMarketDetai
             const isSelected = selectedMarket?.ticker === m.ticker;
             const hasPosition = m.positionQty > 0;
             return (
-              <button
+              <button type="button"
                 key={m.ticker}
                 onClick={() => setSelectedMarket(m)}
                 className={`w-full text-left p-3 rounded-lg border transition-colors ${

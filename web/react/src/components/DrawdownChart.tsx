@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { TrendingDown, AlertTriangle, Activity } from 'lucide-react';
+import { API_ENDPOINTS, CHART_COLORS} from "../config/constants";
 
 interface DrawdownChartProps {
   agentId?: string;
@@ -48,28 +49,28 @@ export default function DrawdownChart({
     
     try {
       const [equityRes, drawdownRes, metricsRes] = await Promise.all([
-        fetch(`/api/v1/risk-metrics/agents/${agentId}/equity-history?limit=100`),
-        fetch(`/api/v1/risk-metrics/agents/${agentId}/drawdown-history?limit=100`),
-        fetch(`/api/v1/risk-metrics/agents/${agentId}`),
+        fetch(API_ENDPOINTS.RISK_AGENT_EQUITY_HISTORY(agentId)),
+        fetch(API_ENDPOINTS.RISK_AGENT_DRAWDOWN_HISTORY(agentId)),
+        fetch(API_ENDPOINTS.RISK_AGENT_METRICS(agentId)),
       ]);
 
       if (equityRes.ok) {
         const data = await equityRes.json();
-        setTimestamps(data.history.map((h: any) => h.timestamp));
-        setEquity(data.history.map((h: any) => h.equity));
+        setTimestamps(data.history.map((h: Record<string, unknown>) => h.timestamp));
+        setEquity(data.history.map((h: Record<string, unknown>) => h.equity));
       }
 
       if (drawdownRes.ok) {
         const data = await drawdownRes.json();
-        setDrawdown(data.history.map((h: any) => h.drawdown));
+        setDrawdown(data.history.map((h: Record<string, unknown>) => h.drawdown));
       }
 
       if (metricsRes.ok) {
         const data = await metricsRes.json();
         setMaxDrawdown(data.max_drawdown ?? 0);
       }
-    } catch (err) {
-      console.error('Failed to fetch drawdown data:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     } finally {
       setLoading(false);
     }
@@ -84,9 +85,9 @@ export default function DrawdownChart({
   };
 
   const getDrawdownColor = (dd: number) => {
-    if (dd >= dangerThreshold) return '#f87171'; // red
-    if (dd >= warningThreshold) return '#facc15'; // yellow
-    return '#4ade80'; // green
+    if (dd >= dangerThreshold) return CHART_COLORS.LIGHT_RED; // red
+    if (dd >= warningThreshold) return CHART_COLORS.YELLOW; // yellow
+    return CHART_COLORS.LIGHT_GREEN; // green
   };
 
   // SVG rendering
@@ -163,7 +164,7 @@ export default function DrawdownChart({
           y1={warningY}
           x2={padding.left + chartWidth}
           y2={warningY}
-          stroke="#facc15"
+          stroke={CHART_COLORS.YELLOW}
           strokeDasharray="4,4"
           opacity="0.5"
         />
@@ -172,7 +173,7 @@ export default function DrawdownChart({
           y1={dangerY}
           x2={padding.left + chartWidth}
           y2={dangerY}
-          stroke="#f87171"
+          stroke={CHART_COLORS.LIGHT_RED}
           strokeDasharray="4,4"
           opacity="0.5"
         />
@@ -197,7 +198,7 @@ export default function DrawdownChart({
           <path
             d={`M ${equityPoints.join(' L ')}`}
             fill="none"
-            stroke="#60a5fa"
+            stroke={CHART_COLORS.LIGHT_BLUE}
             strokeWidth="2"
           />
         )}
