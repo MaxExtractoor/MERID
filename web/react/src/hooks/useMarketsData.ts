@@ -3,6 +3,7 @@
  */
 
 import { useState, useEffect } from 'react';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 export interface StockData {
   symbol: string;
@@ -63,8 +64,8 @@ export function useStocks(symbols?: string) {
     const fetchStocks = async () => {
       try {
         const url = symbols 
-          ? `/api/v1/markets/stocks?symbols=${symbols}`
-          : '/api/v1/markets/stocks';
+          ? `${API_ENDPOINTS.MARKETS_STOCKS}?symbols=${symbols}`
+          : API_ENDPOINTS.MARKETS_STOCKS;
         
         const response = await fetch(url);
         if (!response.ok) throw new Error('Failed to fetch stocks');
@@ -80,7 +81,7 @@ export function useStocks(symbols?: string) {
     };
 
     fetchStocks();
-    const interval = setInterval(fetchStocks, 5000); // Update every 5s
+    const interval = setInterval(fetchStocks, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH); // Update every 5s
     return () => clearInterval(interval);
   }, [symbols]);
 
@@ -96,8 +97,8 @@ export function useForex(pairs?: string) {
     const fetchForex = async () => {
       try {
         const url = pairs 
-          ? `/api/v1/markets/forex?pairs=${pairs}`
-          : '/api/v1/markets/forex';
+          ? `${API_ENDPOINTS.MARKETS_FOREX}?pairs=${pairs}`
+          : API_ENDPOINTS.MARKETS_FOREX;
         
         const response = await fetch(url);
         if (!response.ok) throw new Error('Failed to fetch forex');
@@ -113,7 +114,7 @@ export function useForex(pairs?: string) {
     };
 
     fetchForex();
-    const interval = setInterval(fetchForex, 10000); // Update every 10s
+    const interval = setInterval(fetchForex, DEFAULTS.POLLING_INTERVALS.STANDARD); // Update every 10s
     return () => clearInterval(interval);
   }, [pairs]);
 
@@ -129,8 +130,8 @@ export function useCommodities(symbols?: string) {
     const fetchCommodities = async () => {
       try {
         const url = symbols 
-          ? `/api/v1/markets/commodities?symbols=${symbols}`
-          : '/api/v1/markets/commodities';
+          ? `${API_ENDPOINTS.MARKETS_COMMODITIES}?symbols=${symbols}`
+          : API_ENDPOINTS.MARKETS_COMMODITIES;
         
         const response = await fetch(url);
         if (!response.ok) throw new Error('Failed to fetch commodities');
@@ -146,7 +147,7 @@ export function useCommodities(symbols?: string) {
     };
 
     fetchCommodities();
-    const interval = setInterval(fetchCommodities, 30000); // Update every 30s
+    const interval = setInterval(fetchCommodities, DEFAULTS.POLLING_INTERVALS.RISK); // Update every 30s
     return () => clearInterval(interval);
   }, [symbols]);
 
@@ -163,7 +164,7 @@ export function useAllMarkets() {
   useEffect(() => {
     const fetchAllMarkets = async () => {
       try {
-        const response = await fetch('/api/v1/markets/all');
+        const response = await fetch(API_ENDPOINTS.MARKETS_ALL);
         if (!response.ok) throw new Error('Failed to fetch markets');
         
         const result = await response.json();
@@ -179,7 +180,7 @@ export function useAllMarkets() {
     };
 
     fetchAllMarkets();
-    const interval = setInterval(fetchAllMarkets, 10000); // Update every 10s
+    const interval = setInterval(fetchAllMarkets, DEFAULTS.POLLING_INTERVALS.STANDARD); // Update every 10s
     return () => clearInterval(interval);
   }, []);
 
