@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Activity, AlertCircle, CheckCircle, TrendingUp, Server, Cpu } from 'lucide-react';
 import { api } from '../services/api';
 import type { SystemHealth } from '../services/api';
+import { DEFAULTS } from '../config/constants';
 
 interface PnLSummary {
   today_pnl: number;
@@ -72,7 +73,7 @@ export function useSystemHealth() {
     }
 
     fetchHealth();
-    const interval = setInterval(fetchHealth, 5000); // Update every 5s for live data
+    const interval = setInterval(fetchHealth, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH); // Update every 5s for live data
     return () => clearInterval(interval);
   }, []);
 
@@ -87,7 +88,7 @@ export function usePnLSummary() {
     async function fetchPnL() {
       try {
         const data = await api.getPnLSummary();
-        setPnL(data as any);
+        setPnL(data as unknown);
       } catch (e) {
         console.error('Failed to fetch P&L:', e);
       } finally {
@@ -96,7 +97,7 @@ export function usePnLSummary() {
     }
 
     fetchPnL();
-    const interval = setInterval(fetchPnL, 5000);
+    const interval = setInterval(fetchPnL, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
     return () => clearInterval(interval);
   }, []);
 
@@ -111,7 +112,7 @@ export function useAgentsSummary() {
     async function fetchAgents() {
       try {
         const data = await api.getAgentSummary();
-        setAgents(data as any);
+        setAgents(data as unknown);
       } catch (e) {
         console.error('Failed to fetch agents:', e);
       } finally {
@@ -120,7 +121,7 @@ export function useAgentsSummary() {
     }
 
     fetchAgents();
-    const interval = setInterval(fetchAgents, 5000);
+    const interval = setInterval(fetchAgents, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
     return () => clearInterval(interval);
   }, []);
 
@@ -135,7 +136,7 @@ export function useTradingSummary() {
     async function fetchTrading() {
       try {
         const data = await api.getTradingSummary();
-        setTrading(data as any);
+        setTrading(data as unknown);
       } catch (e) {
         console.error('Failed to fetch trading:', e);
       } finally {
@@ -144,7 +145,7 @@ export function useTradingSummary() {
     }
 
     fetchTrading();
-    const interval = setInterval(fetchTrading, 5000);
+    const interval = setInterval(fetchTrading, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
     return () => clearInterval(interval);
   }, []);
 
@@ -159,7 +160,7 @@ export function usePrimeStatus() {
     async function fetchPrime() {
       try {
         const data = await api.getPrimeStatus();
-        setPrime(data as any);
+        setPrime(data as unknown);
       } catch (e) {
         console.error('Failed to fetch prime status:', e);
       } finally {
@@ -168,7 +169,7 @@ export function usePrimeStatus() {
     }
 
     fetchPrime();
-    const interval = setInterval(fetchPrime, 5000);
+    const interval = setInterval(fetchPrime, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
     return () => clearInterval(interval);
   }, []);
 
@@ -450,9 +451,9 @@ export function AgentStatusCard() {
               <span className="text-sm">{agent.name}</span>
             </div>
             <div className="flex items-center gap-3 text-xs">
-              <span className="text-slate-500">{(agent as any).tasks_completed || 0} tasks</span>
+              <span className="text-slate-500">{(agent as unknown).tasks_completed || 0} tasks</span>
               <span className="text-emerald-400">
-                {(agent as any).uptime ? `${(agent as any).uptime.toFixed(1)}%` : 'N/A'}
+                {(agent as unknown).uptime ? `${(agent as unknown).uptime.toFixed(1)}%` : 'N/A'}
               </span>
             </div>
           </div>
