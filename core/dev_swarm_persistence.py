@@ -202,6 +202,10 @@ class DevSwarmPersistence:
             logger.error("metadata_load_failed", error=str(e))
             return {}
     
+    def compact(self, keep_recent: int = 1000) -> bool:
+        """Alias for compact_storage."""
+        return self.compact_storage(keep_recent)
+
     def compact_storage(self, keep_recent: int = 1000) -> bool:
         """
         Compact storage by removing old tasks.
@@ -283,32 +287,27 @@ class DevSwarmPersistence:
             "priority": task.priority,
             "estimated_effort": task.estimated_effort,
             "timeout_seconds": task.timeout_seconds,
-            "max_cost_usd": task.max_cost_usd,
-            "created_at": task.created_at,
             "started_at": task.started_at,
             "completed_at": task.completed_at,
             "status": task.status,
             "error": task.error,
             "result": task.result,
-            "cost_usd": task.cost_usd,
         }
     
     def _dict_to_task(self, data: Dict[str, Any]) -> DevTask:
         """Convert dictionary to DevTask."""
-        return DevTask(
-            task_id=data["task_id"],
+        task = DevTask(
             description=data["description"],
             target_files=data["target_files"],
-            success_criteria=data["success_criteria"],
-            priority=data["priority"],
-            estimated_effort=data["estimated_effort"],
-            timeout_seconds=data["timeout_seconds"],
-            max_cost_usd=data["max_cost_usd"],
-            created_at=data["created_at"],
-            started_at=data.get("started_at"),
-            completed_at=data.get("completed_at"),
-            status=data["status"],
-            error=data.get("error"),
-            result=data.get("result"),
-            cost_usd=data["cost_usd"],
+            success_criteria=data.get("success_criteria", ""),
+            priority=data.get("priority", 1),
+            estimated_effort=data.get("estimated_effort", "medium"),
+            timeout_seconds=data.get("timeout_seconds"),
         )
+        task.task_id = data["task_id"]
+        task.status = data.get("status", "pending")
+        task.started_at = data.get("started_at")
+        task.completed_at = data.get("completed_at")
+        task.error = data.get("error")
+        task.result = data.get("result")
+        return task

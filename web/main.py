@@ -103,9 +103,19 @@ from web.api.signals_api import router as signals_api_router
 from web.api.orchestrator_api import router as orchestrator_api_router
 from web.api.blockchain_health_api import router as blockchain_health_api_router
 from web.api.rewards import router as rewards_router
+from web.api.cognitive_api import router as cognitive_router
 from web.api.dev_swarm_routes import router as dev_swarm_router
+from web.api.dev_swarm_governance_routes import router as dev_swarm_governance_router
 from web.api.operator import router as operator_router
+from web.api.metrics import router as metrics_router
+from web.api.metrics import record_latency
+from web.api.market_data import router as market_data_router
+from web.api.market_data import ws_router as market_ws_router
 from web.api.loop_api import loop_api_router
+from web.api.system_observability import router as system_observability_router
+from web.api.llm_governance_api import router as llm_governance_router
+from web.api.rag_api import router as rag_router
+from web.api.assistant_api import router as assistant_router
 
 # Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
 # from web.api.mock_simulation import router as mock_simulation_router
@@ -376,9 +386,29 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(orchestrator_api_router)
     application.include_router(blockchain_health_api_router)
     application.include_router(rewards_router)
+    application.include_router(cognitive_router)
     # application.include_router(dev_swarm_router)  # Replaced by real_data_router (avoids heavy Neo4j init in request context)
+    application.include_router(dev_swarm_governance_router)
     application.include_router(operator_router)
+    application.include_router(metrics_router)
+    application.include_router(market_data_router)
+    application.include_router(market_ws_router)
     application.include_router(loop_api_router)
+    application.include_router(system_observability_router)
+    application.include_router(llm_governance_router)
+    application.include_router(rag_router)
+    application.include_router(assistant_router)
+
+    # Latency timing middleware
+    @application.middleware("http")
+    async def latency_timing_middleware(request, call_next):
+        import time as _t
+        start = _t.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (_t.perf_counter() - start) * 1000
+        record_latency(str(request.url.path), elapsed_ms)
+        return response
+
     # Phase 0 adapters - only mount if feature flags are enabled
     if phase0_router:
         application.include_router(phase0_router)
@@ -1623,6 +1653,14 @@ async def _app_lifespan(application: FastAPI):
             startup_success = False
     else:
         logger.info("⚠️  Skipping whale detection - no prediction markets available")
+
+    # Pre-warm signal metrics cache (background thread, non-blocking)
+    try:
+        from web.api.signal_layer_api import warm_signal_metrics_cache
+        warm_signal_metrics_cache()
+        logger.info("✅ Signal metrics cache warming started (background)")
+    except Exception as e:
+        logger.warning(f"⚠️  Signal metrics cache warm failed: {e}")
 
     startup_duration = time.time() - _startup_state["started_at"]
     logger.info("=" * 80)
