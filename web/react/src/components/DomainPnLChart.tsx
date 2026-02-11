@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { DollarSign, RefreshCw } from 'lucide-react';
+import { DEFAULTS, API_ENDPOINTS, CHART_COLORS} from "../config/constants";
 
 interface PnLDataPoint {
   timestamp: string;
@@ -10,10 +11,10 @@ interface PnLDataPoint {
 }
 
 const DOMAIN_COLORS: Record<string, string> = {
-  prediction: '#f97316',
-  crypto: '#3b82f6',
-  equity: '#22c55e',
-  total: '#a78bfa',
+  prediction: CHART_COLORS.DEEP_ORANGE,
+  crypto: CHART_COLORS.BLUE,
+  equity: CHART_COLORS.GREEN,
+  total: CHART_COLORS.LIGHT_PURPLE,
 };
 
 export default function DomainPnLChart() {
@@ -23,7 +24,7 @@ export default function DomainPnLChart() {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch(`/api/v1/pipeline/pnl?range=${timeRange}`);
+      const res = await fetch(API_ENDPOINTS.PIPELINE_PNL(timeRange));
       if (res.ok) {
         const json = await res.json();
         if (json.data) { setData(json.data); return; }
@@ -36,7 +37,7 @@ export default function DomainPnLChart() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(fetchData, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
     return () => clearInterval(interval);
   }, [fetchData]);
 
@@ -84,7 +85,7 @@ export default function DomainPnLChart() {
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
             {(['1h', '4h', '24h', '7d'] as const).map(r => (
-              <button
+              <button type="button"
                 key={r}
                 onClick={() => setTimeRange(r)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
@@ -95,7 +96,7 @@ export default function DomainPnLChart() {
               </button>
             ))}
           </div>
-          <button onClick={fetchData} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh PnL">
+          <button type="button" onClick={fetchData} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh PnL" aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
@@ -121,7 +122,7 @@ export default function DomainPnLChart() {
       <div className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-3">
         <svg viewBox="0 0 100 50" className="w-full h-40" preserveAspectRatio="none">
           {/* Zero line */}
-          <line x1="0" y1={toY(0)} x2="100" y2={toY(0)} stroke="#475569" strokeWidth="0.2" strokeDasharray="1,1" />
+          <line x1="0" y1={toY(0)} x2="100" y2={toY(0)} stroke={CHART_COLORS.SLATE_500} strokeWidth="0.2" strokeDasharray="1,1" />
           {/* Domain lines */}
           {(['prediction', 'crypto', 'equity', 'total'] as const).map(key => (
             <path

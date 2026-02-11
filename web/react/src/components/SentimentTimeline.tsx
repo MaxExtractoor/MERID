@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { DEFAULTS } from "../config/constants";
 import { 
   TrendingUp, TrendingDown, Minus, Twitter, Newspaper, 
   MessageCircle, RefreshCw, AlertTriangle 
@@ -82,7 +83,7 @@ export default function SentimentTimeline({ ticker }: SentimentTimelineProps) {
 
   useEffect(() => {
     fetchSentiment();
-    const interval = setInterval(fetchSentiment, 15000);
+    const interval = setInterval(fetchSentiment, DEFAULTS.POLLING_INTERVALS.SLOW);
     return () => clearInterval(interval);
   }, [fetchSentiment]);
 
@@ -134,7 +135,7 @@ export default function SentimentTimeline({ ticker }: SentimentTimelineProps) {
         <div className="flex items-center gap-2">
           {/* Ticker filter */}
           <div className="flex gap-1">
-            <button
+            <button type="button"
               onClick={() => setSelectedTicker('')}
               className={`px-2 py-1 text-xs rounded transition-colors ${
                 !selectedTicker ? 'bg-blue-600 text-white' : 'bg-slate-700 text-gray-400 hover:text-white'
@@ -143,7 +144,7 @@ export default function SentimentTimeline({ ticker }: SentimentTimelineProps) {
               All
             </button>
             {tickers.map(t => (
-              <button
+              <button type="button"
                 key={t}
                 onClick={() => setSelectedTicker(t)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
@@ -154,11 +155,11 @@ export default function SentimentTimeline({ ticker }: SentimentTimelineProps) {
               </button>
             ))}
           </div>
-          <button
+          <button type="button"
             onClick={fetchSentiment}
             className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
             title="Refresh sentiment"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>

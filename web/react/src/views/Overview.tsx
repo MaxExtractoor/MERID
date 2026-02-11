@@ -5,6 +5,7 @@ import CollapsibleConsole from '../components/CollapsibleConsole';
 import PredictionMarketsPanel from '../components/PredictionMarketsPanel';
 import AgentActivityPanel from '../components/AgentActivityPanel';
 import QuickActionsPanel from '../components/QuickActionsPanel';
+import { API_ENDPOINTS, CHART_COLORS} from '../config/constants';
 import { 
   SystemHealthCard, 
   PnLCard, 
@@ -67,7 +68,7 @@ function usePortfolio() {
 
   const fetch_ = useCallback(async () => {
     try {
-      const res = await fetch('/api/portfolio/summary');
+      const res = await fetch(API_ENDPOINTS.PORTFOLIO_LIVE);
       if (res.ok) setData(await res.json());
     } catch { /* silent */ }
     finally { setLoading(false); }
@@ -88,7 +89,7 @@ function useWatchlist() {
 
   const fetch_ = useCallback(async () => {
     try {
-      const res = await fetch('/api/prices/live?symbols=BTC,ETH,SOL,AVAX');
+      const res = await fetch(`${API_ENDPOINTS.PRICES_LIVE}?symbols=BTC,ETH,SOL,AVAX`);
       if (res.ok) {
         const d = await res.json();
         setPrices(d.prices || []);
@@ -112,7 +113,7 @@ function useRecentTrades() {
 
   const fetch_ = useCallback(async () => {
     try {
-      const res = await fetch('/api/orders/recent?limit=8');
+      const res = await fetch(`${API_ENDPOINTS.ORDERS_RECENT}?limit=8`);
       if (res.ok) {
         const d = await res.json();
         setTrades(d.orders || []);
@@ -136,7 +137,7 @@ function useRiskExposure() {
   useEffect(() => {
     const f = async () => {
       try {
-        const r = await fetch('/api/risk/exposure');
+        const r = await fetch(API_ENDPOINTS.RISK_EXPOSURE);
         if (r.ok) setExposure(await r.json());
       } catch { /* silent */ }
     };
@@ -154,7 +155,7 @@ function useEquitySeries() {
   useEffect(() => {
     const f = async () => {
       try {
-        const r = await fetch('/api/operator/equity-series?window=1d');
+        const r = await fetch(`${API_ENDPOINTS.EQUITY_SERIES}?window=1d`);
         if (r.ok) {
           const d = await r.json();
           setPoints(d.points || []);
@@ -227,7 +228,7 @@ function PortfolioHero({ portfolio, loading, refresh }: { portfolio: PortfolioSu
               <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" /> Live
             </span>
           </div>
-          <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-slate-700/50 transition-colors" title="Refresh">
+          <button type="button" onClick={refresh} className="p-1.5 rounded-lg hover:bg-slate-700/50 transition-colors" title="Refresh" aria-label="Refresh">
             <RefreshCw className="w-4 h-4 text-slate-400" />
           </button>
         </div>
@@ -308,18 +309,18 @@ function EquityChart({ points, portfolio }: { points: EquityPoint[]; portfolio: 
           <AreaChart data={chartData}>
             <defs>
               <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={pnlPositive ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
-                <stop offset="95%" stopColor={pnlPositive ? '#10b981' : '#ef4444'} stopOpacity={0} />
+                <stop offset="5%" stopColor={pnlPositive ? CHART_COLORS.TEAL : CHART_COLORS.RED} stopOpacity={0.3} />
+                <stop offset="95%" stopColor={pnlPositive ? CHART_COLORS.TEAL : CHART_COLORS.RED} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-            <XAxis dataKey="time" stroke="#475569" tick={{ fontSize: 10 }} />
-            <YAxis domain={[minVal, maxVal]} stroke="#475569" tick={{ fontSize: 10 }} tickFormatter={(v: number) => fmtUsd(v, true)} />
+            <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.TOOLTIP_BG} />
+            <XAxis dataKey="time" stroke={CHART_COLORS.SLATE_500} tick={{ fontSize: 10 }} />
+            <YAxis domain={[minVal, maxVal]} stroke={CHART_COLORS.SLATE_500} tick={{ fontSize: 10 }} tickFormatter={(v: number) => fmtUsd(v, true)} />
             <Tooltip
-              contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '8px', fontSize: '12px' }}
+              contentStyle={{ backgroundColor: CHART_COLORS.SLATE_800, border: '1px solid #334155', borderRadius: '8px', fontSize: '12px' }}
               formatter={(v: number) => [fmtUsd(v), 'Equity']}
             />
-            <Area type="monotone" dataKey="equity" stroke={pnlPositive ? '#10b981' : '#ef4444'} strokeWidth={2} fill="url(#eqGrad)" />
+            <Area type="monotone" dataKey="equity" stroke={pnlPositive ? CHART_COLORS.TEAL : CHART_COLORS.RED} strokeWidth={2} fill="url(#eqGrad)" />
           </AreaChart>
         </ResponsiveContainer>
       </div>

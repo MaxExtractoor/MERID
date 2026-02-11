@@ -6,6 +6,7 @@
  */
 
 import React, { useState } from "react";
+import { DEFAULTS, API_ENDPOINTS } from "../config/constants";
 import {
   useSignalCQI,
   useSignalArbs,
@@ -49,7 +50,7 @@ function CQICard({ domain, cqi }: { domain: string; cqi: CQIDomain }) {
       data-testid="cqi-card"
       className={`border rounded-lg p-4 cursor-pointer transition-colors ${bandBg(cqi.band)}`}
       onClick={() => setExpanded(!expanded)}
-    >
+     role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => setExpanded(!expanded))(); } }}>
       <div className="flex items-center justify-between mb-2">
         <span className="font-bold text-white capitalize text-lg">{domain}</span>
         <div className="flex items-center gap-2">
@@ -154,7 +155,7 @@ function ArbRow({ signal }: { signal: ArbSignal }) {
 
 // ── Decay Config Table ───────────────────────────────────────────────
 
-function DecayConfigTable({ configs }: { configs: Record<string, any> }) {
+function DecayConfigTable({ configs }: { configs: Record<string, unknown> }) {
   const entries = Object.entries(configs);
   if (!entries.length) return <div className="text-slate-500 text-sm" data-testid="decay-empty">No configs loaded</div>;
   return (
@@ -187,7 +188,7 @@ function DecayConfigTable({ configs }: { configs: Record<string, any> }) {
 
 // ── Metrics Sidebar ──────────────────────────────────────────────────
 
-function MetricsSidebar({ metrics }: { metrics: any }) {
+function MetricsSidebar({ metrics }: { metrics: Record<string, unknown> }) {
   if (!metrics) return null;
   const store = metrics.store || {};
   const arb = metrics.arb || {};
@@ -271,7 +272,7 @@ export default function SignalLayerView() {
         {/* Tabs */}
         <div className="flex items-center gap-4">
           {tabs.map((tab) => (
-            <button
+            <button type="button"
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
               className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
@@ -335,7 +336,7 @@ export default function SignalLayerView() {
               <div className="flex items-center gap-2 mb-4">
                 <span className="text-xs text-slate-500">Symbol:</span>
                 {["BTC", "ETH", "SOL", "DOGE", "BONK"].map((sym) => (
-                  <button
+                  <button type="button"
                     key={sym}
                     onClick={() => setSelectedSymbol(sym)}
                     className={`px-2 py-1 rounded text-xs ${
@@ -400,7 +401,7 @@ function FeaturePanel({ symbol }: { symbol: string }) {
               </div>
             </div>
             <div className="grid grid-cols-2 gap-2 text-xs">
-              {Object.entries(features).map(([fname, fdata]: [string, any]) => (
+              {Object.entries(features).map(([fname, fdata]: [string, Record<string, unknown>]) => (
                 <div key={fname} className="flex items-center justify-between bg-slate-800/50 rounded px-2 py-1">
                   <span className="text-slate-400 truncate mr-2">{fname}</span>
                   <div className="flex items-center gap-1">
@@ -425,20 +426,20 @@ function FeaturePanel({ symbol }: { symbol: string }) {
 }
 
 function useSignalFeatures(symbol: string) {
-  const [data, setData] = React.useState<any>(null);
+  const [data, setData] = React.useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = React.useState(true);
 
   React.useEffect(() => {
     const fetchData = async () => {
       try {
-        const res = await fetch(`/api/v1/signal-layer/features/${symbol}`);
+        const res = await fetch(API_ENDPOINTS.SIGNAL_LAYER_FEATURES(symbol));
         if (res.ok) setData(await res.json());
-      } catch {} finally {
+      } catch { /* fetch failed */ } finally {
         setLoading(false);
       }
     };
     fetchData();
-    const id = setInterval(fetchData, 15000);
+    const id = setInterval(fetchData, DEFAULTS.POLLING_INTERVALS.SLOW);
     return () => clearInterval(id);
   }, [symbol]);
 
