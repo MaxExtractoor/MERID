@@ -116,14 +116,31 @@ async def list_tasks(
 ) -> Dict[str, Any]:
     """List dev swarm tasks."""
     tasks = list(_task_registry.values())
+
+    # Also include tasks from swarm task_history not in registry
+    swarm = await _get_swarm()
+    registry_ids = set(_task_registry.keys())
+    for t in swarm.task_history:
+        tid = getattr(t, 'task_id', None) if hasattr(t, 'task_id') else (t.get('task_id') if isinstance(t, dict) else None)
+        if tid and tid not in registry_ids:
+            if hasattr(t, 'task_id'):
+                tasks.append({
+                    "task_id": t.task_id, "description": t.description,
+                    "status": t.status, "started_at": t.started_at,
+                    "completed_at": t.completed_at, "created_at": t.started_at or 0,
+                    "error": t.error,
+                })
+            else:
+                tasks.append(t)
+
     if status:
-        tasks = [t for t in tasks if t["status"] == status]
-    tasks.sort(key=lambda t: t["created_at"], reverse=True)
+        tasks = [t for t in tasks if (t.get("status") if isinstance(t, dict) else getattr(t, 'status', None)) == status]
+    tasks.sort(key=lambda t: t.get("created_at", 0) if isinstance(t, dict) else getattr(t, 'started_at', 0) or 0, reverse=True)
     paginated = tasks[offset:offset + limit]
 
-    active = sum(1 for t in _task_registry.values() if t["status"] == "running")
-    completed = sum(1 for t in _task_registry.values() if t["status"] == "completed")
-    failed = sum(1 for t in _task_registry.values() if t["status"] == "failed")
+    active = sum(1 for t in tasks if (t.get("status") if isinstance(t, dict) else getattr(t, 'status', None)) == "running")
+    completed = sum(1 for t in tasks if (t.get("status") if isinstance(t, dict) else getattr(t, 'status', None)) == "completed")
+    failed = sum(1 for t in tasks if (t.get("status") if isinstance(t, dict) else getattr(t, 'status', None)) == "failed")
 
     return {"tasks": paginated, "total": len(tasks), "active": active, "completed": completed, "failed": failed}
 
@@ -131,22 +148,54 @@ async def list_tasks(
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: str) -> Dict[str, Any]:
     """Get a specific task."""
-    if task_id not in _task_registry:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    return _task_registry[task_id]
+    # Check task registry first
+    if task_id in _task_registry:
+        return _task_registry[task_id]
+
+    # Check swarm active_tasks and task_history
+    swarm = await _get_swarm()
+    if task_id in swarm.active_tasks:
+        t = swarm.active_tasks[task_id]
+        duration = (time.time() - t.started_at) if t.started_at else None
+        return {
+            "task_id": t.task_id, "description": t.description,
+            "status": t.status, "started_at": t.started_at,
+            "completed_at": t.completed_at, "duration_seconds": duration,
+            "error": t.error, "result": t.result,
+        }
+    for t in swarm.task_history:
+        tid = getattr(t, 'task_id', None) or (t.get('task_id') if isinstance(t, dict) else None)
+        if tid == task_id:
+            if hasattr(t, 'task_id'):
+                return {
+                    "task_id": t.task_id, "description": t.description,
+                    "status": t.status, "started_at": t.started_at,
+                    "completed_at": t.completed_at, "error": t.error,
+                    "duration_seconds": (t.completed_at - t.started_at) if t.started_at and t.completed_at else None,
+                }
+            return t
+    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
 
 @router.delete("/tasks/{task_id}")
 async def cancel_task(task_id: str) -> Dict[str, str]:
     """Cancel a task."""
-    if task_id not in _task_registry:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    entry = _task_registry[task_id]
-    if entry["status"] not in ("pending", "running"):
-        raise HTTPException(status_code=409, detail="Task is not cancellable")
-    entry["status"] = "cancelled"
-    entry["completed_at"] = time.time()
-    return {"message": f"Task {task_id} cancelled"}
+    # Check registry
+    if task_id in _task_registry:
+        entry = _task_registry[task_id]
+        if entry["status"] not in ("pending", "running"):
+            raise HTTPException(status_code=409, detail="Task is not cancellable")
+        entry["status"] = "cancelled"
+        entry["completed_at"] = time.time()
+        return {"message": f"Task {task_id} cancelled"}
+
+    # Check swarm active_tasks
+    swarm = await _get_swarm()
+    if task_id in swarm.active_tasks:
+        await swarm.cancel_task(task_id)
+        return {"message": f"Task {task_id} cancelled"}
+
+    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
 
 @router.get("/agents")
@@ -204,12 +253,43 @@ async def get_stats() -> Dict[str, Any]:
 async def health_check() -> Dict[str, Any]:
     """Health check."""
     swarm = await _get_swarm()
+    active = sum(1 for t in _task_registry.values() if t["status"] == "running")
+    checks = {
+        "agents_registered": len(swarm.agents) > 0,
+        "not_shutdown": not swarm._shutdown,
+        "not_paused": not _is_paused,
+    }
+    status = "healthy" if all(checks.values()) else "degraded"
     return {
-        "status": "healthy",
-        "active_tasks": sum(1 for t in _task_registry.values() if t["status"] == "running"),
+        "status": status,
+        "active_tasks": active,
         "agents": len(swarm.agents),
+        "checks": checks,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@router.post("/config")
+async def update_config(
+    max_concurrent_tasks: Optional[int] = Query(None),
+    max_daily_cost_usd: Optional[float] = Query(None),
+    default_task_timeout: Optional[int] = Query(None),
+) -> Dict[str, Any]:
+    """Update swarm configuration."""
+    swarm = await _get_swarm()
+    updates = {}
+    if max_concurrent_tasks is not None:
+        swarm.config.max_concurrent_tasks = max_concurrent_tasks
+        updates["max_concurrent_tasks"] = max_concurrent_tasks
+    if max_daily_cost_usd is not None:
+        swarm.config.max_daily_cost_usd = max_daily_cost_usd
+        updates["max_daily_cost_usd"] = max_daily_cost_usd
+    if default_task_timeout is not None:
+        swarm.config.default_task_timeout = default_task_timeout
+        updates["default_task_timeout"] = default_task_timeout
+    if not updates:
+        return {"message": "No configuration changes requested", "updates": {}}
+    return {"message": "Configuration updated", "updates": updates}
 
 
 # Readiness audit
@@ -274,4 +354,12 @@ async def shutdown_swarm() -> Dict[str, Any]:
         if entry.get("status") in ("pending", "running"):
             entry["status"] = "cancelled"
             cancelled += 1
-    return {"shutdown": True, "paused": True, "cancelled_tasks": cancelled}
+    swarm = await _get_swarm()
+    await swarm.shutdown()
+    return {
+        "message": "Swarm shutdown initiated",
+        "warning": "All pending tasks have been cancelled",
+        "shutdown": True,
+        "paused": True,
+        "cancelled_tasks": cancelled,
+    }

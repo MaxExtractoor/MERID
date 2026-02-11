@@ -5,6 +5,33 @@ All notable changes to MERID will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-02-11
+
+### Fixed
+- **Dev Swarm Core** — Fixed `execute_task` lifecycle: tasks now register in `active_tasks` before pipeline, use per-task `timeout_seconds`, and always append to `task_history` (including early-return paths)
+- **Credit Ledger** — Changed from hard rejection to soft warning; daily cost limit is the real budget gate
+- **Pipeline Exception Handling** — Outer try/except/finally in `execute_task` catches all pipeline exceptions and properly sets `failed` status
+- **Shutdown** — Uses `asyncio.wait_for` pattern; `_wait_for_active_tasks()` no longer takes args
+- **`cancel_task`** — Made async-compatible
+- **`pause`/`resume`** — Now return `bool` indicating state change
+- **Persistence** — `_task_to_dict`/`_dict_to_task` aligned with `DevTask` fields; fresh import for test patching
+- **API Routes** — Health check includes `checks` key; added `POST /config`; shutdown returns `message`/`warning`; task endpoints search `active_tasks` and `task_history`
+
+### Added
+- **`DevTask.cost_usd`** field for per-task cost tracking
+- **`DevTaskTemplates`** — 19 static template methods (RG-01–RG-11, structural, RRG-01–RRG-09)
+- **Router Registration** — `metrics_router`, `market_data_router`, `market_ws_router`, `latency_timing_middleware` wired into `web/main.py`
+- **Readiness Auditor Prerequisites** — `dev_swarm` marker in `pytest.ini`, `LEGACY_RISK_MATRIX.md`, `QUARANTINE_MARKERS` hook in conftest, Makefile targets (`dev-swarm-test`, `backend-test`, `frontend-build`, `swarm-metrics`)
+- **`HISTORICAL_AUDIT_GAP_REPORT.md`** — RRG-01 through RRG-10 and UW items
+- **`LEGACY_RISK_MATRIX.md`** — Quarantine lists, CI gate, coverage snapshot
+
+### Tests
+- `test_dev_swarm.py`: **393/393 passing** (was ~130 failures)
+- `test_dev_swarm_xdist_invariants.py`: 17/17 passing
+- Zero regressions across broader test suite
+
+---
+
 ## [2.0.0] - 2026-02-09
 
 ### Added
