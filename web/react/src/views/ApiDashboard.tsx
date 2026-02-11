@@ -1,10 +1,13 @@
 import React, { useState } from "react";
+import { RefreshCw } from 'lucide-react';
 import { useApiData } from "../hooks/useApiData";
-import { API_ENDPOINTS, STATUS_TYPES } from "../config/constants";
+import { API_ENDPOINTS, STATUS_TYPES, DEFAULTS } from "../config/constants";
 import { formatDateTime, formatPercent } from "../utils/formatters";
 import MetricCard from "../components/MetricCard";
 import StatusIndicator from "../components/StatusIndicator";
 import DataTableEnhanced from "../components/DataTableEnhanced";
+import ErrorAlert from "../components/ErrorAlert";
+import EmptyState from "../components/EmptyState";
 import { RiskStatus } from "../types/risk";
 
 interface ApiStatus {
@@ -39,16 +42,18 @@ export default function ApiDashboard() {
   const [showDetails, setShowDetails] = useState(false);
 
   // Fetch API status data
-  const { data: apiStatus } = useApiData<ApiStatus[]>(
+  const { data: apiStatus, loading: statusLoading, error: statusError, refetch: refetchStatus } = useApiData<ApiStatus[]>(
     API_ENDPOINTS.API_STATUS,
-    { pollingInterval: 30000 }
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.API_STATUS }
   );
 
   // Fetch API metrics
-  const { data: metrics } = useApiData<ApiMetrics>(
-    "/api/v1/api/metrics",
-    { pollingInterval: 60000 }
+  const { data: metrics, loading: metricsLoading } = useApiData<ApiMetrics>(
+    API_ENDPOINTS.API_METRICS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SYSTEM_HEALTH }
   );
+
+  const isLoading = statusLoading && metricsLoading && !apiStatus && !metrics;
 
   const filteredApis = React.useMemo(() => {
     if (!apiStatus) return [];
@@ -63,6 +68,33 @@ export default function ApiDashboard() {
     if (!apiStatus) return [];
     return [...new Set(apiStatus.map(api => api.category))];
   }, [apiStatus]);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <RefreshCw className="w-6 h-6 text-blue-400 animate-spin" />
+        <span className="ml-3 text-slate-400">Loading API dashboard…</span>
+      </div>
+    );
+  }
+
+  if (statusError && !apiStatus) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">API Dashboard</h1>
+        <ErrorAlert message="Failed to load API status" onRetry={refetchStatus} />
+      </div>
+    );
+  }
+
+  if (apiStatus && apiStatus.length === 0) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">API Dashboard</h1>
+        <EmptyState title="No APIs configured" message="API integrations will appear here once configured." />
+      </div>
+    );
+  }
 
   const convertRiskStatus = (status: RiskStatus): keyof typeof STATUS_TYPES => {
     switch (status) {
@@ -151,7 +183,7 @@ export default function ApiDashboard() {
       label: "API Name",
       sortable: true,
       render: (value: string, row: ApiStatus) => (
-        <button
+        <button type="button"
           onClick={() => {
             setSelectedApi(row);
             setShowDetails(true);
@@ -293,7 +325,9 @@ export default function ApiDashboard() {
       {/* Category Filter */}
       <div className="flex items-center gap-4">
         <label className="text-sm font-medium text-slate-400">Filter by Category:</label>
-        <select
+        <select aria-label="Filter by Category:"
+          id="api-category-filter"
+          name="categoryFilter"
           value={selectedCategory}
           onChange={(e) => setSelectedCategory(e.target.value)}
           title="Filter by API category"
@@ -326,7 +360,7 @@ export default function ApiDashboard() {
           <div className="bg-slate-800 rounded-xl border border-slate-700 p-6 max-w-2xl max-h-[80vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-white">API Details</h3>
-              <button
+              <button type="button"
                 onClick={() => setShowDetails(false)}
                 className="text-slate-400 hover:text-white"
               >
