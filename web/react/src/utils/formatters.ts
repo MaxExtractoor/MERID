@@ -32,6 +32,9 @@ export function formatNumber(value: number, digits?: number): string {
 
 export function formatDateTime(iso: string | Date): string {
   const date = typeof iso === "string" ? new Date(iso) : iso;
+  if (isNaN(date.getTime())) {
+    return 'N/A';
+  }
   return new Intl.DateTimeFormat("en-US", {
     year: "numeric",
     month: "short",
