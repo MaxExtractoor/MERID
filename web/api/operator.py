@@ -111,6 +111,7 @@ async def get_operator_summary() -> Dict[str, Any]:
     try:
         from merid.execution_guard import get_execution_guard
         guard = get_execution_guard()
+        promo_enforcement = guard.summary().get("promotion_enforcement", {})
         result["guard"] = {
             "kill_switch_active": guard.kill_switch_active,
             "last_cqi": {k: round(v, 4) for k, v in guard._last_cqi.items()},
@@ -119,6 +120,7 @@ async def get_operator_summary() -> Dict[str, Any]:
                 for k, v in guard._domain_caps.items()
             },
             "recent_verdicts_count": len(guard._trade_log),
+            "promotion": promo_enforcement,
         }
     except Exception as exc:
         logger.warning(f"operator_summary_guard_error: {exc}")
@@ -202,7 +204,6 @@ async def get_equity_series(
     """
     # Take a fresh snapshot
     try:
-        from trading.paper_trading import get_paper_engine
         engine = get_paper_engine()
         total_value = 100_000.0
         unrealized_pnl = 0.0
@@ -241,10 +242,9 @@ async def get_risk_utilization() -> Dict[str, Any]:
     limits: List[Dict[str, Any]] = []
 
     try:
-        import requests as _req
-        resp = _req.get("http://localhost:8000/api/risk/protections", timeout=2)
-        if resp.ok:
-            data = resp.json()
+        from web.api.risk_metrics_api import get_risk_protections
+        data = await get_risk_protections()
+        if data:
             rl = data.get("risk_limits", {})
 
             # Daily loss limit
@@ -285,10 +285,9 @@ async def get_risk_utilization() -> Dict[str, Any]:
 
     # Add margin utilization from risk metrics
     try:
-        import requests as _req
-        resp = _req.get("http://localhost:8000/api/v1/risk/metrics", timeout=2)
-        if resp.ok:
-            data = resp.json()
+        from web.api.risk_metrics_api import get_risk_metrics
+        data = await get_risk_metrics()
+        if data:
             margin_used = data.get("marginUsed", 0)
             margin_avail = data.get("marginAvailable", 100000)
             margin_total = margin_used + margin_avail
@@ -368,4 +367,170 @@ async def scale_agent_pool(target_count: int = Query(..., ge=1, le=20, descripti
         raise
     except Exception as exc:
         logger.error(f"scale_agent_pool_error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Promotion Report ─────────────────────────────────────────────────
+
+@router.get("/promotion-report")
+async def get_promotion_report() -> Dict[str, Any]:
+    """
+    Returns the cached promotion report showing per-domain and per-agent
+    eligibility for live execution.  Report is regenerated at most every
+    5 minutes; call POST /promotion-report/refresh to force.
+    """
+    try:
+        from merid.promotion_report import get_cached_promotion_report
+        report = get_cached_promotion_report(gauntlet_cycles=5)
+        return report.to_dict()
+    except Exception as exc:
+        logger.error(f"promotion_report_error: {exc}")
+        return {
+            "timestamp": time.time(),
+            "overall_eligible": False,
+            "all_rings_pass": False,
+            "rings": [],
+            "domains": {"eligible": [], "blocked": [], "detail": []},
+            "agents": {"promoted": [], "blocked": [], "detail": []},
+            "elapsed_s": 0,
+            "error": str(exc),
+        }
+
+
+@router.post("/promotion-report/refresh")
+async def refresh_promotion_report() -> Dict[str, Any]:
+    """Force-regenerate the promotion report (bypasses cache)."""
+    try:
+        from merid.promotion_report import invalidate_cache, get_cached_promotion_report
+        invalidate_cache()
+        report = get_cached_promotion_report(gauntlet_cycles=5)
+        return report.to_dict()
+    except Exception as exc:
+        logger.error(f"promotion_report_refresh_error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/promotion-checklist")
+async def get_promotion_checklist(domain: Optional[str] = Query(None)) -> List[Dict[str, Any]]:
+    """Machine-readable promotion runbook checklist.
+
+    Returns an ordered list of steps, each with name, status
+    (pass/fail/unknown), command, detail, and failures.
+    Optionally filter domain eligibility steps to a single domain.
+    """
+    try:
+        from merid.promotion_report import promotion_checklist
+        return promotion_checklist(domain=domain)
+    except Exception as exc:
+        logger.error(f"promotion_checklist_error: {exc}")
+        return [{
+            "step": 0,
+            "name": "Error",
+            "command": "",
+            "status": "fail",
+            "detail": str(exc),
+            "failures": [str(exc)],
+        }]
+
+
+@router.get("/promotion-log")
+async def get_promotion_log_endpoint(
+    entity_type: Optional[str] = Query(None, description="Filter by 'domain' or 'agent'"),
+    entity_id: Optional[str] = Query(None, description="Filter by specific domain name or agent_id"),
+    source: Optional[str] = Query(None, description="Filter by 'automation', 'operator', or 'system'"),
+    limit: int = Query(50, ge=1, le=500),
+) -> Dict[str, Any]:
+    """Historical promotion change log.
+
+    Returns timestamped events recording every domain/agent status
+    transition (eligible↔blocked), with reason, report reference, and source.
+    """
+    try:
+        from merid.promotion_report import get_promotion_log
+        log = get_promotion_log()
+        events = log.events(entity_type=entity_type, entity_id=entity_id, source=source, limit=limit)
+        return {
+            "total_events": len(log),
+            "returned": len(events),
+            "events": [e.to_dict() for e in events],
+        }
+    except Exception as exc:
+        logger.error(f"promotion_log_error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/promotion-override")
+async def promotion_override(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Manually promote or demote a domain/agent with operator attribution.
+
+    Body:
+        action: "promote" or "demote"
+        entity_type: "domain" or "agent"
+        entity_id: domain name or agent_id
+        reason: optional explanation
+        operator: optional operator name
+    """
+    action = body.get("action")
+    entity_type = body.get("entity_type")
+    entity_id = body.get("entity_id")
+    reason = body.get("reason", "")
+    operator_name = body.get("operator", "unknown")
+
+    if action not in ("promote", "demote"):
+        raise HTTPException(status_code=400, detail="action must be 'promote' or 'demote'")
+    if entity_type not in ("domain", "agent"):
+        raise HTTPException(status_code=400, detail="entity_type must be 'domain' or 'agent'")
+    if not entity_id:
+        raise HTTPException(status_code=400, detail="entity_id is required")
+
+    try:
+        from merid.promotion_report import manual_promote, manual_demote
+        if action == "promote":
+            event = manual_promote(entity_type, entity_id, reason=reason, operator=operator_name)
+        else:
+            event = manual_demote(entity_type, entity_id, reason=reason, operator=operator_name)
+        return event.to_dict()
+    except Exception as exc:
+        logger.error(f"promotion_override_error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/governance-status")
+async def get_governance_status() -> Dict[str, Any]:
+    """Governance notification system status.
+
+    Returns configured channels, recent dispatch history, and
+    promotion enforcement summary from the ExecutionGuard.
+    """
+    try:
+        from merid.governance_notifier import get_governance_notifier
+        notifier = get_governance_notifier()
+
+        promo = {}
+        try:
+            from merid.execution_guard import get_execution_guard
+            guard = get_execution_guard()
+            promo = guard.summary().get("promotion_enforcement", {})
+        except (ImportError, Exception):
+            pass
+
+        recent = notifier.history[-10:] if notifier.history else []
+
+        return {
+            "channels": notifier.channels,
+            "total_dispatches": len(notifier.history),
+            "recent_dispatches": [
+                {
+                    "timestamp": r["timestamp"],
+                    "entity": r["payload"].get("entity_id", "?"),
+                    "status": r["payload"].get("new_status", "?"),
+                    "source": r["payload"].get("source", "?"),
+                    "results": r["results"],
+                }
+                for r in recent
+            ],
+            "promotion_enforcement": promo,
+        }
+    except Exception as exc:
+        logger.error(f"governance_status_error: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
