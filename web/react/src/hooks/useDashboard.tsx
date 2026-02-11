@@ -73,7 +73,7 @@ export function useSystemHealth() {
     }
 
     fetchHealth();
-    const interval = setInterval(fetchHealth, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH); // Update every 5s for live data
+    const interval = setInterval(fetchHealth, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
     return () => clearInterval(interval);
   }, []);
 
@@ -96,9 +96,9 @@ export function usePnLSummary() {
       }
     }
 
-    fetchPnL();
+    const t = setTimeout(() => { fetchPnL(); }, 2000);
     const interval = setInterval(fetchPnL, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(t); clearInterval(interval); };
   }, []);
 
   return { pnl, loading };
@@ -120,9 +120,9 @@ export function useAgentsSummary() {
       }
     }
 
-    fetchAgents();
+    const t = setTimeout(() => { fetchAgents(); }, 4000);
     const interval = setInterval(fetchAgents, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(t); clearInterval(interval); };
   }, []);
 
   return { agents, loading };
@@ -144,9 +144,9 @@ export function useTradingSummary() {
       }
     }
 
-    fetchTrading();
+    const t = setTimeout(() => { fetchTrading(); }, 6000);
     const interval = setInterval(fetchTrading, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(t); clearInterval(interval); };
   }, []);
 
   return { trading, loading };
@@ -168,9 +168,9 @@ export function usePrimeStatus() {
       }
     }
 
-    fetchPrime();
+    const t = setTimeout(() => { fetchPrime(); }, 8000);
     const interval = setInterval(fetchPrime, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(t); clearInterval(interval); };
   }, []);
 
   return { prime, loading };
