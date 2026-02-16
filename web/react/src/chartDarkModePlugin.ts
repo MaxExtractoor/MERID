@@ -1,8 +1,16 @@
-import { Chart } from "chart.js";
+type ChartLike = {
+  options: {
+    scales?: Record<string, { ticks?: Record<string, unknown>; grid?: Record<string, unknown> } | undefined>;
+    plugins?: {
+      legend?: { labels?: { color?: string } };
+      tooltip?: { backgroundColor?: string; titleColor?: string; bodyColor?: string; borderColor?: string };
+    };
+  };
+};
 
 export const MeridDarkModePlugin = {
   id: "meridDarkMode",
-  beforeLayout(chart: Chart) {
+  beforeLayout(chart: ChartLike) {
     const root = document.documentElement;
     const isDark = root.classList.contains("dark");
 
@@ -13,10 +21,9 @@ export const MeridDarkModePlugin = {
     if (chart.options.scales) {
       for (const scale of Object.values(chart.options.scales)) {
         if (!scale) continue;
-        // @ts-ignore
-        scale.ticks = { ...(scale.ticks || {}), color: axisColor };
-        // @ts-ignore
-        scale.grid = { ...(scale.grid || {}), color: gridColor };
+        const mutableScale = scale as { ticks?: Record<string, unknown>; grid?: Record<string, unknown> };
+        mutableScale.ticks = { ...(mutableScale.ticks || {}), color: axisColor };
+        mutableScale.grid = { ...(mutableScale.grid || {}), color: gridColor };
       }
     }
 
@@ -35,7 +42,8 @@ export const MeridDarkModePlugin = {
 
 // Registration helper
 export function registerMeridDarkModePlugin() {
-  Chart.register(MeridDarkModePlugin);
+  const chartGlobal = (globalThis as { Chart?: { register: (plugin: unknown) => void } }).Chart;
+  chartGlobal?.register(MeridDarkModePlugin);
 }
 
 // Usage example:

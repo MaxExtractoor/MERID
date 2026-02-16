@@ -69,7 +69,7 @@ from web.api.referrals import router as referrals_router
 from web.api.trading import router as trading_router
 from web.api.betting import router as betting_router
 from web.api.streams import router as streams_router
-from web.api.paper_trading import router as paper_trading_router
+from web.api.paper_trading import router as paper_trading_router, paper_trading_convenience_router
 from web.api.system_control import router as system_control_router
 from web.api.data_endpoints import router as data_endpoints_router
 from web.api.live_stream import router as live_stream_router
@@ -116,6 +116,15 @@ from web.api.system_observability import router as system_observability_router
 from web.api.llm_governance_api import router as llm_governance_router
 from web.api.rag_api import router as rag_router
 from web.api.assistant_api import router as assistant_router
+from web.api.telemetry import router as telemetry_router
+from web.api.resilience import router as resilience_router
+from web.api.guardrails_api import router as guardrails_router
+from web.api.kalshi_grid_api import router as kalshi_grid_router
+from web.api.kalshi_api import router as kalshi_api_router
+from web.api.sidebar_config import router as sidebar_config_router
+from web.api.benchmarks_api import router as benchmarks_router
+from web.api.paper_ladder_api import router as paper_ladder_router
+from web.api.paper_session_api import router as paper_session_router
 
 # Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
 # from web.api.mock_simulation import router as mock_simulation_router
@@ -297,11 +306,11 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(mining_router)
     application.include_router(auth_router)
     application.include_router(referrals_router)
-    application.include_router(missing_endpoints_router)
     application.include_router(trading_router)
     application.include_router(betting_router)
     application.include_router(streams_router)
     application.include_router(paper_trading_router)
+    application.include_router(paper_trading_convenience_router)
     application.include_router(system_control_router)
     application.include_router(data_endpoints_router)
     application.include_router(live_stream_router)
@@ -398,6 +407,34 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(llm_governance_router)
     application.include_router(rag_router)
     application.include_router(assistant_router)
+    application.include_router(telemetry_router)
+    application.include_router(resilience_router)
+    application.include_router(guardrails_router)
+    application.include_router(kalshi_grid_router)
+    application.include_router(kalshi_api_router)
+    application.include_router(sidebar_config_router)
+    application.include_router(benchmarks_router)
+    application.include_router(paper_ladder_router)
+    application.include_router(paper_session_router)
+
+    # Register fallback stubs last so concrete implementations win route precedence.
+    application.include_router(missing_endpoints_router)
+
+    # Correlation ID middleware — propagates X-Correlation-ID on every request/response
+    # and sets it in contextvars so all log lines during the request include it.
+    @application.middleware("http")
+    async def correlation_id_middleware(request, call_next):
+        import uuid as _uuid
+        from utils.logger import set_correlation_id, correlation_id_var
+        cid = request.headers.get("x-correlation-id") or str(_uuid.uuid4())
+        request.state.correlation_id = cid
+        token = set_correlation_id(cid)
+        try:
+            response = await call_next(request)
+            response.headers["x-correlation-id"] = cid
+            return response
+        finally:
+            correlation_id_var.reset(token)
 
     # Latency timing middleware
     @application.middleware("http")
@@ -729,14 +766,13 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
 async def trades_websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for trade events (TradeFloor.tsx).
 
-    Sends heartbeats and trade events from the paper trading engine.
-    If no engine is available, notifies the client and closes gracefully.
+    Sends heartbeats and trade/order snapshots from the paper trading engine.
     """
     await websocket.accept()
     logger.info("Trade WS client connected")
 
     try:
-        import asyncio as _asyncio, uuid as _uuid
+        import asyncio as _asyncio
         from datetime import datetime as _dt
 
         # Send mode status immediately
@@ -753,6 +789,33 @@ async def trades_websocket_endpoint(websocket: WebSocket):
             "is_simulated": True,
             "timestamp": _dt.utcnow().timestamp(),
         })
+
+        # Send initial order snapshot from paper engine
+        try:
+            from trading.paper_trading import get_paper_engine
+            engine = get_paper_engine()
+            uid = next(iter(engine.portfolios), None)
+            if uid:
+                portfolio = engine.get_portfolio(uid)
+                positions = getattr(portfolio, "positions", {})
+                for sym, pos in list(positions.items())[:20]:
+                    qty = getattr(pos, "quantity", getattr(pos, "size", 0))
+                    price = getattr(pos, "avg_price", getattr(pos, "entry_price", 0))
+                    side = "buy" if qty > 0 else "sell"
+                    await websocket.send_json({
+                        "event_type": "order_filled",
+                        "trader_type": "agent",
+                        "trader_id": "paper-engine",
+                        "symbol": sym,
+                        "side": side,
+                        "qty": abs(qty),
+                        "price": round(price, 2),
+                        "status": "filled",
+                        "venue": "paper",
+                        "timestamp": _dt.utcnow().timestamp(),
+                    })
+        except Exception:
+            pass
 
         while True:
             try:
@@ -786,6 +849,9 @@ async def risk_websocket_endpoint(websocket: WebSocket):
                 # Pull real portfolio data if available
                 equity = 10000.0
                 pnl = 0.0
+                position_count = 0
+                exposure = 0.0
+                unrealized = 0.0
                 try:
                     from trading.paper_trading import get_paper_engine
                     engine = get_paper_engine()
@@ -794,16 +860,23 @@ async def risk_websocket_endpoint(websocket: WebSocket):
                         p = engine.get_portfolio(uid)
                         equity = getattr(p, "equity", 10000.0)
                         pnl = getattr(p, "total_pnl", 0.0)
+                        positions = getattr(p, "positions", {})
+                        position_count = len(positions)
+                        unrealized = getattr(p, "unrealized_pnl", 0.0)
+                        for _sym, pos in positions.items():
+                            qty = abs(getattr(pos, "quantity", getattr(pos, "size", 0)))
+                            px = getattr(pos, "avg_price", getattr(pos, "entry_price", 0))
+                            exposure += qty * px
                 except Exception:
                     pass
 
                 await websocket.send_json({
                     "event_type": "risk_summary",
-                    "total_equity": equity,
-                    "total_pnl": pnl,
-                    "unrealized_pnl": 0.0,
-                    "position_count": 0,
-                    "exposure": 0.0,
+                    "total_equity": round(equity, 2),
+                    "total_pnl": round(pnl, 2),
+                    "unrealized_pnl": round(unrealized, 2),
+                    "position_count": position_count,
+                    "exposure": round(exposure, 2),
                     "timestamp": _dt.utcnow().timestamp(),
                 })
             except (WebSocketDisconnect, RuntimeError):
@@ -1333,6 +1406,173 @@ async def settle_uma_assertion(assertion_id: str):
 
 
 # ════════════════════════════════════════════════
+# TERMINAL TELEMETRY — agent heartbeats, trades, consensus
+# ════════════════════════════════════════════════
+
+_telem_logger = get_logger("merid.telemetry")
+
+# Track previous-tick message counts so we can detect idle agents
+_prev_agent_msgs: Dict[str, int] = {}
+
+
+def _unique_tail(items: list, n: int, key_fn=None) -> list:
+    """Return up to *n* items from the tail of *items*, skipping consecutive duplicates."""
+    result: list = []
+    prev_key = None
+    for item in reversed(items):
+        k = key_fn(item) if key_fn else item
+        if k == prev_key:
+            continue
+        result.append(item)
+        prev_key = k
+        if len(result) >= n:
+            break
+    result.reverse()
+    return result
+
+
+async def _terminal_telemetry_loop(interval: float = 30.0) -> None:
+    """Background loop that prints agent heartbeats, recent trades,
+    and consensus explainability to the terminal every *interval* seconds."""
+
+    await asyncio.sleep(10.0)  # let startup finish before first tick
+
+    while True:
+        try:
+            # ── 1. Agent heartbeats ─────────────────────────────────
+            try:
+                from agents.agent_framework import get_agent_registry
+                registry = get_agent_registry()
+                agents = registry.get_all_agents()
+                if agents:
+                    lines = []
+                    for a in agents:
+                        m = a.get_metrics()
+                        raw_status = a.status.value if hasattr(a.status, "value") else str(a.status)
+                        uptime_m = int(m.uptime_seconds // 60)
+                        # Derive effective status: if nominally active but
+                        # zero new messages since last tick → idle
+                        total_msgs = m.messages_sent + m.messages_received
+                        prev = _prev_agent_msgs.get(a.agent_id, 0)
+                        if raw_status == "active" and total_msgs == prev and m.decisions_made == 0:
+                            effective = "idle"
+                        else:
+                            effective = raw_status
+                        _prev_agent_msgs[a.agent_id] = total_msgs
+                        lines.append(
+                            f"  {a.agent_id:<28s} status={effective:<10s} "
+                            f"msgs={m.messages_sent}/{m.messages_received} "
+                            f"decisions={m.decisions_made} errors={m.errors} "
+                            f"up={uptime_m}m"
+                        )
+                    _telem_logger.info(
+                        "🫀 AGENT HEARTBEATS (%d agents):\n%s",
+                        len(agents), "\n".join(lines),
+                    )
+            except Exception as exc:
+                _telem_logger.debug("Heartbeat collection failed: %s", exc)
+
+            # ── 2. Recent trading activity ──────────────────────────
+            try:
+                from trading.paper_trading import get_paper_engine
+                engine = get_paper_engine()
+                uid = next(iter(engine.portfolios), "default")
+                portfolio = engine.get_portfolio(uid)
+                recent = portfolio.trade_history[-5:]
+                if recent:
+                    lines = []
+                    for o in reversed(recent):
+                        side_str = o.side.value if hasattr(o.side, "value") else str(o.side)
+                        status_str = o.status.value if hasattr(o.status, "value") else str(o.status)
+                        lines.append(
+                            f"  {side_str.upper():<6s} {o.asset:<12s} "
+                            f"${o.size_usd:>10.2f} @ {o.fill_price or 0:>10.4f}  "
+                            f"status={status_str.upper()}"
+                        )
+                    _telem_logger.info(
+                        "📊 RECENT TRADES (last %d):\n%s",
+                        len(recent), "\n".join(lines),
+                    )
+                    stats = engine.get_portfolio_stats(uid)
+                    closed = stats.get("winning_trades", 0) + stats.get("losing_trades", 0)
+                    # Only show win rate when there are closed trades to measure
+                    if closed > 0:
+                        wr_str = f" | win_rate={stats['win_rate_pct']:.1f}% ({closed} closed)"
+                    else:
+                        wr_str = " | win_rate=N/A (no closed trades)"
+                    _telem_logger.info(
+                        "💰 PORTFOLIO: equity=$%.2f | realized=$%.2f | unrealized=$%.2f | trades=%d%s",
+                        stats.get("equity", stats.get("current_balance", 0)),
+                        stats.get("total_pnl", 0) - stats.get("total_unrealized_pnl", 0),
+                        stats.get("total_unrealized_pnl", 0),
+                        stats.get("total_trades", 0),
+                        wr_str,
+                    )
+            except Exception as exc:
+                _telem_logger.debug("Trade log collection failed: %s", exc)
+
+            # ── 3. Consensus explainability ─────────────────────────
+            try:
+                from core.consensus_store import get_consensus_store
+                store = get_consensus_store()
+                raw_opinions = store.list_opinions(limit=20)
+                raw_plans = store.list_plans(limit=10)
+
+                # De-dup consecutive identical opinions/plans
+                recent_opinions = _unique_tail(
+                    raw_opinions, 5,
+                    key_fn=lambda o: (o.agent_id, o.symbol, o.stance),
+                )
+                recent_plans = _unique_tail(
+                    raw_plans, 3,
+                    key_fn=lambda p: (p.symbol, p.direction, p.status),
+                )
+
+                if recent_opinions:
+                    lines = []
+                    for op in recent_opinions:
+                        agent = op.agent_id or op.agent_name or "?"
+                        market = (op.symbol or "?")[:30]
+                        stance = op.stance or "neutral"
+                        conf = op.confidence
+                        reason = (op.reasoning or "")[:60]
+                        lines.append(
+                            f"  {agent:<20s} {market:<30s} {stance:<10s} "
+                            f"conf={conf:.2f}  {reason}"
+                        )
+                    _telem_logger.info(
+                        "🧠 CONSENSUS OPINIONS (%d unique):\n%s",
+                        len(recent_opinions), "\n".join(lines),
+                    )
+                if recent_plans:
+                    lines = []
+                    for plan in recent_plans:
+                        direction = (plan.direction or "?").upper()
+                        market = (plan.symbol or "?")[:25]
+                        conf = plan.confidence
+                        score = plan.consensus_score
+                        status = plan.status or "?"
+                        lines.append(
+                            f"  {direction:<6s} {market:<25s} "
+                            f"confidence={conf:.2f} consensus={score:.2f} "
+                            f"status={status}"
+                        )
+                    _telem_logger.info(
+                        "📋 CONSENSUS TRADE PLANS (%d unique):\n%s",
+                        len(recent_plans), "\n".join(lines),
+                    )
+            except Exception as exc:
+                _telem_logger.debug("Consensus log collection failed: %s", exc)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            _telem_logger.error("Telemetry loop error: %s", exc)
+
+        await asyncio.sleep(interval)
+
+
+# ════════════════════════════════════════════════
 # LIFESPAN — replaces all @on_event("startup") / @on_event("shutdown")
 # ════════════════════════════════════════════════
 
@@ -1413,6 +1653,73 @@ async def _app_lifespan(application: FastAPI):
             raise ValueError(f"Missing required production settings: {', '.join(missing)}")
         logger.info("✅ Production validation passed")
 
+    # ── Fresh Start: wipe transient state across all subsystems ────────
+    from core.fresh_start import is_fresh_start, assert_safe_for_fresh_start
+    assert_safe_for_fresh_start()  # hard crash if LIVE + FRESH_START
+    if is_fresh_start():
+        logger.warning("=" * 60)
+        logger.warning("🧹 FRESH START MODE — wiping all transient state")
+        logger.warning("=" * 60)
+
+        # 1. Consensus store (SQLite opinions + plans)
+        try:
+            from core.consensus_store import get_consensus_store
+            get_consensus_store().reset_all()
+        except Exception as exc:
+            logger.warning("Fresh-start: consensus store reset failed: %s", exc)
+
+        # 2. Risk controller (zero daily PnL, keep kill-switch)
+        try:
+            from merid.risk import risk_controller
+            risk_controller.reset_daily_counters()
+        except Exception as exc:
+            logger.warning("Fresh-start: risk controller reset failed: %s", exc)
+
+        # 3. Operator equity buffer
+        try:
+            from web.api.operator import reset_equity_buffer
+            reset_equity_buffer()
+        except Exception as exc:
+            logger.warning("Fresh-start: equity buffer reset failed: %s", exc)
+
+        # 4. Drift detector (in-memory CQI / outcomes)
+        try:
+            from merid.signals.drift import get_drift_detector
+            get_drift_detector().reset()
+        except Exception as exc:
+            logger.warning("Fresh-start: drift detector reset failed: %s", exc)
+
+        # 5. Signal store (SQLite drift_metrics, cqi_history, arb tables)
+        try:
+            from merid.signals.store import get_signal_store
+            get_signal_store().reset_all()
+        except Exception as exc:
+            logger.warning("Fresh-start: signal store reset failed: %s", exc)
+
+        # 6. Prediction consensus DB
+        try:
+            from pathlib import Path as _FsPath
+            pred_db = _FsPath(__file__).resolve().parent.parent / "data" / "prediction_consensus.db"
+            if pred_db.exists():
+                import sqlite3
+                with sqlite3.connect(str(pred_db)) as _pc:
+                    for tbl in _pc.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+                        _pc.execute(f"DELETE FROM [{tbl[0]}]")
+                logger.info("Fresh-start: prediction_consensus.db truncated")
+        except Exception as exc:
+            logger.warning("Fresh-start: prediction consensus reset failed: %s", exc)
+
+        # 7. Run any additional registered hooks
+        from core.fresh_start import run_reset_hooks
+        hook_count = run_reset_hooks()
+        if hook_count:
+            logger.info("Fresh-start: ran %d additional reset hooks", hook_count)
+
+        logger.warning(
+            "🔥 MERID FRESH START: all paper/consensus/signals/equity state reset. "
+            "Kill switch state preserved. Historical audit logs untouched."
+        )
+
     logger.info("Phase 1: Initializing core systems...")
     try:
         from core.consensus_engine import get_consensus_engine
@@ -1451,10 +1758,9 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["services"]["data_persistence"] = {"status": "failed", "error": str(e)}
 
     try:
-        from agents.reflection_layer import get_reflection_system
-        reflection = get_reflection_system()
-        reflection_count = len(reflection._reflections)
-        agent_count = len(reflection._agent_stats)
+        from agents.reflection_layer import reflection_layer
+        reflection_count = len(reflection_layer._reflections)
+        agent_count = len(reflection_layer._agent_stats)
         logger.info(f"✅ Reflection layer: {reflection_count} reflections, {agent_count} agents")
         _startup_state["services"]["reflection"] = {"status": "running", "started_at": time.time()}
     except Exception as e:
@@ -1464,7 +1770,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from monitoring.brier_metrics import get_brier_tracker
         brier = get_brier_tracker()
-        prediction_count = len(brier.predictions)
+        prediction_count = len(brier._predictions)
         logger.info(f"✅ Brier metrics: {prediction_count} predictions tracked")
         _startup_state["services"]["brier_metrics"] = {"status": "running", "started_at": time.time()}
     except Exception as e:
@@ -1522,6 +1828,77 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Agent orchestrator started")
         _startup_state["services"]["agent_orchestrator"] = {"status": "running", "started_at": time.time()}
+
+        # Bridge orchestrator agents into the framework AgentRegistry so the
+        # /api/agents/* endpoints report real agent instances instead of
+        # falling back to the static manifest.
+        try:
+            from agents.agent_framework import (
+                get_agent_registry, Agent, AgentRole, AgentStatus, AgentCapability,
+            )
+
+            class _BridgeAgent(Agent):
+                """Lightweight proxy that exposes an orchestrator agent in the framework registry."""
+                async def process_message(self, message):
+                    return None
+                async def make_decision(self, context):
+                    return {"action": "none"}
+
+            _ORCH_ROLE_MAP = {
+                "TWITTER": AgentRole.RESEARCH_SIGNAL,
+                "TELEGRAM": AgentRole.RESEARCH_SIGNAL,
+                "NEWS_MONITOR": AgentRole.RESEARCH_SIGNAL,
+                "ARBITRAGE": AgentRole.SNIPER_ARBITRAGE,
+                "EXECUTION": AgentRole.EXECUTION,
+                "SLIPPAGE": AgentRole.RISK,
+                "PRICE_FEED": AgentRole.ANOMALY_DETECTION,
+            }
+
+            registry = get_agent_registry()
+            for role_enum, agent_obj in orchestrator.agents.items():
+                agent_name = role_enum.name  # e.g. "TWITTER"
+                fw_role = _ORCH_ROLE_MAP.get(agent_name, AgentRole.RESEARCH_SIGNAL)
+                bridge = _BridgeAgent(
+                    agent_id=f"orch-{agent_name.lower()}",
+                    role=fw_role,
+                    capabilities=[AgentCapability(
+                        name=agent_name.lower(),
+                        description=f"Orchestrator {agent_name} agent",
+                        input_schema={}, output_schema={},
+                    )],
+                )
+                enabled = getattr(agent_obj, "enabled", True)
+                bridge.status = AgentStatus.ACTIVE if enabled else AgentStatus.PAUSED
+                bridge._running = True
+                registry.register(bridge)
+            logger.info("✅ Bridged %d orchestrator agents into framework registry", len(orchestrator.agents))
+        except Exception as bridge_err:
+            logger.warning("Agent bridge failed: %s", bridge_err, exc_info=True)
+
+        # Initialize guardrails: register built-in tools + capability maps
+        try:
+            import merid.guardrails.builtin_tools  # noqa: F401 — auto-registers tools
+            from merid.guardrails.capabilities import get_capability_store
+
+            _ORCH_PROFILE_MAP = {
+                "TWITTER": "research",
+                "TELEGRAM": "research",
+                "NEWS_MONITOR": "research",
+                "PRICE_FEED": "research",
+                "ARBITRAGE": "trading",
+                "EXECUTION": "trading",
+                "SLIPPAGE": "risk",
+            }
+            cap_store = get_capability_store()
+            for role_enum in orchestrator.agents:
+                agent_name = role_enum.name
+                profile = _ORCH_PROFILE_MAP.get(agent_name, "research")
+                cap_store.register_from_profile(f"orch-{agent_name.lower()}", profile)
+            logger.info("✅ Guardrails initialized: %d tools, %d agent capability maps",
+                        len(cap_store.list_agents()), len(cap_store.list_agents()))
+        except Exception as guard_err:
+            logger.warning("Guardrails init failed: %s", guard_err, exc_info=True)
+
     except Exception as e:
         logger.warning(f"⚠️  Agent orchestrator failed: {e}")
         _startup_state["services"]["agent_orchestrator"] = {"status": "failed", "error": str(e)}
@@ -1530,17 +1907,9 @@ async def _app_lifespan(application: FastAPI):
     try:
         from trading.execution import get_optimal_executor
         execution = get_optimal_executor()
-        task = asyncio.create_task(execution.start())
-        _startup_state["background_tasks"].append(task)
-        # Wire execution engine to live price feed
-        try:
-            price_feed = get_live_price_feed()
-            def on_execution_price_update(price_data):
-                execution.update_price(price_data.symbol, price_data.price)
-            price_feed.subscribe(on_execution_price_update)
-            logger.info("✅ Execution engine started + wired to price feed")
-        except Exception:
-            logger.info("✅ Execution engine started (price feed wire skipped)")
+        status = execution.get_status()
+        logger.info("✅ Execution engine ready (plans: %d, active: %d)",
+                     status["total_plans"], status["active_plans"])
         _startup_state["services"]["execution"] = {"status": "running", "started_at": time.time()}
     except Exception as e:
         logger.warning(f"⚠️  Execution engine failed: {e}")
@@ -1671,11 +2040,33 @@ async def _app_lifespan(application: FastAPI):
     logger.info("🚀 MERID STARTUP COMPLETE - System Ready")
     logger.info("=" * 80)
 
+    # ── Start periodic reconciliation ──────────────────────────────────
+    try:
+        from trading.reconciliation import start_periodic_reconciliation
+        start_periodic_reconciliation(interval_seconds=300.0)
+    except Exception as exc:
+        logger.debug("Reconciliation loop not started: %s", exc)
+
+    # ── Start terminal telemetry loop (heartbeats, trades, consensus) ─
+    _telemetry_task = asyncio.create_task(_terminal_telemetry_loop())
+    _startup_state["background_tasks"].append(_telemetry_task)
+    logger.info("✅ Terminal telemetry loop started (heartbeats + trades + consensus)")
+
     # ── YIELD — app is running ─────────────────────────────────────────
     yield
 
     # ── SHUTDOWN ───────────────────────────────────────────────────────
     logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
+
+    # Final reconciliation + save paper state
+    try:
+        from trading.reconciliation import run_reconciliation, stop_periodic_reconciliation
+        stop_periodic_reconciliation()
+        report = run_reconciliation()
+        logger.info("Shutdown reconciliation: all_ok=%s hash=%s", report.all_ok, report.snapshot_hash[:12])
+    except Exception as exc:
+        logger.debug("Shutdown reconciliation skipped: %s", exc)
+
     for task in _startup_state.get("background_tasks", []):
         if not task.done():
             task.cancel()

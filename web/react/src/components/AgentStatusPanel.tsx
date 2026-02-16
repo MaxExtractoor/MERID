@@ -19,6 +19,7 @@ import {
   Shield,
   Clock
 } from 'lucide-react';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface AgentStatus {
   agent_id: string;
@@ -66,7 +67,6 @@ const ROLE_TEXT_COLORS: Record<string, string> = {
 };
 
 export default function AgentStatusPanel({
-  compact: _compact = false,
   showMetrics = true,
   onAgentSelect,
 }: AgentStatusPanelProps) {
@@ -77,13 +77,13 @@ export default function AgentStatusPanel({
   // Fetch agent metrics
   const fetchAgents = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/risk-metrics/agents');
+      const res = await fetch(API_ENDPOINTS.RISK_AGENTS);
       if (res.ok) {
         const data = await res.json();
         
         // Convert to AgentStatus with heartbeat-based status
         const now = Date.now() / 1000;
-        const agentStatuses: AgentStatus[] = (data.agents || []).map((a: any) => {
+        const agentStatuses: AgentStatus[] = (data.agents || []).map((a: Record<string, unknown>) => {
           const timeSinceUpdate = now - (a.last_updated || 0);
           let status: 'online' | 'degraded' | 'offline' = 'online';
           
@@ -111,8 +111,8 @@ export default function AgentStatusPanel({
 
         setAgents(agentStatuses);
       }
-    } catch (err) {
-      console.error('Failed to fetch agent status:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     } finally {
       setLoading(false);
     }
@@ -120,7 +120,7 @@ export default function AgentStatusPanel({
 
   useEffect(() => {
     fetchAgents();
-    const interval = setInterval(fetchAgents, 5000);
+    const interval = setInterval(fetchAgents, DEFAULTS.POLLING_INTERVALS.STANDARD);
     return () => clearInterval(interval);
   }, [fetchAgents]);
 
@@ -233,7 +233,7 @@ export default function AgentStatusPanel({
             </span>
           </div>
 
-          <button
+          <button type="button"
             onClick={fetchAgents}
             className="p-1.5 hover:bg-slate-700/50 rounded transition-colors"
             title="Refresh agent status"
@@ -260,7 +260,7 @@ export default function AgentStatusPanel({
                 selectedAgent === agent.agent_id ? 'bg-slate-800/70' : ''
               } ${ROLE_COLORS[agent.role] || ROLE_COLORS.analyst}`}
               onClick={() => handleAgentClick(agent.agent_id)}
-            >
+             role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => handleAgentClick(agent.agent_id))(); } }}>
               {/* Agent Header */}
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
