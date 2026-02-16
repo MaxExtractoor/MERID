@@ -13,6 +13,7 @@ describe('useOpenOrders', () => {
   const mockOn = jest.fn();
   const mockOff = jest.fn();
   const mockEmit = jest.fn();
+  const apiBase = { rawResponse: null, isStub: false, stubMessage: '' };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -31,6 +32,7 @@ describe('useOpenOrders', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useOpenOrders());
@@ -75,6 +77,7 @@ describe('useOpenOrders', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useOpenOrders());
@@ -116,6 +119,7 @@ describe('useOpenOrders', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useOpenOrders());
@@ -147,8 +151,8 @@ describe('useOpenOrders', () => {
 
     await waitFor(() => {
       expect(result.current.rows).toHaveLength(2);
-      expect(result.current.meta.total).toBe(2);
     });
+    expect(result.current.meta.total).toBe(2);
   });
 
   it('handles WebSocket order:updated event (partial fill)', async () => {
@@ -182,6 +186,7 @@ describe('useOpenOrders', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useOpenOrders());
@@ -199,10 +204,10 @@ describe('useOpenOrders', () => {
 
     await waitFor(() => {
       expect(result.current.rows[0].status).toBe('PARTIALLY_FILLED');
-      expect(result.current.rows[0].filledSize).toBe(0.5);
-      expect(result.current.meta.partiallyFilled).toBe(1);
-      expect(result.current.meta.pending).toBe(0);
     });
+    expect(result.current.rows[0].filledSize).toBe(0.5);
+    expect(result.current.meta.partiallyFilled).toBe(1);
+    expect(result.current.meta.pending).toBe(0);
   });
 
   it('handles WebSocket order:canceled event', async () => {
@@ -236,6 +241,7 @@ describe('useOpenOrders', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useOpenOrders());
@@ -262,6 +268,7 @@ describe('useOpenOrders', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useOpenOrders());
@@ -276,6 +283,7 @@ describe('useOpenOrders', () => {
       error: new Error('Network error'),
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useOpenOrders());

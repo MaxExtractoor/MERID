@@ -1,8 +1,9 @@
+/* eslint-disable react-refresh/only-export-components */
 import React from 'react';
 
 interface DataGuardProps {
   /** The API response object — checks for _stub flag */
-  data: any;
+  data: unknown;
   /** Label shown when data is a stub */
   label?: string;
   /** Whether to still render children behind the overlay (greyed out) */
@@ -21,8 +22,11 @@ interface DataGuardProps {
  *   </DataGuard>
  */
 export function DataGuard({ data, label, showSkeleton = true, children }: DataGuardProps) {
-  const isStub = data?._stub === true;
-  const stubMessage = data?._stub_message || 'No live data available';
+  const stubData = typeof data === 'object' && data !== null
+    ? (data as { _stub?: boolean; _stub_message?: string; _implementation_status?: string })
+    : ({} as { _stub?: boolean; _stub_message?: string; _implementation_status?: string });
+  const isStub = stubData._stub === true;
+  const stubMessage = stubData._stub_message || 'No live data available';
 
   if (!isStub) {
     return <>{children}</>;
@@ -57,8 +61,11 @@ export function DataGuard({ data, label, showSkeleton = true, children }: DataGu
  * Inline stub badge — for use in table cells, card headers, etc.
  * Shows a small "STUB" pill when data is from a stub endpoint.
  */
-export function StubBadge({ data, className = '' }: { data: any; className?: string }) {
-  if (!data?._stub) return null;
+export function StubBadge({ data, className = '' }: { data: unknown; className?: string }) {
+  const stubData = typeof data === 'object' && data !== null
+    ? (data as { _stub?: boolean })
+    : ({} as { _stub?: boolean });
+  if (!stubData._stub) return null;
   return (
     <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-900/40 text-yellow-500 border border-yellow-700/30 ${className}`}>
       <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
@@ -71,12 +78,15 @@ export function StubBadge({ data, className = '' }: { data: any; className?: str
  * Hook to check if any API response contains stub data.
  * Returns { isStub, message, dataMode }
  */
-export function useDataMode(data: any) {
+export function useDataMode(data: unknown) {
+  const stubData = typeof data === 'object' && data !== null
+    ? (data as { _stub?: boolean; _stub_message?: string; _implementation_status?: string })
+    : ({} as { _stub?: boolean; _stub_message?: string; _implementation_status?: string });
   return {
-    isStub: data?._stub === true,
-    message: data?._stub_message || '',
-    dataMode: data?._stub ? 'offline' as const : 'live' as const,
-    implementationStatus: data?._implementation_status || 'LIVE',
+    isStub: stubData._stub === true,
+    message: stubData._stub_message || '',
+    dataMode: stubData._stub ? 'offline' as const : 'live' as const,
+    implementationStatus: stubData._implementation_status || 'LIVE',
   };
 }
 

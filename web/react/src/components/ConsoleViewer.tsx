@@ -1,18 +1,20 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, PauseCircle, Trash, Copy, RefreshCw, Terminal } from 'lucide-react';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface ConsoleMessage {
   id: string;
   timestamp: Date;
   type: 'api' | 'ws' | 'log' | 'error';
   source: string;
-  data: any;
+  data: unknown;
 }
 
 export default function ConsoleViewer() {
   const [messages, setMessages] = useState<ConsoleMessage[]>([]);
   const [isPaused, setIsPaused] = useState(false);
-  const [selectedMode, setSelectedMode] = useState<'prime' | 'orders' | 'risk' | 'logs'>('prime');
+  type ConsoleMode = 'prime' | 'orders' | 'risk' | 'logs';
+  const [selectedMode, setSelectedMode] = useState<ConsoleMode>('prime');
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -30,23 +32,8 @@ export default function ConsoleViewer() {
     }
   }, [messages, isPaused]);
 
-  // Fetch Prime API data
-  const fetchPrimeData = async () => {
-    setIsLoading(true);
-    try {
-      const response = await fetch('/api/prime/status');
-      if (response.ok) {
-        const data = await response.json();
-        addMessage('api', 'Prime API', data);
-      }
-    } catch (error) {
-      addMessage('error', 'Prime API', { error: 'Failed to fetch' });
-    }
-    setIsLoading(false);
-  };
-
   // Add message to console
-  const addMessage = (type: ConsoleMessage['type'], source: string, data: any) => {
+  const addMessage = useCallback((type: ConsoleMessage['type'], source: string, data: unknown) => {
     if (isPaused) return;
     
     const newMessage: ConsoleMessage = {
@@ -58,7 +45,22 @@ export default function ConsoleViewer() {
     };
     
     setMessages(prev => [...prev.slice(-99), newMessage]); // Keep last 100
-  };
+  }, [isPaused]);
+
+  // Fetch Prime API data
+  const fetchPrimeData = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const response = await fetch(API_ENDPOINTS.PRIME_STATUS);
+      if (response.ok) {
+        const data = await response.json();
+        addMessage('api', 'Prime API', data);
+      }
+    } catch {
+      addMessage('error', 'Prime API', { error: 'Failed to fetch' });
+    }
+    setIsLoading(false);
+  }, [addMessage]);
 
   // WebSocket connection for real-time data
   useEffect(() => {
@@ -70,7 +72,7 @@ export default function ConsoleViewer() {
         try {
           const data = JSON.parse(event.data);
           addMessage('ws', selectedMode.toUpperCase(), data);
-        } catch (e) {
+        } catch {
           addMessage('ws', selectedMode.toUpperCase(), { raw: event.data });
         }
       };
@@ -83,16 +85,16 @@ export default function ConsoleViewer() {
         wsRef.current?.close();
       };
     }
-  }, [selectedMode]);
+  }, [selectedMode, addMessage]);
 
   // Polling for Prime and Logs modes - reduced frequency
   useEffect(() => {
     if (selectedMode === 'prime') {
       fetchPrimeData();
-      const interval = setInterval(fetchPrimeData, 30000); // Poll every 30s instead of 5s
+      const interval = setInterval(fetchPrimeData, DEFAULTS.POLLING_INTERVALS.BACKGROUND); // Poll every 30s instead of 5s
       return () => clearInterval(interval);
     }
-  }, [selectedMode]);
+  }, [selectedMode, fetchPrimeData]);
 
   const clearConsole = () => setMessages([]);
   
@@ -122,7 +124,7 @@ export default function ConsoleViewer() {
     }
   };
 
-  const renderJSON = (data: any, level: number = 0): JSX.Element => {
+  const renderJSON = (data: unknown, level = 0): JSX.Element => {
     if (data === null) return <span className="text-slate-500">null</span>;
     if (typeof data === 'boolean') return <span className="text-amber-400">{data.toString()}</span>;
     if (typeof data === 'number') return <span className="text-cyan-400">{data}</span>;
@@ -172,10 +174,13 @@ export default function ConsoleViewer() {
           <Terminal className="w-4 h-4 text-slate-400" />
           <span className="text-sm font-medium text-slate-300">Console</span>
           
-          <select
+          <select aria-label="Console"
+            id="console-mode"
+            name="consoleMode"
+            title="Select console mode"
             value={selectedMode}
             onChange={(e) => {
-              setSelectedMode(e.target.value as any);
+              setSelectedMode(e.target.value as ConsoleMode);
               clearConsole();
             }}
             className="ml-4 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:outline-none focus:border-blue-500"
@@ -186,7 +191,8 @@ export default function ConsoleViewer() {
             <option value="logs">System Logs</option>
           </select>
           
-          <button
+          <button type="button"
+            title="Refresh console data"
             onClick={() => {
               if (selectedMode === 'prime') fetchPrimeData();
             }}
@@ -198,7 +204,7 @@ export default function ConsoleViewer() {
         </div>
         
         <div className="flex items-center gap-2">
-          <button
+          <button type="button"
             onClick={() => setIsPaused(!isPaused)}
             className={`p-1.5 rounded transition-colors ${isPaused ? 'bg-amber-500/20 text-amber-400' : 'hover:bg-slate-800 text-slate-400'}`}
             title={isPaused ? 'Resume' : 'Pause'}
@@ -206,19 +212,19 @@ export default function ConsoleViewer() {
             {isPaused ? <Play className="w-4 h-4" /> : <PauseCircle className="w-4 h-4" />}
           </button>
           
-          <button
+          <button type="button"
             onClick={copyToClipboard}
             className="p-1.5 rounded hover:bg-slate-800 text-slate-400 transition-colors"
             title="Copy to clipboard"
-          >
+           aria-label="Copy">
             <Copy className="w-4 h-4" />
           </button>
           
-          <button
+          <button type="button"
             onClick={clearConsole}
             className="p-1.5 rounded hover:bg-slate-800 text-slate-400 transition-colors"
             title="Clear console"
-          >
+           aria-label="Delete">
             <Trash className="w-4 h-4" />
           </button>
         </div>

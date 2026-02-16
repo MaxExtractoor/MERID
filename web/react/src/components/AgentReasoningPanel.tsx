@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Brain, Search, TrendingUp, AlertCircle, RefreshCw, Clock, Zap, Target } from 'lucide-react';
+import { DEFAULTS } from '../config/constants';
 
 interface AgentDecision {
   timestamp: number;
@@ -58,22 +59,21 @@ export default function AgentReasoningPanel({ agentId, className = '' }: AgentRe
                 setActivity(prev => [decision, ...prev].slice(0, 20));
               }
             }
-          } catch (err) {
-            console.error('Failed to parse WebSocket message:', err);
-          }
+          } catch {
+      // Operation failed — UI state unchanged
+    }
         };
 
-        ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
+        ws.onerror = () => {
           setError('WebSocket connection error');
         };
 
         ws.onclose = () => {
           setWsConnected(false);
           // Attempt reconnection after 5 seconds
-          reconnectTimeout = setTimeout(connectWebSocket, 5000);
+          reconnectTimeout = setTimeout(connectWebSocket, DEFAULTS.POLLING_INTERVALS.STANDARD);
         };
-      } catch (err) {
+      } catch {
         setError('Failed to connect to agent stream');
         setLoading(false);
       }

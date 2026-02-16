@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Target, TrendingUp, TrendingDown, Award, RefreshCw, AlertCircle } from 'lucide-react';
+import { DEFAULTS } from "../config/constants";
 
 interface BrierScore {
   agent_name: string;
@@ -43,13 +44,7 @@ export default function BrierMetricsPanel({ className = '' }: BrierMetricsPanelP
   const [error, setError] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string>('all');
 
-  useEffect(() => {
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, 30000);
-    return () => clearInterval(interval);
-  }, [selectedAgent]);
-
-  const fetchMetrics = async () => {
+  const fetchMetrics = useCallback(async () => {
     try {
       const url = selectedAgent === 'all'
         ? '/api/v1/metrics/brier'
@@ -69,7 +64,13 @@ export default function BrierMetricsPanel({ className = '' }: BrierMetricsPanelP
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedAgent]);
+
+  useEffect(() => {
+    fetchMetrics();
+    const interval = setInterval(fetchMetrics, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
+    return () => clearInterval(interval);
+  }, [fetchMetrics]);
 
   const getScoreColor = (score: number) => {
     if (score <= 0.15) return 'text-green-400';
@@ -117,7 +118,9 @@ export default function BrierMetricsPanel({ className = '' }: BrierMetricsPanelP
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <select
+          <select aria-label="Selected Agent"
+            id="brier-agent-filter"
+            name="agentFilter"
             value={selectedAgent}
             onChange={(e) => setSelectedAgent(e.target.value)}
             className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
@@ -129,11 +132,11 @@ export default function BrierMetricsPanel({ className = '' }: BrierMetricsPanelP
               </option>
             ))}
           </select>
-          <button
+          <button type="button"
             onClick={fetchMetrics}
             className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
             title="Refresh metrics"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4 text-gray-400" />
           </button>
         </div>

@@ -4,8 +4,15 @@ import { useApiData } from '../useApiData';
 // Mock fetch
 global.fetch = jest.fn();
 
+interface TestOptions {
+  pollingInterval?: number;
+  initialData?: unknown;
+  enabled?: boolean;
+  transform?: (data: unknown) => unknown;
+}
+
 // Test component wrapper
-function TestComponent({ endpoint, options }: { endpoint: string; options?: any }) {
+function TestComponent({ endpoint, options }: { endpoint: string; options?: TestOptions }) {
   const result = useApiData(endpoint, options);
   return (
     <div>
@@ -40,9 +47,11 @@ describe('useApiData', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('loading')).toHaveTextContent('loaded');
-      expect(screen.getByTestId('data')).toHaveTextContent(JSON.stringify(mockData));
-      expect(screen.getByTestId('error')).toHaveTextContent('no error');
     });
+    await waitFor(() => {
+      expect(screen.getByTestId('data')).toHaveTextContent(JSON.stringify(mockData));
+    });
+    expect(screen.getByTestId('error')).toHaveTextContent('no error');
   });
 
   it('handles fetch error', async () => {
@@ -53,9 +62,11 @@ describe('useApiData', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('loading')).toHaveTextContent('loaded');
-      expect(screen.getByTestId('data')).toHaveTextContent('null');
-      expect(screen.getByTestId('error')).toHaveTextContent('Network error');
     });
+    await waitFor(() => {
+      expect(screen.getByTestId('data')).toHaveTextContent('null');
+    });
+    expect(screen.getByTestId('error')).toHaveTextContent('Network error');
   });
 
   it('handles polling', async () => {
@@ -69,6 +80,8 @@ describe('useApiData', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('loading')).toHaveTextContent('loaded');
+    });
+    await waitFor(() => {
       expect(screen.getByTestId('data')).toHaveTextContent(JSON.stringify(mockData));
     });
   });
@@ -83,7 +96,12 @@ describe('useApiData', () => {
     render(<TestComponent 
       endpoint="/api/test" 
       options={{
-        transform: (data: any) => ({ doubled: data.value * 2 })
+        transform: (data: unknown) => {
+          const value = typeof data === 'object' && data !== null && 'value' in data
+            ? (data as { value?: number }).value
+            : undefined;
+          return { doubled: typeof value === 'number' ? value * 2 : 0 };
+        }
       }} 
     />);
 

@@ -15,6 +15,7 @@ describe('usePredictions', () => {
 
   const mockOn = jest.fn();
   const mockOff = jest.fn();
+  const apiBase = { rawResponse: null, isStub: false, stubMessage: '' };
 
   const mockMarket: PredictionMarket = {
     id: 'market-1',
@@ -49,9 +50,9 @@ describe('usePredictions', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    jest.spyOn(console, 'log').mockImplementation(() => {});
-    jest.spyOn(console, 'warn').mockImplementation(() => {});
-    jest.spyOn(console, 'error').mockImplementation(() => {});
+    jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
 
     mockUseMeridSocket.mockReturnValue({
       socket: {
@@ -75,6 +76,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => usePredictions());
@@ -93,6 +95,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => usePredictions());
@@ -114,6 +117,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => usePredictions());
@@ -128,6 +132,7 @@ describe('usePredictions', () => {
       error: new Error('Network error'),
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => usePredictions());
@@ -142,6 +147,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     renderHook(() => usePredictions());
@@ -157,6 +163,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { unmount } = renderHook(() => usePredictions());
@@ -173,6 +180,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => usePredictions());
@@ -202,8 +210,8 @@ describe('usePredictions', () => {
 
     await waitFor(() => {
       expect(result.current.markets[0].yesPrice).toBe(0.7);
-      expect(result.current.markets[0].volume).toBe(1600000);
     });
+    expect(result.current.markets[0].volume).toBe(1600000);
   });
 
   it('should update market on resolution event', async () => {
@@ -213,6 +221,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => usePredictions());
@@ -242,8 +251,8 @@ describe('usePredictions', () => {
 
     await waitFor(() => {
       expect(result.current.markets[0].status).toBe('RESOLVED');
-      expect(result.current.markets[0].ourPnl).toBe(450);
     });
+    expect(result.current.markets[0].ourPnl).toBe(450);
   });
 
   it('should handle invalid WebSocket payload gracefully', async () => {
@@ -253,6 +262,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     renderHook(() => usePredictions());
@@ -292,6 +302,7 @@ describe('usePredictions', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => usePredictions());

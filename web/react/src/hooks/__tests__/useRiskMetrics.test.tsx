@@ -13,6 +13,7 @@ describe('useRiskMetrics', () => {
   const mockOn = jest.fn();
   const mockOff = jest.fn();
   const mockEmit = jest.fn();
+  const apiBase = { rawResponse: null, isStub: false, stubMessage: '' };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -31,6 +32,7 @@ describe('useRiskMetrics', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
@@ -70,6 +72,7 @@ describe('useRiskMetrics', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
@@ -95,6 +98,7 @@ describe('useRiskMetrics', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
@@ -117,6 +121,7 @@ describe('useRiskMetrics', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
@@ -137,9 +142,9 @@ describe('useRiskMetrics', () => {
 
     await waitFor(() => {
       expect(result.current.alerts).toHaveLength(1);
-      expect(result.current.alerts[0].metric).toBe('marginUtilization');
-      expect(result.current.alerts[0].severity).toBe('CRITICAL');
     });
+    expect(result.current.alerts[0].metric).toBe('marginUtilization');
+    expect(result.current.alerts[0].severity).toBe('CRITICAL');
   });
 
   it('handles WebSocket exposure_changed event', async () => {
@@ -159,6 +164,7 @@ describe('useRiskMetrics', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
@@ -194,6 +200,7 @@ describe('useRiskMetrics', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
@@ -221,6 +228,7 @@ describe('useRiskMetrics', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
@@ -235,6 +243,7 @@ describe('useRiskMetrics', () => {
       error: new Error('Network error'),
       refetch: jest.fn(),
       lastUpdated: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
@@ -258,6 +267,7 @@ describe('useRiskMetrics', () => {
       error: null,
       refetch: jest.fn(),
       lastUpdated: new Date(),
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useRiskMetrics());
