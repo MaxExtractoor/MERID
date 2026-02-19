@@ -157,7 +157,9 @@ class AgentGrid:
         )
 
     async def stop(self) -> None:
-        """Gracefully stop all agents."""
+        """Gracefully stop all agents (idempotent)."""
+        if not self._running:
+            return
         self._running = False
 
         # Stop market catalog
