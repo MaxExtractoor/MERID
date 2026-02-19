@@ -16,7 +16,7 @@ import {
   ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -107,9 +107,16 @@ const PublishPipelinePanel: React.FC = () => {
     setTriggering(true);
     setTriggerMsg(null);
     try {
+      const token = localStorage.getItem('merid-access');
       const res = await fetch(
-        `${API_ENDPOINTS.KALSHI_PUBLISH_PIPELINE_TRIGGER}?ticker=${encodeURIComponent(triggerTicker)}&category=${encodeURIComponent(triggerCategory)}`,
-        { method: 'POST' },
+        `${API_BASE_URL}${API_ENDPOINTS.KALSHI_PUBLISH_PIPELINE_TRIGGER}?ticker=${encodeURIComponent(triggerTicker)}&category=${encodeURIComponent(triggerCategory)}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        },
       );
       const json = await res.json().catch(() => ({}));
       if (res.ok) {
