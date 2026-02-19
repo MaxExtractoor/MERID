@@ -2174,7 +2174,37 @@ async def _app_lifespan(application: FastAPI):
         from trading.reconciliation import start_periodic_reconciliation
         start_periodic_reconciliation(interval_seconds=300.0)
     except Exception as exc:
-        logger.debug("Reconciliation loop not started: %s", exc)
+        logger.debug("Paper reconciliation loop not started: %s", exc)
+
+    # ── Start periodic Kalshi venue reconciliation ───────────────────
+    try:
+        import threading as _recon_threading
+        from merid.reconciliation import reconcile_all_venues
+
+        _kalshi_recon_stop = _recon_threading.Event()
+
+        def _kalshi_recon_loop() -> None:
+            logger.info("Periodic Kalshi venue reconciliation started (every 300s)")
+            while not _kalshi_recon_stop.wait(timeout=300.0):
+                try:
+                    discs = reconcile_all_venues(["kalshi"])
+                    n_crit = sum(1 for d in discs if d.severity == "critical")
+                    if discs:
+                        logger.warning(
+                            "Kalshi venue reconciliation: %d discrepancies (%d critical)",
+                            len(discs), n_crit,
+                        )
+                    else:
+                        logger.info("Kalshi venue reconciliation: OK (0 discrepancies)")
+                except Exception as exc:
+                    logger.error("Kalshi venue reconciliation error: %s", exc)
+
+        _kalshi_recon_thread = _recon_threading.Thread(
+            target=_kalshi_recon_loop, daemon=True, name="kalshi-recon-loop",
+        )
+        _kalshi_recon_thread.start()
+    except Exception as exc:
+        logger.debug("Kalshi venue reconciliation loop not started: %s", exc)
 
     # Terminal telemetry loop DISABLED — was printing synthetic crypto trades/portfolio
     # Kalshi agent grid has its own telemetry via the /api/v1/kalshi-grid/* endpoints.
