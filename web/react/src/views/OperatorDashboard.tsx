@@ -188,14 +188,14 @@ export default function OperatorDashboard() {
                   operatorRiskState.pnl.daily_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
                 }`}>{formatCurrency(operatorRiskState.pnl.daily_pnl)}</p>
                 <p className="text-[10px] text-slate-500">
-                  {operatorRiskState.pnl.utilization_pct.toFixed(1)}% of limit used
+                  {(operatorRiskState.pnl.utilization_pct ?? 0).toFixed(1)}% of limit used
                 </p>
               </div>
               <div className="bg-slate-800 rounded-lg p-3">
                 <p className="text-[10px] text-slate-500 uppercase">Position</p>
                 <p className="text-sm font-bold text-white">{formatCurrency(operatorRiskState.position.total_value)}</p>
                 <p className="text-[10px] text-slate-500">
-                  {operatorRiskState.position.utilization_pct.toFixed(1)}% of max
+                  {(operatorRiskState.position.utilization_pct ?? 0).toFixed(1)}% of max
                 </p>
               </div>
               <div className={`rounded-lg p-3 ${
