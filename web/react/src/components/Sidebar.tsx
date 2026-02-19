@@ -16,6 +16,8 @@ import {
   Settings as SettingsIcon,
 } from 'lucide-react';
 import type { View } from '../types/views';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 interface SidebarProps {
   current: View;
@@ -48,9 +50,10 @@ const system = [
   { name: 'Settings', href: 'settings', icon: SettingsIcon, color: 'text-gray-400' },
 ];
 
-function NavItem({ item, current, onChange, collapsed }: { item: typeof liveTrading[0]; current: View; onChange: (v: View) => void; collapsed: boolean }) {
+function NavItem({ item, current, onChange, collapsed, isLive }: { item: typeof liveTrading[0]; current: View; onChange: (v: View) => void; collapsed: boolean; isLive?: boolean }) {
   const Icon = item.icon;
   const isActive = current === item.href;
+  const showModeDot = item.href === 'kalshi-dashboard' || item.href === 'kalshi-grid' || item.href === 'kalshi-terminal';
   return (
     <button type="button"
       onClick={() => onChange(item.href as View)}
@@ -64,7 +67,23 @@ function NavItem({ item, current, onChange, collapsed }: { item: typeof liveTrad
       `}
     >
       <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : item.color}`} />
-      {!collapsed && item.name}
+      {!collapsed && (
+        <span className="flex-1 flex items-center justify-between">
+          {item.name}
+          {showModeDot && isLive !== undefined && (
+            <span
+              className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                isLive
+                  ? 'bg-green-500/20 text-green-400'
+                  : 'bg-amber-500/15 text-amber-500'
+              }`}
+              title={isLive ? 'Live trading active' : 'Paper mode'}
+            >
+              {isLive ? '● LIVE' : '○ PAPER'}
+            </span>
+          )}
+        </span>
+      )}
     </button>
   );
 }
@@ -75,6 +94,12 @@ function SectionHeader({ label, collapsed }: { label: string; collapsed: boolean
 }
 
 function Sidebar({ current, onChange, className, collapsed = false, onToggleCollapse }: SidebarProps) {
+  const { data: modeData } = useApiData<{ mode: string; is_live: boolean }>(
+    API_ENDPOINTS.KALSHI_GRID_MODE,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const isLive = modeData?.is_live ?? false;
+
   const primarySections = [
     { label: 'Live Trading', items: liveTrading },
     { label: 'Command Center', items: commandCenter },
@@ -102,7 +127,7 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
             <SectionHeader label={section.label} collapsed={collapsed} />
             <div className="space-y-1">
               {section.items.map((item) => (
-                <NavItem key={item.name} item={item} current={current} onChange={onChange} collapsed={collapsed} />
+                <NavItem key={item.name} item={item} current={current} onChange={onChange} collapsed={collapsed} isLive={modeData ? isLive : undefined} />
               ))}
             </div>
           </div>
