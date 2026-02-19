@@ -279,7 +279,7 @@ export default function KalshiTerminalView() {
           </div>
           {risk && (
             <span className={`font-mono ${risk.drawdown_pct > 5 ? 'text-orange-400' : 'text-gray-500'}`}>
-              DD:{risk.drawdown_pct.toFixed(1)}%
+              DD:{(risk.drawdown_pct ?? 0).toFixed(1)}%
             </span>
           )}
           <div className="w-px h-4 bg-slate-700" />
@@ -289,7 +289,7 @@ export default function KalshiTerminalView() {
           <span className="font-mono text-white">{fills.length}<span className="text-gray-500"> fills</span></span>
           {sizing && (
             <span className={`font-mono ${sizing.kelly_utilization_pct > 80 ? 'text-amber-400' : 'text-gray-400'}`}>
-              Kelly:{sizing.kelly_fraction.toFixed(2)}
+              Kelly:{(sizing.kelly_fraction ?? 0).toFixed(2)}
             </span>
           )}
 
@@ -455,7 +455,7 @@ export default function KalshiTerminalView() {
                       <span>EV: <span className={`font-mono ${selectedEdge.ev_cents > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {selectedEdge.ev_cents > 0 ? '+' : ''}{selectedEdge.ev_cents}¢
                       </span></span>
-                      <span>Conf: <span className="text-gray-300">{(selectedEdge.confidence * 100).toFixed(0)}%</span></span>
+                      <span>Conf: <span className="text-gray-300">{((selectedEdge.confidence ?? 0) * 100).toFixed(0)}%</span></span>
                     </>
                   )}
                 </div>
@@ -464,9 +464,9 @@ export default function KalshiTerminalView() {
                   <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-purple-500/5 border border-purple-500/20 text-xs">
                     <Shield className="w-3 h-3 text-purple-400" />
                     <span className="font-mono text-white">{selectedPosition.size} {selectedPosition.outcome}</span>
-                    <span className="text-gray-500">@{(selectedPosition.avg_price * 100).toFixed(0)}¢</span>
+                    <span className="text-gray-500">@{((selectedPosition.avg_price ?? 0) * 100).toFixed(0)}¢</span>
                     <span className={`font-mono ml-auto ${selectedPosition.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      {selectedPosition.unrealized_pnl >= 0 ? '+' : ''}${selectedPosition.unrealized_pnl.toFixed(2)}
+                      {(selectedPosition.unrealized_pnl ?? 0) >= 0 ? '+' : ''}${(selectedPosition.unrealized_pnl ?? 0).toFixed(2)}
                     </span>
                   </div>
                 )}
