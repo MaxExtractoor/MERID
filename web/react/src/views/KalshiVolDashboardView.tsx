@@ -15,7 +15,7 @@ import {
   ShieldOff, ToggleLeft, ToggleRight, Bot,
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiInsightsPanel from '../components/KalshiInsightsPanel';
@@ -193,9 +193,13 @@ const KalshiVolDashboardView: React.FC = () => {
     setModeToggling(true);
     setModeError(null);
     try {
-      const res = await fetch(API_ENDPOINTS.KALSHI_GRID_MODE, {
+      const token = localStorage.getItem('merid-access');
+      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_GRID_MODE}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ mode: targetMode, force: false }),
       });
       if (!res.ok) {
