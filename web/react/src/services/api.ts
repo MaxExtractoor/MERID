@@ -88,26 +88,6 @@ export interface RiskProtections {
   recent_events: Array<{ timestamp: string; type: string; details: Record<string, unknown> }>;
 }
 
-export interface PrimeStatus {
-  status: string;
-  mode: string;
-  market_data_connected: boolean;
-  narrative_available: boolean;
-  last_narrative_timestamp: number;
-  data_feeds: Record<string, { connected: boolean; latency_ms: number }>;
-}
-
-export interface PredictionMarket {
-  market_id: string;
-  question: string;
-  category: string;
-  yes_price: number;
-  no_price: number;
-  volume_24h: number;
-  platform: string;
-  close_date?: string;
-}
-
 class APIService {
   private async fetchJSON<T>(endpoint: string): Promise<T> {
     const response = await fetch(`${API_BASE}${endpoint}`);
@@ -117,62 +97,20 @@ class APIService {
     return response.json();
   }
 
-  // System Health
   async getSystemHealth(): Promise<SystemHealth> {
     return this.fetchJSON<SystemHealth>('/system/health');
   }
 
-  // PnL & Portfolio
   async getPnLSummary(): Promise<PnLSummary> {
     return this.fetchJSON<PnLSummary>('/risk/pnl-summary');
   }
 
-  async getPortfolioSummary() {
-    return this.fetchJSON('/portfolio/summary');
-  }
-
-  // Trading Operations
   async getTradingSummary(): Promise<TradingSummary> {
     return this.fetchJSON<TradingSummary>('/trading/summary');
   }
 
-  // Agents
   async getAgentSummary(): Promise<AgentSummary> {
     return this.fetchJSON<AgentSummary>('/agents/summary');
-  }
-
-  async getAgentActivity() {
-    return this.fetchJSON('/agents/activity');
-  }
-
-  // Risk & Protections
-  async getRiskProtections(): Promise<RiskProtections> {
-    return this.fetchJSON<RiskProtections>('/risk/protections');
-  }
-
-  async getRiskExposure() {
-    return this.fetchJSON('/risk/exposure');
-  }
-
-  // Prime Status
-  async getPrimeStatus(): Promise<PrimeStatus> {
-    return this.fetchJSON<PrimeStatus>('/prime/status');
-  }
-
-  // Prediction Markets
-  async getPredictionMarkets(): Promise<{ markets: PredictionMarket[] }> {
-    return this.fetchJSON<{ markets: PredictionMarket[] }>('/v1/us-compliant/prediction-markets');
-  }
-
-  // Live Prices
-  async getLivePrices(symbols: string[]) {
-    const symbolsParam = symbols.join(',');
-    return this.fetchJSON(`/prices/live?symbols=${symbolsParam}`);
-  }
-
-  // Recent Orders
-  async getRecentOrders() {
-    return this.fetchJSON('/orders/recent');
   }
 }
 
