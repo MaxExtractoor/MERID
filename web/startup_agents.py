@@ -108,7 +108,7 @@ class OrchestratorAgentManager:
             from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
             from merid.prediction.agent_grid_config import PortfolioRiskConfig
             trading_agents = (
-                list(self.kalshi_agent_grid._agents.values())
+                list(self.kalshi_agent_grid._agents)
                 if self.kalshi_agent_grid and hasattr(self.kalshi_agent_grid, "_agents")
                 else []
             )
