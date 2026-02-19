@@ -68,9 +68,9 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
     }
     return pts.map(p => ({
       time: new Date(p.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      equity: Number(p.equity.toFixed(2)),
-      pnl: Number(p.cumulative_pnl.toFixed(2)),
-      dailyPnl: Number(p.daily_pnl.toFixed(2)),
+      equity: Number((p.equity ?? 0).toFixed(2)),
+      pnl: Number((p.cumulative_pnl ?? 0).toFixed(2)),
+      dailyPnl: Number((p.daily_pnl ?? 0).toFixed(2)),
     }));
   }, [data, categoryFilter]);
 

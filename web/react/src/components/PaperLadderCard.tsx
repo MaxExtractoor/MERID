@@ -158,7 +158,7 @@ export default function PaperLadderCard() {
                     <TierBadge level={p.current_tier} name={p.tier_name} />
                   </div>
                   <span className={`text-xs font-bold ${p.roi_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {p.roi_pct >= 0 ? '+' : ''}{p.roi_pct.toFixed(1)}%
+                    {(p.roi_pct ?? 0) >= 0 ? '+' : ''}{(p.roi_pct ?? 0).toFixed(1)}%
                   </span>
                 </div>
 
@@ -175,13 +175,13 @@ export default function PaperLadderCard() {
                   <div className="text-center">
                     <div className="text-[9px] text-slate-500 uppercase">Win Rate</div>
                     <div className={`text-[11px] font-bold ${p.win_rate_pct >= 50 ? 'text-emerald-400' : 'text-slate-300'}`}>
-                      {p.win_rate_pct.toFixed(0)}%
+                      {(p.win_rate_pct ?? 0).toFixed(0)}%
                     </div>
                   </div>
                   <div className="text-center">
                     <div className="text-[9px] text-slate-500 uppercase">Drawdown</div>
                     <div className={`text-[11px] font-bold ${p.drawdown_pct > ddLimit * 0.7 ? 'text-red-400' : 'text-slate-300'}`}>
-                      {p.drawdown_pct.toFixed(1)}%
+                      {(p.drawdown_pct ?? 0).toFixed(1)}%
                     </div>
                   </div>
                 </div>
@@ -191,7 +191,7 @@ export default function PaperLadderCard() {
                   <div className="mb-1">
                     <div className="flex items-center justify-between text-[9px] text-slate-500 mb-0.5">
                       <span className="flex items-center gap-1"><Target className="w-2.5 h-2.5" /> Profit</span>
-                      <span>{Math.max(0, p.roi_pct).toFixed(1)}% / {profitTarget}%</span>
+                      <span>{Math.max(0, p.roi_pct ?? 0).toFixed(1)}% / {profitTarget}%</span>
                     </div>
                     <ProgressBar value={Math.max(0, p.roi_pct)} max={profitTarget} color="bg-emerald-500" />
                   </div>
