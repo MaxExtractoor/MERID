@@ -77,6 +77,7 @@ const KalshiPortfolioView: React.FC = () => {
   const [downsizeResult, setDownsizeResult] = useState<string | null>(null);
   const [amendOrderId, setAmendOrderId] = useState<string | null>(null);
   const [amendPrice, setAmendPrice] = useState<string>('');
+  const [orderError, setOrderError] = useState<string | null>(null);
 
   const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
     const token = localStorage.getItem('merid-access');
@@ -118,16 +119,19 @@ const KalshiPortfolioView: React.FC = () => {
 
   const handleCancelOrder = useCallback(async (orderId: string) => {
     setCancellingOrder(orderId);
+    setOrderError(null);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDER_CANCEL(orderId)}`, {
         method: 'DELETE',
         headers: authHeaders(),
       });
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        throw new Error(`Cancel failed: HTTP ${res.status}`);
       }
       ordResult.refetch();
-    } catch { /* best effort */ }
+    } catch (err) {
+      setOrderError(err instanceof Error ? err.message : `Cancel order ${orderId} failed`);
+    }
     setCancellingOrder(null);
   }, [authHeaders, ordResult]);
 
@@ -140,14 +144,17 @@ const KalshiPortfolioView: React.FC = () => {
     if (!amendOrderId) return;
     const newPriceCents = parseInt(amendPrice, 10);
     if (isNaN(newPriceCents) || newPriceCents < 1 || newPriceCents > 99) return;
+    setOrderError(null);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDER_AMEND(amendOrderId)}?price_cents=${newPriceCents}`, {
         method: 'PATCH',
         headers: authHeaders(),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      if (!res.ok) throw new Error(`Amend failed: HTTP ${res.status}`);
       ordResult.refetch();
-    } catch { /* best effort */ }
+    } catch (err) {
+      setOrderError(err instanceof Error ? err.message : `Amend order failed`);
+    }
     setAmendOrderId(null);
     setAmendPrice('');
   }, [amendOrderId, amendPrice, authHeaders, ordResult]);
@@ -155,16 +162,19 @@ const KalshiPortfolioView: React.FC = () => {
   const handleCancelAllOrders = useCallback(async () => {
     if (!window.confirm(`Cancel all ${orders.length} open orders?`)) return;
     setCancellingAll(true);
+    setOrderError(null);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDERS_BATCH_CANCEL}`, {
         method: 'DELETE',
         headers: authHeaders(),
       });
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        throw new Error(`Batch cancel failed: HTTP ${res.status}`);
       }
       ordResult.refetch();
-    } catch { /* best effort */ }
+    } catch (err) {
+      setOrderError(err instanceof Error ? err.message : 'Batch cancel failed');
+    }
     setCancellingAll(false);
   }, [authHeaders, orders.length, ordResult]);
 
@@ -274,6 +284,15 @@ const KalshiPortfolioView: React.FC = () => {
           <AlertTriangle className="w-4 h-4 shrink-0" />
           <span>Kill switch failed: {killSwitchError}</span>
           <button type="button" onClick={() => setKillSwitchError(null)} className="ml-auto text-red-400 hover:text-red-300" title="Dismiss" aria-label="Dismiss error">×</button>
+        </div>
+      )}
+
+      {/* Order action error banner */}
+      {orderError && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{orderError}</span>
+          <button type="button" onClick={() => setOrderError(null)} className="ml-auto text-red-400 hover:text-red-300" title="Dismiss" aria-label="Dismiss error">×</button>
         </div>
       )}
 
