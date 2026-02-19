@@ -630,7 +630,7 @@ export default function KalshiGridView() {
                     </span>
                   </div>
                   <p className="text-xs text-slate-400">{gridHealth.ws.subscribed_tickers} tickers subscribed</p>
-                  <p className="text-xs text-slate-500 mt-0.5">{gridHealth.ws.events_forwarded.toLocaleString()} events forwarded</p>
+                  <p className="text-xs text-slate-500 mt-0.5">{(gridHealth.ws.events_forwarded ?? 0).toLocaleString()} events forwarded</p>
                 </>
               ) : <p className="text-sm text-slate-600">—</p>}
             </div>
@@ -689,13 +689,13 @@ export default function KalshiGridView() {
                 <div>
                   <p className="text-slate-500 mb-1">Error Rate</p>
                   <p className={`font-semibold font-mono ${status.venue_health.error_rate > 0.05 ? 'text-red-400' : 'text-slate-300'}`}>
-                    {(status.venue_health.error_rate * 100).toFixed(2)}%
+                    {((status.venue_health?.error_rate ?? 0) * 100).toFixed(2)}%
                   </p>
                 </div>
                 <div>
                   <p className="text-slate-500 mb-1">Rate Tokens</p>
                   <p className="font-semibold font-mono text-slate-300">
-                    R:{status.venue_health.rate_limits.read.toFixed(0)} W:{status.venue_health.rate_limits.write.toFixed(0)}
+                    R:{(status.venue_health?.rate_limits?.read ?? 0).toFixed(0)} W:{(status.venue_health?.rate_limits?.write ?? 0).toFixed(0)}
                   </p>
                 </div>
               </div>
@@ -744,7 +744,7 @@ export default function KalshiGridView() {
                           {hasError && <p className="text-red-400/70 text-[10px] truncate max-w-[200px]" title={agent.last_error ?? ''}>{agent.last_error}</p>}
                         </td>
                         <td className="px-4 py-2 text-slate-400 font-mono">{agent.config.assets.join(', ')}</td>
-                        <td className="px-4 py-2 text-right font-mono text-slate-300">{agent.cycles_run.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-300">{(agent.cycles_run ?? 0).toLocaleString()}</td>
                         <td className="px-4 py-2 text-right font-mono text-slate-300">{agent.orders_placed}</td>
                         <td className="px-4 py-2 text-right font-mono text-slate-300">{agent.fill_count}</td>
                         <td className="px-4 py-2 text-right text-slate-500">
@@ -768,13 +768,13 @@ export default function KalshiGridView() {
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
             <span className="text-xs text-gray-400 uppercase tracking-wider">Market Coverage</span>
-            <p className="text-xl font-bold text-white mt-1">{status.metrics.coverage_pct.toFixed(1)}%</p>
+            <p className="text-xl font-bold text-white mt-1">{(status.metrics?.coverage_pct ?? 0).toFixed(1)}%</p>
             <p className="text-[10px] text-gray-500">{status.metrics.covered_markets} / {status.metrics.active_markets} markets</p>
           </div>
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
             <span className="text-xs text-gray-400 uppercase tracking-wider">Total Orders</span>
             <p className="text-xl font-bold text-white mt-1">{status.metrics.total_orders}</p>
-            <p className="text-[10px] text-gray-500">{(status.venue_health.error_rate * 100).toFixed(2)}% error rate</p>
+            <p className="text-[10px] text-gray-500">{((status.venue_health?.error_rate ?? 0) * 100).toFixed(2)}% error rate</p>
           </div>
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
             <span className="text-xs text-gray-400 uppercase tracking-wider">Total Fills</span>
@@ -782,7 +782,7 @@ export default function KalshiGridView() {
           </div>
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
             <span className="text-xs text-gray-400 uppercase tracking-wider">Rate Limit</span>
-            <p className="text-xl font-bold text-white mt-1">{status.venue_health.rate_limits.write.toFixed(0)}</p>
+            <p className="text-xl font-bold text-white mt-1">{(status.venue_health?.rate_limits?.write ?? 0).toFixed(0)}</p>
             <p className="text-[10px] text-gray-500">Write tokens available</p>
           </div>
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
