@@ -57,6 +57,9 @@ import ObservabilityView from '../ObservabilityView';
 import KalshiTerminalView from '../KalshiTerminalView';
 import KalshiOrderbookPanel from '../../components/KalshiOrderbookPanel';
 import KalshiActivityLog from '../../components/KalshiActivityLog';
+import KalshiSentimentView from '../KalshiSentimentView';
+import KalshiAgentPerformanceView from '../KalshiAgentPerformanceView';
+import Positions from '../Positions';
 
 describe('Kalshi Suite — Smoke Tests', () => {
   it('Overview mounts without errors', () => {
@@ -122,5 +125,25 @@ describe('Kalshi Suite — Smoke Tests', () => {
   it('KalshiActivityLog renders nothing when no ticker', () => {
     const { container } = render(<KalshiActivityLog ticker={null} />);
     expect(container.innerHTML).toBe('');
+  });
+
+  it('KalshiSentimentView mounts and shows Fear/Greed title', () => {
+    render(<KalshiSentimentView />);
+    expect(screen.getByText(/Fear \/ Greed/i)).toBeTruthy();
+  });
+
+  it('KalshiSentimentView shows empty state when no data', () => {
+    render(<KalshiSentimentView />);
+    expect(screen.getByText(/No sentiment data yet/i)).toBeTruthy();
+  });
+
+  it('KalshiAgentPerformanceView mounts and shows title', () => {
+    render(<KalshiAgentPerformanceView />);
+    expect(screen.getByText(/Agent Performance/i)).toBeTruthy();
+  });
+
+  it('Positions mounts and shows title', () => {
+    render(<Positions />);
+    expect(screen.getByText(/Kalshi Positions/i)).toBeTruthy();
   });
 });
