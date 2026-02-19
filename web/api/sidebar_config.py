@@ -360,13 +360,13 @@ WORKFLOW_PHASES: List[Dict[str, Any]] = [
         "id": "discovery",
         "label": "Market Discovery",
         "order": 1,
-        "views": ["kalshi-dashboard", "kalshi-vol-dashboard"],
+        "views": ["kalshi-dashboard", "kalshi-vol-dashboard", "kalshi-sentiment"],
     },
     {
         "id": "strategy",
         "label": "Strategy & Configuration",
         "order": 2,
-        "views": ["kalshi-grid", "agents", "operator", "agent-health"],
+        "views": ["kalshi-grid", "kalshi-performance", "agents", "operator", "agent-health"],
     },
     {
         "id": "execution",
