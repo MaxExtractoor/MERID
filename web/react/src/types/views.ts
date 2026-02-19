@@ -17,6 +17,5 @@ export type View =
   | "orders"
   | "operator"
   | "kill-switch"
-  | "agent-health"
   | "logs"
   | "settings";

@@ -1,4 +1,3 @@
-import React from 'react';
 import { 
   Wifi, WifiOff, AlertTriangle, RefreshCw, Power, 
   Clock, Zap, ShieldCheck 

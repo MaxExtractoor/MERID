@@ -164,8 +164,8 @@ class Settings(BaseSettings):
     # PREDICTION MARKET SETTINGS (Kalshi-first)
     # =============================================================================
     KALSHI_ONLY: bool = Field(default=True, description="Kalshi-only mode: restricts UI/API to 8 canonical Kalshi views")
-    MERID_PM_TRADING_MODE: str = Field(default="sim", description="Prediction market mode: sim/paper/live")
-    MERID_PM_LIVE_ENABLED: bool = Field(default=False, description="Explicit unlock for live PM trading")
+    MERID_PM_TRADING_MODE: str = Field(default="paper", description="Prediction market mode: paper/live (set MERID_PM_LIVE_ENABLED=true to unlock live)")
+    MERID_PM_LIVE_ENABLED: bool = Field(default=False, description="Explicit unlock for live PM trading — must be true for MERID_PM_TRADING_MODE=live to take effect")
     MERID_PM_MAX_NOTIONAL_PER_MARKET: float = Field(default=500.0, description="Max notional per PM market (USD)")
     MERID_PM_MAX_DAILY_LOSS: float = Field(default=250.0, description="Max daily loss for prediction markets (USD)")
     MERID_PM_MAX_TOTAL_NOTIONAL: float = Field(default=5000.0, description="Max total PM portfolio notional (USD)")

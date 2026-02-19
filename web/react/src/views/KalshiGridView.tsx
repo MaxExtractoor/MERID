@@ -17,7 +17,7 @@ import KalshiModeBadge from '../components/KalshiModeBadge';
 import {
   BarChart3, Play, Square, Pause, RotateCcw, RefreshCw,
   Shield, AlertTriangle, Clock, ChevronRight,
-  Activity, X, Zap,
+  Activity, X, Zap, Radio, Wifi, WifiOff, Target,
 } from 'lucide-react';
 
 /* ═══════════════════════════════════════════════════════
@@ -98,6 +98,15 @@ interface GridStatus {
   };
 }
 
+interface GridHealth {
+  status: string;
+  issues: string[];
+  catalog: { market_count: number; last_refresh: string | null; categories: number };
+  risk: { kill_switch: boolean; daily_pnl: number; drawdown_pct: number };
+  ws: { running: boolean; events_forwarded: number; subscribed_tickers: number };
+  rate_limits: { orders_this_minute: number; max_per_minute: number; orders_this_hour: number; max_per_hour: number };
+}
+
 interface SignalEntry {
   ts: string;
   market_id: string;
@@ -172,8 +181,22 @@ interface GridMatrixData {
   timeframes: string[];
 }
 
+type GridTab = 'grid' | 'health';
+
+function UtilBar({ value, max, warn = 75, danger = 90 }: { value: number; max: number; warn?: number; danger?: number }) {
+  const p = max > 0 ? Math.min((value / max) * 100, 100) : 0;
+  const color = p >= danger ? 'bg-red-500' : p >= warn ? 'bg-amber-500' : 'bg-emerald-500';
+  return (
+    <div className="w-full bg-slate-700 rounded-full h-1.5 mt-0.5">
+      <div className={`h-1.5 rounded-full transition-all ${color}`} style={{ width: `${p}%` }} />
+    </div>
+  );
+}
+
 export default function KalshiGridView() {
+  const [activeTab, setActiveTab] = useState<GridTab>('grid');
   const [status, setStatus] = useState<GridStatus | null>(null);
+  const [gridHealth, setGridHealth] = useState<GridHealth | null>(null);
   const [matrixData, setMatrixData] = useState<GridMatrixData | null>(null);
   const [fills, setFills] = useState<FillEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -209,10 +232,11 @@ export default function KalshiGridView() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const [statusRes, matrixRes, fillsRes] = await Promise.allSettled([
+      const [statusRes, matrixRes, fillsRes, healthRes] = await Promise.allSettled([
         fetchJson<GridStatus>(API_ENDPOINTS.KALSHI_GRID_STATUS),
         fetchJson<GridMatrixData>(API_ENDPOINTS.KALSHI_GRID_MATRIX),
         fetchJson<{ fills?: FillEntry[] } | FillEntry[]>(API_ENDPOINTS.KALSHI_GRID_FILLS),
+        fetchJson<GridHealth>(API_ENDPOINTS.KALSHI_GRID_HEALTH),
       ]);
 
       if (statusRes.status === 'fulfilled') {
@@ -224,6 +248,9 @@ export default function KalshiGridView() {
       if (fillsRes.status === 'fulfilled') {
         const payload = fillsRes.value;
         setFills(Array.isArray(payload) ? payload : (payload.fills ?? []));
+      }
+      if (healthRes.status === 'fulfilled') {
+        setGridHealth(healthRes.value);
       }
     } catch {
       // keep stale data on network/parse errors
@@ -523,6 +550,215 @@ export default function KalshiGridView() {
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
+
+      {/* ── Tabs ────────────────────────────────────────── */}
+      <div className="flex gap-1 border-b border-slate-800">
+        {(['grid', 'health'] as GridTab[]).map(tab => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setActiveTab(tab)}
+            className={`px-4 py-2 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${
+              activeTab === tab
+                ? 'border-orange-500 text-orange-400'
+                : 'border-transparent text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            {tab === 'health' ? 'Health & Diagnostics' : 'Agent Grid'}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Health Tab ──────────────────────────────────── */}
+      {activeTab === 'health' && (
+        <div className="space-y-5">
+          {/* Issues banner */}
+          {gridHealth && gridHealth.issues.length > 0 && (
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                <h2 className="text-sm font-semibold text-amber-300">Health Issues ({gridHealth.issues.length})</h2>
+              </div>
+              <ul className="space-y-1">
+                {gridHealth.issues.map((issue, i) => (
+                  <li key={i} className="text-xs text-amber-300/80 flex items-start gap-2">
+                    <span className="text-amber-500 mt-0.5">•</span>{issue}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {gridHealth && gridHealth.issues.length === 0 && (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-3 flex items-center gap-2">
+              <Activity className="w-4 h-4 text-emerald-400" />
+              <span className="text-sm text-emerald-300 font-medium">All systems healthy</span>
+            </div>
+          )}
+
+          {/* Catalog + WS + Rate limits */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Target className="w-4 h-4 text-orange-400" />
+                <h3 className="text-sm font-semibold text-white">Market Catalog</h3>
+              </div>
+              {gridHealth ? (
+                <>
+                  <p className="text-2xl font-bold text-orange-400 font-mono">{gridHealth.catalog.market_count}</p>
+                  <p className="text-xs text-slate-500 mt-1">markets · {gridHealth.catalog.categories} categories</p>
+                  {gridHealth.catalog.last_refresh && (
+                    <p className="text-[10px] text-slate-600 mt-1">Refreshed {new Date(gridHealth.catalog.last_refresh).toLocaleTimeString()}</p>
+                  )}
+                </>
+              ) : <p className="text-sm text-slate-600">—</p>}
+            </div>
+
+            <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Radio className="w-4 h-4 text-cyan-400" />
+                <h3 className="text-sm font-semibold text-white">WebSocket Feed</h3>
+              </div>
+              {gridHealth ? (
+                <>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={`w-2 h-2 rounded-full ${gridHealth.ws.running ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
+                    <span className={`text-sm font-bold ${gridHealth.ws.running ? 'text-green-400' : 'text-red-400'}`}>
+                      {gridHealth.ws.running ? 'LIVE' : 'DOWN'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400">{gridHealth.ws.subscribed_tickers} tickers subscribed</p>
+                  <p className="text-xs text-slate-500 mt-0.5">{gridHealth.ws.events_forwarded.toLocaleString()} events forwarded</p>
+                </>
+              ) : <p className="text-sm text-slate-600">—</p>}
+            </div>
+
+            <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Activity className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-semibold text-white">Rate Limits</h3>
+              </div>
+              {gridHealth ? (
+                <div className="space-y-2">
+                  <div>
+                    <div className="flex justify-between text-xs mb-0.5">
+                      <span className="text-slate-400">Orders/min</span>
+                      <span className="text-slate-300 font-mono">{gridHealth.rate_limits.orders_this_minute} / {gridHealth.rate_limits.max_per_minute}</span>
+                    </div>
+                    <UtilBar value={gridHealth.rate_limits.orders_this_minute} max={gridHealth.rate_limits.max_per_minute} />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-xs mb-0.5">
+                      <span className="text-slate-400">Orders/hr</span>
+                      <span className="text-slate-300 font-mono">{gridHealth.rate_limits.orders_this_hour} / {gridHealth.rate_limits.max_per_hour}</span>
+                    </div>
+                    <UtilBar value={gridHealth.rate_limits.orders_this_hour} max={gridHealth.rate_limits.max_per_hour} />
+                  </div>
+                </div>
+              ) : <p className="text-sm text-slate-600">—</p>}
+            </div>
+          </div>
+
+          {/* Venue connection detail */}
+          <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
+            <div className="flex items-center gap-2 mb-3">
+              {status?.venue_health?.connected
+                ? <Wifi className="w-4 h-4 text-green-400" />
+                : <WifiOff className="w-4 h-4 text-red-400" />}
+              <h3 className="text-sm font-semibold text-white">Venue Connection</h3>
+            </div>
+            {status?.venue_health ? (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                <div>
+                  <p className="text-slate-500 mb-1">Status</p>
+                  <p className={`font-semibold ${status.venue_health.connected ? 'text-green-400' : 'text-red-400'}`}>
+                    {status.venue_health.connected ? 'Connected' : 'Disconnected'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-500 mb-1">Circuit Breaker</p>
+                  <p className={`font-semibold ${status.venue_health.circuit.state === 'closed' ? 'text-green-400' : 'text-red-400'}`}>
+                    {status.venue_health.circuit.state.toUpperCase()}
+                  </p>
+                  {status.venue_health.circuit.failure_count > 0 && (
+                    <p className="text-slate-600">{status.venue_health.circuit.failure_count} failures</p>
+                  )}
+                </div>
+                <div>
+                  <p className="text-slate-500 mb-1">Error Rate</p>
+                  <p className={`font-semibold font-mono ${status.venue_health.error_rate > 0.05 ? 'text-red-400' : 'text-slate-300'}`}>
+                    {(status.venue_health.error_rate * 100).toFixed(2)}%
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-500 mb-1">Rate Tokens</p>
+                  <p className="font-semibold font-mono text-slate-300">
+                    R:{status.venue_health.rate_limits.read.toFixed(0)} W:{status.venue_health.rate_limits.write.toFixed(0)}
+                  </p>
+                </div>
+              </div>
+            ) : <p className="text-sm text-slate-600">No venue data</p>}
+          </div>
+
+          {/* Per-agent status table */}
+          {status?.agents && status.agents.length > 0 && (
+            <div className="bg-slate-900/70 rounded-xl border border-slate-800 overflow-hidden">
+              <div className="p-4 border-b border-slate-800">
+                <h3 className="text-sm font-semibold text-white">Agent Status</h3>
+              </div>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-500">
+                    <th className="text-left px-4 py-2">Agent</th>
+                    <th className="text-left px-4 py-2">Status</th>
+                    <th className="text-left px-4 py-2">Assets</th>
+                    <th className="text-right px-4 py-2">Cycles</th>
+                    <th className="text-right px-4 py-2">Orders</th>
+                    <th className="text-right px-4 py-2">Fills</th>
+                    <th className="text-right px-4 py-2">Last Cycle</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {status.agents.map(agent => {
+                    const hasError = !!agent.last_error;
+                    const isPaused = status.portfolio_risk?.paused_agents?.includes(agent.name);
+                    return (
+                      <tr key={agent.name} className="border-b border-slate-800/50 hover:bg-slate-800/20">
+                        <td className="px-4 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`w-1.5 h-1.5 rounded-full ${
+                              hasError ? 'bg-red-400' : agent.running ? 'bg-green-400 animate-pulse' : !agent.enabled ? 'bg-slate-700' : 'bg-slate-500'
+                            }`} />
+                            <span className="text-slate-200 font-medium">{agent.name}</span>
+                            {isPaused && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-400 font-bold">PAUSED</span>}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2">
+                          <span className={`font-medium ${
+                            hasError ? 'text-red-400' : agent.running ? 'text-green-400' : !agent.enabled ? 'text-slate-600' : 'text-slate-400'
+                          }`}>
+                            {hasError ? 'Error' : agent.running ? 'Running' : !agent.enabled ? 'Disabled' : 'Idle'}
+                          </span>
+                          {hasError && <p className="text-red-400/70 text-[10px] truncate max-w-[200px]" title={agent.last_error ?? ''}>{agent.last_error}</p>}
+                        </td>
+                        <td className="px-4 py-2 text-slate-400 font-mono">{agent.config.assets.join(', ')}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-300">{agent.cycles_run.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-300">{agent.orders_placed}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-300">{agent.fill_count}</td>
+                        <td className="px-4 py-2 text-right text-slate-500">
+                          {agent.last_cycle_at ? new Date(agent.last_cycle_at).toLocaleTimeString() : '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Grid Tab content (existing) ──────────────────── */}
+      {activeTab === 'grid' && <>
 
       {/* ── Grid Metrics ── */}
       {status?.metrics && (
@@ -879,6 +1115,7 @@ export default function KalshiGridView() {
           </div>
         )}
       </div>
+      </> }
     </div>
   );
 }

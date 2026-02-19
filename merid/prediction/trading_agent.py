@@ -467,6 +467,27 @@ class KalshiTradingAgent:
             timestamp=now,
         )
 
+        # Inject fear/greed sentiment scores
+        try:
+            from merid.event_venues.kalshi.sentiment import get_sentiment_service
+            svc = get_sentiment_service()
+            # Feed latest data point so the service stays current
+            svc.update_market(
+                market.market_id,
+                prob=float(implied.yes_prob),
+                volume=float(market.volume or 0),
+                category=(market.category or "unknown").lower(),
+            )
+            local_s = svc.market_score(market.market_id)
+            cat_s   = svc.category_score((market.category or "unknown").lower())
+            glob_s  = svc.global_score()
+            snapshot.sentiment_local    = local_s.score if local_s else None
+            snapshot.sentiment_category = cat_s.score
+            snapshot.sentiment_global   = glob_s.score
+            snapshot.sentiment_regime   = local_s.regime if local_s else glob_s.regime
+        except Exception:
+            pass
+
         # Compute edges for both sides using the model
         asset = self.config.assets[0] if self.config.assets else None
         strike = None

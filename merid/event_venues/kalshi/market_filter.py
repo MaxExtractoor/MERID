@@ -48,14 +48,16 @@ class MarketFilterConfig:
     # Maximum best-bid price (filter out near-certain contracts)
     max_price_cents: int = 90
 
-    # Only include markets for these underlyings
+    # Only include markets for these underlyings.
+    # Empty list = allow all underlyings (full Kalshi platform coverage).
     allowed_underlyings: List[str] = field(
-        default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        default_factory=lambda: []
     )
 
-    # Only include these timeframes
+    # Only include these timeframes.
+    # Empty list = allow all timeframes (daily, weekly, monthly, etc.).
     allowed_timeframes: List[str] = field(
-        default_factory=lambda: ["hourly", "15m"]
+        default_factory=lambda: []
     )
 
     # Overlap window: markets within this many seconds of each other
@@ -169,11 +171,11 @@ class MarketFilter:
         """
         cfg = self._config
 
-        # Underlying check
-        if market.underlying.upper() not in [u.upper() for u in cfg.allowed_underlyings]:
+        # Underlying check — empty list means allow all underlyings
+        if cfg.allowed_underlyings and market.underlying.upper() not in [u.upper() for u in cfg.allowed_underlyings]:
             return False, f"underlying {market.underlying} not allowed"
 
-        # Timeframe check
+        # Timeframe check — empty list means allow all timeframes
         if market.timeframe and cfg.allowed_timeframes:
             if market.timeframe.lower() not in [t.lower() for t in cfg.allowed_timeframes]:
                 return False, f"timeframe {market.timeframe} not allowed"

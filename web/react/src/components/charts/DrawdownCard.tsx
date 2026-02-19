@@ -5,7 +5,6 @@
  * of equity over the session. Uses data from equity-series endpoint.
  */
 
-import React from 'react';
 import {
   ResponsiveContainer,
   AreaChart,

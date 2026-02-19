@@ -277,6 +277,12 @@ class KalshiStrategy:
             return self._evaluate_mm(snapshot, phase)
         elif archetype == "arbitrage":
             return self._evaluate_arb(snapshot, phase)
+        elif archetype == "contrarian":
+            return self._evaluate_contrarian(snapshot, phase)
+        elif archetype == "regime_switch":
+            return self._evaluate_regime_switch(snapshot, phase)
+        elif archetype == "vol_breakout":
+            return self._evaluate_vol_breakout(snapshot, phase)
         else:
             return self._evaluate_directional(snapshot, phase)
 
@@ -377,6 +383,223 @@ class KalshiStrategy:
             edge=best,
             phase=phase,
             reason=f"{phase.value} phase, {best.edge_type} edge {best.net_edge:.4f}, Kelly size {size}.",
+        )
+
+    # ------------------------------------------------------------------
+    # Sentiment helpers
+    # ------------------------------------------------------------------
+
+    def _sentiment_size_multiplier(self, snapshot: MarketSnapshot, action: SignalAction) -> Decimal:
+        """Return a 0.5–1.5 multiplier applied to Kelly size based on regime.
+
+        Logic:
+          extreme_fear  + buying YES (contrarian long) → 1.3× (fear = discount)
+          extreme_greed + buying YES (momentum chase)  → 0.6× (crowded, reduce)
+          extreme_greed + buying NO  (fade greed)      → 1.2× (contrarian short)
+          fear / greed  (moderate)                     → 1.0× (baseline)
+          No sentiment data                            → 1.0×
+        """
+        regime = snapshot.sentiment_regime
+        if not regime:
+            return Decimal("1.0")
+        buying_yes = action in (SignalAction.BUY_YES,)
+        buying_no  = action in (SignalAction.BUY_NO,)
+        if regime == "extreme_fear":
+            return Decimal("1.3") if buying_yes else Decimal("0.8")
+        if regime == "extreme_greed":
+            if buying_yes:
+                return Decimal("0.6")   # reduce momentum chase
+            if buying_no:
+                return Decimal("1.2")   # reward contrarian fade
+        return Decimal("1.0")
+
+    def _sentiment_edge_floor(self, snapshot: MarketSnapshot, phase: ExpiryPhase) -> Decimal:
+        """Raise the minimum edge threshold in extreme regimes (more selective)."""
+        base = self._min_edge_for_phase(phase)
+        regime = snapshot.sentiment_regime
+        if regime in ("extreme_fear", "extreme_greed"):
+            return base * Decimal("1.25")   # +25% edge required in extreme regimes
+        return base
+
+    # ------------------------------------------------------------------
+    # Contrarian archetype
+    # ------------------------------------------------------------------
+
+    def _evaluate_contrarian(self, snapshot: MarketSnapshot, phase: ExpiryPhase) -> StrategySignal:
+        """Contrarian: only trades when local fear/greed >= 75 AND model disagrees by ≥10pp."""
+        local = snapshot.sentiment_local
+        if local is None or local < 75:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none", contracts=0, phase=phase,
+                reason=f"Contrarian requires local sentiment ≥75; got {local}.",
+            )
+
+        spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        if not spec_edges:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none", contracts=0, phase=phase,
+                reason="No speculative edge for contrarian.",
+            )
+
+        best = max(spec_edges, key=lambda e: e.net_edge)
+        model_gap = abs(float(best.model_prob) - float(best.market_prob))
+        if model_gap < 0.10:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side, contracts=0, edge=best, phase=phase,
+                reason=f"Contrarian model gap {model_gap:.2%} < 10pp required.",
+            )
+
+        min_edge = self._sentiment_edge_floor(snapshot, phase)
+        if best.net_edge < min_edge:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side, contracts=0, edge=best, phase=phase,
+                reason=f"Contrarian edge {best.net_edge:.4f} below floor {min_edge}.",
+            )
+
+        size = self._kelly_size(best, phase)
+        mult = self._sentiment_size_multiplier(snapshot, SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO)
+        size = max(1, int(Decimal(str(size)) * mult))
+        size = min(size, self.config.max_contracts_per_order)
+
+        action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
+        limit_cents = int(snapshot.implied.yes_ask or 50) if best.side == "yes" else int(snapshot.implied.no_ask or 50)
+
+        return StrategySignal(
+            market_id=snapshot.market_id,
+            action=action, side=best.side, contracts=size,
+            limit_price_cents=limit_cents, edge=best, phase=phase,
+            reason=f"Contrarian fade: sentiment={local:.0f}/100 gap={model_gap:.2%} size={size}×{mult}.",
+        )
+
+    # ------------------------------------------------------------------
+    # Regime-switch archetype
+    # ------------------------------------------------------------------
+
+    def _evaluate_regime_switch(self, snapshot: MarketSnapshot, phase: ExpiryPhase) -> StrategySignal:
+        """Regime-switch: rides momentum when category sentiment shifts fast (Δ > 20 in session).
+
+        Uses category score as the regime signal; falls back to directional if no shift.
+        """
+        cat_score = snapshot.sentiment_category
+        glob_score = snapshot.sentiment_global
+        if cat_score is None:
+            return self._evaluate_directional(snapshot, phase)
+
+        # Momentum regime: category is greed/extreme_greed → ride YES momentum
+        # Fear regime: category is fear/extreme_fear → ride NO momentum (things going lower)
+        regime = snapshot.sentiment_regime or "greed"
+        spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        if not spec_edges:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none", contracts=0, phase=phase,
+                reason="No speculative edge for regime-switch.",
+            )
+
+        best = max(spec_edges, key=lambda e: e.net_edge)
+        min_edge = self._min_edge_for_phase(phase)
+        if best.net_edge < min_edge:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side, contracts=0, edge=best, phase=phase,
+                reason=f"Regime-switch edge {best.net_edge:.4f} below threshold.",
+            )
+
+        # In greed regime, prefer YES; in fear regime, prefer NO
+        if regime in ("greed", "extreme_greed") and best.side != "yes":
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side, contracts=0, edge=best, phase=phase,
+                reason=f"Regime-switch: greed regime, skipping NO-side trade.",
+            )
+        if regime in ("fear", "extreme_fear") and best.side != "no":
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side, contracts=0, edge=best, phase=phase,
+                reason=f"Regime-switch: fear regime, skipping YES-side trade.",
+            )
+
+        size = self._kelly_size(best, phase)
+        action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
+        mult = self._sentiment_size_multiplier(snapshot, action)
+        size = max(1, int(Decimal(str(size)) * mult))
+        size = min(size, self.config.max_contracts_per_order)
+        limit_cents = int(snapshot.implied.yes_ask or 50) if best.side == "yes" else int(snapshot.implied.no_ask or 50)
+
+        return StrategySignal(
+            market_id=snapshot.market_id,
+            action=action, side=best.side, contracts=size,
+            limit_price_cents=limit_cents, edge=best, phase=phase,
+            reason=f"Regime-switch: {regime} cat={cat_score:.0f} glob={glob_score:.0f} size={size}.",
+        )
+
+    # ------------------------------------------------------------------
+    # Vol-breakout archetype
+    # ------------------------------------------------------------------
+
+    def _evaluate_vol_breakout(self, snapshot: MarketSnapshot, phase: ExpiryPhase) -> StrategySignal:
+        """Vol-breakout: trades when volatility component is high AND book is imbalanced.
+
+        Scales risk with sentiment intensity — higher score = larger size up to cap.
+        """
+        local = snapshot.sentiment_local
+        if local is None:
+            return self._evaluate_directional(snapshot, phase)
+
+        # Require elevated sentiment (either direction) to signal vol breakout
+        if 35 <= local <= 65:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none", contracts=0, phase=phase,
+                reason=f"Vol-breakout requires sentiment outside 35–65; got {local:.0f}.",
+            )
+
+        spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        if not spec_edges:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none", contracts=0, phase=phase,
+                reason="No speculative edge for vol-breakout.",
+            )
+
+        best = max(spec_edges, key=lambda e: e.net_edge)
+        min_edge = self._min_edge_for_phase(phase)
+        if best.net_edge < min_edge:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side, contracts=0, edge=best, phase=phase,
+                reason=f"Vol-breakout edge {best.net_edge:.4f} below threshold.",
+            )
+
+        # Scale size by sentiment intensity (distance from 50)
+        intensity = abs(local - 50) / 50.0   # 0–1
+        size = self._kelly_size(best, phase)
+        scaled = max(1, int(size * (1.0 + intensity * 0.5)))   # up to 1.5× at extremes
+        scaled = min(scaled, self.config.max_contracts_per_order)
+
+        action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
+        limit_cents = int(snapshot.implied.yes_ask or 50) if best.side == "yes" else int(snapshot.implied.no_ask or 50)
+
+        return StrategySignal(
+            market_id=snapshot.market_id,
+            action=action, side=best.side, contracts=scaled,
+            limit_price_cents=limit_cents, edge=best, phase=phase,
+            reason=f"Vol-breakout: sentiment={local:.0f} intensity={intensity:.2f} size={scaled}.",
         )
 
     def _evaluate_mm(self, snapshot: MarketSnapshot, phase: ExpiryPhase) -> StrategySignal:

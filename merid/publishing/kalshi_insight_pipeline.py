@@ -126,6 +126,13 @@ class InsightObject:
     tags: List[str] = field(default_factory=list)
     prev_prob: Optional[float] = None
     resolved_yes: Optional[bool] = None
+    # Fear/greed sentiment (from KalshiSentimentService)
+    fear_greed_local: Optional[float] = None      # 0–100, this market
+    fear_greed_category: Optional[float] = None   # 0–100, category average
+    fear_greed_global: Optional[float] = None     # 0–100, all Kalshi
+    regime: Optional[str] = None                  # extreme_fear|fear|greed|extreme_greed
+    signal: Optional[str] = None                  # e.g. "fade_greed_long_yes"
+    size: Optional[int] = None                    # recommended contracts
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -340,6 +347,38 @@ class KalshiInsightPipeline:
         # Build narrative
         narrative = self._build_narrative(market, action, prev_prob, swarm_prob, swarm_conf)
 
+        # Fetch sentiment scores
+        fg_local: Optional[float] = None
+        fg_category: Optional[float] = None
+        fg_global: Optional[float] = None
+        fg_regime: Optional[str] = None
+        fg_signal: Optional[str] = None
+        try:
+            from merid.event_venues.kalshi.sentiment import get_sentiment_service
+            svc = get_sentiment_service()
+            cat_key = market.category.lower() if market.category else "unknown"
+            local_s = svc.market_score(ticker)
+            cat_s   = svc.category_score(cat_key)
+            glob_s  = svc.global_score()
+            fg_local    = round(local_s.score, 1) if local_s else None
+            fg_category = round(cat_s.score, 1)
+            fg_global   = round(glob_s.score, 1)
+            fg_regime   = local_s.regime if local_s else glob_s.regime
+            # Derive a human-readable signal label
+            gap = swarm_prob - market.prob
+            if fg_regime == "extreme_greed" and gap < -0.05:
+                fg_signal = "fade_greed_long_no"
+            elif fg_regime == "extreme_greed" and gap > 0.05:
+                fg_signal = "fade_greed_long_yes"
+            elif fg_regime == "extreme_fear" and gap > 0.05:
+                fg_signal = "buy_fear_dip_yes"
+            elif fg_regime == "extreme_fear" and gap < -0.05:
+                fg_signal = "short_fear_no"
+            else:
+                fg_signal = "neutral"
+        except Exception:
+            pass
+
         insight = InsightObject(
             source="kalshi",
             category=market.category,
@@ -358,6 +397,11 @@ class KalshiInsightPipeline:
             tags=CATEGORY_TAGS.get(market.category, ["#Kalshi"]),
             prev_prob=prev_prob,
             resolved_yes=(market.result == "yes") if market.result else None,
+            fear_greed_local=fg_local,
+            fear_greed_category=fg_category,
+            fear_greed_global=fg_global,
+            regime=fg_regime,
+            signal=fg_signal,
         )
 
         # Update state

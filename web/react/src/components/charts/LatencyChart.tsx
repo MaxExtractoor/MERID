@@ -5,7 +5,6 @@
  * Polls /api/metrics/latency. Targets: p95 < 200-300ms per Deephaven guidance.
  */
 
-import React from 'react';
 import {
   ResponsiveContainer,
   BarChart,

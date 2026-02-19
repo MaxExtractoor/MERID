@@ -18,7 +18,6 @@ jest.mock('../../hooks/useKalshiRiskStream', () => ({
   }),
 }));
 
-import React from 'react';
 import KalshiRiskFeed from '../KalshiRiskFeed';
 
 const MOCK_EVENTS = {

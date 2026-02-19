@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Bot, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, ClipboardList } from 'lucide-react';
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, ClipboardList } from 'lucide-react';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -22,7 +22,6 @@ const COMMANDS: CommandItem[] = [
   { id: 'orders', label: 'Orders', section: 'Live Trading', icon: ClipboardList, keywords: ['order', 'open', 'pending', 'fill', 'cancel'] },
   { id: 'kalshi-vol-dashboard', label: 'Vol & Sizing', section: 'Live Trading', icon: Gauge, keywords: ['kalshi', 'volatility', 'sizing', 'kelly', 'sharpe'] },
   { id: 'kill-switch', label: 'Kill Switch', section: 'Risk & Limits', icon: ShieldAlert, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
-  { id: 'agent-health', label: 'Agent Health', section: 'System', icon: Bot, keywords: ['agent', 'health', 'leaderboard', 'strategy'] },
   { id: 'operator', label: 'Orchestrator', section: 'System', icon: Monitor, keywords: ['ops', 'control', 'status', 'operator'] },
   { id: 'logs', label: 'Logs', section: 'System', icon: Terminal, keywords: ['log', 'error', 'debug'] },
   { id: 'settings', label: 'Settings', section: 'System', icon: Settings, keywords: ['config', 'preference', 'theme'] },

@@ -8,7 +8,6 @@ import Settings from "./views/Settings";
 import Positions from "./views/Positions";
 import Orders from "./views/Orders";
 import KillSwitchView from "./views/KillSwitchView";
-import AgentHealthView from "./views/AgentHealthView";
 import KalshiGridView from "./views/KalshiGridView";
 import KalshiDashboardView from "./views/KalshiDashboardView";
 import KalshiPortfolioView from "./views/KalshiPortfolioView";
@@ -111,7 +110,6 @@ export default function App() {
               {view === "orders" && <Orders />}
               {view === "operator" && <OperatorDashboard />}
               {view === "kill-switch" && <KillSwitchView />}
-              {view === "agent-health" && <AgentHealthView />}
               {view === "logs" && <Logs />}
               {view === "settings" && <Settings />}
             </ErrorBoundary>
