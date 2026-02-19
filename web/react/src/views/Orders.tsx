@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { Search, RefreshCw } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
+import KalshiModeBadge from '../components/KalshiModeBadge';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import type { KalshiOrder } from '../types/kalshi';
 
@@ -40,7 +41,7 @@ export default function Orders() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Kalshi Orders</h1>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2">Kalshi Orders <KalshiModeBadge /></h1>
           <p className="text-slate-400">Resting and recent orders on your Kalshi account</p>
         </div>
       </div>

@@ -376,38 +376,38 @@ const KalshiVolDashboardView: React.FC = () => {
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <div>
                   <span className="text-gray-500">Target Vol</span>
-                  <p className="text-white font-mono">{(sizing.target_vol * 100).toFixed(1)}%</p>
+                  <p className="text-white font-mono">{((sizing.target_vol ?? 0) * 100).toFixed(1)}%</p>
                 </div>
                 <div>
                   <span className="text-gray-500">Realized Vol</span>
-                  <p className={`font-mono ${sizing.realized_vol > sizing.target_vol ? 'text-red-400' : 'text-green-400'}`}>
-                    {(sizing.realized_vol * 100).toFixed(1)}%
+                  <p className={`font-mono ${(sizing.realized_vol ?? 0) > (sizing.target_vol ?? 0) ? 'text-red-400' : 'text-green-400'}`}>
+                    {((sizing.realized_vol ?? 0) * 100).toFixed(1)}%
                   </p>
                 </div>
                 <div>
                   <span className="text-gray-500">Kelly f</span>
-                  <p className="text-white font-mono">{sizing.kelly_fraction.toFixed(3)}</p>
+                  <p className="text-white font-mono">{(sizing.kelly_fraction ?? 0).toFixed(3)}</p>
                 </div>
                 <div>
                   <span className="text-gray-500">Kelly Util</span>
-                  <p className="text-white font-mono">{sizing.kelly_utilization_pct.toFixed(0)}%</p>
+                  <p className="text-white font-mono">{(sizing.kelly_utilization_pct ?? 0).toFixed(0)}%</p>
                 </div>
                 <div>
                   <span className="text-gray-500">Vol Scale</span>
-                  <p className="text-white font-mono">{sizing.vol_scale.toFixed(2)}×</p>
+                  <p className="text-white font-mono">{(sizing.vol_scale ?? 0).toFixed(2)}×</p>
                 </div>
                 <div>
                   <span className="text-gray-500">ATR</span>
-                  <p className="text-white font-mono">{sizing.atr_value.toFixed(0)}</p>
+                  <p className="text-white font-mono">{(sizing.atr_value ?? 0).toFixed(0)}</p>
                 </div>
               </div>
 
               <div className="space-y-1">
                 <div className="flex justify-between text-[10px]">
                   <span className="text-gray-500">Effective Fraction</span>
-                  <span className="text-white font-mono">{(sizing.effective_fraction * 100).toFixed(2)}%</span>
+                  <span className="text-white font-mono">{((sizing.effective_fraction ?? 0) * 100).toFixed(2)}%</span>
                 </div>
-                {pctBar(sizing.effective_fraction * 100, 5, 'bg-purple-500')}
+                {pctBar((sizing.effective_fraction ?? 0) * 100, 5, 'bg-purple-500')}
               </div>
             </>
           ) : (
