@@ -4,7 +4,7 @@
  *
  * Usage:
  *   <StubGate data={apiResponse}>
- *     <button onClick={placeOrder}>BUY</button>
+ *     <button type="button" onClick={placeOrder} title="BUY">BUY</button>
  *   </StubGate>
  *
  * When `isStub(data)` is true:
@@ -32,7 +32,7 @@ interface StubGateProps {
   hide?: boolean;
 }
 
-export default function StubGate({ data, children, onBlocked, label, hide }: StubGateProps) {
+function StubGate({ data, children, onBlocked, label, hide }: StubGateProps) {
   if (!isStub(data)) {
     return <>{children}</>;
   }
@@ -68,3 +68,7 @@ export default function StubGate({ data, children, onBlocked, label, hide }: Stu
     </div>
   );
 }
+
+const MemoizedStubGate = React.memo(StubGate);
+MemoizedStubGate.displayName = 'StubGate';
+export default MemoizedStubGate;

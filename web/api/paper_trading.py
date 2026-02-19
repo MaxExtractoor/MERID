@@ -493,3 +493,103 @@ async def update_paper_prices(prices: dict):
     except Exception as exc:
         logger.error(f"Failed to update prices: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Convenience routes (no user_id) for frontend dashboard ────────────
+# Frontend expects /api/v1/paper-trading/{portfolio,positions,orders}
+
+paper_trading_convenience_router = APIRouter(
+    prefix="/api/v1/paper-trading", tags=["paper_trading"]
+)
+
+_DEFAULT_USER = "default"
+
+
+@paper_trading_convenience_router.get("/portfolio")
+async def get_default_portfolio():
+    """Get paper trading portfolio for default user (dashboard convenience)."""
+    try:
+        engine = get_paper_engine()
+        portfolio = engine.get_portfolio(_DEFAULT_USER)
+        total_closed = portfolio.winning_trades + portfolio.losing_trades
+        win_rate = (portfolio.winning_trades / total_closed) if total_closed > 0 else 0.0
+        return {
+            "portfolio": {
+                "equity": portfolio.current_balance,
+                "cash": portfolio.current_balance - sum(
+                    p.size_usd for p in portfolio.positions.values()
+                ),
+                "total_pnl": portfolio.total_pnl,
+                "daily_pnl": 0.0,
+                "positions_count": len(portfolio.positions),
+                "domains": {},
+                "win_rate": win_rate,
+                "total_trades": portfolio.total_trades,
+            },
+            "pnl_history": [],
+            "equity_curve": [],
+        }
+    except Exception as exc:
+        logger.error(f"Default portfolio fetch failed: {exc}")
+        return {
+            "portfolio": {
+                "equity": 100000.0, "cash": 100000.0, "total_pnl": 0.0,
+                "daily_pnl": 0.0, "positions_count": 0, "domains": {},
+                "win_rate": 0.0, "total_trades": 0,
+            },
+            "pnl_history": [], "equity_curve": [],
+        }
+
+
+@paper_trading_convenience_router.get("/positions")
+async def get_default_positions():
+    """Get paper trading positions for default user (dashboard convenience)."""
+    try:
+        engine = get_paper_engine()
+        portfolio = engine.get_portfolio(_DEFAULT_USER)
+        positions = []
+        for pos in portfolio.positions.values():
+            try:
+                engine._calculate_position_pnl(pos)
+            except Exception as exc:
+                logger.debug(f"Position PnL calc error (ignored): {exc}")
+            positions.append({
+                "symbol": pos.asset,
+                "domain": getattr(pos, "market_type", "crypto"),
+                "side": pos.side,
+                "size": pos.size_usd,
+                "entry_price": pos.entry_price,
+                "current_price": pos.current_price,
+                "unrealized_pnl": pos.unrealized_pnl,
+                "pnl_pct": (pos.unrealized_pnl / pos.size_usd * 100) if pos.size_usd > 0 else 0,
+                "opened_at": pos.opened_at,
+            })
+        return {"positions": positions}
+    except Exception as exc:
+        logger.error(f"Default positions fetch failed: {exc}")
+        return {"positions": []}
+
+
+@paper_trading_convenience_router.get("/orders")
+async def get_default_orders():
+    """Get paper trading orders for default user (dashboard convenience)."""
+    try:
+        engine = get_paper_engine()
+        portfolio = engine.get_portfolio(_DEFAULT_USER)
+        orders = []
+        for order in portfolio.orders.values():
+            orders.append({
+                "id": order.order_id,
+                "symbol": order.asset,
+                "side": order.side,
+                "order_type": order.order_type.value if hasattr(order.order_type, "value") else str(order.order_type),
+                "size": order.size_usd,
+                "price": order.price,
+                "status": order.status.value if hasattr(order.status, "value") else str(order.status),
+                "created_at": order.created_at,
+                "filled_at": getattr(order, "filled_at", None),
+            })
+        return {"orders": orders}
+    except Exception as exc:
+        logger.error(f"Default orders fetch failed: {exc}")
+        return {"orders": []}

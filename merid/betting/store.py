@@ -349,8 +349,8 @@ class BettingStore:
                                 break
                         pm_source = "kalshi"
                         break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("operation_suppressed", error=str(exc))
 
         # Swarm layer
         swarm_prob: Dict[str, float] = {}

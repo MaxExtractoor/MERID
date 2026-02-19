@@ -224,6 +224,34 @@ class KalshiTradingAgent:
                 # Record every signal (including NO_ACTION) for audit
                 self._record_signal(market, signal, snapshot, now)
 
+                # Submit actionable signals to consensus engine via event bus
+                if signal.action not in (SignalAction.NO_ACTION, SignalAction.HOLD):
+                    try:
+                        from merid.prediction.consensus_bridge import get_kalshi_consensus_adapter
+                        from core.streaming_bus import get_event_bus, EventChannel, StreamEvent
+                        adapter = get_kalshi_consensus_adapter()
+                        energy = adapter.signal_to_energy(signal, market, self.agent_id)
+                        # Publish as price_signal so ConsensusEngine._process_event picks it up
+                        direction = energy["metadata"].get("direction", "neutral")
+                        confidence = energy["metadata"].get("confidence", 0.5)
+                        bus = get_event_bus()
+                        await bus.publish(StreamEvent(
+                            event_type="price_signal",
+                            source=self.agent_id,
+                            channel=EventChannel.AGENT_OUTPUT,
+                            data={
+                                "signal": "bullish" if direction == "long" else "bearish" if direction == "short" else "neutral",
+                                "confidence": confidence,
+                                "ticker": market.market_id,
+                                "edge_pct": energy["metadata"].get("edge_pct", 0),
+                                "action": energy["metadata"].get("action", ""),
+                                "venue": "kalshi",
+                            },
+                        ))
+                        self.logger.debug(f"Consensus vote published: {market.market_id} {signal.action} conf={confidence:.2f}")
+                    except Exception as exc:
+                        self.logger.debug(f"Consensus submission error (ignored): {exc}")
+
                 if signal.action == SignalAction.NO_ACTION or signal.action == SignalAction.HOLD:
                     continue
 
@@ -582,6 +610,7 @@ class KalshiTradingAgent:
     ) -> None:
         """Execute a strategy signal by placing an order."""
         from merid.prediction.kalshi_tools import _kalshi_place_order
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
 
         action_map = {
             SignalAction.BUY_YES: ("yes", "buy"),
@@ -693,6 +722,35 @@ class KalshiTradingAgent:
             except Exception as exc:
                 self.logger.debug(f"Event bus publish error (ignored): {exc}")
 
+            # Record fill in performance tracker
+            try:
+                tracker = get_agent_performance_tracker()
+                tracker.record_fill(
+                    agent_id=self.agent_id,
+                    market_id=market.market_id,
+                    side=side,
+                    price_cents=signal.limit_price_cents or 50,
+                    contracts=size,
+                    predicted_edge=float(signal.edge.net_edge) if signal.edge else 0.0,
+                    confidence=float(signal.confidence) if hasattr(signal, 'confidence') else 0.5,
+                )
+            except Exception as exc:
+                self.logger.debug(f"Performance tracker record error (ignored): {exc}")
+
+            # Wire fill into KalshiRiskManager so risk/sizing endpoints see live flow
+            try:
+                from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+                risk_mgr = get_kalshi_risk()
+                price_cents = signal.limit_price_cents or 50
+                category = getattr(self.config, 'category', None)
+                risk_mgr.record_order(category=category, contracts=size, price_cents=price_cents)
+                # Estimate immediate PnL from edge (realized on fill for market-making)
+                if signal.edge and hasattr(signal.edge, 'net_edge'):
+                    pnl_usd = float(signal.edge.net_edge) * size * (price_cents / 100.0)
+                    risk_mgr.record_pnl(pnl_usd)
+            except Exception as exc:
+                self.logger.debug(f"KalshiRiskManager record error (ignored): {exc}")
+
             # Record fill in paper session for per-interval PnL tracking
             try:
                 from merid.prediction.paper_session import get_paper_session
@@ -707,6 +765,36 @@ class KalshiTradingAgent:
                     )
             except Exception as exc:
                 self.logger.debug(f"Paper session record error (ignored): {exc}")
+
+            # Record decision in ReflectionSystem for learning/persistence
+            try:
+                from agents.reflection.integration import get_reflection_system
+                reflection_sys = get_reflection_system()
+                action_str = signal.action.value if hasattr(signal.action, "value") else str(signal.action)
+                confidence = float(signal.edge.confidence) if signal.edge and hasattr(signal.edge, "confidence") else 0.5
+                edge_val = float(signal.edge.net_edge) if signal.edge and hasattr(signal.edge, "net_edge") else 0.0
+                reflection_sys.record_decision(
+                    agent_id=self.agent_id,
+                    energy_id=f"{market.market_id}:{now_ts.isoformat()}",
+                    decision="accept",
+                    confidence=confidence,
+                    reasoning=f"{action_str} {size}x {market.market_id} edge={edge_val:.4f}",
+                    market_context={
+                        "market_id": market.market_id,
+                        "question": market.question[:120] if market.question else "",
+                        "side": side,
+                        "action": action,
+                        "price_cents": signal.limit_price_cents,
+                        "contracts": size,
+                        "edge": edge_val,
+                        "implied_yes": float(snapshot.implied.yes_prob) if snapshot and snapshot.implied else None,
+                        "implied_no": float(snapshot.implied.no_prob) if snapshot and snapshot.implied else None,
+                        "simulated": result_payload.get("simulated", False),
+                    },
+                    agent_state=self.state.to_dict(),
+                )
+            except Exception as exc:
+                self.logger.debug(f"ReflectionSystem record error (ignored): {exc}")
 
             self.logger.info(
                 f"Order placed: {action} {size}x {side} {market.market_id} "

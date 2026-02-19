@@ -13,6 +13,7 @@ class MockWebSocket {
   onclose: ((event: CloseEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
+  lastSent: string | null = null;
   
   constructor(public url: string, public protocols?: string | string[]) {
     // Simulate connection
@@ -24,8 +25,8 @@ class MockWebSocket {
     }, 0);
   }
   
-  send(_data: string) {
-    // Mock send
+  send(data: string) {
+    this.lastSent = data;
   }
   
   close() {
@@ -89,7 +90,7 @@ describe('useWebSocket', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
     });
     
-    const mockSocket = result.current.socket as MockWebSocket;
+    const mockSocket = result.current.socket as unknown as MockWebSocket;
     const testMessage = { type: 'test', data: 'hello' };
     
     // Simulate receiving a message
@@ -112,7 +113,7 @@ describe('useWebSocket', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
     });
     
-    const mockSocket = result.current.socket as MockWebSocket;
+    const mockSocket = result.current.socket as unknown as MockWebSocket;
     const sendSpy = jest.spyOn(mockSocket, 'send');
     
     act(() => {
@@ -132,7 +133,7 @@ describe('useWebSocket', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
     });
     
-    const mockSocket = result.current.socket as MockWebSocket;
+    const mockSocket = result.current.socket as unknown as MockWebSocket;
     const closeSpy = jest.spyOn(mockSocket, 'close');
     
     act(() => {

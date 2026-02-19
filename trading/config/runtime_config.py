@@ -6,20 +6,21 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field, asdict
-from enum import Enum
 from typing import Any, Dict, Optional
 
+from trading.trade_mode import TradeMode
 from utils.logger import get_logger
 
 logger = get_logger("trading.config.runtime")
 
 
-class GlobalTradingMode(str, Enum):
-    OFFLINE = "offline"
-    SIM = "sim"
-    PAPER = "paper"
-    LIVE = "live"
-    HYBRID = "hybrid"
+# DEPRECATED: local GlobalTradingMode removed in Season 5 mode-unification.
+# Use the canonical ``trading.trade_mode.TradeMode`` (MOCK/PAPER/LIVE).
+# OFFLINE, SIM, HYBRID all map to MOCK.
+GlobalTradingMode = TradeMode
+
+
+from enum import Enum
 
 
 class VenueMode(str, Enum):
@@ -46,7 +47,7 @@ class VenueConfig:
 
 @dataclass
 class TradingRuntimeState:
-    mode: GlobalTradingMode = GlobalTradingMode.OFFLINE
+    mode: GlobalTradingMode = GlobalTradingMode.MOCK
     allow_live_trades: bool = False
     spectator_mode: bool = True
     last_updated: float = field(default_factory=time.time)
@@ -83,7 +84,9 @@ class TradingRuntimeConfig:
         venue_ids = [v.strip() for v in allowed.split(",") if v.strip()]
 
         with self._lock:
-            self._state.mode = GlobalTradingMode(mode) if mode in GlobalTradingMode._value2member_map_ else GlobalTradingMode.OFFLINE
+            _MODE_ALIASES = {"offline": "mock", "sim": "mock", "hybrid": "paper"}
+            canonical = _MODE_ALIASES.get(mode, mode)
+            self._state.mode = GlobalTradingMode(canonical) if canonical in GlobalTradingMode._value2member_map_ else GlobalTradingMode.MOCK
             self._state.allow_live_trades = allow_live
             self._state.spectator_mode = spectator
             for venue_id in venue_ids:
@@ -133,7 +136,9 @@ class TradingRuntimeConfig:
         with self._lock:
             if mode:
                 try:
-                    self._state.mode = GlobalTradingMode(mode.lower())
+                    _MODE_ALIASES = {"offline": "mock", "sim": "mock", "hybrid": "paper"}
+                    canonical = _MODE_ALIASES.get(mode.lower(), mode.lower())
+                    self._state.mode = GlobalTradingMode(canonical)
                 except ValueError:
                     raise ValueError(f"Invalid trading mode: {mode}")
             if allow_live_trades is not None:

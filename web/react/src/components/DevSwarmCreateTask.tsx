@@ -41,7 +41,7 @@ export default function DevSwarmCreateTask({ onSubmit, onCancel }: DevSwarmCreat
           <label htmlFor="task-description" className="block text-sm font-medium text-slate-400 mb-2">
             Description *
           </label>
-          <textarea
+          <textarea aria-label="Text input"
             id="task-description"
             name="description"
             value={description}
@@ -63,7 +63,7 @@ export default function DevSwarmCreateTask({ onSubmit, onCancel }: DevSwarmCreat
           <label htmlFor="target-files" className="block text-sm font-medium text-slate-400 mb-2">
             Target Files * (one per line)
           </label>
-          <textarea
+          <textarea aria-label="Text input"
             id="target-files"
             name="targetFiles"
             value={targetFiles}
@@ -80,7 +80,7 @@ export default function DevSwarmCreateTask({ onSubmit, onCancel }: DevSwarmCreat
           <label htmlFor="success-criteria" className="block text-sm font-medium text-slate-400 mb-2">
             Success Criteria *
           </label>
-          <textarea
+          <textarea aria-label="Text input"
             id="success-criteria"
             name="successCriteria"
             value={successCriteria}
@@ -100,7 +100,7 @@ export default function DevSwarmCreateTask({ onSubmit, onCancel }: DevSwarmCreat
             <label htmlFor="task-priority" className="block text-sm font-medium text-slate-400 mb-2">
               Priority
             </label>
-            <select
+            <select aria-label="Priority"
               id="task-priority"
               name="priority"
               value={priority}
@@ -120,7 +120,7 @@ export default function DevSwarmCreateTask({ onSubmit, onCancel }: DevSwarmCreat
             <label htmlFor="estimated-effort" className="block text-sm font-medium text-slate-400 mb-2">
               Estimated Effort
             </label>
-            <select
+            <select aria-label="Estimated Effort"
               id="estimated-effort"
               name="estimatedEffort"
               value={estimatedEffort}
@@ -141,7 +141,7 @@ export default function DevSwarmCreateTask({ onSubmit, onCancel }: DevSwarmCreat
             <label htmlFor="timeout-seconds" className="block text-sm font-medium text-slate-400 mb-2">
               Timeout (seconds)
             </label>
-            <input
+            <input aria-label="Timeout (seconds)"
               id="timeout-seconds"
               name="timeoutSeconds"
               type="number"
@@ -161,7 +161,7 @@ export default function DevSwarmCreateTask({ onSubmit, onCancel }: DevSwarmCreat
             <label htmlFor="max-cost-usd" className="block text-sm font-medium text-slate-400 mb-2">
               Max Cost (USD)
             </label>
-            <input
+            <input aria-label="Max Cost (USD)"
               id="max-cost-usd"
               name="maxCostUsd"
               type="number"
@@ -184,13 +184,13 @@ export default function DevSwarmCreateTask({ onSubmit, onCancel }: DevSwarmCreat
             type="button"
             onClick={onCancel}
             className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors"
-          >
+           title="Cancel">
             Cancel
           </button>
           <button
             type="submit"
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
-          >
+           title="Create Task">
             Create Task
           </button>
         </div>

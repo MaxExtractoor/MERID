@@ -19,9 +19,12 @@ Endpoints:
 
 from __future__ import annotations
 
+import time
+import threading
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 signal_layer_router = APIRouter(prefix="/api/v1/signal-layer", tags=["signal-layer"])
@@ -160,19 +163,12 @@ def get_all_cqi():
     detector = _drift()
     all_cqi = detector.get_all_cqi()
     if not all_cqi:
-        # Generate synthetic CQI for demo
-        domains = ["crypto", "prediction", "sports", "meme"]
-        for d in domains:
-            # Seed some outcomes
-            import random
-            rng = random.Random(hash(d))
-            for _ in range(20):
-                detector.record_outcome(
-                    d, rng.uniform(0.2, 0.8), rng.choice([0.0, 1.0]),
-                    rng.uniform(-50, 50), rng.uniform(0.3, 0.9),
-                )
-            detector.compute_cqi(d)
-        all_cqi = detector.get_all_cqi()
+        return {
+            "domains": {},
+            "domain_count": 0,
+            "_stub": True,
+            "_stub_message": "No CQI data yet — awaiting real signal outcomes",
+        }
 
     return {
         "domains": {d: c.to_dict() for d, c in all_cqi.items()},
@@ -213,47 +209,165 @@ def get_decay_configs_endpoint():
     return {d: c.to_dict() for d, c in configs.items()}
 
 
-@signal_layer_router.get("/metrics")
-def get_signal_layer_metrics():
-    """Aggregate signal layer metrics."""
-    try:
-        store = _store()
-        store_metrics = store.get_signal_metrics()
-    except Exception:
-        store_metrics = {}
+# ── Cached metrics snapshot ───────────────────────────────────────────
+_METRICS_CACHE: Dict[str, Any] = {}
+_METRICS_CACHE_TS: float = 0.0
+_METRICS_CACHE_TTL: float = 60.0  # seconds (was 30 — increased to reduce recomputation)
+_METRICS_LOCK = threading.Lock()
+_METRICS_SUBSYSTEM_TIMEOUT: float = 3.0  # per-subsystem timeout in seconds
 
-    try:
-        scanner = _scanner()
-        arb_metrics = scanner.get_metrics()
-    except Exception:
-        arb_metrics = {}
+# SLO thresholds (p95 targets in milliseconds)
+_SLO_SUBSYSTEM_MS: Dict[str, int] = {
+    "store": 500,
+    "arb": 500,
+    "drift": 500,
+    "live_feeds": 1000,
+    "ws_feed": 1000,
+}
+_SLO_TOTAL_MS: int = 2000  # Overall endpoint target
+_SLO_HISTORY_SIZE: int = 20  # Rolling window for SLO tracking
+_slo_history: List[Dict[str, int]] = []  # Recent timing snapshots
 
-    try:
-        detector = _drift()
-        drift_summary = detector.summary()
-    except Exception:
-        drift_summary = {}
 
-    # Live feed status
-    live_feeds_status = {}
+def _fetch_subsystem(name: str, fn) -> tuple:
+    """Fetch a single subsystem's metrics with timing. Returns (name, data, latency_ms)."""
+    t0 = time.monotonic()
     try:
-        from merid.signals.live_feeds import get_live_feed_manager
-        live_feeds_status = get_live_feed_manager().status()
+        data = fn()
     except Exception:
-        pass
+        data = {}
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    return (name, data, latency_ms)
 
-    # WS feed status
-    ws_feed_status = {}
-    try:
-        from merid.signals.ws_price_feed import get_ws_feed_manager
-        ws_feed_status = get_ws_feed_manager().status()
-    except Exception:
-        pass
 
-    return {
-        "store": store_metrics,
-        "arb": arb_metrics,
-        "drift": drift_summary,
-        "live_feeds": live_feeds_status,
-        "ws_feed": ws_feed_status,
+def _build_signal_metrics() -> Dict[str, Any]:
+    """Aggregate signal subsystem metrics in parallel (runs in threadpool).
+
+    Uses a thread pool to fetch all 5 subsystems concurrently instead of
+    sequentially.  Each subsystem has a 3s timeout so one slow init can't
+    block the entire response.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    t0 = time.monotonic()
+
+    # Define subsystem fetchers (lazy imports inside lambdas to avoid
+    # module-level init cost — the singleton is only created on first call)
+    subsystems = {
+        "store": lambda: _store().get_signal_metrics(),
+        "arb": lambda: _scanner().get_metrics(),
+        "drift": lambda: _drift().summary(),
+        "live_feeds": lambda: __import__(
+            "merid.signals.live_feeds", fromlist=["get_live_feed_manager"]
+        ).get_live_feed_manager().status(),
+        "ws_feed": lambda: __import__(
+            "merid.signals.ws_price_feed", fromlist=["get_ws_feed_manager"]
+        ).get_ws_feed_manager().status(),
     }
+
+    result: Dict[str, Any] = {}
+    timings: Dict[str, int] = {}
+
+    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="sig_metrics") as pool:
+        futures = {
+            pool.submit(_fetch_subsystem, name, fn): name
+            for name, fn in subsystems.items()
+        }
+        for future in as_completed(futures, timeout=_METRICS_SUBSYSTEM_TIMEOUT + 1):
+            try:
+                name, data, latency_ms = future.result(timeout=_METRICS_SUBSYSTEM_TIMEOUT)
+                result[name] = data
+                timings[name] = latency_ms
+            except Exception:
+                name = futures[future]
+                result[name] = {}
+                timings[name] = -1  # timeout or error
+
+    total_ms = int((time.monotonic() - t0) * 1000)
+
+    # Track SLO history
+    snapshot = {**timings, "_total": total_ms}
+    _slo_history.append(snapshot)
+    while len(_slo_history) > _SLO_HISTORY_SIZE:
+        _slo_history.pop(0)
+
+    # Compute SLO status from rolling window
+    slo_status: Dict[str, Any] = {}
+    for name, threshold in _SLO_SUBSYSTEM_MS.items():
+        values = [h.get(name, -1) for h in _slo_history if h.get(name, -1) >= 0]
+        if values:
+            p95 = sorted(values)[int(len(values) * 0.95)] if len(values) >= 2 else max(values)
+            slo_status[name] = {
+                "threshold_ms": threshold,
+                "p95_ms": p95,
+                "ok": p95 <= threshold,
+                "samples": len(values),
+            }
+        else:
+            slo_status[name] = {"threshold_ms": threshold, "p95_ms": None, "ok": False, "samples": 0}
+
+    # Overall SLO
+    total_values = [h.get("_total", -1) for h in _slo_history if h.get("_total", -1) >= 0]
+    if total_values:
+        total_p95 = sorted(total_values)[int(len(total_values) * 0.95)] if len(total_values) >= 2 else max(total_values)
+        slo_status["_overall"] = {
+            "threshold_ms": _SLO_TOTAL_MS,
+            "p95_ms": total_p95,
+            "ok": total_p95 <= _SLO_TOTAL_MS,
+            "samples": len(total_values),
+        }
+    all_ok = all(v.get("ok", False) for v in slo_status.values())
+
+    result["_subsystem_timings_ms"] = timings
+    result["_latency_ms"] = total_ms
+    result["_cached_at"] = time.time()
+    result["_slo"] = {"subsystems": slo_status, "all_ok": all_ok}
+    return result
+
+
+def warm_signal_metrics_cache() -> None:
+    """Pre-warm the metrics cache in a background thread.
+
+    Call this at application startup so the first dashboard request
+    doesn't pay the 7+ second cold-start penalty.
+    """
+    def _warm():
+        global _METRICS_CACHE, _METRICS_CACHE_TS
+        try:
+            snapshot = _build_signal_metrics()
+            with _METRICS_LOCK:
+                _METRICS_CACHE = snapshot
+                _METRICS_CACHE_TS = time.monotonic()
+        except Exception:
+            pass  # Non-critical — first request will compute it
+
+    t = threading.Thread(target=_warm, daemon=True, name="sig_metrics_warm")
+    t.start()
+
+
+@signal_layer_router.get("/metrics")
+async def get_signal_layer_metrics():
+    """Aggregate signal layer metrics (cached with 60s TTL, computed off event loop)."""
+    global _METRICS_CACHE, _METRICS_CACHE_TS
+
+    now = time.monotonic()
+    if _METRICS_CACHE and (now - _METRICS_CACHE_TS) < _METRICS_CACHE_TTL:
+        return _METRICS_CACHE
+
+    try:
+        # Run heavy work off the event loop
+        snapshot = await run_in_threadpool(_build_signal_metrics)
+
+        with _METRICS_LOCK:
+            _METRICS_CACHE = snapshot
+            _METRICS_CACHE_TS = time.monotonic()
+
+        return snapshot
+    except Exception:
+        return {
+            "subsystems": {},
+            "total_signals": 0,
+            "active_arbs": 0,
+            "domains_tracked": 0,
+            "error": "Signal layer metrics temporarily unavailable",
+        }

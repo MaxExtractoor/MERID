@@ -5,10 +5,10 @@
  * Uses Recharts Treemap with data from /api/metrics/heatmap.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useMemo } from 'react';
 import { ResponsiveContainer, Treemap } from 'recharts';
 import { LayoutGrid } from 'lucide-react';
-import { API_BASE_URL } from '../../config/constants';
+import { useApiData } from '../../hooks/useApiData';
 
 interface HeatmapInstrument {
   symbol: string;
@@ -39,9 +39,18 @@ function pnlToColor(pnl: number): string {
   return '#e11d48';                   // rose-600
 }
 
+interface TreemapContentProps {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  name?: string;
+  pnl?: number;
+  exposure?: number;
+}
+
 // Custom content renderer for treemap tiles
-function CustomContent(props: any) {
-  const { x, y, width, height, name, pnl, exposure } = props;
+function CustomContent({ x = 0, y = 0, width = 0, height = 0, name = '', pnl = 0, exposure = 0 }: TreemapContentProps) {
 
   if (width < 30 || height < 20) return null;
 
@@ -53,7 +62,7 @@ function CustomContent(props: any) {
         width={width}
         height={height}
         rx={4}
-        fill={pnlToColor(pnl || 0)}
+        fill={pnlToColor(pnl)}
         stroke="#1e293b"
         strokeWidth={2}
       />
@@ -75,7 +84,7 @@ function CustomContent(props: any) {
               fill="rgba(255,255,255,0.7)"
               fontSize={9}
             >
-              {pnl >= 0 ? '+' : ''}{pnl?.toFixed(0) ?? 0} · ${exposure?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? 0}
+              {pnl >= 0 ? '+' : ''}{pnl.toFixed(0)} · ${exposure.toLocaleString(undefined, { maximumFractionDigits: 0 })}
             </text>
           )}
         </>
@@ -85,28 +94,10 @@ function CustomContent(props: any) {
 }
 
 export function RiskTreeMap({ className = '', height = 260 }: RiskTreeMapProps) {
-  const [data, setData] = useState<HeatmapData | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/metrics/heatmap`);
-      if (res.ok) {
-        const json = await res.json();
-        setData(json);
-      }
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-    const id = setInterval(fetchData, 15000);
-    return () => clearInterval(id);
-  }, [fetchData]);
+  const { data, loading } = useApiData<HeatmapData>(
+    '/api/metrics/heatmap',
+    { pollingInterval: 15000 },
+  );
 
   // Transform to Recharts Treemap format
   const treeData = useMemo(() => {

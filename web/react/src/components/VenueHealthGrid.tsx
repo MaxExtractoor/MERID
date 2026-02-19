@@ -1,8 +1,19 @@
-import { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import { 
   Wifi, WifiOff, AlertTriangle, RefreshCw, Power, 
   Clock, Zap, ShieldCheck 
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS} from '../config/constants';
+
+function authHeaders(headers?: HeadersInit): HeadersInit {
+  const token = localStorage.getItem('merid-access');
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(headers ?? {}),
+  };
+}
 
 interface VenueHealth {
   name: string;
@@ -32,46 +43,23 @@ const DOMAIN_COLORS: Record<string, string> = {
 };
 
 export default function VenueHealthGrid() {
-  const [venues, setVenues] = useState<VenueHealth[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetchVenues = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/pipeline/venues');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.venues) setVenues(data.venues);
-      }
-    } catch {
-      setVenues([
-        { name: 'Kalshi', key: 'kalshi', domain: 'prediction', connected: true, enabled: true, mode: 'SIM', latencyMs: 45, latencyP95Ms: 120, errorRate: 0.1, circuitBreaker: 'closed', lastHeartbeat: new Date().toISOString(), requestsPerMin: 12 },
-        { name: 'Binance', key: 'binance', domain: 'crypto', connected: true, enabled: true, mode: 'SIM', latencyMs: 32, latencyP95Ms: 85, errorRate: 0.0, circuitBreaker: 'closed', lastHeartbeat: new Date().toISOString(), requestsPerMin: 45 },
-        { name: 'Coinbase', key: 'coinbase', domain: 'crypto', connected: true, enabled: true, mode: 'SIM', latencyMs: 55, latencyP95Ms: 140, errorRate: 0.2, circuitBreaker: 'closed', lastHeartbeat: new Date().toISOString(), requestsPerMin: 30 },
-        { name: 'Kraken', key: 'kraken', domain: 'crypto', connected: true, enabled: true, mode: 'SIM', latencyMs: 68, latencyP95Ms: 180, errorRate: 0.0, circuitBreaker: 'closed', lastHeartbeat: new Date().toISOString(), requestsPerMin: 20 },
-        { name: 'Alpaca', key: 'alpaca', domain: 'equity', connected: true, enabled: true, mode: 'PAPER', latencyMs: 40, latencyP95Ms: 95, errorRate: 0.0, circuitBreaker: 'closed', lastHeartbeat: new Date().toISOString(), requestsPerMin: 8 },
-        { name: 'IBKR', key: 'ibkr', domain: 'equity', connected: false, enabled: false, mode: 'SIM', latencyMs: 0, latencyP95Ms: 0, errorRate: 0, circuitBreaker: 'open', lastHeartbeat: '', requestsPerMin: 0 },
-      ]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchVenues();
-    const interval = setInterval(fetchVenues, 5000);
-    return () => clearInterval(interval);
-  }, [fetchVenues]);
+  const { data: rawData, loading, error, refetch } = useApiData<{ venues: VenueHealth[] }>(
+    API_ENDPOINTS.PIPELINE_VENUES,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const venues = rawData?.venues ?? [];
 
   const toggleVenue = async (key: string, enable: boolean) => {
     try {
-      await fetch(`/api/v1/pipeline/venue/${enable ? 'enable' : 'disable'}`, {
+      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.PIPELINE_VENUE_TOGGLE(enable ? 'enable' : 'disable')}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ venue: key }),
       });
-      await fetchVenues();
-    } catch (err) {
-      console.error(`Failed to toggle venue ${key}:`, err);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      refetch();
+    } catch {
+      // Operation failed — UI state unchanged
     }
   };
 
@@ -104,14 +92,22 @@ export default function VenueHealthGrid() {
             {venues.filter(v => v.connected).length}/{venues.length} connected
           </span>
         </div>
-        <button
-          onClick={fetchVenues}
+        <button type="button"
+          onClick={() => refetch()}
           className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
           title="Refresh venue health"
-        >
+         aria-label="Refresh">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
+
+      {error && (
+        <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{error?.message ?? 'Unknown error'}</span>
+          <button type="button" onClick={() => refetch()} className="ml-auto text-xs underline hover:text-red-300">Retry</button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {venues.map((venue) => {
@@ -134,7 +130,7 @@ export default function VenueHealthGrid() {
                   <span className="font-semibold text-white">{venue.name}</span>
                   <span className="text-xs text-gray-500 uppercase">{venue.domain}</span>
                 </div>
-                <button
+                <button type="button"
                   onClick={() => toggleVenue(venue.key, !venue.enabled)}
                   className={`p-1 rounded transition-colors ${
                     venue.enabled

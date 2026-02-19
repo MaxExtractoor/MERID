@@ -53,7 +53,7 @@ export interface AgentStatusChangedPayload {
   lastSeen?: string;
 }
 
-export interface AgentConnectedPayload extends AgentRow {}
+export type AgentConnectedPayload = AgentRow;
 
 export interface AgentDisconnectedPayload {
   id: string;

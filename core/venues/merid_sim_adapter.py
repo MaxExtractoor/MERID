@@ -50,7 +50,7 @@ class MERIDSimulatorAdapter(VenueAdapter):
             venue="merid_sim"
         )
     
-    async def place_order(
+    async def _place_order_impl(
         self,
         symbol: str,
         side: OrderSide,

@@ -84,6 +84,9 @@ class TwitterAgent:
         self.recent_tweets: List[Tweet] = []
         self.last_post_time = 0
         self.min_post_interval = 60  # Minimum 60 seconds between posts
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 3
+        self._disabled_reason: Optional[str] = None
     
     def post_tweet(self, text: str, force: bool = False) -> Optional[Tweet]:
         """
@@ -97,14 +100,14 @@ class TwitterAgent:
             Tweet object if successful, None otherwise
         """
         if not self.enabled:
-            logger.warning(f"Twitter agent disabled - would have posted: {text}")
+            if not self._disabled_reason:
+                logger.debug(f"Twitter agent disabled - would have posted: {text[:80]}...")
             return None
         
         # Rate limiting
         if not force:
             time_since_last = time.time() - self.last_post_time
             if time_since_last < self.min_post_interval:
-                logger.warning(f"Rate limit: {self.min_post_interval - time_since_last:.0f}s until next post")
                 return None
         
         # Truncate if needed
@@ -124,12 +127,46 @@ class TwitterAgent:
             
             self.recent_tweets.append(tweet)
             self.last_post_time = time.time()
+            self._consecutive_failures = 0
             
             logger.info(f"Tweet posted successfully: {tweet.tweet_id}")
             return tweet
             
         except Exception as exc:
-            logger.error(f"Failed to post tweet: {exc}")
+            exc_str = str(exc)
+            self.last_post_time = time.time()  # Prevent retry flood
+            self._consecutive_failures += 1
+
+            # 403 = OAuth permissions not configured for write — permanent failure
+            if "403" in exc_str and ("Forbidden" in exc_str or "oauth" in exc_str.lower() or "permissions" in exc_str.lower()):
+                self._disabled_reason = f"OAuth write permissions not granted: {exc_str}"
+                self.enabled = False
+                logger.error(
+                    "Twitter agent DISABLED — OAuth1 app lacks write permissions. "
+                    "Go to developer.twitter.com → App Settings → User authentication → "
+                    "set App permissions to 'Read and write'. Error: %s", exc_str
+                )
+                return None
+
+            # 401 = bad credentials — permanent failure
+            if "401" in exc_str and "Unauthorized" in exc_str:
+                self._disabled_reason = f"Invalid credentials: {exc_str}"
+                self.enabled = False
+                logger.error("Twitter agent DISABLED — invalid credentials: %s", exc_str)
+                return None
+
+            # Transient failures: back off after N consecutive failures
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                self._disabled_reason = f"Too many consecutive failures ({self._consecutive_failures}): {exc_str}"
+                self.enabled = False
+                logger.error(
+                    "Twitter agent DISABLED after %d consecutive failures. Last error: %s",
+                    self._consecutive_failures, exc_str,
+                )
+                return None
+
+            logger.warning("Tweet failed (%d/%d): %s",
+                           self._consecutive_failures, self._max_consecutive_failures, exc_str)
             return None
     
     def post_market_update(self, asset: str, price: float, change_pct: float, volume: float) -> Optional[Tweet]:
@@ -208,6 +245,66 @@ class TwitterAgent:
         
         return self.post_tweet(text)
     
+    def post_tweet_reply(self, text: str, reply_to_id: str) -> Optional[Tweet]:
+        """Post a reply tweet to thread a follow-up on the same market."""
+        if not self.enabled:
+            return None
+        if len(text) > 280:
+            text = text[:277] + "..."
+        try:
+            response = self.client.create_tweet(
+                text=text,
+                in_reply_to_tweet_id=reply_to_id,
+            )
+            tweet = Tweet(
+                text=text,
+                tweet_id=response.data["id"],
+                created_at=datetime.now(),
+            )
+            self.recent_tweets.append(tweet)
+            self.last_post_time = time.time()
+            self._consecutive_failures = 0
+            logger.info("Reply tweet posted: %s → %s", tweet.tweet_id, reply_to_id)
+            return tweet
+        except Exception as exc:
+            logger.warning("Reply tweet failed: %s", exc)
+            return None
+
+    def post_kalshi_insight(
+        self,
+        category: str,
+        question: str,
+        prob_pct: str,
+        change_str: str,
+        swarm_pct: str,
+        market_url: str,
+        tags: List[str],
+        action: str = "update",
+    ) -> Optional[Tweet]:
+        """Post a Kalshi market insight with category-aware formatting."""
+        action_emojis = {
+            "new_market": "🆕", "prob_cross": "📈",
+            "swing": "⚡", "resolution": "🏁", "update": "🔄",
+        }
+        cat_emojis = {
+            "Trending": "🔥", "Politics": "🏛️", "Sports": "🏆",
+            "Culture": "🎭", "Crypto": "₿", "Climate": "🌍",
+            "Economics": "📊", "Mentions": "📰", "Companies": "🏢",
+            "Financials": "💹", "Tech & Science": "🔬",
+        }
+        ce = cat_emojis.get(category, "📌")
+        ae = action_emojis.get(action, "🔄")
+        tag_str = " ".join(tags[:2])
+        q = question if len(question) <= 80 else question[:77] + "…"
+        text = (
+            f"{ce} {ae} {category.upper()}\n"
+            f"{q}\n"
+            f"Now: {prob_pct} {change_str} | MERID: {swarm_pct}\n"
+            f"{market_url}\n"
+            f"{tag_str}"
+        )
+        return self.post_tweet(text)
+
     def get_recent_tweets(self, limit: int = 10) -> List[Tweet]:
         """Get recent tweets posted by this agent."""
         return self.recent_tweets[-limit:]

@@ -35,9 +35,43 @@ from merid.prediction.consensus import (
     ResolvedMarket,
     get_prediction_consensus_store,
 )
+from merid.prediction.debate import (
+    AgentTeam,
+    DebateArgument,
+    DebateBacktester,
+    DebateSession,
+    DebateStore,
+    RewardEntry,
+    RewardParameterSweep,
+    get_debate_store,
+)
+from merid.prediction.agent_grid_config import (
+    AgentGridConfig,
+    get_agent_grid_config,
+)
+from merid.prediction.session_guard import (
+    SessionGuard,
+    get_session_guard,
+)
+from merid.prediction.agent_grid import (
+    AgentGrid,
+    get_agent_grid,
+)
+from merid.prediction.trading_agent import KalshiTradingAgent
+from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
+from merid.prediction.kalshi_tools import register_kalshi_tools
+from merid.prediction.social_broadcaster import (
+    KalshiSocialBroadcaster,
+    get_social_broadcaster,
+)
 
 __all__ = [
+    "AgentTeam",
     "ContractState",
+    "DebateArgument",
+    "DebateBacktester",
+    "DebateSession",
+    "DebateStore",
     "KalshiStrategy",
     "MarketSnapshot",
     "PredictionConsensusStore",
@@ -49,9 +83,23 @@ __all__ = [
     "PredictionRiskConfig",
     "PreTradeCheck",
     "ResolvedMarket",
+    "RewardEntry",
+    "RewardParameterSweep",
     "StrategyConfig",
     "StrategySignal",
     "TradingMode",
     "VenueGate",
+    "get_debate_store",
     "get_prediction_consensus_store",
+    "AgentGrid",
+    "AgentGridConfig",
+    "KalshiTradingAgent",
+    "PortfolioRiskAgent",
+    "SessionGuard",
+    "get_agent_grid",
+    "get_agent_grid_config",
+    "get_session_guard",
+    "register_kalshi_tools",
+    "KalshiSocialBroadcaster",
+    "get_social_broadcaster",
 ]

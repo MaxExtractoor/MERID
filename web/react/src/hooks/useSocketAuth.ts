@@ -8,7 +8,7 @@ export function useSocketAuth() {
     if (socket && connected) {
       // Auth is handled by the underlying useMeridSocket hook
       // which reads the token from localStorage automatically
-      console.log("Socket authenticated and connected");
+      console.debug("Socket authenticated and connected");
     }
   }, [socket, connected]);
 

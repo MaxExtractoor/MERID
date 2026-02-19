@@ -416,6 +416,26 @@ class SignalStore:
             if not self._mem_conn:
                 conn.close()
 
+    # ── Reset ─────────────────────────────────────────────────────────
+
+    def reset_all(self) -> None:
+        """Truncate all signal tables.  Used by fresh-start mode."""
+        conn = self._conn()
+        try:
+            conn.executescript("""
+                DELETE FROM signal_features;
+                DELETE FROM arb_signals;
+                DELETE FROM arb_plans;
+                DELETE FROM drift_metrics;
+                DELETE FROM cqi_history;
+            """)
+            if not self._mem_conn:
+                conn.commit()
+            logger.warning("SignalStore reset: all tables truncated")
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
     # ── Aggregate metrics ─────────────────────────────────────────────
 
     def get_signal_metrics(self) -> Dict[str, Any]:

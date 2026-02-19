@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
 import { DEFAULTS } from "../config/constants";
 import { 
   TrendingUp, TrendingDown, Minus, Twitter, Newspaper, 
@@ -44,48 +46,21 @@ const SOURCE_COLORS = {
 };
 
 export default function SentimentTimeline({ ticker }: SentimentTimelineProps) {
-  const [events, setEvents] = useState<SentimentEvent[]>([]);
-  const [windows, setWindows] = useState<SentimentWindow[]>([]);
   const [selectedTicker, setSelectedTicker] = useState(ticker || '');
-  const [loading, setLoading] = useState(true);
 
-  const fetchSentiment = useCallback(async () => {
-    try {
-      const url = selectedTicker
-        ? `/api/v1/signals/sentiment/${selectedTicker}`
-        : '/api/v1/signals/sentiment';
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.events) setEvents(data.events);
-        if (data.windows) setWindows(data.windows);
-        return;
-      }
-    } catch {
-      // fallback
-    }
+  const endpoint = selectedTicker
+    ? `/api/v1/signals/sentiment/${selectedTicker}`
+    : '/api/v1/signals/sentiment';
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ events: SentimentEvent[]; windows: SentimentWindow[] }>(
+    endpoint,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
+  );
 
-    const now = Date.now();
-    setEvents([
-      { id: '1', timestamp: new Date(now - 120000).toISOString(), source: 'x', ticker: 'BTC', polarity: 0.8, magnitude: 0.9, relevance: 0.95, headline: 'Bitcoin breaks $105K resistance with massive volume', isSpike: true },
-      { id: '2', timestamp: new Date(now - 300000).toISOString(), source: 'news', ticker: 'BTC', polarity: 0.6, magnitude: 0.7, relevance: 0.8, headline: 'Institutional inflows hit record high for Bitcoin ETFs', isSpike: false },
-      { id: '3', timestamp: new Date(now - 600000).toISOString(), source: 'x', ticker: 'ETH', polarity: -0.4, magnitude: 0.5, relevance: 0.7, headline: 'Ethereum gas fees spike amid NFT mint frenzy', isSpike: false },
-      { id: '4', timestamp: new Date(now - 900000).toISOString(), source: 'telegram', ticker: 'SOL', polarity: 0.7, magnitude: 0.8, relevance: 0.85, headline: 'Solana DEX volume surpasses Ethereum for third day', isSpike: false },
-      { id: '5', timestamp: new Date(now - 1200000).toISOString(), source: 'news', ticker: 'BTC', polarity: -0.6, magnitude: 0.8, relevance: 0.9, headline: 'SEC delays spot Bitcoin ETF decision again', isSpike: true },
-    ]);
-    setWindows([
-      { ticker: 'BTC', polarity: 0.45, magnitude: 0.72, eventCount: 24, sourceBreakdown: { x: 15, news: 7, telegram: 2 } },
-      { ticker: 'ETH', polarity: -0.12, magnitude: 0.45, eventCount: 12, sourceBreakdown: { x: 8, news: 3, telegram: 1 } },
-      { ticker: 'SOL', polarity: 0.62, magnitude: 0.68, eventCount: 8, sourceBreakdown: { x: 5, news: 2, telegram: 1 } },
-    ]);
-    setLoading(false);
-  }, [selectedTicker]);
-
-  useEffect(() => {
-    fetchSentiment();
-    const interval = setInterval(fetchSentiment, DEFAULTS.POLLING_INTERVALS.SLOW);
-    return () => clearInterval(interval);
-  }, [fetchSentiment]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Sentiment" error={fetchError} onRetry={refetch} />;
+  }
+  const events = rawData?.events ?? [];
+  const windows = rawData?.windows ?? [];
 
   const getPolarityColor = (p: number) => {
     if (p > 0.3) return 'text-green-400';
@@ -97,11 +72,6 @@ export default function SentimentTimeline({ ticker }: SentimentTimelineProps) {
     if (p > 0.3) return TrendingUp;
     if (p < -0.3) return TrendingDown;
     return Minus;
-  };
-
-  const getPolarityBar = (p: number) => {
-    const pct = ((p + 1) / 2) * 100;
-    return pct;
   };
 
   const formatTime = (ts: string) => {
@@ -156,7 +126,7 @@ export default function SentimentTimeline({ ticker }: SentimentTimelineProps) {
             ))}
           </div>
           <button type="button"
-            onClick={fetchSentiment}
+            onClick={() => refetch()}
             className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
             title="Refresh sentiment"
            aria-label="Refresh">

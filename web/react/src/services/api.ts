@@ -85,7 +85,7 @@ export interface RiskProtections {
     max_open_orders: number;
     current_open_orders: number;
   };
-  recent_events: Array<{ timestamp: string; type: string; details: any }>;
+  recent_events: Array<{ timestamp: string; type: string; details: Record<string, unknown> }>;
 }
 
 export interface PrimeStatus {

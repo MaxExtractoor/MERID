@@ -466,6 +466,16 @@ class ConsensusStore:
 
         return {"quality_index": qi, "band": band, "window_trades": n}
 
+    # ── Reset ─────────────────────────────────────────────────────────
+
+    def reset_all(self) -> None:
+        """Truncate all opinions and plans.  Used by fresh-start mode."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM opinions")
+                conn.execute("DELETE FROM plans")
+        logger.warning("Consensus store reset: all opinions and plans deleted")
+
     # ── Row converters ───────────────────────────────────────────────
 
     @staticmethod

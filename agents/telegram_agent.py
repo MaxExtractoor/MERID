@@ -46,11 +46,21 @@ class TelegramAgent:
         """Initialize Telegram agent with Bot API credentials."""
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        
-        # TELEGRAM AGENT DISABLED
-        self.enabled = False
-        self.bot = None
-        logger.info("Telegram agent is DISABLED by configuration")
+
+        # Enable when credentials are present
+        if self.bot_token and self.chat_id:
+            try:
+                self.bot = Bot(token=self.bot_token)
+                self.enabled = True
+                logger.info("Telegram agent ENABLED (bot token + chat_id found)")
+            except Exception as exc:
+                self.bot = None
+                self.enabled = False
+                logger.warning(f"Telegram agent disabled — Bot init failed: {exc}")
+        else:
+            self.enabled = False
+            self.bot = None
+            logger.info("Telegram agent DISABLED — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable")
         
         self.recent_messages: List[TelegramMessage] = []
         self.last_post_time = 0

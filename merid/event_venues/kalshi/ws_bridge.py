@@ -225,21 +225,39 @@ class KalshiWebSocketBridge:
                 self._coalesce_buffer[event.market_id] = payload
 
             elif isinstance(event, VenueTrade):
-                await self._publish_to_bus(
-                    "kalshi:trade",
-                    {
-                        "trade_id": event.trade_id,
-                        "market_id": event.market_id,
-                        "order_id": event.order_id,
-                        "side": event.side,
-                        "size": float(event.size),
-                        "price": float(event.price),
-                        "fee": float(event.fee),
-                        "ts": event.timestamp.isoformat(),
-                    },
-                )
+                trade_payload = {
+                    "trade_id": event.trade_id,
+                    "market_id": event.market_id,
+                    "order_id": event.order_id,
+                    "side": event.side,
+                    "size": float(event.size),
+                    "price": float(event.price),
+                    "fee": float(event.fee),
+                    "ts": event.timestamp.isoformat(),
+                }
+                await self._publish_to_bus("kalshi:trade", trade_payload)
                 self._events_forwarded += 1
                 self._type_counts["trade"] += 1
+
+                # Wire live fills to AgentPerformanceTracker.record_close so
+                # calibration metrics update from real Kalshi trade events.
+                try:
+                    from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+                    tracker = get_agent_performance_tracker()
+                    # Profit: payout (100 - price) * size - fee, normalized to USD
+                    price_cents = int(round(float(event.price) * 100)) if float(event.price) <= 1.0 else int(round(float(event.price)))
+                    payout_cents = (100 - price_cents) * int(event.size)
+                    profit_usd = Decimal(str(round((payout_cents - float(event.fee)) / 100.0, 4)))
+                    # Record close against any open fill for this market
+                    # agent_id is unknown from WS trade; record against system-wide
+                    tracker.record_close(
+                        agent_id="kalshi_ws",
+                        market_id=event.market_id,
+                        profit_usd=profit_usd,
+                        exit_price_cents=price_cents,
+                    )
+                except Exception as _exc:
+                    logger.debug(f"WS trade → record_close error (ignored): {_exc}")
 
             elif isinstance(event, dict) and event.get("type") in (
                 "orderbook_snapshot", "orderbook_delta",

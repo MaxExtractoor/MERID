@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
 import { DEFAULTS } from "../config/constants";
 import {
   Clock, DollarSign, BarChart3, RefreshCw
@@ -44,67 +46,27 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function PredictionMarketDetail({ ticker }: PredictionMarketDetailProps) {
-  const [markets, setMarkets] = useState<MarketSnapshot[]>([]);
   const [selectedMarket, setSelectedMarket] = useState<MarketSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
 
-  const fetchMarkets = useCallback(async () => {
-    try {
-      const url = ticker
-        ? `/api/v1/prediction-markets/summary?ticker=${ticker}`
-        : '/api/v1/prediction-markets/summary';
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.markets) {
-          setMarkets(data.markets);
-          if (!selectedMarket && data.markets.length > 0) {
-            setSelectedMarket(data.markets[0]);
-          }
-          setLoading(false);
-          return;
-        }
-      }
-    } catch {
-      // fallback
-    }
+  const endpoint = ticker
+    ? `/api/v1/prediction-markets/summary?ticker=${ticker}`
+    : '/api/v1/prediction-markets/summary';
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ markets: MarketSnapshot[] }>(
+    endpoint,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
 
-    const mock: MarketSnapshot[] = [
-      {
-        ticker: 'KXBTC-105K-YES', title: 'BTC above $105K by Feb 14', category: 'Crypto',
-        yesAsk: 62, yesBid: 60, noAsk: 40, noBid: 38,
-        impliedProb: 0.61, volume24h: 12500, openInterest: 45000,
-        expiresAt: '2026-02-14T23:59:00Z', expiryPhase: 'MID',
-        edge: 3.2, edgeType: 'speculative', positionQty: 50, positionSide: 'yes',
-        unrealizedPnl: 15.50, status: 'TRADING',
-      },
-      {
-        ticker: 'KXFED-HOLD-YES', title: 'Fed holds rates in March', category: 'Economics',
-        yesAsk: 78, yesBid: 76, noAsk: 24, noBid: 22,
-        impliedProb: 0.77, volume24h: 8200, openInterest: 32000,
-        expiresAt: '2026-03-19T18:00:00Z', expiryPhase: 'EARLY',
-        edge: 1.5, edgeType: 'speculative', positionQty: 0, positionSide: 'none',
-        unrealizedPnl: 0, status: 'TRADING',
-      },
-      {
-        ticker: 'KXETH-4K-YES', title: 'ETH above $4K by Feb 28', category: 'Crypto',
-        yesAsk: 35, yesBid: 33, noAsk: 67, noBid: 65,
-        impliedProb: 0.34, volume24h: 5600, openInterest: 18000,
-        expiresAt: '2026-02-28T23:59:00Z', expiryPhase: 'MID',
-        edge: -2.0, edgeType: 'none', positionQty: 30, positionSide: 'no',
-        unrealizedPnl: -8.20, status: 'TRADING',
-      },
-    ];
-    setMarkets(mock);
-    if (!selectedMarket) setSelectedMarket(mock[0]);
-    setLoading(false);
-  }, [ticker, selectedMarket]);
+  const markets = useMemo(() => rawData?.markets ?? [], [rawData]);
 
   useEffect(() => {
-    fetchMarkets();
-    const interval = setInterval(fetchMarkets, DEFAULTS.POLLING_INTERVALS.STANDARD);
-    return () => clearInterval(interval);
-  }, [fetchMarkets]);
+    if (!selectedMarket && markets.length > 0) {
+      setSelectedMarket(markets[0]);
+    }
+  }, [markets, selectedMarket]);
+
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Prediction markets" error={fetchError} onRetry={refetch} />;
+  }
 
   const daysToExpiry = (expiresAt: string) => {
     const ms = new Date(expiresAt).getTime() - Date.now();
@@ -135,7 +97,7 @@ export default function PredictionMarketDetail({ ticker }: PredictionMarketDetai
           <span className="text-sm text-gray-400">{markets.length} active</span>
         </div>
         <button type="button"
-          onClick={fetchMarkets}
+          onClick={() => refetch()}
           className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
           title="Refresh markets"
          aria-label="Refresh">

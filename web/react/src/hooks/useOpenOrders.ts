@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useApiData } from './useApiData';
 import { useMeridSocket } from './useMeridSocket';
 import { API_ENDPOINTS } from '../config/constants';
+import { logUiError } from '../utils/logger';
 import type {
   OrderRow,
   OpenOrdersResponse,
@@ -158,7 +159,7 @@ export function useOpenOrders(): UseOpenOrdersReturn {
     };
 
     const handleError = (error: Error) => {
-      console.error('[useOpenOrders] WebSocket error:', error);
+      logUiError('useOpenOrders', 'WebSocket error', error);
     };
 
     socket.on('order:created', handleCreated);

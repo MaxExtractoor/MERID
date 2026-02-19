@@ -18,6 +18,7 @@ from merid.pipeline.proposal import (
     TradeProposal,
 )
 from merid.pipeline.risk_manager import GlobalRiskManager, get_global_risk_manager
+from merid.pipeline.routing_policy import RoutingPolicy, VenueSelector
 from core.order_sanity_check import OrderSanityChecker, get_order_sanity_checker
 
 from utils.logger import get_logger
@@ -45,12 +46,14 @@ class TradeRouter:
         mode_manager: Optional[ModeManager] = None,
         risk_manager: Optional[GlobalRiskManager] = None,
         sanity_checker: Optional[OrderSanityChecker] = None,
+        routing_policy: Optional[RoutingPolicy] = None,
     ):
         self._adapters = registry or get_adapter_registry()
         self._instruments = instruments or get_instrument_registry()
         self._modes = mode_manager or get_mode_manager()
         self._risk = risk_manager or get_global_risk_manager()
         self._sanity = sanity_checker or get_order_sanity_checker()
+        self._venue_selector = VenueSelector(policy=routing_policy)
         self._history: List[TradeProposal] = []
 
     # ── Main entry point ─────────────────────────────────────────────
@@ -82,14 +85,33 @@ class TradeRouter:
                 )
                 return proposal
 
-        # 3. Mode check
+        # 3. Venue health check (health-aware routing with failover)
+        decision = self._venue_selector.select(
+            proposal.venue,
+            proposal.domain.value if hasattr(proposal.domain, 'value') else str(proposal.domain),
+        )
+        proposal.metadata["routing_decision"] = decision.to_dict()
+
+        if decision.venue is None:
+            proposal.reject(f"No healthy venue available: {decision.reason}")
+            return proposal
+
+        if decision.venue != proposal.venue:
+            logger.info(
+                f"Venue failover: {proposal.venue} -> {decision.venue} "
+                f"(reason={decision.reason})"
+            )
+            proposal.venue = decision.venue
+            proposal.native_symbol = ""  # Force re-resolve for new venue
+
+        # 4. Mode check
         try:
             self._modes.check_can_trade(proposal.venue)
         except (ModeManager.VenueDisabledError, ModeManager.ModeBlockedError) as exc:
             proposal.reject(str(exc))
             return proposal
 
-        # 4. Global risk check
+        # 5. Global risk check
         risk_result = self._risk.check_proposal(proposal)
         proposal.risk_check_result = risk_result.to_dict()
         if not risk_result.approved:

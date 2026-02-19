@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { TrendingUp, TrendingDown, Activity } from 'lucide-react';
 import { api } from '../services/api';
 import type { PredictionMarket } from '../services/api';
+import { DEFAULTS } from "../config/constants";
+import type { RawPredictionMarket } from '../types/api';
 
 export default function PredictionMarketsPanel() {
   const [markets, setMarkets] = useState<PredictionMarket[]>([]);
@@ -12,15 +14,15 @@ export default function PredictionMarketsPanel() {
       try {
         const data = await api.getPredictionMarkets();
         setMarkets(data.markets || []);
-      } catch (e) {
-        console.error('Failed to fetch prediction markets:', e);
-      } finally {
+      } catch {
+      // Operation failed — UI state unchanged
+    } finally {
         setLoading(false);
       }
     }
 
     fetchMarkets();
-    const interval = setInterval(fetchMarkets, 30000); // Update every 30s for live data
+    const interval = setInterval(fetchMarkets, DEFAULTS.POLLING_INTERVALS.STANDARD); // Update every 10s for live data
     return () => clearInterval(interval);
   }, []);
 
@@ -57,30 +59,31 @@ export default function PredictionMarketsPanel() {
       ) : (
         <div className="space-y-3">
           {markets.slice(0, 5).map((market, index) => {
-            const yesPrice = ((market as any).yesPrice ?? market.yes_price ?? 0);
-            const noPrice = ((market as any).noPrice ?? market.no_price ?? 0);
-            const volume = (market as any).volume || market.volume_24h || 0;
-            const endTime = (market as any).endTime || market.close_date;
-            const position = (market as any).ourPosition;
-            const pnl = (market as any).ourPnl;
-            const confidence = (market as any).modelConfidence;
+            const m = market as unknown as RawPredictionMarket;
+            const yesPrice = (m.yesPrice ?? m.yes_price ?? 0);
+            const noPrice = (m.noPrice ?? m.no_price ?? 0);
+            const volume = m.volume || m.volume_24h || 0;
+            const endTime = m.endTime || m.close_date;
+            const position = m.ourPosition;
+            const pnl = m.ourPnl;
+            const confidence = m.modelConfidence;
 
             return (
               <div
-                key={(market as any).id || market.market_id || `market-${index}`}
+                key={m.id || m.market_id || `market-${index}`}
                 className="p-4 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
               >
                 {/* Question */}
                 <p className="text-sm font-medium text-slate-200 mb-2 line-clamp-2 leading-relaxed">
-                  {market.question || (market as any).symbol || 'Market'}
+                  {m.question || m.symbol || 'Market'}
                 </p>
 
                 {/* Tags row */}
                 <div className="flex flex-wrap items-center gap-2 text-xs mb-3">
                   <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded">
-                    {market.category || (market as any).symbol || 'Prediction'}
+                    {m.category || m.symbol || 'Prediction'}
                   </span>
-                  <span className="text-slate-500">{market.platform || 'Kalshi'}</span>
+                  <span className="text-slate-500">{m.platform || 'Kalshi'}</span>
                   {endTime && (
                     <>
                       <span className="text-slate-600">•</span>
@@ -130,7 +133,7 @@ export default function PredictionMarketsPanel() {
       )}
 
       {markets.length > 5 && (
-        <button className="mt-4 w-full py-2 text-sm text-blue-400 hover:text-blue-300 transition-colors">
+        <button type="button" className="mt-4 w-full py-2 text-sm text-blue-400 hover:text-blue-300 transition-colors" title="View all">
           View all {markets.length} markets →
         </button>
       )}

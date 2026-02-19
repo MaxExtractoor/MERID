@@ -7,9 +7,14 @@ import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from collections import defaultdict, deque
 from dataclasses import asdict
 from typing import Any, Deque, Dict, Optional
+
+from web.startup_agents import get_orchestrator_manager
 
 import httpx
 from fastapi import (
@@ -54,7 +59,8 @@ from memory.patterns import pattern_engine
 from memory.store import reality_memory
 from readiness.report import build_readiness_report
 from services.gamification import GamificationEngine
-from simulation.engine import build_simulation_chain
+# Lazy import to avoid loading crypto adapters in Kalshi-only mode
+# from simulation.engine import build_simulation_chain
 from swarm.agents.charters import CHARTER_REGISTRY
 from swarm.performance import performance_ledger
 from utils.logger import get_logger
@@ -66,16 +72,19 @@ from web.api.consensus import router as consensus_router
 from web.api.mining import router as mining_router
 from web.api.auth import router as auth_router
 from web.api.referrals import router as referrals_router
-from web.api.trading import router as trading_router
+# Lazy import - trading router loads paper_trading infrastructure
+# from web.api.trading import router as trading_router
 from web.api.betting import router as betting_router
 from web.api.streams import router as streams_router
-from web.api.paper_trading import router as paper_trading_router, paper_trading_convenience_router
+# Lazy import to avoid loading paper_trading which imports live_price_feed
+# from web.api.paper_trading import router as paper_trading_router, paper_trading_convenience_router
 from web.api.system_control import router as system_control_router
 from web.api.data_endpoints import router as data_endpoints_router
 from web.api.live_stream import router as live_stream_router
 from web.api.institutional import router as institutional_router
 from web.api.schemas import router as schemas_router
-from web.api.arbitrage import router as arbitrage_router
+# Lazy import - arbitrage router loads CCXT exchange scanners
+# from web.api.arbitrage import router as arbitrage_router
 from web.api.prediction import router as prediction_router
 from web.api.prediction_markets import router as prediction_markets_router
 from web.api.prediction_consensus_api import router as prediction_consensus_router
@@ -107,6 +116,7 @@ from web.api.cognitive_api import router as cognitive_router
 from web.api.dev_swarm_routes import router as dev_swarm_router
 from web.api.dev_swarm_governance_routes import router as dev_swarm_governance_router
 from web.api.operator import router as operator_router
+from web.api.operator_endpoints import router as operator_endpoints_router, legacy_router as operator_legacy_router
 from web.api.metrics import router as metrics_router
 from web.api.metrics import record_latency
 from web.api.market_data import router as market_data_router
@@ -121,10 +131,13 @@ from web.api.resilience import router as resilience_router
 from web.api.guardrails_api import router as guardrails_router
 from web.api.kalshi_grid_api import router as kalshi_grid_router
 from web.api.kalshi_api import router as kalshi_api_router
+from web.api.kalshi_ui import router as kalshi_ui_router
 from web.api.sidebar_config import router as sidebar_config_router
 from web.api.benchmarks_api import router as benchmarks_router
 from web.api.paper_ladder_api import router as paper_ladder_router
 from web.api.paper_session_api import router as paper_session_router
+from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
+from web.api.kalshi_agent_performance_api import router as kalshi_agent_performance_router
 
 # Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
 # from web.api.mock_simulation import router as mock_simulation_router
@@ -134,15 +147,16 @@ from web.api.paper_session_api import router as paper_session_router
 # from web.api.mock_system_admin import router as mock_system_admin_router
 # from web.api.mock_prediction_markets import router as mock_prediction_markets_router
 # from web.api.mock_agent_cohorts import router as mock_agent_cohorts_router
-from web.api.trading_suite import router as trading_suite_router
+# Lazy import - trading_suite loads paper adapter which instantiates at module level
+# from web.api.trading_suite import router as trading_suite_router
 
 
 # Load centralized settings - single source of truth
 from merid.settings import settings
 
 # Basic environment logging (moved validation to startup_event)
-print(f"🚀 MERID Environment: {settings.MERID_ENV}")
-print(f"📝 Log Level: {settings.MERID_LOG_LEVEL}")
+print(f">> MERID Environment: {settings.MERID_ENV}")
+print(f">> Log Level: {settings.MERID_LOG_LEVEL}")
 from web.api.ops import router as ops_router
 from web.api.archive import router as archive_router
 from web.api.trading_mode import router as trading_mode_router
@@ -180,10 +194,11 @@ from web.api.api_status import router as api_status_router
 from web.api.risk import router as risk_router
 # Skip governance cadence for Phase 0 trial
 # from web.api.governance_cadence import router as governance_cadence_router
-from web.api.minimal_scope import router as minimal_scope_router
-from web.api.phase0_experiment import router as phase0_experiment_router
-from web.api.phase0_adapters import phase0_router
-from web.api.phase0_trial_api import router as phase0_trial_router
+# Phase0 routers - disabled in Kalshi-only mode
+minimal_scope_router = None
+phase0_experiment_router = None
+phase0_router = None
+phase0_trial_router = None
 from web.api.us_compliant_markets import router as us_compliant_markets_router
 from web.api.system_endpoints import router as system_endpoints_router
 from web.api.real_data_endpoints import router as real_data_router
@@ -235,7 +250,78 @@ def _templates():
     return _context_value("templates")
 
 
+@asynccontextmanager
+async def lifespan_with_agents(app: FastAPI):
+    """Application lifespan manager - starts/stops orchestrator agents."""
+    # Startup
+    logger.info("Starting application lifespan...")
+    orchestrator_manager = get_orchestrator_manager()
+    await orchestrator_manager.start_all()
+    logger.info("✅ Orchestrator agents started")
+    
+    # Start Kalshi agent grid if enabled
+    if settings.KALSHI_ONLY or settings.MERID_PM_LIVE_ENABLED:
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            grid = get_agent_grid()
+            await grid.start()
+            logger.info(f"✅ Kalshi agent grid started: {len(grid._agents)} agents running")
+        except Exception as e:
+            logger.error(f"Failed to start Kalshi agent grid: {e}")
+    
+    # Run reconciliation once on startup to clear execution gate
+    if settings.KALSHI_ONLY or settings.MERID_PM_LIVE_ENABLED:
+        try:
+            logger.info("=" * 80)
+            logger.info("Running startup reconciliation to unblock execution gate...")
+            logger.info("=" * 80)
+            import asyncio as _asyncio
+            from merid.reconciliation import (
+                reconcile_all_venues,
+                has_critical_discrepancies,
+            )
+            # reconcile_all_venues is synchronous — run in thread pool to avoid blocking event loop
+            discrepancies = await _asyncio.get_event_loop().run_in_executor(
+                None, lambda: reconcile_all_venues(["kalshi"])
+            )
+            n_crit = sum(1 for d in discrepancies if d.severity == "critical")
+            n_warn = sum(1 for d in discrepancies if d.severity == "warning")
+            logger.info(
+                f"✅ Startup reconciliation complete: {len(discrepancies)} discrepancies "
+                f"({n_crit} critical, {n_warn} warning)"
+            )
+            if has_critical_discrepancies():
+                logger.warning("⚠️  Execution gate: BLOCKED (critical reconciliation issues found)")
+            else:
+                logger.info("✅ Execution gate: CLEAR - trades can proceed")
+            logger.info("=" * 80)
+        except Exception as e:
+            logger.error(f"Startup reconciliation failed: {e}", exc_info=True)
+            logger.warning("⚠️  Execution gate may remain BLOCKED - reconciliation incomplete")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down application...")
+    
+    # Stop Kalshi agent grid
+    if settings.KALSHI_ONLY or settings.MERID_PM_LIVE_ENABLED:
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            grid = get_agent_grid()
+            await grid.stop()
+            logger.info("✅ Kalshi agent grid stopped")
+        except Exception as e:
+            logger.error(f"Failed to stop Kalshi agent grid: {e}")
+    
+    await orchestrator_manager.stop_all()
+    logger.info("✅ Application shutdown complete")
+
+
 def create_app(lifespan=None) -> FastAPI:
+    # Use _app_lifespan by default when called as factory (lifespan=None)
+    if lifespan is None:
+        lifespan = _app_lifespan
     application = FastAPI(title="MERID Core", version="2.0", lifespan=lifespan)
     
     # Mount static files
@@ -261,12 +347,19 @@ def create_app(lifespan=None) -> FastAPI:
         logger.warning("Neo4j initialization skipped; continuing without graph store", exc_info=e)
     
     templates = Jinja2Templates(directory="web/templates")
-    simulation_chain = build_simulation_chain(
-        use_mock=str(os.getenv("MERID_KALSHI_MOCK", "")).lower() in {"1", "true", "yes"}
-    )
+    
+    # Skip simulation chain in Kalshi-only mode (imports crypto perp adapters)
+    from merid.settings import settings
+    if not settings.KALSHI_ONLY:
+        from simulation.engine import build_simulation_chain
+        simulation_chain = build_simulation_chain(
+            use_mock=str(os.getenv("MERID_KALSHI_MOCK", "")).lower() in {"1", "true", "yes"}
+        )
+    else:
+        simulation_chain = None  # Not used in Kalshi-only mode
     context = {
         "simulation_chain": simulation_chain,
-        "merid": get_core(),
+        "merid": None,  # Lazy init during startup to avoid loading agents at import time
         "logger": logger,
         "dashboard_api_key": os.getenv("MERID_DASHBOARD_API_KEY"),
         "templates": templates,
@@ -297,41 +390,62 @@ def create_app(lifespan=None) -> FastAPI:
     except Exception as exc:
         logger.debug(f"Tracing middleware not available: {exc}")
 
+    # ── Profile-based router gating ─────────────────────────────────
+    # When MERID_PROFILE=kalshi-only, only Kalshi-critical routers are
+    # registered.  Crypto feeds, miner, research, rewards, prediction,
+    # betting, wallet, treasury etc. won't start.
+    _profile = os.getenv("MERID_PROFILE", "full").lower().strip()
+    _kalshi_only = _profile in ("kalshi-only", "kalshi_only", "kalshi")
+    if _kalshi_only:
+        logger.info("🎯 KALSHI-ONLY profile active — legacy routers suppressed")
+
     application.include_router(root_router)
     application.include_router(router)
     application.include_router(router_v1)
     application.include_router(real_data_router)
-    application.include_router(reflection_router)
+    # Phase0 trial router gated
+    # if not _kalshi_only:
+    #     application.include_router(phase0_trial_router)
     application.include_router(consensus_router)
     application.include_router(mining_router)
     application.include_router(auth_router)
-    application.include_router(referrals_router)
-    application.include_router(trading_router)
-    application.include_router(betting_router)
+    if not _kalshi_only:
+        from web.api.trading import router as trading_router
+        application.include_router(referrals_router)
+        application.include_router(trading_router)
+        application.include_router(betting_router)
     application.include_router(streams_router)
-    application.include_router(paper_trading_router)
-    application.include_router(paper_trading_convenience_router)
+    if not _kalshi_only:
+        from web.api.paper_trading import router as paper_trading_router, paper_trading_convenience_router
+        application.include_router(paper_trading_router)
+        application.include_router(paper_trading_convenience_router)
     application.include_router(system_control_router)
     application.include_router(data_endpoints_router)
     application.include_router(live_stream_router)
-    application.include_router(institutional_router)
+    if not _kalshi_only:
+        application.include_router(institutional_router)
     application.include_router(schemas_router)
-    application.include_router(arbitrage_router)
-    application.include_router(prediction_router)
-    application.include_router(wallet_router)
+    if not _kalshi_only:
+        from web.api.arbitrage import router as arbitrage_router
+        application.include_router(arbitrage_router)
+        application.include_router(prediction_router)
+        application.include_router(wallet_router)
     application.include_router(offline_router)
     application.include_router(notifications_router)
     application.include_router(compliance_router)
-    application.include_router(plugins_router)
+    if not _kalshi_only:
+        application.include_router(plugins_router)
     application.include_router(monitoring_router)
     application.include_router(ratelimit_router)
     application.include_router(backup_router)
-    application.include_router(cost_models_router)
-    application.include_router(time_exploit_router)
-    application.include_router(sniping_router)
+    if not _kalshi_only:
+        application.include_router(cost_models_router)
+        application.include_router(time_exploit_router)
+        application.include_router(sniping_router)
     application.include_router(recovery_router)
-    application.include_router(treasury_router)
-    application.include_router(quadratic_funding_router)
+    if not _kalshi_only:
+        application.include_router(treasury_router)
+        application.include_router(quadratic_funding_router)
     application.include_router(agents_router)
     application.include_router(governance_router)
     
@@ -343,79 +457,98 @@ def create_app(lifespan=None) -> FastAPI:
     # application.include_router(mock_system_admin_router, prefix="/api/v1/system", tags=["system"])
     # application.include_router(mock_prediction_markets_router, prefix="/api/v1/prediction", tags=["prediction"])
     # application.include_router(mock_agent_cohorts_router, prefix="/api/v1/agent-cohorts", tags=["agent-cohorts"])
-    application.include_router(trading_suite_router, prefix="/api/v1/trading-suite", tags=["trading-suite"])
+    if not _kalshi_only:
+        from web.api.trading_suite import router as trading_suite_router
+        application.include_router(trading_suite_router, prefix="/api/v1/trading-suite", tags=["trading-suite"])
     application.include_router(ops_router)
     application.include_router(archive_router)
     application.include_router(trading_mode_router)
-    application.include_router(reality_router)
+    if not _kalshi_only:
+        application.include_router(reality_router)
     application.include_router(explainability_router)
     application.include_router(live_data_router)
     application.include_router(dashboard_data_router)
     application.include_router(dashboard_router)
-    application.include_router(intelligence_router)
-    application.include_router(local_venue_router)
-    application.include_router(local_venue_validation_router)
+    if not _kalshi_only:
+        application.include_router(intelligence_router)
+        application.include_router(local_venue_router)
+        application.include_router(local_venue_validation_router)
     application.include_router(degraded_router)
-    application.include_router(market_assertions_router)
-    application.include_router(onchain_assertions_router)
-    application.include_router(simulation_assertions_router)
-    application.include_router(agent_assertions_router)
+    if not _kalshi_only:
+        application.include_router(market_assertions_router)
+        application.include_router(onchain_assertions_router)
+        application.include_router(simulation_assertions_router)
+        application.include_router(agent_assertions_router)
     application.include_router(domain_priority_router)
     application.include_router(production_status_router)
     application.include_router(dashboard_ws_router)
-    application.include_router(x_bot_router)
-    application.include_router(moat_router)
+    if not _kalshi_only:
+        application.include_router(x_bot_router)
+        application.include_router(moat_router)
     application.include_router(swarm_router)
     application.include_router(health_router)
     application.include_router(analytics_router)
-    application.include_router(predictions_router)
-    application.include_router(prediction_markets_router)
-    application.include_router(prediction_consensus_router)
-    application.include_router(betting_consensus_router)
-    application.include_router(flow_router)
-    application.include_router(signal_layer_router)
-    application.include_router(unified_pipeline_router)
-    application.include_router(simulation_router)
-    application.include_router(neo4j_memory_router)
+    if not _kalshi_only:
+        application.include_router(predictions_router)
+        application.include_router(prediction_markets_router)
+        application.include_router(prediction_consensus_router)
+        application.include_router(betting_consensus_router)
+        application.include_router(flow_router)
+        application.include_router(signal_layer_router)
+        application.include_router(unified_pipeline_router)
+        application.include_router(simulation_router)
+        application.include_router(neo4j_memory_router)
     # Skip assertion registry for Phase 0 trial
     # application.include_router(assertion_router)
-    application.include_router(brier_metrics_router)
+    if not _kalshi_only:
+        application.include_router(brier_metrics_router)
     application.include_router(governance_router)
     application.include_router(feedback_router)
-    application.include_router(prime_screen_router)
-    application.include_router(autonomy_router)
+    if not _kalshi_only:
+        application.include_router(prime_screen_router)
+        application.include_router(autonomy_router)
     application.include_router(api_status_router)
     application.include_router(risk_router)
     # application.include_router(governance_cadence_router)
-    application.include_router(minimal_scope_router)
-    application.include_router(phase0_experiment_router)
-    application.include_router(us_compliant_markets_router)
+    # Phase0 routers gated - imports commented out at line 197-201
+    # application.include_router(minimal_scope_router)
+    if not _kalshi_only:
+        # application.include_router(phase0_experiment_router)
+        application.include_router(us_compliant_markets_router)
     application.include_router(system_endpoints_router)
-    application.include_router(signals_api_router)
+    if not _kalshi_only:
+        application.include_router(signals_api_router)
     application.include_router(orchestrator_api_router)
-    application.include_router(blockchain_health_api_router)
-    application.include_router(rewards_router)
-    application.include_router(cognitive_router)
-    # application.include_router(dev_swarm_router)  # Replaced by real_data_router (avoids heavy Neo4j init in request context)
-    application.include_router(dev_swarm_governance_router)
+    if not _kalshi_only:
+        application.include_router(blockchain_health_api_router)
+        application.include_router(rewards_router)
+        application.include_router(cognitive_router)
+        # application.include_router(dev_swarm_router)
+        application.include_router(dev_swarm_governance_router)
     application.include_router(operator_router)
+    application.include_router(operator_endpoints_router)
+    application.include_router(operator_legacy_router)
     application.include_router(metrics_router)
     application.include_router(market_data_router)
     application.include_router(market_ws_router)
     application.include_router(loop_api_router)
     application.include_router(system_observability_router)
-    application.include_router(llm_governance_router)
-    application.include_router(rag_router)
-    application.include_router(assistant_router)
+    if not _kalshi_only:
+        application.include_router(llm_governance_router)
+        application.include_router(rag_router)
+        application.include_router(assistant_router)
     application.include_router(telemetry_router)
     application.include_router(resilience_router)
     application.include_router(guardrails_router)
-    application.include_router(kalshi_grid_router)
     application.include_router(kalshi_api_router)
+    application.include_router(kalshi_ui_router)
+    application.include_router(kalshi_grid_router)
     application.include_router(sidebar_config_router)
     application.include_router(benchmarks_router)
     application.include_router(paper_ladder_router)
     application.include_router(paper_session_router)
+    application.include_router(kalshi_agent_grid_router)
+    application.include_router(kalshi_agent_performance_router)
 
     # Register fallback stubs last so concrete implementations win route precedence.
     application.include_router(missing_endpoints_router)
@@ -446,11 +579,11 @@ def create_app(lifespan=None) -> FastAPI:
         record_latency(str(request.url.path), elapsed_ms)
         return response
 
-    # Phase 0 adapters - only mount if feature flags are enabled
-    if phase0_router:
-        application.include_router(phase0_router)
-    # Phase 0 trial - always available when Phase 0 is enabled
-    application.include_router(phase0_trial_router)
+    # Phase 0 adapters gated - imports commented out at line 197-201
+    # if phase0_router:
+    #     application.include_router(phase0_router)
+    # Phase 0 trial gated
+    # application.include_router(phase0_trial_router)
     return application
 
 
@@ -790,42 +923,66 @@ async def trades_websocket_endpoint(websocket: WebSocket):
             "timestamp": _dt.utcnow().timestamp(),
         })
 
-        # Send initial order snapshot from paper engine
-        try:
-            from trading.paper_trading import get_paper_engine
-            engine = get_paper_engine()
-            uid = next(iter(engine.portfolios), None)
-            if uid:
-                portfolio = engine.get_portfolio(uid)
-                positions = getattr(portfolio, "positions", {})
-                for sym, pos in list(positions.items())[:20]:
-                    qty = getattr(pos, "quantity", getattr(pos, "size", 0))
-                    price = getattr(pos, "avg_price", getattr(pos, "entry_price", 0))
-                    side = "buy" if qty > 0 else "sell"
+        # Send initial order snapshot from paper engine (skip in Kalshi-only mode)
+        if not settings.KALSHI_ONLY:
+            try:
+                from trading.paper_trading import get_paper_engine
+                engine = get_paper_engine()
+                uid = next(iter(engine.portfolios), None)
+                if uid:
+                    portfolio = engine.get_portfolio(uid)
+                    positions = getattr(portfolio, "positions", {})
+                    for sym, pos in list(positions.items())[:20]:
+                        qty = getattr(pos, "quantity", getattr(pos, "size", 0))
+                        price = getattr(pos, "avg_price", getattr(pos, "entry_price", 0))
+                        side = "buy" if qty > 0 else "sell"
+                        await websocket.send_json({
+                            "event_type": "order_filled",
+                            "trader_type": "agent",
+                            "trader_id": "paper-engine",
+                            "symbol": sym,
+                            "side": side,
+                            "qty": abs(qty),
+                            "price": round(price, 2),
+                            "status": "filled",
+                            "venue": "paper",
+                            "timestamp": _dt.utcnow().timestamp(),
+                        })
+            except Exception:
+                pass
+
+        async def _send_heartbeats():
+            while True:
+                try:
                     await websocket.send_json({
-                        "event_type": "order_filled",
-                        "trader_type": "agent",
-                        "trader_id": "paper-engine",
-                        "symbol": sym,
-                        "side": side,
-                        "qty": abs(qty),
-                        "price": round(price, 2),
-                        "status": "filled",
-                        "venue": "paper",
+                        "event_type": "heartbeat",
                         "timestamp": _dt.utcnow().timestamp(),
                     })
-        except Exception:
-            pass
+                except (WebSocketDisconnect, RuntimeError):
+                    break
+                await _asyncio.sleep(15)
 
-        while True:
-            try:
-                await websocket.send_json({
-                    "event_type": "heartbeat",
-                    "timestamp": _dt.utcnow().timestamp(),
-                })
-            except (WebSocketDisconnect, RuntimeError):
-                break
-            await _asyncio.sleep(15)
+        async def _receive_messages():
+            while True:
+                try:
+                    raw = await websocket.receive_text()
+                    import json as _json
+                    msg = _json.loads(raw)
+                    # Respond to client ping with pong
+                    if msg.get("event") == "ping":
+                        await websocket.send_json({"event": "pong", "ts": _dt.utcnow().timestamp()})
+                except (WebSocketDisconnect, RuntimeError):
+                    break
+                except Exception:
+                    pass
+
+        # Run heartbeat sender and message receiver concurrently
+        done, pending = await _asyncio.wait(
+            [_asyncio.create_task(_send_heartbeats()), _asyncio.create_task(_receive_messages())],
+            return_when=_asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -1584,53 +1741,39 @@ async def _app_lifespan(application: FastAPI):
     startup_success = True
 
     # ── Phase 0: WebSocket publishers ──────────────────────────────────
+    # Legacy crypto publishers DISABLED — Kalshi has its own data pipeline.
+    # price_publisher, portfolio_publisher, prediction_publisher all produced
+    # synthetic/crypto data that polluted the terminal and UI.
     logger.info("=" * 80)
-    logger.info("STARTUP EVENT: Starting WebSocket publishers")
+    logger.info("STARTUP EVENT: Legacy WS publishers SKIPPED (Kalshi-only mode)")
     logger.info("=" * 80)
 
+    # ── Phase 0.5: Kalshi Agent Grid ───────────────────────────────────
+    logger.info("=" * 80)
+    logger.info("🤖 Starting Kalshi Trading Agent Grid")
+    logger.info("=" * 80)
     try:
-        from web.services.price_publisher import get_price_publisher
-        price_publisher = get_price_publisher()
-        asyncio.create_task(price_publisher.start())
-        logger.info("Price publisher task created")
-        print("✓ Price publisher task created")
+        from merid.prediction.agent_grid import get_agent_grid
+        agent_grid = get_agent_grid()
+        await agent_grid.start()
+        logger.info("✅ Kalshi Agent Grid started")
+        print(f">> Kalshi Agent Grid started: {len(agent_grid._agents)} trading agents")
     except Exception as e:
-        logger.error(f"Failed to start price publisher: {e}", exc_info=True)
-        print(f"✗ Failed to start price publisher: {e}")
-
+        logger.error(f"Failed to start Kalshi Agent Grid: {e}", exc_info=True)
+        print(f">> Failed to start Kalshi Agent Grid: {e}")
+    
+    # ── Phase 0.6: Orchestrator Agents ─────────────────────────────────
+    logger.info("=" * 80)
+    logger.info("🤖 Starting Orchestrator Agents (news monitor, social feeds, etc.)")
+    logger.info("=" * 80)
     try:
-        from web.services.portfolio_publisher import get_portfolio_publisher
-        portfolio_publisher = get_portfolio_publisher()
-        asyncio.create_task(portfolio_publisher.start())
-        logger.info("Portfolio publisher task created")
-        print("✓ Portfolio publisher task created")
+        orchestrator_manager = get_orchestrator_manager()
+        await orchestrator_manager.start_all()
+        logger.info("✅ Orchestrator agents started")
+        print(">> Orchestrator agents started (news monitor, twitter, telegram)")
     except Exception as e:
-        logger.error(f"Failed to start portfolio publisher: {e}", exc_info=True)
-        print(f"✗ Failed to start portfolio publisher: {e}")
-
-    try:
-        from monitoring.prediction_markets import get_prediction_aggregator
-        aggregator_early = get_prediction_aggregator()
-        application.state.prediction_aggregator = aggregator_early
-        asyncio.create_task(aggregator_early.start())
-        logger.info("Prediction markets aggregator initialized")
-        print("✓ Prediction markets aggregator initialized")
-    except Exception as e:
-        logger.error(f"Failed to start prediction markets: {e}", exc_info=True)
-        print(f"✗ Failed to start prediction markets: {e}")
-
-    try:
-        from web.services.prediction_publisher import get_prediction_publisher
-        prediction_publisher = get_prediction_publisher()
-        asyncio.create_task(prediction_publisher.start())
-        logger.info("Prediction publisher task created")
-        print("✓ Prediction publisher task created")
-    except Exception as e:
-        logger.error(f"Failed to start prediction publisher: {e}", exc_info=True)
-        print(f"✗ Failed to start prediction publisher: {e}")
-
-    await asyncio.sleep(0.5)
-    logger.info("WebSocket publishers startup complete")
+        logger.error(f"Failed to start orchestrator agents: {e}", exc_info=True)
+        print(f">> Failed to start orchestrator agents: {e}")
 
     # ── Phase 1: Core systems ──────────────────────────────────────────
     logger.info("=" * 80)
@@ -1730,16 +1873,21 @@ async def _app_lifespan(application: FastAPI):
         logger.warning(f"⚠️  Consensus engine initialization failed: {e}")
         _startup_state["services"]["consensus"] = {"status": "failed", "error": str(e)}
 
-    try:
-        from trading.paper_trading import get_paper_trading_engine
-        paper_engine = get_paper_trading_engine()
-        portfolio_count = len(paper_engine.portfolios)
-        position_count = sum(len(p.positions) for p in paper_engine.portfolios.values())
-        logger.info(f"✅ Paper trading engine: {portfolio_count} portfolios, {position_count} positions restored")
-        _startup_state["services"]["paper_trading"] = {"status": "running", "started_at": time.time(), "portfolios": portfolio_count, "positions": position_count}
-    except Exception as e:
-        logger.warning(f"⚠️  Paper trading engine initialization failed: {e}")
-        _startup_state["services"]["paper_trading"] = {"status": "failed", "error": str(e)}
+    # Paper trading engine SKIPPED (Kalshi-only mode) — would initialize crypto exchanges
+    if not settings.KALSHI_ONLY:
+        try:
+            from trading.paper_trading import get_paper_trading_engine
+            paper_engine = get_paper_trading_engine()
+            portfolio_count = len(paper_engine.portfolios)
+            position_count = sum(len(p.positions) for p in paper_engine.portfolios.values())
+            logger.info(f"✅ Paper trading engine: {portfolio_count} portfolios, {position_count} positions restored")
+            _startup_state["services"]["paper_trading"] = {"status": "running", "started_at": time.time(), "portfolios": portfolio_count, "positions": position_count}
+        except Exception as e:
+            logger.warning(f"⚠️  Paper trading engine initialization failed: {e}")
+            _startup_state["services"]["paper_trading"] = {"status": "failed", "error": str(e)}
+    else:
+        logger.info("Paper trading engine SKIPPED (Kalshi-only mode)")
+        _startup_state["services"]["paper_trading"] = {"status": "skipped", "reason": "Kalshi-only mode"}
 
     try:
         from pathlib import Path as _Path
@@ -1790,35 +1938,15 @@ async def _app_lifespan(application: FastAPI):
         logger.warning(f"⚠️  Neo4j initialization failed: {e}")
         _startup_state["services"]["neo4j"] = {"status": "failed", "error": str(e)}
 
-    # ── Phase 2: Prediction markets ────────────────────────────────────
-    logger.info("Phase 2: Starting prediction markets...")
-    aggregator = await _start_service_with_timeout(
-        "prediction_markets",
-        _start_prediction_markets(),
-        timeout_seconds=30.0,
-        optional=True
-    )
-    if aggregator:
-        market_count = len(aggregator._all_markets) if hasattr(aggregator, '_all_markets') else 0
-        logger.info(f"✅ Prediction market aggregator: {market_count} initial markets")
-    else:
-        logger.info("⚠️  Continuing without prediction markets - will use fallback data")
-        startup_success = False
+    # ── Phase 2: Prediction markets (DISABLED — Kalshi-only mode) ──────
+    aggregator = None  # Legacy crypto prediction aggregator disabled
+    logger.info("Phase 2: Legacy prediction markets SKIPPED (Kalshi-only mode)")
 
     # ── Phase 3: Streaming & background services ─────────────────────
     logger.info("Phase 3: Starting streaming & background services...")
 
-    # Live price feed streaming
-    try:
-        from data.live_price_feed import get_live_price_feed
-        price_feed = get_live_price_feed()
-        task = asyncio.create_task(price_feed.start_streaming())
-        _startup_state["background_tasks"].append(task)
-        logger.info("✅ Live price feed streaming started")
-        _startup_state["services"]["price_feed"] = {"status": "running", "started_at": time.time()}
-    except Exception as e:
-        logger.warning(f"⚠️  Live price feed failed: {e}")
-        _startup_state["services"]["price_feed"] = {"status": "failed", "error": str(e)}
+    # Live price feed streaming (DISABLED — legacy CCXT crypto feed, not needed for Kalshi)
+    logger.info("Live price feed SKIPPED (Kalshi-only mode)")
 
     # Agent orchestrator
     try:
@@ -1937,17 +2065,8 @@ async def _app_lifespan(application: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️  Consensus engine streaming failed: {e}")
 
-    # Continuous miner
-    try:
-        from simulation.continuous_miner import get_continuous_miner
-        miner = get_continuous_miner()
-        task = asyncio.create_task(miner.start())
-        _startup_state["background_tasks"].append(task)
-        logger.info("✅ Continuous miner started")
-        _startup_state["services"]["miner"] = {"status": "running", "started_at": time.time()}
-    except Exception as e:
-        logger.warning(f"⚠️  Continuous miner failed: {e}")
-        _startup_state["services"]["miner"] = {"status": "failed", "error": str(e)}
+    # Continuous miner (DISABLED — legacy simulation, not needed for Kalshi)
+    logger.info("Continuous miner SKIPPED (Kalshi-only mode)")
 
     # Audit trail
     try:
@@ -2010,18 +2129,8 @@ async def _app_lifespan(application: FastAPI):
         logger.warning(f"⚠️  Health monitor failed: {e}")
         _startup_state["services"]["health_monitor"] = {"status": "failed", "error": str(e)}
 
-    # Whale listener
-    if aggregator:
-        try:
-            from merid.whales import solana_whale_listener
-            task = asyncio.create_task(solana_whale_listener(aggregator))
-            _startup_state["background_tasks"].append(task)
-            logger.info("✅ Solana whale detection listener started")
-        except Exception as e:
-            logger.warning(f"⚠️  Whale detection listener failed: {e}")
-            startup_success = False
-    else:
-        logger.info("⚠️  Skipping whale detection - no prediction markets available")
+    # Whale listener (DISABLED — Solana-specific, not needed for Kalshi)
+    logger.info("Whale listener SKIPPED (Kalshi-only mode)")
 
     # Pre-warm signal metrics cache (background thread, non-blocking)
     try:
@@ -2047,10 +2156,9 @@ async def _app_lifespan(application: FastAPI):
     except Exception as exc:
         logger.debug("Reconciliation loop not started: %s", exc)
 
-    # ── Start terminal telemetry loop (heartbeats, trades, consensus) ─
-    _telemetry_task = asyncio.create_task(_terminal_telemetry_loop())
-    _startup_state["background_tasks"].append(_telemetry_task)
-    logger.info("✅ Terminal telemetry loop started (heartbeats + trades + consensus)")
+    # Terminal telemetry loop DISABLED — was printing synthetic crypto trades/portfolio
+    # Kalshi agent grid has its own telemetry via the /api/v1/kalshi-grid/* endpoints.
+    logger.info("Terminal telemetry loop SKIPPED (Kalshi-only mode)")
 
     # ── YIELD — app is running ─────────────────────────────────────────
     yield
@@ -2303,4 +2411,60 @@ async def startup_health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8011)
+    import sys
+    
+    # Exception handler to suppress Windows socket errors
+    def asyncio_exception_handler(loop, context):
+        """Handle asyncio exceptions gracefully, especially Windows socket errors."""
+        exception = context.get("exception")
+        message = context.get("message", "")
+        
+        # Suppress specific Windows socket errors that are harmless
+        if exception and isinstance(exception, OSError):
+            if exception.winerror == 64:  # Network name no longer available
+                logger.debug(f"Suppressed harmless socket error: {exception}")
+                return
+            if exception.errno == 22:  # Invalid argument (socket cleanup)
+                logger.debug(f"Suppressed socket cleanup error: {exception}")
+                return
+        
+        # Log other exceptions normally
+        if exception:
+            logger.warning(f"Asyncio exception: {message}", exc_info=exception)
+        else:
+            logger.warning(f"Asyncio exception: {message}")
+    
+    # Set exception handler for the event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.set_exception_handler(asyncio_exception_handler)
+    
+    # Windows-specific configuration to handle socket errors
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=8011,
+        log_level="info",
+        access_log=True,
+        # Use asyncio event loop that handles Windows socket errors better
+        loop="asyncio" if sys.platform == "win32" else "auto",
+        # Limit concurrent connections to reduce socket errors
+        limit_concurrency=1000,
+        # Timeout for keep-alive connections
+        timeout_keep_alive=5,
+    )
+    
+    server = uvicorn.Server(config)
+    
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        logger.info("Server shutdown requested")
+    except Exception as e:
+        logger.error(f"Server error: {e}", exc_info=True)
+    finally:
+        # Clean up event loop
+        try:
+            loop.close()
+        except:
+            pass

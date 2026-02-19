@@ -134,9 +134,9 @@ class TestKalshiWebSocketSubscriptions:
         mock_ws.send.assert_called_once()
         call_args = mock_ws.send.call_args[0][0]
         message = json.loads(call_args)
-        assert message["type"] == "subscribe"
-        assert message["channel"] == "ticker"
-        assert "FED-25DEC-T3.00" in message["tickers"]
+        assert message["cmd"] == "subscribe"
+        assert "ticker" in message["params"]["channels"]
+        assert "FED-25DEC-T3.00" in message["params"]["market_tickers"]
         
         # Check subscriptions tracked
         assert "FED-25DEC-T3.00" in ws_client._subscriptions
@@ -157,8 +157,8 @@ class TestKalshiWebSocketSubscriptions:
         mock_ws.send.assert_called_once()
         call_args = mock_ws.send.call_args[0][0]
         message = json.loads(call_args)
-        assert message["type"] == "subscribe"
-        assert message["channel"] == "trades"
+        assert message["cmd"] == "subscribe"
+        assert "trade" in message["params"]["channels"]
     
     async def test_subscribe_trades_with_markets(self, ws_client):
         """Test subscribe_trades with specific markets."""
@@ -169,7 +169,7 @@ class TestKalshiWebSocketSubscriptions:
         
         call_args = mock_ws.send.call_args[0][0]
         message = json.loads(call_args)
-        assert message["tickers"] == ["FED-25DEC"]
+        assert message["params"]["market_tickers"] == ["FED-25DEC"]
     
     async def test_subscribe_orderbook_success(self, ws_client):
         """Test subscribe_orderbook success."""
@@ -181,9 +181,9 @@ class TestKalshiWebSocketSubscriptions:
         mock_ws.send.assert_called_once()
         call_args = mock_ws.send.call_args[0][0]
         message = json.loads(call_args)
-        assert message["type"] == "subscribe"
-        assert message["channel"] == "orderbook"
-        assert message["ticker"] == "FED-25DEC-T3.00"
+        assert message["cmd"] == "subscribe"
+        assert "orderbook_delta" in message["params"]["channels"]
+        assert "FED-25DEC-T3.00" in message["params"]["market_tickers"]
         
         # Check subscription tracked with prefix
         assert "orderbook:FED-25DEC-T3.00" in ws_client._subscriptions

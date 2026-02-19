@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Network, Users, Zap, Brain, RefreshCw, AlertCircle, TrendingUp, Activity } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface SwarmAgent {
   id: string;
@@ -37,37 +39,16 @@ interface SwarmPanelProps {
 }
 
 export default function SwarmPanel({ className = '' }: SwarmPanelProps) {
-  const [swarmData, setSwarmData] = useState<{
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+
+  const { data: swarmData, loading, error, refetch } = useApiData<{
     agents: SwarmAgent[];
     tasks: SwarmTask[];
     metrics: SwarmMetrics;
-  } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchSwarmData();
-    const interval = setInterval(fetchSwarmData, 15000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchSwarmData = async () => {
-    try {
-      const response = await fetch('/api/v1/swarm/status');
-      if (response.ok) {
-        const data = await response.json();
-        setSwarmData(data);
-        setError(null);
-      } else {
-        throw new Error('Failed to fetch swarm data');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-    } finally {
-      setLoading(false);
-    }
-  };
+  }>(
+    API_ENDPOINTS.SWARM_STATUS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
+  );
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -115,7 +96,7 @@ export default function SwarmPanel({ className = '' }: SwarmPanelProps) {
           <AlertCircle className="w-5 h-5 text-yellow-500" />
           <div>
             <p className="text-yellow-500 font-medium">Data unavailable</p>
-            <p className="text-sm text-gray-400">{error}</p>
+            <p className="text-sm text-gray-400">{error?.message ?? 'Unknown error'}</p>
           </div>
         </div>
       )}
@@ -180,11 +161,11 @@ export default function SwarmPanel({ className = '' }: SwarmPanelProps) {
             <Network className="w-6 h-6 text-purple-400" />
             <h3 className="text-lg font-bold text-white">Agent Network</h3>
           </div>
-          <button
-            onClick={fetchSwarmData}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
             title="Refresh swarm data"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4 text-gray-400" />
           </button>
         </div>
@@ -199,7 +180,7 @@ export default function SwarmPanel({ className = '' }: SwarmPanelProps) {
                   ? 'bg-blue-500/20 border-blue-500'
                   : 'bg-slate-700/30 border-slate-700/50 hover:border-slate-600'
               }`}
-            >
+             role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => setSelectedAgent(agent.id === selectedAgent ? null : agent.id))(); } }}>
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <div className={`w-3 h-3 rounded-full ${getStatusColor(agent.status)}`} />

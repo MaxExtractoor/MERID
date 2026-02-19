@@ -64,7 +64,7 @@ export function OpinionFeed() {
     };
 
     // Subscribe to consensus events
-    const handleConsensus = (data: any) => {
+    const handleConsensus = (data: unknown) => {
       setOpinionsBySymbol(prev => {
         const newMap = new Map(prev);
         const existing = newMap.get(data.symbol);

@@ -17,7 +17,7 @@ from typing import List, Optional
 from xml.etree import ElementTree as ET
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from utils.logger import get_logger
 
@@ -226,47 +226,103 @@ class CoinTelegraphFeed:
         return "high" if any(kw in text for kw in high_keywords) else "medium"
 
 
+def _is_retryable_error(exc: BaseException) -> bool:
+    """Only retry on server errors and network issues, not 4xx client errors."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError))
+
+
 class BinanceAnnouncementsFeed:
-    """Binance announcements via public API."""
+    """Binance US announcements via blog RSS feed."""
     
-    API_URL = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+    RSS_URL = "https://blog.binance.us/feed/"
     
     def __init__(self):
-        self.client = httpx.Client(timeout=15.0, follow_redirects=True)
+        self.client = httpx.Client(
+            timeout=15.0,
+            follow_redirects=True,
+            headers={"User-Agent": "MERID/1.0 NewsAggregator"},
+        )
+        self._permanently_failed = False
+        self._fail_reason: Optional[str] = None
     
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(min=1, max=5),
+        retry=retry_if_exception(_is_retryable_error),
+        reraise=True,
+    )
     def fetch_articles(self, limit: int = 10) -> List[NewsArticle]:
-        """Fetch latest Binance announcements."""
+        """Fetch latest Binance US announcements from blog RSS."""
+        if self._permanently_failed:
+            return []
+
         try:
-            payload = {
-                "type": 1,  # Announcements
-                "pageNo": 1,
-                "pageSize": limit
-            }
-            
-            response = self.client.post(self.API_URL, json=payload)
+            response = self.client.get(self.RSS_URL)
             response.raise_for_status()
             
-            data = response.json()
+            root = ET.fromstring(response.text)
             articles = []
             
-            for item in data.get("data", {}).get("catalogs", [])[:limit]:
+            for item in root.findall(".//item")[:limit]:
+                title = item.findtext("title", "")
+                description = item.findtext("description", "")
+                link = item.findtext("link", "")
+                pub_date = item.findtext("pubDate", "")
+                
+                # Parse categories
+                categories = ["exchange", "binance-us"]
+                for cat in item.findall("category"):
+                    if cat.text:
+                        categories.append(cat.text.lower())
+                
+                # Assess importance — listings and regulatory news are high
+                importance = self._assess_importance(title, description)
+                
                 articles.append(NewsArticle(
-                    source="Binance",
-                    headline=item.get("title", ""),
-                    summary=item.get("description", "")[:300],
-                    url=f"https://www.binance.com/en/support/announcement/{item.get('code', '')}",
-                    published_at=item.get("releaseDate", time.time() * 1000) / 1000,
-                    importance="high",  # All Binance announcements are important
-                    categories=["exchange", "binance"]
+                    source="Binance US",
+                    headline=title,
+                    summary=description[:300],
+                    url=link,
+                    published_at=self._parse_rss_date(pub_date),
+                    importance=importance,
+                    categories=categories,
                 ))
             
-            logger.info("Fetched %d announcements from Binance", len(articles))
+            logger.info("Fetched %d articles from Binance US blog", len(articles))
             return articles
             
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403, 404):
+                self._permanently_failed = True
+                self._fail_reason = str(exc)
+                logger.warning(
+                    "Binance US feed DISABLED — %d %s. Will skip in future fetches.",
+                    exc.response.status_code, exc.response.reason_phrase,
+                )
+                return []
+            raise  # Let tenacity handle 5xx
         except Exception as exc:
-            logger.error("Binance announcements error: %s", exc)
+            logger.error("Binance US feed error: %s", exc)
             return []
+    
+    @staticmethod
+    def _parse_rss_date(date_str: str) -> float:
+        """Parse RSS pubDate to epoch seconds."""
+        from email.utils import parsedate_to_datetime
+        try:
+            return parsedate_to_datetime(date_str).timestamp()
+        except Exception:
+            return time.time()
+    
+    @staticmethod
+    def _assess_importance(title: str, description: str) -> str:
+        """Assess article importance for Binance US content."""
+        text = f"{title} {description}".lower()
+        high_keywords = ["listing", "new asset", "delisting", "regulatory",
+                         "maintenance", "suspend", "resume", "security", "incident"]
+        return "high" if any(kw in text for kw in high_keywords) else "medium"
 
 
 class CryptoCompareFeed:
@@ -328,11 +384,17 @@ class AggregatedNewsFeed:
         """Fetch news from all sources and aggregate."""
         all_articles = []
         
-        # Fetch from all sources in parallel would be better, but sequential is simpler
-        all_articles.extend(self.coindesk.fetch_articles(limit_per_source))
-        all_articles.extend(self.cointelegraph.fetch_articles(limit_per_source))
-        all_articles.extend(self.binance.fetch_articles(limit_per_source))
-        all_articles.extend(self.cryptocompare.fetch_articles(limit_per_source))
+        # Fetch from all sources — isolate failures so one source can't block others
+        for name, feed in [
+            ("CoinDesk", self.coindesk),
+            ("CoinTelegraph", self.cointelegraph),
+            ("Binance", self.binance),
+            ("CryptoCompare", self.cryptocompare),
+        ]:
+            try:
+                all_articles.extend(feed.fetch_articles(limit_per_source))
+            except Exception as exc:
+                logger.warning("News feed %s failed: %s", name, exc)
         
         # Sort by published_at descending (most recent first)
         all_articles.sort(key=lambda x: x.published_at, reverse=True)

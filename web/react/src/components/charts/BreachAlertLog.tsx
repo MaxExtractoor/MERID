@@ -5,9 +5,9 @@
  * severity, and value vs threshold. Polls /api/metrics/breach_log.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import { ShieldAlert, AlertTriangle, AlertOctagon, Info, RefreshCw } from 'lucide-react';
-import { API_BASE_URL } from '../../config/constants';
+import { useApiData } from '../../hooks/useApiData';
 
 interface Breach {
   ts: string;
@@ -41,30 +41,12 @@ function formatTime(ts: string): string {
 }
 
 export function BreachAlertLog({ className = '', limit = 20 }: BreachAlertLogProps) {
-  const [breaches, setBreaches] = useState<Breach[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [total, setTotal] = useState(0);
-
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/metrics/breach_log?limit=${limit}`);
-      if (res.ok) {
-        const json = await res.json();
-        setBreaches(json.breaches || []);
-        setTotal(json.total || 0);
-      }
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, [limit]);
-
-  useEffect(() => {
-    fetchData();
-    const id = setInterval(fetchData, 10000);
-    return () => clearInterval(id);
-  }, [fetchData]);
+  const { data: rawData, loading, refetch } = useApiData<{ breaches: Breach[]; total: number }>(
+    `/api/metrics/breach_log?limit=${limit}`,
+    { pollingInterval: 10000 },
+  );
+  const breaches = rawData?.breaches ?? [];
+  const total = rawData?.total ?? 0;
 
   return (
     <div className={`bg-slate-900/70 rounded-xl border border-slate-800 p-4 ${className}`}>
@@ -79,7 +61,7 @@ export function BreachAlertLog({ className = '', limit = 20 }: BreachAlertLogPro
             </span>
           )}
         </div>
-        <button onClick={() => { setLoading(true); fetchData(); }} className="p-1 rounded hover:bg-slate-800" title="Refresh">
+        <button onClick={() => refetch()} className="p-1 rounded hover:bg-slate-800" title="Refresh">
           <RefreshCw className={`w-3.5 h-3.5 text-slate-500 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>

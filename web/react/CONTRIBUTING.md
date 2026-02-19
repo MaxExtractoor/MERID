@@ -14,7 +14,7 @@ A concise guide for contributing to the MERID React frontend while maintaining a
 ```bash
 cd web/react
 npm ci
-npm run type-check  # Must pass before committing
+npm run type-check:ci  # Must pass before committing (baseline-aware)
 npm test            # Check for regressions
 ```
 
@@ -276,12 +276,18 @@ describe('useMyHook', () => {
 
 Before creating a PR:
 
-- [ ] `npm run type-check` passes (0 errors)
+- [ ] `npm run type-check:ci` passes (0 **new** TS errors vs baseline)
 - [ ] `npm test` shows no new failing tests
 - [ ] If tests fail, add entry to `TEST_DEBT.md`
 - [ ] New code follows patterns in `ARCHITECTURE.md`
 - [ ] No `any` types without justification
 - [ ] No `@ts-ignore` without comment explaining why
+- [ ] API response shapes use interfaces from `src/types/api.ts` — no new `Record<string, unknown>`
+
+> **Baseline workflow:** We use [`tsc-baseline`](https://github.com/TimMikeladze/tsc-baseline)
+> to gate CI on *new* type errors only. If your PR intentionally fixes legacy
+> errors, run `npm run type-check:save` to update the baseline and commit the
+> updated `.tsc-baseline.json`.
 
 ---
 
@@ -292,6 +298,9 @@ Before creating a PR:
 ```typescript
 // Don't use any
 const data: any = fetchData();
+
+// Don't cast API responses to Record<string, unknown>
+const items = (data as Record<string, unknown>).items;  // Use types/api.ts
 
 // Don't ignore null/undefined
 const value = data.property;  // data might be null
@@ -304,12 +313,15 @@ const formatted = `$${value.toFixed(2)}`;  // Use formatCurrency
 
 // Don't use bare WebSocket
 const ws = new WebSocket(url);  // Use useMeridSocket
+
+// Don't use raw console.error in catch blocks
+} catch (err) { console.error('fetch failed', err); }  // Use logUiError
 ```
 
 ### ✅ Do
 
 ```typescript
-// Use specific types
+// Use specific types (pull shapes into src/types/api.ts)
 const data: MyFeatureData | null = await fetchData();
 
 // Guard against null
@@ -323,6 +335,15 @@ const formatted = formatCurrency(value);
 
 // Use MERID WebSocket adapter
 const { socket } = useMeridSocket();
+
+// Use structured logger for errors and warnings
+import { logUiError, logUiWarn } from '../utils/logger';
+} catch (err) { logUiError('MyComponent', 'Fetch failed', err, { endpoint }); }
+
+// Use toast for user-facing error feedback
+import { useToast } from '../components/ToastProvider';
+const { toast } = useToast();
+toast({ type: 'error', title: 'Connection lost', message: 'Retrying...' });
 ```
 
 ---
@@ -331,10 +352,13 @@ const { socket } = useMeridSocket();
 
 - `ARCHITECTURE.md` - Full pattern documentation
 - `TEST_DEBT.md` - Known test failures
+- `src/types/api.ts` - Centralized DTO interfaces for API response shapes
+- `src/utils/logger.ts` - Structured UI logger (`logUiError`, `logUiWarn`, `logUiInfo`)
+- `src/components/ToastProvider.tsx` - Toast notifications (`useToast` hook)
 - `src/utils/formatters.ts` - Formatting utilities
 - `src/utils/validators.ts` - Validation utilities
 - `src/config/constants.ts` - Status types, endpoints, defaults
 
 ---
 
-*Last updated: January 30, 2026*
+*Last updated: February 13, 2026*

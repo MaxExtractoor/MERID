@@ -1,6 +1,16 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Bell, X, CheckCircle, AlertCircle, Info, TrendingUp } from 'lucide-react';
-import { useRealtimeSubscription } from '../hooks/useRealtimeData';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import type { RawNotification } from '../types/api';
+
+function authHeaders(headers?: HeadersInit): HeadersInit {
+  const token = localStorage.getItem('merid-access');
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(headers ?? {}),
+  };
+}
 
 interface LiveNotification {
   id: string;
@@ -15,27 +25,86 @@ export default function LiveNotifications() {
   const [notifications, setNotifications] = useState<LiveNotification[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [isConnected, setIsConnected] = useState(false);
 
-  const handleNotification = useCallback((newNotification: LiveNotification) => {
-    setNotifications(prev => [newNotification, ...prev].slice(0, 50));
-    setUnreadCount(prev => prev + 1);
+  const normalizeNotification = useCallback((note: RawNotification): LiveNotification => {
+    const baseType = note.type ?? 'info';
+    const severity = note.severity ?? 'info';
+    const type = baseType === 'trade'
+      ? 'trade'
+      : (baseType === 'success'
+        ? 'success'
+        : (severity === 'warning' || severity === 'error' || severity === 'critical')
+          ? 'warning'
+          : 'info');
+    const timestampRaw = note.timestamp ?? new Date().toISOString();
+    const timestamp = Number.isNaN(Date.parse(timestampRaw)) ? Date.now() : Date.parse(timestampRaw);
+
+    return {
+      id: note.id ?? `temp-${timestamp}`,
+      type,
+      title: note.title ?? 'Notification',
+      message: note.message ?? '',
+      timestamp,
+      read: Boolean(note.read),
+    };
   }, []);
 
-  const [isConnected] = useRealtimeSubscription<LiveNotification>('notification', handleNotification);
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.NOTIFICATIONS}`, {
+        headers: authHeaders(),
+      });
+      if (!response.ok) {
+        setIsConnected(false);
+        return;
+      }
+      const data = await response.json();
+      const normalized = Array.isArray(data.notifications)
+        ? data.notifications.map((note: RawNotification) => normalizeNotification(note))
+        : [];
+      setNotifications(normalized);
+      setIsConnected(true);
+    } catch {
+      setIsConnected(false);
+    }
+  }, [normalizeNotification]);
+
+  useEffect(() => {
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
+    return () => clearInterval(interval);
+  }, [fetchNotifications]);
 
   useEffect(() => {
     const count = notifications.filter(n => !n.read).length;
     setUnreadCount(count);
   }, [notifications]);
 
-  const markAsRead = (id: string) => {
+  const markAsRead = async (id: string) => {
     setNotifications(prev =>
       prev.map(n => n.id === id ? { ...n, read: true } : n)
     );
+    try {
+      await fetch(`${API_BASE_URL}${API_ENDPOINTS.NOTIFICATION_READ(id)}`, {
+        method: 'POST',
+        headers: authHeaders(),
+      });
+    } catch {
+      // keep optimistic state
+    }
   };
 
-  const markAllAsRead = () => {
+  const markAllAsRead = async () => {
     setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+    try {
+      await fetch(`${API_BASE_URL}${API_ENDPOINTS.NOTIFICATIONS_READ_ALL}`, {
+        method: 'POST',
+        headers: authHeaders(),
+      });
+    } catch {
+      // keep optimistic state
+    }
   };
 
   const removeNotification = (id: string) => {
@@ -116,31 +185,23 @@ export default function LiveNotifications() {
                   {notifications.map(notification => (
                     <div
                       key={notification.id}
-                      className={`p-4 hover:bg-slate-700/50 transition-colors ${
+                      className={`p-4 hover:bg-slate-700/50 transition-colors flex items-start gap-3 ${
                         !notification.read ? 'bg-slate-700/30' : ''
                       }`}
-                      onClick={() => markAsRead(notification.id)}
-                     role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => markAsRead(notification.id))(); } }}>
-                      <div className="flex items-start gap-3">
+                    >
+                      <button
+                        type="button"
+                        onClick={() => markAsRead(notification.id)}
+                        className="flex items-start gap-3 flex-1 min-w-0 text-left"
+                        title="Mark as read"
+                      >
                         <div className="flex-shrink-0 mt-1">
                           {getIcon(notification.type)}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-start justify-between gap-2">
-                            <h4 className="text-sm font-medium text-white">
-                              {notification.title}
-                            </h4>
-                            <button type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                removeNotification(notification.id);
-                              }}
-                              className="text-gray-400 hover:text-white"
-                              title="Remove notification"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
+                          <h4 className="text-sm font-medium text-white">
+                            {notification.title}
+                          </h4>
                           <p className="text-sm text-gray-400 mt-1">
                             {notification.message}
                           </p>
@@ -148,7 +209,15 @@ export default function LiveNotifications() {
                             {getTimeAgo(notification.timestamp)}
                           </p>
                         </div>
-                      </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeNotification(notification.id)}
+                        className="text-gray-400 hover:text-white"
+                        title="Remove notification"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
                     </div>
                   ))}
                 </div>

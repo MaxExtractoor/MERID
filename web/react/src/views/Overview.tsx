@@ -1,262 +1,260 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
-import { DollarSign, Activity, BarChart3, Shield, Zap, Clock, ArrowUpRight, ArrowDownRight, Minus, RefreshCw, Wallet, Target, Award } from 'lucide-react';
+import { useState, useCallback } from 'react';
+import {
+  DollarSign,
+  Activity,
+  Shield,
+  Wallet,
+  FileText,
+  Bot,
+  RefreshCw,
+  Play,
+  Square,
+  Database,
+  ShieldAlert,
+  ShieldCheck,
+} from 'lucide-react';
+import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import CollapsibleConsole from '../components/CollapsibleConsole';
-import PredictionMarketsPanel from '../components/PredictionMarketsPanel';
 import AgentActivityPanel from '../components/AgentActivityPanel';
-import QuickActionsPanel from '../components/QuickActionsPanel';
-import { API_ENDPOINTS, CHART_COLORS} from '../config/constants';
+import { useApiData } from '../hooks/useApiData';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiFill } from '../types/kalshi';
 import { 
   SystemHealthCard, 
-  PnLCard, 
-  TradingOperationsCard, 
-  PrimeStatusCard,
+  KalshiHealthCard,
   AgentStatusCard,
   RiskProtectionCard 
 } from '../hooks/useDashboard';
 
 /* ── Types ─────────────────────────────────────────── */
-interface PortfolioSummary {
-  equity: number;
-  dailyPnl: number;
-  dailyPnlPct: number;
-  availableMargin: number;
-  activeBots: number;
-  totalValue: number;
-  unrealizedPnl: number;
-  activePositions: number;
-  totalTrades: number;
-  winRate: number;
-  roi: number;
-  startingBalance: number;
+interface KalshiPnL { daily_pnl_usd: number; total_notional_usd: number; peak_equity_usd: number; current_equity_usd: number; drawdown_pct: number; category_pnl: Record<string, number> }
+interface OperatorKillSwitchState {
+  global_kill?: boolean;
+  active?: boolean;
+  can_trade?: boolean;
+  kill_reason?: string | null;
+  reason?: string | null;
 }
-
-interface WatchlistItem {
-  symbol: string;
-  price: number;
-  change: number;
-  volume: string;
-  source?: string;
+interface GridStatusLite {
+  running?: boolean;
+  agent_count?: number;
+  session?: { trading_allowed?: boolean; reason?: string };
 }
-
-interface RecentTrade {
-  time: string;
-  action: string;
-  size: string;
-  price: string;
-  status?: string;
-}
-
-interface RiskExposure {
-  total_exposure: number;
-  total_exposure_pct: number;
-  open_orders_count: number;
-  buying_power: number;
-  by_symbol: Array<{ symbol: string; pct_of_equity: number }>;
-}
-
-interface EquityPoint {
-  ts: number;
-  equity: number;
-  pnl: number;
-}
-
-/* ── Hooks ─────────────────────────────────────────── */
-function usePortfolio() {
-  const [data, setData] = useState<PortfolioSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const fetch_ = useCallback(async () => {
-    try {
-      const res = await fetch(API_ENDPOINTS.PORTFOLIO_LIVE);
-      if (res.ok) setData(await res.json());
-    } catch { /* silent */ }
-    finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => {
-    fetch_();
-    const i = setInterval(fetch_, 15_000);
-    return () => clearInterval(i);
-  }, [fetch_]);
-
-  return { portfolio: data, loading, refresh: fetch_ };
-}
-
-function useWatchlist() {
-  const [prices, setPrices] = useState<WatchlistItem[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetch_ = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_ENDPOINTS.PRICES_LIVE}?symbols=BTC,ETH,SOL,AVAX`);
-      if (res.ok) {
-        const d = await res.json();
-        setPrices(d.prices || []);
-      }
-    } catch { /* silent */ }
-    finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => {
-    fetch_();
-    const i = setInterval(fetch_, 10_000);
-    return () => clearInterval(i);
-  }, [fetch_]);
-
-  return { prices, loading };
-}
-
-function useRecentTrades() {
-  const [trades, setTrades] = useState<RecentTrade[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetch_ = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_ENDPOINTS.ORDERS_RECENT}?limit=8`);
-      if (res.ok) {
-        const d = await res.json();
-        setTrades(d.orders || []);
-      }
-    } catch { /* silent */ }
-    finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => {
-    fetch_();
-    const i = setInterval(fetch_, 30_000);
-    return () => clearInterval(i);
-  }, [fetch_]);
-
-  return { trades, loading };
-}
-
-function useRiskExposure() {
-  const [exposure, setExposure] = useState<RiskExposure | null>(null);
-
-  useEffect(() => {
-    const f = async () => {
-      try {
-        const r = await fetch(API_ENDPOINTS.RISK_EXPOSURE);
-        if (r.ok) setExposure(await r.json());
-      } catch { /* silent */ }
-    };
-    f();
-    const i = setInterval(f, 30_000);
-    return () => clearInterval(i);
-  }, []);
-
-  return exposure;
-}
-
-function useEquitySeries() {
-  const [points, setPoints] = useState<EquityPoint[]>([]);
-
-  useEffect(() => {
-    const f = async () => {
-      try {
-        const r = await fetch(`${API_ENDPOINTS.EQUITY_SERIES}?window=1d`);
-        if (r.ok) {
-          const d = await r.json();
-          setPoints(d.points || []);
-        }
-      } catch { /* silent */ }
-    };
-    f();
-    const i = setInterval(f, 60_000);
-    return () => clearInterval(i);
-  }, []);
-
-  return points;
+interface CatalogResponseLite {
+  market_count?: number;
+  count?: number;
+  markets?: unknown[];
 }
 
 /* ── Helpers ───────────────────────────────────────── */
-function fmtUsd(v: number, compact = false): string {
-  if (compact && Math.abs(v) >= 1_000_000)
-    return `$${(v / 1_000_000).toFixed(2)}M`;
-  if (compact && Math.abs(v) >= 1_000)
-    return `$${(v / 1_000).toFixed(1)}K`;
+function fmtUsd(v: number): string {
   return v.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
-}
-
-function PnlBadge({ value, pct }: { value: number; pct?: number }) {
-  const positive = value >= 0;
-  const Icon = positive ? ArrowUpRight : value < 0 ? ArrowDownRight : Minus;
-  const color = positive ? 'text-emerald-400' : 'text-red-400';
-  const bg = positive ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30';
-
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${bg} ${color}`}>
-      <Icon className="w-3 h-3" />
-      {positive ? '+' : ''}{fmtUsd(value)}
-      {pct !== undefined && <span className="ml-1 opacity-75">({positive ? '+' : ''}{pct.toFixed(2)}%)</span>}
-    </span>
-  );
 }
 
 function Skeleton({ className = '' }: { className?: string }) {
   return <div className={`bg-slate-700/50 rounded animate-pulse ${className}`} />;
 }
 
-/* ── Portfolio Hero Card ──────────────────────────── */
-function PortfolioHero({ portfolio, loading, refresh }: { portfolio: PortfolioSummary | null; loading: boolean; refresh: () => void }) {
-  if (loading || !portfolio) {
+function RebootControlPanel({
+  killSwitch,
+  gridStatus,
+  catalogCount,
+  busyAction,
+  message,
+  error,
+  gridStartMode,
+  onGridStartModeChange,
+  onRefreshCatalog,
+  onStartGrid,
+  onStopGrid,
+  onRefreshSignals,
+}: {
+  killSwitch: OperatorKillSwitchState | null;
+  gridStatus: GridStatusLite | null;
+  catalogCount: number | null;
+  busyAction: string | null;
+  message: string | null;
+  error: string | null;
+  gridStartMode: 'paper' | 'live';
+  onGridStartModeChange: (mode: 'paper' | 'live') => void;
+  onRefreshCatalog: () => void;
+  onStartGrid: () => void;
+  onStopGrid: () => void;
+  onRefreshSignals: () => void;
+}) {
+  const killActive = Boolean(killSwitch?.global_kill ?? killSwitch?.active ?? false);
+  const canTrade = killSwitch?.can_trade ?? !killActive;
+  const killReason = killSwitch?.kill_reason ?? killSwitch?.reason;
+  const gridRunning = Boolean(gridStatus?.running);
+
+  return (
+    <section className="bg-slate-900/70 rounded-2xl border border-slate-800 p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-200">Reboot Sequence</h3>
+          <p className="text-xs text-slate-500">Pre-flight checks and controls for live Kalshi restart.</p>
+        </div>
+        <button
+          type="button"
+          onClick={onRefreshSignals}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-slate-700 text-slate-300 hover:bg-slate-800"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          Refresh
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className={`rounded-xl border p-3 ${killActive ? 'bg-red-950/40 border-red-500/40' : 'bg-emerald-950/30 border-emerald-500/30'}`}>
+          <p className="text-[10px] uppercase text-slate-500 mb-1">Kill Switch</p>
+          <div className={`flex items-center gap-1.5 text-sm font-semibold ${killActive ? 'text-red-400' : 'text-emerald-400'}`}>
+            {killActive ? <ShieldAlert className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
+            {killActive ? 'HALTED' : 'CLEAR'}
+          </div>
+          <p className="text-[10px] text-slate-500 mt-1">{canTrade ? 'Trading permitted' : 'Trading blocked'}</p>
+          {killReason && <p className="text-[10px] text-red-300 mt-1 truncate" title={killReason}>{killReason}</p>}
+        </div>
+
+        <div className={`rounded-xl border p-3 ${gridRunning ? 'bg-blue-950/30 border-blue-500/30' : 'bg-slate-800/70 border-slate-700/40'}`}>
+          <p className="text-[10px] uppercase text-slate-500 mb-1">Agent Grid</p>
+          <p className={`text-sm font-semibold ${gridRunning ? 'text-blue-300' : 'text-slate-300'}`}>
+            {gridRunning ? 'RUNNING' : 'STOPPED'}
+          </p>
+          <p className="text-[10px] text-slate-500 mt-1">{gridStatus?.agent_count ?? 0} agents</p>
+          {gridStatus?.session && (
+            <p className="text-[10px] text-slate-500 mt-0.5">
+              Session: {gridStatus.session.trading_allowed ? 'Open' : (gridStatus.session.reason ?? 'Closed')}
+            </p>
+          )}
+        </div>
+
+        <div className="rounded-xl border p-3 bg-slate-800/70 border-slate-700/40">
+          <p className="text-[10px] uppercase text-slate-500 mb-1">Catalog</p>
+          <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-200">
+            <Database className="w-4 h-4 text-orange-400" />
+            {catalogCount != null ? `${catalogCount} markets` : 'Unknown size'}
+          </div>
+          <p className="text-[10px] text-slate-500 mt-1">Refresh before enabling live agents</p>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={onRefreshCatalog}
+          disabled={busyAction !== null}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-orange-500/15 text-orange-300 border border-orange-500/30 hover:bg-orange-500/20 disabled:opacity-50"
+        >
+          <Database className="w-3.5 h-3.5" />
+          {busyAction === 'catalog' ? 'Refreshing…' : 'Refresh Catalog'}
+        </button>
+
+        {!gridRunning ? (
+          <>
+            {/* Mode toggle */}
+            <div className="flex items-center rounded-lg overflow-hidden border border-slate-700">
+              <button
+                type="button"
+                onClick={() => onGridStartModeChange('paper')}
+                className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  gridStartMode === 'paper' ? 'bg-amber-600 text-white' : 'bg-slate-800 text-gray-400 hover:text-white'
+                }`}
+              >
+                Paper
+              </button>
+              <button
+                type="button"
+                onClick={() => onGridStartModeChange('live')}
+                className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  gridStartMode === 'live' ? 'bg-red-600 text-white' : 'bg-slate-800 text-gray-400 hover:text-red-400'
+                }`}
+              >
+                Live
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={onStartGrid}
+              disabled={busyAction !== null || killActive}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border disabled:opacity-50 ${
+                gridStartMode === 'live'
+                  ? 'bg-red-500/15 text-red-300 border-red-500/30 hover:bg-red-500/20'
+                  : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
+              }`}
+            >
+              <Play className="w-3.5 h-3.5" />
+              {busyAction === 'grid-start' ? 'Starting…' : `Start Grid${gridStartMode === 'live' ? ' (LIVE)' : ''}`}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={onStopGrid}
+            disabled={busyAction !== null}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/15 text-red-300 border border-red-500/30 hover:bg-red-500/20 disabled:opacity-50"
+          >
+            <Square className="w-3.5 h-3.5" />
+            {busyAction === 'grid-stop' ? 'Stopping…' : 'Stop Grid'}
+          </button>
+        )}
+
+        {killActive && (
+          <span className="text-[11px] text-red-300">Grid start disabled while kill switch is active.</span>
+        )}
+        {gridStartMode === 'live' && !gridRunning && !killActive && (
+          <span className="text-[11px] text-red-300 font-semibold">⚠ LIVE mode — real money at risk</span>
+        )}
+      </div>
+
+      {message && <p className="text-xs text-emerald-300">{message}</p>}
+      {error && <p className="text-xs text-red-300">{error}</p>}
+    </section>
+  );
+}
+
+/* ── Kalshi Balance Hero ──────────────────────────── */
+function KalshiBalanceHero({ balance, pnl }: { balance: KalshiBalance | null; pnl: KalshiPnL | null }) {
+  if (!balance) {
     return (
-      <div className="bg-gradient-to-br from-slate-900 via-blue-950/30 to-slate-900 rounded-2xl border border-blue-500/20 p-6 lg:p-8">
+      <div className="bg-gradient-to-br from-slate-900 via-orange-950/20 to-slate-900 rounded-2xl border border-orange-500/20 p-6">
         <Skeleton className="h-4 w-32 mb-3" />
         <Skeleton className="h-10 w-48 mb-4" />
-        <div className="grid grid-cols-4 gap-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div>
+        <div className="grid grid-cols-3 gap-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div>
       </div>
     );
   }
 
-  const pnlPos = portfolio.dailyPnl >= 0;
+  const dayPnl = pnl?.daily_pnl_usd ?? 0;
+  const pnlPos = dayPnl >= 0;
 
   return (
-    <div className="bg-gradient-to-br from-slate-900 via-blue-950/30 to-slate-900 rounded-2xl border border-blue-500/20 p-6 lg:p-8 relative overflow-hidden">
-      {/* Glow accent */}
-      <div className={`absolute -top-20 -right-20 w-40 h-40 rounded-full blur-3xl opacity-20 ${pnlPos ? 'bg-emerald-500' : 'bg-red-500'}`} />
-
+    <div className="bg-gradient-to-br from-slate-900 via-orange-950/20 to-slate-900 rounded-2xl border border-orange-500/20 p-6 relative overflow-hidden">
+      <div className={`absolute -top-20 -right-20 w-40 h-40 rounded-full blur-3xl opacity-15 ${pnlPos ? 'bg-emerald-500' : 'bg-red-500'}`} />
       <div className="relative">
-        <div className="flex items-center justify-between mb-1">
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 bg-blue-500/20 rounded-lg">
-              <Wallet className="w-4 h-4 text-blue-400" />
-            </div>
-            <span className="text-sm text-slate-400 font-medium">Portfolio Value</span>
-            <span className="flex items-center gap-1 text-xs text-emerald-400">
-              <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" /> Live
-            </span>
-          </div>
-          <button type="button" onClick={refresh} className="p-1.5 rounded-lg hover:bg-slate-700/50 transition-colors" title="Refresh" aria-label="Refresh">
-            <RefreshCw className="w-4 h-4 text-slate-400" />
-          </button>
+        <div className="flex items-center gap-2 mb-1">
+          <div className="p-1.5 bg-orange-500/20 rounded-lg"><Wallet className="w-4 h-4 text-orange-400" /></div>
+          <span className="text-sm text-slate-400 font-medium">Kalshi Balance</span>
+          <span className="flex items-center gap-1 text-xs text-emerald-400">
+            <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" /> Live
+          </span>
         </div>
-
-        <div className="text-4xl lg:text-5xl font-bold text-white tracking-tight mb-2">
-          {fmtUsd(portfolio.equity)}
+        <div className="text-4xl font-bold text-white tracking-tight mb-3">
+          {fmtUsd(balance.available)}
         </div>
-
-        <div className="mb-6">
-          <PnlBadge value={portfolio.dailyPnl} pct={portfolio.dailyPnlPct} />
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-slate-700/50">
+        <div className="grid grid-cols-3 gap-4 pt-3 border-t border-slate-700/50">
           <div>
             <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><DollarSign className="w-3 h-3" />Available</div>
-            <div className="text-base font-semibold text-slate-200">{fmtUsd(portfolio.availableMargin, true)}</div>
+            <div className="text-base font-semibold text-slate-200">{fmtUsd(balance.available)}</div>
           </div>
           <div>
-            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Activity className="w-3 h-3" />Positions</div>
-            <div className="text-base font-semibold text-slate-200">{portfolio.activePositions}</div>
+            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Shield className="w-3 h-3" />Locked</div>
+            <div className="text-base font-semibold text-slate-200">{fmtUsd(balance.locked)}</div>
           </div>
           <div>
-            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Target className="w-3 h-3" />Trades</div>
-            <div className="text-base font-semibold text-slate-200">{portfolio.totalTrades}</div>
-          </div>
-          <div>
-            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Award className="w-3 h-3" />Win Rate</div>
-            <div className="text-base font-semibold text-slate-200">{portfolio.winRate}%</div>
+            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Activity className="w-3 h-3" />Day P&L</div>
+            <div className={`text-base font-semibold ${pnlPos ? 'text-emerald-400' : 'text-red-400'}`}>
+              {pnlPos ? '+' : ''}{fmtUsd(dayPnl)}
+            </div>
           </div>
         </div>
       </div>
@@ -264,276 +262,225 @@ function PortfolioHero({ portfolio, loading, refresh }: { portfolio: PortfolioSu
   );
 }
 
-/* ── Equity Chart ─────────────────────────────────── */
-function EquityChart({ points, portfolio }: { points: EquityPoint[]; portfolio: PortfolioSummary | null }) {
-  const chartData = useMemo(() => {
-    if (points.length > 0) {
-      return points.map(p => ({
-        time: new Date(p.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        equity: p.equity,
-        pnl: p.pnl,
-      }));
-    }
-    // Show flat line at current equity if no historical data
-    const eq = portfolio?.equity || 10000;
-    const now = Date.now();
-    return Array.from({ length: 12 }, (_, i) => ({
-      time: new Date(now - (11 - i) * 300_000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      equity: eq,
-      pnl: 0,
-    }));
-  }, [points, portfolio]);
-
-  const minVal = Math.min(...chartData.map(d => d.equity)) * 0.9995;
-  const maxVal = Math.max(...chartData.map(d => d.equity)) * 1.0005;
-  const pnlPositive = (portfolio?.dailyPnl ?? 0) >= 0;
-
+/* ── Kalshi Positions Card ────────────────────────── */
+function KalshiPositionsCard({ positions }: { positions: KalshiPosition[] }) {
   return (
     <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
-      <div className="flex items-center justify-between mb-3">
-        <div>
-          <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-            <BarChart3 className="w-4 h-4 text-blue-400" />
-            Equity Curve
-          </h3>
-          <p className="text-xs text-slate-500">Live session</p>
-        </div>
-        {portfolio && (
-          <span className={`text-xs font-medium ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
-            ROI: {pnlPositive ? '+' : ''}{portfolio.roi}%
-          </span>
-        )}
-      </div>
-      <div className="h-48">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={chartData}>
-            <defs>
-              <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={pnlPositive ? CHART_COLORS.TEAL : CHART_COLORS.RED} stopOpacity={0.3} />
-                <stop offset="95%" stopColor={pnlPositive ? CHART_COLORS.TEAL : CHART_COLORS.RED} stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.TOOLTIP_BG} />
-            <XAxis dataKey="time" stroke={CHART_COLORS.SLATE_500} tick={{ fontSize: 10 }} />
-            <YAxis domain={[minVal, maxVal]} stroke={CHART_COLORS.SLATE_500} tick={{ fontSize: 10 }} tickFormatter={(v: number) => fmtUsd(v, true)} />
-            <Tooltip
-              contentStyle={{ backgroundColor: CHART_COLORS.SLATE_800, border: '1px solid #334155', borderRadius: '8px', fontSize: '12px' }}
-              formatter={(v: number) => [fmtUsd(v), 'Equity']}
-            />
-            <Area type="monotone" dataKey="equity" stroke={pnlPositive ? CHART_COLORS.TEAL : CHART_COLORS.RED} strokeWidth={2} fill="url(#eqGrad)" />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
-}
-
-/* ── Watchlist Card ────────────────────────────────── */
-function WatchlistCard({ prices, loading }: { prices: WatchlistItem[]; loading: boolean }) {
-  if (loading) {
-    return (
-      <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
-        <Skeleton className="h-5 w-28 mb-4" />
-        {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-12 mb-2" />)}
-      </div>
-    );
-  }
-
-  return (
-    <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-          <Zap className="w-4 h-4 text-amber-400" />
-          Live Prices
-        </h3>
-        <span className="text-xs text-slate-500">{prices.length} assets</span>
-      </div>
-      <div className="space-y-1">
-        {prices.map(item => {
-          const up = item.change >= 0;
-          return (
-            <div key={item.symbol} className="flex items-center justify-between py-2.5 px-3 rounded-lg hover:bg-slate-800/50 transition-colors">
-              <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold ${
-                  item.symbol.includes('BTC') ? 'bg-orange-500/20 text-orange-400' :
-                  item.symbol.includes('ETH') ? 'bg-blue-500/20 text-blue-400' :
-                  item.symbol.includes('SOL') ? 'bg-purple-500/20 text-purple-400' :
-                  'bg-slate-600/20 text-slate-400'
-                }`}>
-                  {item.symbol.replace('-USD', '').slice(0, 3)}
-                </div>
-                <div>
-                  <div className="text-sm font-medium text-slate-200">{item.symbol}</div>
-                  <div className="text-xs text-slate-500">{item.source || 'Exchange'}</div>
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="text-sm font-semibold text-slate-200">{fmtUsd(item.price)}</div>
-                <div className={`text-xs font-medium ${up ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {up ? '+' : ''}{item.change.toFixed(2)}%
-                </div>
+      <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
+        <FileText className="w-4 h-4 text-blue-400" />
+        Open Positions
+        <span className="ml-auto text-xs text-slate-500">{positions.length}</span>
+      </h3>
+      <div className="space-y-1 max-h-64 overflow-y-auto">
+        {positions.map(p => (
+          <div key={p.ticker} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-800/50">
+            <div>
+              <div className="text-sm font-medium text-slate-200 truncate max-w-[200px]">{p.ticker}</div>
+              <div className="text-xs text-slate-500">{p.size} contracts · {p.outcome}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-sm font-semibold text-slate-200">{fmtUsd(p.avg_price * p.size)}</div>
+              <div className={`text-xs ${p.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {p.unrealized_pnl >= 0 ? '+' : ''}{fmtUsd(p.unrealized_pnl)}
               </div>
             </div>
-          );
-        })}
-        {prices.length === 0 && (
-          <div className="text-center py-6 text-slate-500 text-sm">Waiting for price data...</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ── Recent Trades Card ───────────────────────────── */
-function RecentTradesCard({ trades, loading }: { trades: RecentTrade[]; loading: boolean }) {
-  if (loading) {
-    return (
-      <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
-        <Skeleton className="h-5 w-28 mb-4" />
-        {[1, 2, 3].map(i => <Skeleton key={i} className="h-10 mb-2" />)}
-      </div>
-    );
-  }
-
-  return (
-    <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-          <Clock className="w-4 h-4 text-cyan-400" />
-          Recent Trades
-        </h3>
-        <span className="text-xs text-slate-500">{trades.length} fills</span>
-      </div>
-      <div className="space-y-1">
-        {trades.map((t, i) => {
-          const isBuy = t.action.toUpperCase().startsWith('BUY');
-          return (
-            <div key={i} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-800/50 transition-colors">
-              <div className="flex items-center gap-2">
-                <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${isBuy ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
-                  {isBuy ? 'BUY' : 'SELL'}
-                </span>
-                <div>
-                  <div className="text-sm font-medium text-slate-200">{t.action.replace('BUY ', '').replace('SELL ', '')}</div>
-                  <div className="text-xs text-slate-500">{t.size} @ ${t.price}</div>
-                </div>
-              </div>
-              <div className="text-xs text-slate-500">{t.time}</div>
-            </div>
-          );
-        })}
-        {trades.length === 0 && (
-          <div className="text-center py-6 text-slate-500 text-sm">
-            <Activity className="w-5 h-5 mx-auto mb-1 opacity-50" />
-            No trades yet this session
           </div>
+        ))}
+        {positions.length === 0 && (
+          <div className="text-center py-6 text-slate-500 text-sm">No open positions</div>
         )}
       </div>
     </div>
   );
 }
 
-/* ── Risk Exposure Card ───────────────────────────── */
-function RiskExposureCard({ exposure }: { exposure: RiskExposure | null }) {
-  if (!exposure) {
-    return (
-      <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
-        <Skeleton className="h-5 w-28 mb-3" />
-        <Skeleton className="h-16" />
-      </div>
-    );
-  }
-
-  const topSymbol = exposure.by_symbol?.reduce(
-    (max, s) => (s.pct_of_equity > (max?.pct_of_equity || 0) ? s : max),
-    exposure.by_symbol?.[0]
-  );
-  const pctDeployed = ((exposure.total_exposure_pct || 0) * 100);
+/* ── Recent Kalshi Orders ─────────────────────────── */
+function KalshiRecentOrders({ orders, fills }: { orders: KalshiOrder[]; fills: KalshiFill[] }) {
+  const recent = [...orders].sort((a, b) => new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()).slice(0, 8);
+  const recentFills = [...fills].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 5);
 
   return (
     <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
       <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
-        <Shield className="w-4 h-4 text-violet-400" />
-        Risk Exposure
+        <Bot className="w-4 h-4 text-cyan-400" />
+        Recent Orders &amp; Fills
+        <span className="ml-auto text-xs text-slate-500">{orders.length} orders / {fills.length} fills</span>
       </h3>
-      <div className="grid grid-cols-3 gap-3 mb-3">
-        <div>
-          <div className="text-lg font-semibold text-slate-200">{exposure.open_orders_count}</div>
-          <div className="text-xs text-slate-500">Open Orders</div>
-        </div>
-        <div>
-          <div className="text-lg font-semibold text-slate-200">{topSymbol?.symbol || '—'}</div>
-          <div className="text-xs text-slate-500">Top Exposure</div>
-        </div>
-        <div>
-          <div className="text-lg font-semibold text-emerald-400">{fmtUsd(exposure.buying_power, true)}</div>
-          <div className="text-xs text-slate-500">Buying Power</div>
-        </div>
+      <div className="space-y-1 max-h-64 overflow-y-auto">
+        {recentFills.map(f => {
+          const isBuy = f.side === 'yes' || f.side === 'buy';
+          return (
+            <div key={f.trade_id} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-800/50">
+              <div className="flex items-center gap-2">
+                <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${isBuy ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+                  {f.side.toUpperCase()}
+                </span>
+                <div>
+                  <div className="text-sm font-medium text-slate-200 truncate max-w-[160px]">{f.ticker}</div>
+                  <div className="text-xs text-slate-500">{f.size}ct @ {Math.round(f.price * 100)}¢</div>
+                </div>
+              </div>
+              <div className="text-xs text-slate-500">{new Date(f.timestamp).toLocaleTimeString()}</div>
+            </div>
+          );
+        })}
+        {recentFills.length === 0 && recent.length === 0 && (
+          <div className="text-center py-6 text-slate-500 text-sm">
+            <Activity className="w-5 h-5 mx-auto mb-1 opacity-50" />
+            No orders or fills yet
+          </div>
+        )}
+        {recentFills.length === 0 && recent.length > 0 && recent.map(o => (
+          <div key={o.order_id} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-800/50">
+            <div className="flex items-center gap-2">
+              <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${o.status === 'resting' ? 'bg-amber-500/20 text-amber-400' : o.status === 'executed' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-500/20 text-slate-400'}`}>
+                {o.status.toUpperCase().slice(0, 6)}
+              </span>
+              <div>
+                <div className="text-sm font-medium text-slate-200 truncate max-w-[160px]">{o.ticker}</div>
+                <div className="text-xs text-slate-500">{o.side} {o.size}ct @ {o.price !== null ? Math.round(o.price * 100) : '—'}¢</div>
+              </div>
+            </div>
+            <div className="text-xs text-slate-500">{o.created_at ? new Date(o.created_at).toLocaleTimeString() : '—'}</div>
+          </div>
+        ))}
       </div>
-      {/* Utilization bar */}
-      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all ${pctDeployed > 80 ? 'bg-red-500' : pctDeployed > 50 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-          style={{ width: `${Math.min(pctDeployed, 100)}%` }}
-        />
-      </div>
-      <div className="text-xs text-slate-500 mt-1">{pctDeployed.toFixed(1)}% deployed</div>
     </div>
   );
 }
 
 /* ── Main Overview ─────────────────────────────────── */
 export default function Overview() {
-  const { portfolio, loading: portfolioLoading, refresh } = usePortfolio();
-  const { prices, loading: pricesLoading } = useWatchlist();
-  const { trades, loading: tradesLoading } = useRecentTrades();
-  const exposure = useRiskExposure();
-  const equityPoints = useEquitySeries();
+  const { data: balance } = useApiData<KalshiBalance>(API_ENDPOINTS.KALSHI_BALANCE, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  });
+  const { data: pnl } = useApiData<KalshiPnL>(API_ENDPOINTS.KALSHI_PNL, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  });
+  const { data: posData } = useApiData<{ positions: KalshiPosition[] }>(API_ENDPOINTS.KALSHI_POSITIONS, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.POSITIONS,
+  });
+  const { data: ordData } = useApiData<{ orders: KalshiOrder[] }>(API_ENDPOINTS.KALSHI_ORDERS, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.ORDERS,
+  });
+  const { data: fillData } = useApiData<{ fills: KalshiFill[] }>(API_ENDPOINTS.KALSHI_FILLS, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.ORDERS,
+  });
+  const { data: killSwitch, refetch: refetchKillSwitch } = useApiData<OperatorKillSwitchState>(API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH,
+  });
+  const { data: gridStatus, refetch: refetchGridStatus } = useApiData<GridStatusLite>(API_ENDPOINTS.KALSHI_GRID_STATUS, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  });
+  const { data: catalog, refetch: refetchCatalog } = useApiData<CatalogResponseLite>(API_ENDPOINTS.KALSHI_CATALOG, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
+  });
+
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [rebootMessage, setRebootMessage] = useState<string | null>(null);
+  const [rebootError, setRebootError] = useState<string | null>(null);
+  const [gridStartMode, setGridStartMode] = useState<'paper' | 'live'>('paper');
+
+  // Sync gridStartMode with actual server mode on load
+  const { data: venueModeData } = useApiData<{ mode: string; is_live: boolean }>(API_ENDPOINTS.KALSHI_GRID_MODE, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  });
+  // Only sync once on first load if server is already in a known mode
+  const [modeSynced, setModeSynced] = useState(false);
+  if (!modeSynced && venueModeData?.mode) {
+    const serverMode = venueModeData.mode.toLowerCase().includes('paper') ? 'paper' : 'live';
+    if (serverMode !== gridStartMode) setGridStartMode(serverMode);
+    setModeSynced(true);
+  }
+
+  const callRebootAction = useCallback(async (action: 'catalog' | 'grid-start' | 'grid-stop', endpoint: string, body?: object) => {
+    setBusyAction(action);
+    setRebootError(null);
+    setRebootMessage(null);
+    try {
+      const token = localStorage.getItem('merid-access');
+      const res = await fetch(`${API_BASE_URL}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const payload = await res.json().catch(() => null) as { message?: string } | null;
+      if (!res.ok) {
+        throw new Error(payload?.message ?? `${res.status} ${res.statusText}`);
+      }
+      setRebootMessage(payload?.message ?? 'Action complete');
+      await Promise.all([refetchKillSwitch(), refetchGridStatus(), refetchCatalog()]);
+    } catch (err) {
+      setRebootError(err instanceof Error ? err.message : 'Action failed');
+    }
+    setBusyAction(null);
+  }, [refetchCatalog, refetchGridStatus, refetchKillSwitch]);
+
+  const handleStartGrid = useCallback(() => {
+    if (gridStartMode === 'live') {
+      const confirmed = window.confirm(
+        '⚠️ Start grid in LIVE mode?\n\nThis will route real orders to Kalshi with real funds.\nEnsure kill switch is clear and catalog is fresh.\n\nContinue?'
+      );
+      if (!confirmed) return;
+    }
+    void callRebootAction('grid-start', `${API_ENDPOINTS.KALSHI_GRID_START}?mode=${gridStartMode}`);
+  }, [gridStartMode, callRebootAction]);
+
+  const refreshRebootSignals = useCallback(() => {
+    setRebootError(null);
+    setRebootMessage('Signals refreshed');
+    void Promise.all([refetchKillSwitch(), refetchGridStatus(), refetchCatalog()]);
+  }, [refetchCatalog, refetchGridStatus, refetchKillSwitch]);
+
+  const catalogCount = catalog?.market_count
+    ?? catalog?.count
+    ?? (catalog && Array.isArray(catalog.markets) ? catalog.markets.length : null);
 
   return (
     <div className="space-y-5">
-      {/* Row 1: System Status Cards */}
-      <section className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+      {/* Execution Gate — always visible */}
+      <ExecutionGateStrip />
+
+      <RebootControlPanel
+        killSwitch={killSwitch}
+        gridStatus={gridStatus}
+        catalogCount={catalogCount}
+        busyAction={busyAction}
+        message={rebootMessage}
+        error={rebootError}
+        gridStartMode={gridStartMode}
+        onGridStartModeChange={setGridStartMode}
+        onRefreshCatalog={() => { void callRebootAction('catalog', API_ENDPOINTS.KALSHI_CATALOG_REFRESH); }}
+        onStartGrid={handleStartGrid}
+        onStopGrid={() => { void callRebootAction('grid-stop', API_ENDPOINTS.KALSHI_GRID_STOP); }}
+        onRefreshSignals={refreshRebootSignals}
+      />
+
+      {/* Row 1: Status Cards */}
+      <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <SystemHealthCard />
-        <PnLCard />
-        <TradingOperationsCard />
-        <PrimeStatusCard />
+        <KalshiHealthCard />
         <AgentStatusCard />
         <RiskProtectionCard />
       </section>
 
-      {/* Row 2: Portfolio Hero + Live Prices */}
+      {/* Row 2: Kalshi Balance + Positions */}
       <section className="grid grid-cols-1 lg:grid-cols-5 gap-5">
         <div className="lg:col-span-3">
-          <PortfolioHero portfolio={portfolio} loading={portfolioLoading} refresh={refresh} />
+          <KalshiBalanceHero balance={balance} pnl={pnl} />
         </div>
         <div className="lg:col-span-2">
-          <WatchlistCard prices={prices} loading={pricesLoading} />
+          <KalshiPositionsCard positions={posData?.positions ?? []} />
         </div>
       </section>
 
-      {/* Row 3: Equity Chart + Risk + Recent Trades */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div className="lg:col-span-2">
-          <EquityChart points={equityPoints} portfolio={portfolio} />
-        </div>
-        <div className="space-y-5">
-          <RiskExposureCard exposure={exposure} />
-          <RecentTradesCard trades={trades} loading={tradesLoading} />
-        </div>
-      </section>
-
-      {/* Row 4: Agent Activity + Quick Actions */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div className="lg:col-span-2">
-          <AgentActivityPanel />
-        </div>
-        <QuickActionsPanel />
-      </section>
-
-      {/* Row 5: Prediction Markets */}
-      <section>
-        <PredictionMarketsPanel />
+      {/* Row 3: Agent Activity + Recent Orders */}
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <AgentActivityPanel />
+        <KalshiRecentOrders orders={ordData?.orders ?? []} fills={fillData?.fills ?? []} />
       </section>
 
       {/* Console */}

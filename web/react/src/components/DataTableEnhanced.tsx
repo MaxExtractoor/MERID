@@ -4,7 +4,7 @@ interface Column<T> {
   key: keyof T;
   label: string;
   sortable?: boolean;
-  render?: (value: any, row: T) => React.ReactNode;
+  render?: (value: unknown, row: T) => React.ReactNode;
   width?: string;
 }
 
@@ -37,15 +37,19 @@ export default function DataTableEnhanced<T>({
 
   // Filter data
   const filteredData = useMemo(() => {
-    if (!filterText) return data;
+    const dataArray = Array.isArray(data) ? data : [];
+    if (!filterText) return dataArray;
     
-    return data.filter((row) =>
+    return dataArray.filter((row) =>
       columns.some((col) => {
         const value = row[col.key];
         return String(value).toLowerCase().includes(filterText.toLowerCase());
       })
     );
   }, [data, columns, filterText]);
+
+  // Ensure sortedData is always an array
+  const ensureArray = (arr: unknown): T[] => Array.isArray(arr) ? arr : [];
 
   // Sort data
   const sortedData = useMemo(() => {
@@ -65,13 +69,14 @@ export default function DataTableEnhanced<T>({
 
   // Paginate data
   const paginatedData = useMemo(() => {
-    if (!showPagination) return sortedData;
+    const dataArray = Array.isArray(sortedData) ? sortedData : [];
+    if (!showPagination) return dataArray;
 
     const startIndex = (currentPage - 1) * pageSize;
-    return sortedData.slice(startIndex, startIndex + pageSize);
+    return dataArray.slice(startIndex, startIndex + pageSize);
   }, [sortedData, currentPage, pageSize, showPagination]);
 
-  const totalPages = Math.ceil(sortedData.length / pageSize);
+  const totalPages = Math.ceil((Array.isArray(sortedData) ? sortedData.length : 0) / pageSize);
 
   const handleSort = (key: keyof T) => {
     if (sortKey === key) {
@@ -118,7 +123,7 @@ export default function DataTableEnhanced<T>({
       {/* Filter */}
       {showFilter && (
         <div className="mb-4">
-          <input
+          <input aria-label="Filter Text"
             id="data-table-filter"
             name="tableFilter"
             type="text"
@@ -138,7 +143,7 @@ export default function DataTableEnhanced<T>({
             <tr>
               {showSelection && (
                 <th className="px-3 py-2">
-                  <input
+                  <input aria-label="Input field"
                     type="checkbox"
                     title="Select all rows"
                     checked={selectedRows.size === paginatedData.length && paginatedData.length > 0}
@@ -165,7 +170,7 @@ export default function DataTableEnhanced<T>({
           <tbody>
             {paginatedData.map((row, index) => {
               // Try to use a unique identifier from the row if available
-              const rowKey = (row as any).id || (row as any).symbol || `row-${index}`;
+              const rowKey = String((row as Record<string, unknown>).id ?? (row as Record<string, unknown>).symbol ?? `row-${index}`);
               return (
                 <tr
                   key={rowKey}
@@ -175,7 +180,7 @@ export default function DataTableEnhanced<T>({
                 >
                 {showSelection && (
                   <td className="px-3 py-2">
-                    <input
+                    <input aria-label="Input field"
                       type="checkbox"
                       title={`Select row ${index + 1}`}
                       checked={selectedRows.has(index)}
@@ -206,7 +211,7 @@ export default function DataTableEnhanced<T>({
           </div>
           
           <div className="flex items-center gap-2">
-            <button
+            <button type="button"
               onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
               disabled={currentPage === 1}
               className="px-3 py-1 bg-slate-700 border border-slate-600 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-600"
@@ -218,7 +223,7 @@ export default function DataTableEnhanced<T>({
               Page {currentPage} of {totalPages}
             </span>
             
-            <button
+            <button type="button"
               onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
               disabled={currentPage === totalPages}
               className="px-3 py-1 bg-slate-700 border border-slate-600 rounded text-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-600"

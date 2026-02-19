@@ -16,6 +16,7 @@ logger = structlog.get_logger(__name__)
 
 
 class KrakenAdapter(VenueAdapter):
+    _is_stub = True
     """Kraken adapter for US crypto spot and margin trading with rate limiting."""
     
     def __init__(
@@ -76,7 +77,7 @@ class KrakenAdapter(VenueAdapter):
             self.logger.error("market_data_error", error=str(e))
             return None
     
-    async def place_order(
+    async def _place_order_impl(
         self,
         symbol: str,
         side: OrderSide,

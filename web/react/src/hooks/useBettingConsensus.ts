@@ -108,7 +108,7 @@ export function useBettingConsensus(
       { pollingInterval },
     );
 
-  const events = data?.events ?? [];
+  const events = useMemo(() => data?.events ?? [], [data?.events]);
 
   const byEventId = useMemo(() => {
     const map: Record<string, BettingConsensusData> = {};

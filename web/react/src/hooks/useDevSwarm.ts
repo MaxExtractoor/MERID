@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import axios from 'axios';
+import { logUiError } from '../utils/logger';
 
 const API_BASE = '/api/dev-swarm';
 
@@ -19,7 +20,7 @@ export interface DevTask {
   error: string | null;
   cost_usd: number;
   duration_seconds: number | null;
-  result: any | null;
+  result: unknown | null;
 }
 
 export interface DevAgent {
@@ -67,9 +68,10 @@ export function useDevSwarm() {
       const params = status ? { status } : {};
       const response = await axios.get(`${API_BASE}/tasks`, { params });
       setTasks(response.data.tasks);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to load tasks');
-      console.error('Failed to load tasks:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to load tasks';
+      setError(msg);
+      logUiError('useDevSwarm', 'Failed to load tasks', err);
     } finally {
       setLoading(false);
     }
@@ -80,7 +82,7 @@ export function useDevSwarm() {
       const response = await axios.get(`${API_BASE}/stats`);
       setStats(response.data);
     } catch (err) {
-      console.error('Failed to load stats:', err);
+      logUiError('useDevSwarm', 'Failed to load stats', err);
     }
   }, []);
 
@@ -89,7 +91,7 @@ export function useDevSwarm() {
       const response = await axios.get(`${API_BASE}/agents`);
       setAgents(response.data);
     } catch (err) {
-      console.error('Failed to load agents:', err);
+      logUiError('useDevSwarm', 'Failed to load agents', err);
     }
   }, []);
 
@@ -98,7 +100,7 @@ export function useDevSwarm() {
       const response = await axios.get(`${API_BASE}/tasks/${taskId}`);
       return response.data;
     } catch (err) {
-      console.error('Failed to load task:', err);
+      logUiError('useDevSwarm', 'Failed to load task', err);
       return null;
     }
   }, []);
@@ -111,9 +113,10 @@ export function useDevSwarm() {
       await refreshTasks();
       await refreshStats();
       return response.data;
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to create task');
-      console.error('Failed to create task:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to create task';
+      setError(msg);
+      logUiError('useDevSwarm', 'Failed to create task', err);
       return null;
     } finally {
       setLoading(false);
@@ -127,7 +130,7 @@ export function useDevSwarm() {
       await refreshStats();
       return true;
     } catch (err) {
-      console.error('Failed to cancel task:', err);
+      logUiError('useDevSwarm', 'Failed to cancel task', err);
       return false;
     }
   }, [refreshTasks, refreshStats]);

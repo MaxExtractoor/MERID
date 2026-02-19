@@ -110,6 +110,13 @@ class PredictionMarketModel:
         self._fee = fee_per_contract
         self._default_slippage = default_slippage_cents
         self._model_probs: Dict[str, Decimal] = {}
+        
+        # Integration with external price feeds
+        try:
+            from data.live_price_feed import get_live_price_feed
+            self._price_feed = get_live_price_feed()
+        except ImportError:
+            self._price_feed = None
 
     # ------------------------------------------------------------------
     # Implied probabilities
@@ -242,6 +249,8 @@ class PredictionMarketModel:
         side: str = "yes",
         action: str = "buy",
         order_size_contracts: int = 1,
+        asset: Optional[str] = None,
+        strike_price: Optional[float] = None,
     ) -> EdgeEstimate:
         """Compute expected edge for a potential trade.
 
@@ -256,8 +265,36 @@ class PredictionMarketModel:
             side: "yes" or "no".
             action: "buy" or "sell".
             order_size_contracts: Number of contracts for fee calc.
+            asset: Underlying asset (e.g. BTC) for external feed integration.
+            strike_price: The strike price of the contract for spot-relative model.
         """
         mp = model_prob or self._model_probs.get(market_id)
+        
+        # If no explicit model prob, try to derive from external spot price feed for crypto
+        if mp is None and self._price_feed and asset and strike_price:
+            price_data = self._price_feed.get_current_price(f"{asset}/USDT")
+            if price_data:
+                spot = Decimal(str(price_data.price))
+                strike = Decimal(str(strike_price))
+                
+                # Simple spot-relative probability model
+                # If spot is near strike, probability is ~0.5
+                # If spot >> strike, YES probability approaches 1.0
+                dist_pct = (spot - strike) / strike
+                
+                # Heuristic: 1% distance from strike shifts probability by ~10%
+                derived_prob = Decimal("0.5") + (dist_pct * 10)
+                derived_prob = min(max(derived_prob, Decimal("0.05")), Decimal("0.95"))
+                
+                if side == "no":
+                    derived_prob = Decimal("1.0") - derived_prob
+                
+                mp = derived_prob
+                logger.debug(
+                    f"[model] Derived {side} prob {mp:.2f} for {market_id} "
+                    f"from spot {spot:.2f} vs strike {strike:.2f}"
+                )
+
         if mp is None:
             mp = implied.yes_prob if side == "yes" else implied.no_prob
 

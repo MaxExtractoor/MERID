@@ -5,7 +5,7 @@
  * Shows Bull/Bear/Risk agent scores over time per symbol.
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { TrendingUp, TrendingDown, Minus, Users, RefreshCw } from 'lucide-react';
 
 interface AgentOpinion {
@@ -180,9 +180,10 @@ export default function AgentOpinionChart({
             const roleClass = roleColors[latestOp.agent_role] || 'border-slate-500';
             
             return (
-              <div
+              <button
                 key={agentId}
-                className={`p-3 bg-slate-800/30 rounded-lg border-l-4 ${roleClass} cursor-pointer
+                type="button"
+                className={`w-full text-left p-3 bg-slate-800/30 rounded-lg border-l-4 ${roleClass}
                   hover:bg-slate-800/50 transition-colors
                   ${selectedAgent === agentId ? 'ring-1 ring-blue-500' : ''}`}
                 onClick={() => setSelectedAgent(selectedAgent === agentId ? null : agentId)}
@@ -237,7 +238,7 @@ export default function AgentOpinionChart({
                     <span className="text-xs text-slate-500 ml-1">history</span>
                   </div>
                 )}
-              </div>
+              </button>
             );
           })
         )}

@@ -1,4 +1,5 @@
 """Tests for web/api/dashboard.py endpoints."""
+from enum import Enum
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 import sys
@@ -184,6 +185,40 @@ class TestRecentOrders:
         data = response.json()
         
         assert len(data["orders"]) <= 3
+
+    def test_recent_orders_handles_enum_side_and_status(self, client):
+        """Regression: side/status may be enum-like objects, not raw strings."""
+
+        class _OrderSide(Enum):
+            BUY = "buy"
+
+        class _OrderStatus(Enum):
+            FILLED = "filled"
+
+        fake_order = Mock(
+            filled_at=1739570100,
+            created_at=1739570000,
+            side=_OrderSide.BUY,
+            asset="BTC",
+            size_usd=1250.0,
+            fill_price=70358.12,
+            status=_OrderStatus.FILLED,
+        )
+
+        fake_portfolio = Mock(trade_history=[fake_order])
+        fake_engine = Mock(
+            portfolios={"default": fake_portfolio},
+            get_portfolio=Mock(return_value=fake_portfolio),
+        )
+
+        with patch("trading.paper_trading.get_paper_engine", return_value=fake_engine):
+            response = client.get("/api/orders/recent?limit=8")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["orders"]) == 1
+        assert data["orders"][0]["action"].startswith("BUY ")
+        assert data["orders"][0]["status"] == "FILLED"
 
 
 class TestAgentActivity:

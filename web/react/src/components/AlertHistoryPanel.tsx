@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import {
   Bell, RefreshCw, Search, AlertTriangle,
   AlertOctagon, Info, CheckCircle
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 interface AlertRecord {
   id: string;
@@ -22,47 +25,18 @@ const SEV_CONFIG: Record<string, { icon: typeof AlertOctagon; color: string; bg:
 };
 
 export default function AlertHistoryPanel() {
-  const [alerts, setAlerts] = useState<AlertRecord[]>([]);
-  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [sevFilter, setSevFilter] = useState<string>('all');
 
-  const fetchAlerts = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/signals/alerts/history');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.alerts) { setAlerts(data.alerts); return; }
-      }
-    } catch { /* fallback */ }
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ alerts: AlertRecord[] }>(
+    API_ENDPOINTS.SIGNALS_ALERTS_HISTORY,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM },
+  );
 
-    const now = Date.now();
-    setAlerts([
-      { id: 'a-1', timestamp: new Date(now - 5000).toISOString(), severity: 'critical', source: 'GlobalRiskManager',
-        title: 'Daily loss soft limit reached', detail: 'Crypto domain at 92% of $1000 daily loss limit.', acknowledged: false },
-      { id: 'a-2', timestamp: new Date(now - 30000).toISOString(), severity: 'warning', source: 'OnChainHealth',
-        title: 'Solana RPC latency spike', detail: 'Helius provider latency 450ms, threshold 200ms.', acknowledged: true },
-      { id: 'a-3', timestamp: new Date(now - 60000).toISOString(), severity: 'resolved', source: 'VenueHealth',
-        title: 'Kraken connectivity restored', detail: 'Kraken API recovered after 3m outage.', acknowledged: true },
-      { id: 'a-4', timestamp: new Date(now - 120000).toISOString(), severity: 'warning', source: 'DataFreshness',
-        title: 'Stale Pyth SOL/USD feed', detail: 'Last update 45s ago, threshold 30s.', acknowledged: false },
-      { id: 'a-5', timestamp: new Date(now - 300000).toISOString(), severity: 'info', source: 'Orchestrator',
-        title: 'Cycle #1247 slow phase', detail: 'RESEARCH phase took 1.8s (target 1.0s).', acknowledged: true },
-      { id: 'a-6', timestamp: new Date(now - 600000).toISOString(), severity: 'critical', source: 'PredictionRisk',
-        title: 'Kill switch activated', detail: 'Manual kill switch on prediction domain by operator.', acknowledged: true },
-      { id: 'a-7', timestamp: new Date(now - 900000).toISOString(), severity: 'resolved', source: 'PredictionRisk',
-        title: 'Kill switch deactivated', detail: 'Prediction domain resumed after review.', acknowledged: true },
-      { id: 'a-8', timestamp: new Date(now - 1200000).toISOString(), severity: 'info', source: 'ArbScanner',
-        title: 'New arb opportunity detected', detail: 'BTC cross-exchange spread 4.0 bps Binance→Coinbase.', acknowledged: true },
-    ]);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchAlerts();
-    const interval = setInterval(fetchAlerts, 10000);
-    return () => clearInterval(interval);
-  }, [fetchAlerts]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Alert history" error={fetchError} onRetry={refetch} />;
+  }
+  const alerts = rawData?.alerts ?? [];
 
   const filtered = alerts
     .filter(a => sevFilter === 'all' || a.severity === sevFilter)
@@ -103,7 +77,7 @@ export default function AlertHistoryPanel() {
         <div className="flex items-center gap-2">
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
-            <input
+            <input aria-label="Search"
               id="alert-history-search"
               name="alertSearch"
               type="text"
@@ -115,7 +89,7 @@ export default function AlertHistoryPanel() {
           </div>
           <div className="flex gap-1">
             {['all', 'critical', 'warning', 'info', 'resolved'].map(f => (
-              <button
+              <button type="button"
                 key={f}
                 onClick={() => setSevFilter(f)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
@@ -126,7 +100,7 @@ export default function AlertHistoryPanel() {
               </button>
             ))}
           </div>
-          <button onClick={fetchAlerts} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh alerts">
+          <button type="button" onClick={() => refetch()} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh alerts" aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>

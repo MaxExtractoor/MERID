@@ -13,10 +13,7 @@ module.exports = {
   parser: '@typescript-eslint/parser',
   plugins: ['react-refresh', 'jsx-a11y', 'testing-library'],
   rules: {
-    'react-refresh/only-export-components': [
-      'warn',
-      { allowConstantExport: true },
-    ],
+    'react-refresh/only-export-components': 'warn',
     'jsx-a11y/anchor-is-valid': 'warn',
     'jsx-a11y/alt-text': 'error',
     'jsx-a11y/aria-props': 'error',
@@ -28,6 +25,22 @@ module.exports = {
     '@typescript-eslint/explicit-module-boundary-types': 'off',
     '@typescript-eslint/no-explicit-any': 'warn',
   },
+  overrides: [
+    {
+      files: [
+        '**/__tests__/**/*.{ts,tsx}',
+        '**/*.test.{ts,tsx}',
+      ],
+      rules: {
+        '@typescript-eslint/no-explicit-any': 'off',
+        '@typescript-eslint/no-non-null-assertion': 'off',
+        '@typescript-eslint/no-inferrable-types': 'off',
+        '@typescript-eslint/no-var-requires': 'off',
+        'testing-library/no-node-access': 'off',
+        'testing-library/no-unnecessary-act': 'off',
+      },
+    },
+  ],
   settings: {
     react: {
       version: 'detect',

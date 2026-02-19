@@ -170,6 +170,10 @@ class CanonicalAgentRegistry:
     def active(self) -> List[CanonicalAgent]:
         return [a for a in self._agents.values() if a.is_active]
 
+    def count(self) -> int:
+        """Return total number of registered agents."""
+        return len(self._agents)
+
     def summary(self) -> List[dict]:
         return [a.summary() for a in self._agents.values()]
 

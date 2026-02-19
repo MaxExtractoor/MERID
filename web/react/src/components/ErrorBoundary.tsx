@@ -1,5 +1,6 @@
 import React from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
+import { logUiError } from '../utils/logger';
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -24,7 +25,10 @@ export default class ErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error("[ErrorBoundary]", this.props.viewName, error, info);
+    logUiError('ErrorBoundary', 'View crashed during render', error, {
+      viewName: this.props.viewName ?? 'unknown',
+      componentStack: info.componentStack ?? undefined,
+    });
   }
 
   handleRetry = () => {

@@ -19,11 +19,16 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from utils.logger import get_logger
+
+_KILL_SWITCH_FILE = Path("data/kill_switch.json")
 
 logger = get_logger("merid.execution_guard")
 
@@ -104,6 +109,37 @@ class DomainCap:
         }
 
 
+# ── Per-venue exposure caps ──────────────────────────────────────────
+
+@dataclass
+class VenueExposureCap:
+    """Per-venue maximum total exposure (sum of open position notional)."""
+    venue: str
+    max_exposure_usd: float = 25000.0
+    current_exposure_usd: float = 0.0
+
+    def would_breach(self, additional_usd: float) -> bool:
+        return (self.current_exposure_usd + additional_usd) > self.max_exposure_usd
+
+    def remaining(self) -> float:
+        return max(0.0, self.max_exposure_usd - self.current_exposure_usd)
+
+    def record(self, notional_usd: float):
+        self.current_exposure_usd += notional_usd
+
+    def release(self, notional_usd: float):
+        self.current_exposure_usd = max(0.0, self.current_exposure_usd - notional_usd)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "venue": self.venue,
+            "max_exposure_usd": self.max_exposure_usd,
+            "current_exposure_usd": round(self.current_exposure_usd, 2),
+            "remaining_usd": round(self.remaining(), 2),
+            "utilization_pct": round(self.current_exposure_usd / self.max_exposure_usd * 100, 1) if self.max_exposure_usd > 0 else 0.0,
+        }
+
+
 # ── CQI Throttle config ──────────────────────────────────────────────
 
 @dataclass
@@ -147,10 +183,25 @@ class ExecutionGuard:
             "equity": DomainCap(domain="equity", max_daily_notional_usd=10000, max_single_trade_usd=2000),
             "sports": DomainCap(domain="sports", max_daily_notional_usd=2000, max_single_trade_usd=200),
         }
+        self._venue_caps: Dict[str, VenueExposureCap] = {
+            "binance": VenueExposureCap(venue="binance", max_exposure_usd=25000),
+            "alpaca": VenueExposureCap(venue="alpaca", max_exposure_usd=20000),
+            "kalshi": VenueExposureCap(venue="kalshi", max_exposure_usd=5000),
+            "coinbase": VenueExposureCap(venue="coinbase", max_exposure_usd=15000),
+        }
         self._last_cqi: Dict[str, float] = {}
         self._cooldown_seconds = 5.0
         self._last_execution_at = 0.0
         self._trade_log: List[Dict[str, Any]] = []
+
+        self._load_persisted_kill_switch()
+
+        # Promotion enforcement: when True, live trades are blocked for
+        # domains that are not eligible in the latest promotion report.
+        self.enforce_promotion = True
+        self._promotion_eligible_domains: Optional[set] = None
+        self._promotion_blocked_agents: Optional[set] = None
+        self._promotion_report_ts: float = 0.0
 
     # ── Kill switch ───────────────────────────────────────────────────
 
@@ -158,13 +209,42 @@ class ExecutionGuard:
         """Block ALL execution immediately."""
         self._global_kill_switch = True
         self._global_kill_reason = reason
+        self._persist_kill_switch()
         logger.warning(f"KILL SWITCH ACTIVATED: {reason}")
 
     def deactivate_kill_switch(self):
         """Re-enable execution."""
         self._global_kill_switch = False
         self._global_kill_reason = ""
+        self._persist_kill_switch()
         logger.info("Kill switch deactivated")
+
+    def _persist_kill_switch(self):
+        """Write kill switch state to disk so it survives restarts."""
+        try:
+            _KILL_SWITCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "active": self._global_kill_switch,
+                "reason": self._global_kill_reason,
+                "activated_at": time.time() if self._global_kill_switch else None,
+            }
+            _KILL_SWITCH_FILE.write_text(json.dumps(payload, indent=2))
+        except Exception as exc:
+            logger.error(f"Failed to persist kill switch state: {exc}")
+
+    def _load_persisted_kill_switch(self):
+        """Reload kill switch state from disk on startup."""
+        try:
+            if _KILL_SWITCH_FILE.exists():
+                data = json.loads(_KILL_SWITCH_FILE.read_text())
+                if data.get("active"):
+                    self._global_kill_switch = True
+                    self._global_kill_reason = data.get("reason", "persisted")
+                    logger.warning(
+                        f"Kill switch restored from disk: {self._global_kill_reason}"
+                    )
+        except Exception as exc:
+            logger.error(f"Failed to load persisted kill switch: {exc}")
 
     def activate_domain_kill_switch(self, domain: str, reason: str = "manual"):
         cap = self._domain_caps.get(domain)
@@ -182,6 +262,39 @@ class ExecutionGuard:
     def kill_switch_active(self) -> bool:
         return self._global_kill_switch
 
+    # ── Promotion enforcement ────────────────────────────────────────
+
+    def sync_promotion_report(self):
+        """Pull eligible domains/agents from the cached promotion report.
+
+        Called periodically by the loop or on-demand.  Does NOT regenerate
+        the report — it reads whatever is cached.
+        """
+        try:
+            from merid.promotion_report import get_cached_promotion_report
+            report = get_cached_promotion_report(gauntlet_cycles=5)
+            self._promotion_eligible_domains = set(report.eligible_domains)
+            self._promotion_blocked_agents = set(report.blocked_agents)
+            self._promotion_report_ts = report.timestamp
+            logger.info(
+                f"Promotion sync: {len(self._promotion_eligible_domains)} eligible domains, "
+                f"{len(self._promotion_blocked_agents)} blocked agents"
+            )
+        except Exception as exc:
+            logger.warning(f"Promotion sync failed (enforcement unchanged): {exc}")
+
+    def is_domain_promoted(self, domain: str) -> bool:
+        """Check if a domain is eligible per the latest promotion report."""
+        if self._promotion_eligible_domains is None:
+            return True  # No report yet — allow (fail-open for paper)
+        return domain in self._promotion_eligible_domains
+
+    def is_agent_promoted(self, agent_id: str) -> bool:
+        """Check if an agent is promoted per the latest promotion report."""
+        if self._promotion_blocked_agents is None:
+            return True  # No report yet — allow
+        return agent_id not in self._promotion_blocked_agents
+
     # ── CQI updates ───────────────────────────────────────────────────
 
     def update_cqi(self, domain: str, cqi_score: float):
@@ -198,6 +311,22 @@ class ExecutionGuard:
 
     # ── Pre-trade check ───────────────────────────────────────────────
 
+    def get_venue_cap(self, venue: str) -> Optional[VenueExposureCap]:
+        return self._venue_caps.get(venue)
+
+    def set_venue_cap(self, venue: str, max_exposure_usd: float):
+        if venue in self._venue_caps:
+            self._venue_caps[venue].max_exposure_usd = max_exposure_usd
+        else:
+            self._venue_caps[venue] = VenueExposureCap(venue=venue, max_exposure_usd=max_exposure_usd)
+
+    def sync_venue_exposure(self, venue: str, current_exposure_usd: float):
+        """Called by the loop/reconciliation to sync actual venue exposure."""
+        if venue in self._venue_caps:
+            self._venue_caps[venue].current_exposure_usd = current_exposure_usd
+        else:
+            self._venue_caps[venue] = VenueExposureCap(venue=venue, current_exposure_usd=current_exposure_usd)
+
     def pre_trade_check(
         self,
         plan_id: str,
@@ -205,6 +334,7 @@ class ExecutionGuard:
         domain: str,
         size_usd: float,
         direction: str = "long",
+        venue: str = "",
         now: Optional[float] = None,
     ) -> TradeVerdict:
         """Run all safety checks before execution. Returns a TradeVerdict."""
@@ -257,6 +387,29 @@ class ExecutionGuard:
             return verdict
         passed.append("domain_enabled")
 
+        # 3.5 Promotion eligibility (only enforced for live execution)
+        if self.enforce_promotion and not self.is_domain_promoted(domain):
+            # Check if we are in live mode — only block live, not paper
+            is_live = False
+            try:
+                from trading.mode_controller import get_trading_mode_controller
+                is_live = get_trading_mode_controller().is_live
+            except Exception as exc:
+                logger.debug("data_fetch_suppressed", error=str(exc))
+            if is_live:
+                verdict.allowed = False
+                verdict.reason = (
+                    f"domain {domain} not eligible for live execution "
+                    f"(promotion report rings not all passing)"
+                )
+                verdict.adjusted_size_usd = 0
+                failed.append("promotion_eligibility")
+                verdict.checks_passed = passed
+                verdict.checks_failed = failed
+                self._log_verdict(plan_id, verdict)
+                return verdict
+        passed.append("promotion_eligibility")
+
         # 4. CQI throttle
         cqi = self.get_cqi(domain)
         verdict.cqi_score = cqi
@@ -273,6 +426,26 @@ class ExecutionGuard:
             return verdict
         verdict.adjusted_size_usd = size_usd * throttle
         passed.append("cqi_throttle")
+
+        # 4.5 Per-venue exposure cap
+        if venue and venue in self._venue_caps:
+            vcap = self._venue_caps[venue]
+            if vcap.would_breach(verdict.adjusted_size_usd):
+                remaining_venue = vcap.remaining()
+                if remaining_venue <= 0:
+                    verdict.allowed = False
+                    verdict.reason = f"venue exposure cap exhausted for {venue}"
+                    verdict.adjusted_size_usd = 0
+                    failed.append("venue_exposure_cap")
+                    verdict.checks_passed = passed
+                    verdict.checks_failed = failed
+                    self._log_verdict(plan_id, verdict)
+                    return verdict
+                else:
+                    verdict.adjusted_size_usd = min(verdict.adjusted_size_usd, remaining_venue)
+                    passed.append("venue_exposure_cap_clamped")
+            else:
+                passed.append("venue_exposure_cap")
 
         # 5. Per-domain daily cap
         if cap:
@@ -343,11 +516,10 @@ class ExecutionGuard:
         if len(self._trade_log) > 1000:
             self._trade_log = self._trade_log[-500:]
 
-        level = "INFO" if verdict.allowed else "WARNING"
-        logger.log(
-            getattr(logger, level.lower(), logger.info).__func__(logger) if False else 20 if verdict.allowed else 30,
+        log_fn = logger.info if verdict.allowed else logger.warning
+        log_fn(
             f"TradeVerdict [{plan_id}] {'ALLOWED' if verdict.allowed else 'BLOCKED'}: "
-            f"${verdict.original_size_usd:.0f}→${verdict.adjusted_size_usd:.0f} "
+            f"${verdict.original_size_usd:.0f}->${verdict.adjusted_size_usd:.0f} "
             f"throttle={verdict.throttle_pct:.0%} CQI={verdict.cqi_score:.3f} "
             f"reason={verdict.reason}"
         )
@@ -365,8 +537,17 @@ class ExecutionGuard:
             },
             "last_cqi": {k: round(v, 4) for k, v in self._last_cqi.items()},
             "domain_caps": {k: v.to_dict() for k, v in self._domain_caps.items()},
+            "venue_caps": {k: v.to_dict() for k, v in self._venue_caps.items()},
             "cooldown_seconds": self._cooldown_seconds,
             "recent_verdicts": len(self._trade_log),
+            "promotion_enforcement": {
+                "enabled": self.enforce_promotion,
+                "eligible_domains": sorted(self._promotion_eligible_domains) if self._promotion_eligible_domains else [],
+                "blocked_agents": sorted(self._promotion_blocked_agents) if self._promotion_blocked_agents else [],
+                "report_ts": self._promotion_report_ts,
+                "sync_age_s": round(time.time() - self._promotion_report_ts, 1) if self._promotion_report_ts else None,
+                "stale": (time.time() - self._promotion_report_ts > 600) if self._promotion_report_ts else True,
+            },
         }
 
     def recent_verdicts(self, limit: int = 20) -> List[Dict[str, Any]]:

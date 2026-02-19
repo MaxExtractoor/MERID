@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
 import { TrendingUp, TrendingDown, Activity, DollarSign, Target, Award, RefreshCw, AlertCircle } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { DEFAULTS, API_ENDPOINTS} from "../config/constants";
 
 interface PerformanceMetrics {
   user_id: string;
@@ -23,35 +24,12 @@ interface PerformanceAnalyticsDashboardProps {
 }
 
 export default function PerformanceAnalyticsDashboard({ userId = 'default', className = '' }: PerformanceAnalyticsDashboardProps) {
-  const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { data: metrics, loading, error, refetch } = useApiData<PerformanceMetrics>(
+    API_ENDPOINTS.PAPER_TRADING_STATS(userId),
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM },
+  );
 
-  useEffect(() => {
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, 10000);
-    return () => clearInterval(interval);
-  }, [userId]);
-
-  const fetchMetrics = async () => {
-    try {
-      const response = await fetch(`/api/v1/paper/portfolio/${userId}/stats`);
-      if (response.ok) {
-        const data = await response.json();
-        setMetrics(data);
-        setError(null);
-      } else {
-        throw new Error('Failed to fetch performance metrics');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setMetrics(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const getMetricColor = (value: number, isPositive: boolean = true) => {
+  const getMetricColor = (value: number, isPositive = true) => {
     if (isPositive) {
       return value >= 0 ? 'text-green-400' : 'text-red-400';
     }
@@ -87,7 +65,7 @@ export default function PerformanceAnalyticsDashboard({ userId = 'default', clas
           <AlertCircle className="w-5 h-5 text-yellow-500" />
           <div>
             <p className="text-yellow-500 font-medium">Data unavailable</p>
-            <p className="text-sm text-gray-400">{error}</p>
+            <p className="text-sm text-gray-400">{error?.message ?? 'Unknown error'}</p>
           </div>
         </div>
       )}
@@ -99,8 +77,8 @@ export default function PerformanceAnalyticsDashboard({ userId = 'default', clas
             <Activity className="w-6 h-6 text-blue-400" />
             <h2 className="text-xl font-bold text-white">Performance Analytics</h2>
           </div>
-          <button
-            onClick={fetchMetrics}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
             title="Refresh metrics"
             aria-label="Refresh metrics"

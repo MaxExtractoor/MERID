@@ -38,17 +38,7 @@ class KalshiTrader:
         await self.client.close()
     
     async def buy_yes(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
-        """
-        Buy YES contracts in a market.
-        
-        Args:
-            ticker: Market ticker (e.g., "FED-25DEC-T3.00")
-            count: Number of contracts to buy
-            price: Max price in cents (0-100), None for market order
-            
-        Returns:
-            PlacedOrder or None if failed
-        """
+        """Buy YES contracts in a market."""
         order = VenueOrder(
             market_id=ticker,
             side="buy",
@@ -57,6 +47,7 @@ class KalshiTrader:
             order_type="limit" if price else "market",
             outcome_id="yes"
         )
+        logger.debug(f"buy_yes: {ticker} count={count} price={price}")
         return await self.client.place_order(order)
     
     async def buy_no(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:

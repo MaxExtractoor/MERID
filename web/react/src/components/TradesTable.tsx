@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { useTradeEvents } from '../hooks/useKafkaStream';
 
-interface Trade {
+interface TradeTableRow {
   event_id?: string;
   event_type: string;
   trader_type: 'human' | 'agent' | 'system';
@@ -55,7 +55,7 @@ export default function TradesTable({
 }: TradesTableProps) {
   const { events, connected, reconnectCount } = useTradeEvents({ maxEvents: maxRows });
   const [paused, setPaused] = useState(false);
-  const [displayedTrades, setDisplayedTrades] = useState<Trade[]>([]);
+  const [displayedTrades, setDisplayedTrades] = useState<TradeTableRow[]>([]);
   const [symbolFilter, setSymbolFilter] = useState<string>('');
   const [sideFilter, setSideFilter] = useState<'all' | 'buy' | 'sell'>('all');
   const [traderFilter, setTraderFilter] = useState<'all' | 'agent' | 'human'>('all');
@@ -64,7 +64,7 @@ export default function TradesTable({
   // Update displayed trades when not paused
   useEffect(() => {
     if (!paused) {
-      let filtered = events as unknown as Trade[];
+      let filtered = events as unknown as TradeTableRow[];
 
       // Apply symbol filter
       if (symbolFilter) {
@@ -134,7 +134,7 @@ export default function TradesTable({
       : <User className="w-4 h-4 text-blue-400" />;
   };
 
-  const getRowClass = (trade: Trade) => {
+  const getRowClass = (trade: TradeTableRow) => {
     const base = 'border-t border-slate-700/30 hover:bg-slate-800/50 transition-colors';
     if (trade.side?.toLowerCase() === 'buy') {
       return `${base} bg-green-500/5`;
@@ -145,7 +145,7 @@ export default function TradesTable({
     return base;
   };
 
-  const uniqueSymbols = [...new Set(events.map((e: any) => e.symbol).filter(Boolean))];
+  const uniqueSymbols = [...new Set(events.map((e) => e.payload?.symbol as string | undefined).filter(Boolean))];
 
   return (
     <div className="bg-slate-900/70 rounded-xl border border-slate-700/50 flex flex-col overflow-hidden">
@@ -167,7 +167,7 @@ export default function TradesTable({
           </div>
 
           {/* Pause/Play */}
-          <button
+          <button type="button"
             onClick={() => setPaused(!paused)}
             className={`p-1.5 rounded transition-colors ${
               paused ? 'bg-yellow-500/20 text-yellow-400' : 'hover:bg-slate-700/50 text-gray-400'
@@ -186,7 +186,7 @@ export default function TradesTable({
           
           {/* Symbol Filter */}
           <div className="relative">
-            <input
+            <input aria-label="Symbol Filter"
               id="trades-symbol-filter"
               name="symbolFilter"
               type="text"
@@ -196,7 +196,7 @@ export default function TradesTable({
               className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-300 w-24 focus:outline-none focus:border-blue-500"
             />
             {symbolFilter && (
-              <button
+              <button type="button"
                 onClick={() => setSymbolFilter('')}
                 className="absolute right-1 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
                 title="Clear filter"
@@ -208,11 +208,11 @@ export default function TradesTable({
           </div>
 
           {/* Side Filter */}
-          <select
+          <select aria-label="Side Filter"
             id="trades-side-filter"
             name="sideFilter"
             value={sideFilter}
-            onChange={(e) => setSideFilter(e.target.value as any)}
+            onChange={(e) => setSideFilter(e.target.value as string)}
             className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-300"
             aria-label="Filter by side"
           >
@@ -222,11 +222,11 @@ export default function TradesTable({
           </select>
 
           {/* Trader Filter */}
-          <select
+          <select aria-label="All Sides"
             id="trades-trader-filter"
             name="traderFilter"
             value={traderFilter}
-            onChange={(e) => setTraderFilter(e.target.value as any)}
+            onChange={(e) => setTraderFilter(e.target.value as string)}
             className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-300"
             aria-label="Filter by trader type"
           >
@@ -237,7 +237,7 @@ export default function TradesTable({
 
           {/* Quick symbol buttons */}
           {uniqueSymbols.slice(0, 4).map(sym => (
-            <button
+            <button type="button"
               key={sym}
               onClick={() => setSymbolFilter(symbolFilter === sym ? '' : sym)}
               className={`px-2 py-0.5 text-xs rounded transition-colors ${

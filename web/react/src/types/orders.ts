@@ -40,7 +40,7 @@ export interface OpenOrdersResponse {
 }
 
 // WebSocket payload types
-export interface OrderCreatedPayload extends OrderRow {}
+export type OrderCreatedPayload = OrderRow;
 
 export interface OrderUpdatedPayload {
   id: string;

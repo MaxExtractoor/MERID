@@ -1,6 +1,6 @@
 """
 Prediction Markets API
-Mock and real prediction market data for MERID
+Real prediction market data for MERID (Kalshi)
 """
 
 import aiohttp
@@ -9,6 +9,9 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+import logging
+logger = logging.getLogger("predictions")
 
 router = APIRouter()
 
@@ -69,11 +72,8 @@ def get_mock_markets():
         }
     ]
 
-# Initialize with mock data immediately
-_markets_cache = get_mock_markets()
-_last_update = datetime.now()
-print(f"[Predictions] Initialized with {len(_markets_cache)} mock markets")
-
+# Start with empty cache — populated on first fetch
+logger.info("[Predictions] Cache initialized (empty — awaiting first Kalshi fetch)")
 async def fetch_kalshi_markets():
     """Fetch prediction markets from Kalshi aggregator."""
     global _markets_cache, _last_update
@@ -104,22 +104,12 @@ async def fetch_kalshi_markets():
                 })
             _markets_cache = markets
             _last_update = datetime.now()
-            print(f"[Predictions] Updated with {len(markets)} Kalshi markets")
+            logger.info(f"[Predictions] Updated with {len(markets)} Kalshi markets")
         else:
-            print("[Predictions] No Kalshi markets available, using mock data")
-            markets = get_mock_markets()
-            _markets_cache = markets
-            _last_update = datetime.now()
+            logger.info("[Predictions] No Kalshi markets available")
                     
     except Exception as e:
-        print(f"[Predictions] Error fetching Kalshi markets: {e}")
-        print("[Predictions] Using mock data as fallback")
-        # Add mock data fallback
-        markets = get_mock_markets()
-        _markets_cache = markets
-        _last_update = datetime.now()
-        print(f"[Predictions] Using {len(markets)} mock markets")
-
+        logger.error(f"[Predictions] Error fetching Kalshi markets: {e}")
 @router.get("/markets")
 async def get_markets():
     """Get all prediction markets."""

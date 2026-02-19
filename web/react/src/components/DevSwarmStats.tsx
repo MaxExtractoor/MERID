@@ -1,3 +1,4 @@
+import React from 'react';
 import { DevSwarmStats as Stats, DevAgent } from '../hooks/useDevSwarm';
 
 interface DevSwarmStatsProps {
@@ -5,7 +6,7 @@ interface DevSwarmStatsProps {
   agents: DevAgent[];
 }
 
-export default function DevSwarmStats({ stats, agents }: DevSwarmStatsProps) {
+function DevSwarmStats({ stats, agents }: DevSwarmStatsProps) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
       {/* Active Tasks */}
@@ -108,3 +109,7 @@ export default function DevSwarmStats({ stats, agents }: DevSwarmStatsProps) {
     </div>
   );
 }
+
+const MemoizedDevSwarmStats = React.memo(DevSwarmStats);
+MemoizedDevSwarmStats.displayName = 'DevSwarmStats';
+export default MemoizedDevSwarmStats;

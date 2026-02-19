@@ -5,7 +5,7 @@
  * over a configurable time window. Polls /api/operator/equity-series.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import {
   ResponsiveContainer,
   LineChart,
@@ -17,7 +17,10 @@ import {
   Legend,
 } from 'recharts';
 import { TrendingUp, Clock } from 'lucide-react';
-import { API_BASE_URL } from '../../config/constants';
+import { useApiData } from '../../hooks/useApiData';
+import { DataAgeBadge } from '../DataAgeBadge';
+import { API_ENDPOINTS } from '../../config/constants';
+import { useFeatureFlags } from '../../config/featureFlags';
 
 type Window = '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
 
@@ -29,9 +32,19 @@ interface EquityPoint {
 
 interface EquityPnLChartProps {
   defaultWindow?: Window;
+  /** When provided, overrides the internal window selector. */
+  externalWindow?: string;
   height?: number;
   className?: string;
 }
+
+/** Map dashboard-level TimeRange values to EquityPnLChart Window values. */
+const EXTERNAL_WINDOW_MAP: Record<string, Window> = {
+  '1h': '1h',
+  '4h': '4h',
+  '24h': '1d',
+  '7d': '1d',
+};
 
 const WINDOWS: { value: Window; label: string }[] = [
   { value: '5m', label: '5m' },
@@ -55,33 +68,20 @@ function formatCurrency(val: number): string {
 
 export function EquityPnLChart({
   defaultWindow = '30m',
+  externalWindow,
   height = 280,
   className = '',
 }: EquityPnLChartProps) {
-  const [window, setWindow] = useState<Window>(defaultWindow);
-  const [data, setData] = useState<EquityPoint[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { kalshiOnly } = useFeatureFlags();
+  const [internalWindow, setInternalWindow] = useState<Window>(defaultWindow);
+  const window = externalWindow ? (EXTERNAL_WINDOW_MAP[externalWindow] ?? internalWindow) : internalWindow;
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/operator/equity-series?window=${window}`);
-      if (res.ok) {
-        const json = await res.json();
-        const pts = json.points || [];
-        setData(pts.length > MAX_POINTS ? pts.slice(-MAX_POINTS) : pts);
-      }
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, [window]);
-
-  useEffect(() => {
-    fetchData();
-    const id = setInterval(fetchData, 5000);
-    return () => clearInterval(id);
-  }, [fetchData]);
+  // Use Kalshi PnL history in Kalshi mode, skip in non-Kalshi (endpoint doesn't exist)
+  const { data: rawData, loading, lastUpdated } = useApiData<{ points: EquityPoint[] }>(
+    kalshiOnly ? API_ENDPOINTS.KALSHI_PNL_HISTORY : '',
+    { pollingInterval: kalshiOnly ? 5000 : 0 },
+  );
+  const data = (rawData?.points ?? []).slice(-MAX_POINTS);
 
   const chartData = data.map((p) => ({
     time: formatTime(p.ts),
@@ -97,12 +97,13 @@ export function EquityPnLChart({
         <div className="flex items-center gap-2">
           <TrendingUp className="w-4 h-4 text-blue-400" />
           <h3 className="text-sm font-semibold text-slate-300">Equity & PnL</h3>
+          <DataAgeBadge lastUpdated={lastUpdated} warningMs={10000} criticalMs={30000} />
         </div>
         <div className="flex items-center gap-1">
           {WINDOWS.map((w) => (
             <button
               key={w.value}
-              onClick={() => { setWindow(w.value); setLoading(true); }}
+              onClick={() => { setInternalWindow(w.value); }}
               className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
                 window === w.value
                   ? 'bg-blue-600 text-white'

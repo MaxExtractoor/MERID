@@ -354,7 +354,6 @@ async def get_audit_service_health():
     """Get UI audit service health status"""
     try:
         # Check if we can import the auditor
-        from qa.ui_auditor import UIAuditor
         
         # Test basic functionality
         auditor = UIAuditor(headless=True)

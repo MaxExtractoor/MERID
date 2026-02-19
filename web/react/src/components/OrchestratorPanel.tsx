@@ -1,8 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { 
   GitBranch, Clock, CheckCircle, AlertCircle, Loader2, 
   RefreshCw 
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface PhaseResult {
   name: string;
@@ -49,50 +51,13 @@ const STATUS_ICONS: Record<string, { icon: typeof CheckCircle; color: string }> 
 };
 
 export default function OrchestratorPanel() {
-  const [cycle, setCycle] = useState<CycleResult | null>(null);
-  const [loading, setLoading] = useState(true);
   const [expandedPhase, setExpandedPhase] = useState<string | null>(null);
 
-  const fetchCycle = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/orchestrator/summary');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.latest_cycle) setCycle(data.latest_cycle);
-        return;
-      }
-    } catch {
-      // fallback
-    }
-
-    setCycle({
-      cycleId: 42,
-      startedAt: new Date(Date.now() - 5000).toISOString(),
-      completedAt: new Date().toISOString(),
-      totalDurationMs: 4850,
-      proposalsGenerated: 3,
-      spikesDetected: 1,
-      verdictsIssued: 2,
-      phases: PHASE_ORDER.map((name, i) => ({
-        name,
-        status: 'completed' as const,
-        agentCount: [4, 3, 2, 2, 1][i],
-        outputCount: [6, 3, 2, 2, 1][i],
-        durationMs: [1200, 900, 800, 1100, 850][i],
-        agents: [
-          { name: `${name.toLowerCase()}_agent_1`, status: 'success' as const, outputSummary: 'Produced 2 outputs', durationMs: [600, 450, 400, 550, 850][i] },
-          { name: `${name.toLowerCase()}_agent_2`, status: 'success' as const, outputSummary: 'Produced 1 output', durationMs: [600, 450, 400, 550, 0][i] },
-        ].filter(a => a.durationMs > 0),
-      })),
-    });
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchCycle();
-    const interval = setInterval(fetchCycle, 5000);
-    return () => clearInterval(interval);
-  }, [fetchCycle]);
+  const { data: rawData, loading, refetch } = useApiData<{ latest_cycle: CycleResult }>(
+    API_ENDPOINTS.ORCHESTRATOR_SUMMARY,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const cycle = rawData?.latest_cycle ?? null;
 
   if (loading && !cycle) {
     return (
@@ -118,11 +83,11 @@ export default function OrchestratorPanel() {
         </div>
         <div className="flex items-center gap-3 text-xs text-gray-400">
           <span>{cycle.totalDurationMs}ms total</span>
-          <button
-            onClick={fetchCycle}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
             title="Refresh orchestrator"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
@@ -160,7 +125,7 @@ export default function OrchestratorPanel() {
                     expandedPhase === phase.name ? 'ring-1 ring-white/30' : ''
                   }`}
                   onClick={() => setExpandedPhase(expandedPhase === phase.name ? null : phase.name)}
-                >
+                 role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => setExpandedPhase(expandedPhase === phase.name ? null : phase.name))(); } }}>
                   <div className={`h-8 ${barColor} rounded flex items-center justify-center gap-1.5 px-2`}>
                     <StatusIcon className={`w-3.5 h-3.5 text-white ${phase.status === 'running' ? 'animate-spin' : ''}`} />
                     <span className="text-xs font-medium text-white truncate">{phase.name}</span>

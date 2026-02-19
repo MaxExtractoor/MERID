@@ -15,14 +15,29 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/orchestrator", tags=["orchestrator"])
 
 
+_orchestrator_instance = None
+
+
 def _get_orchestrator():
-    """Lazy import to avoid circular deps."""
-    try:
-        from merid.agents.orchestrator import AgentOrchestrator
-        return AgentOrchestrator()
-    except Exception as e:
-        logger.warning(f"AgentOrchestrator unavailable: {e}")
-        return None
+    """Get the global orchestrator singleton."""
+    global _orchestrator_instance
+    if _orchestrator_instance is None:
+        try:
+            # Bootstrap canonical agents first
+            from merid.agents.bootstrap import ensure_bootstrapped
+            agent_count = ensure_bootstrapped()
+            logger.info(f"Bootstrapped {agent_count} canonical agents")
+            
+            # Create orchestrator with populated registry
+            from merid.agents.orchestrator import AgentOrchestrator
+            from merid.agents.base import get_canonical_registry
+            registry = get_canonical_registry()
+            _orchestrator_instance = AgentOrchestrator(registry=registry)
+            logger.info(f"Orchestrator singleton created: {registry.count()} agents registered")
+        except Exception as e:
+            logger.error(f"Failed to create AgentOrchestrator: {e}", exc_info=True)
+            return None
+    return _orchestrator_instance
 
 
 @router.get("/summary")

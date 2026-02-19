@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Brain, TrendingUp, TrendingDown, Target, Lightbulb, RefreshCw, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface AgentStats {
   agent_id: string;
@@ -39,15 +40,15 @@ export default function ReflectionPanel({ className = '' }: ReflectionPanelProps
 
   useEffect(() => {
     fetchReflectionData();
-    const interval = setInterval(fetchReflectionData, 30000);
+    const interval = setInterval(fetchReflectionData, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
     return () => clearInterval(interval);
   }, []);
 
   const fetchReflectionData = async () => {
     try {
       const [summaryRes, reflectionsRes] = await Promise.all([
-        fetch('/api/v1/reflection/summary'),
-        fetch('/api/v1/reflection/reflections?limit=20')
+        fetch(API_ENDPOINTS.REFLECTION_SUMMARY),
+        fetch(API_ENDPOINTS.REFLECTION_LIST + '?limit=20')
       ]);
 
       if (summaryRes.ok) {
@@ -166,11 +167,11 @@ export default function ReflectionPanel({ className = '' }: ReflectionPanelProps
             <Brain className="w-6 h-6 text-purple-400" />
             <h3 className="text-lg font-bold text-white">Agent Learning Performance</h3>
           </div>
-          <button
+          <button type="button"
             onClick={fetchReflectionData}
             className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
             title="Refresh data"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4 text-gray-400" />
           </button>
         </div>

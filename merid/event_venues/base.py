@@ -41,6 +41,7 @@ class EventMarket:
     end_date: Optional[datetime] = None
     active: bool = True
     volume: Optional[Decimal] = None
+    open_interest: Optional[Decimal] = None
     liquidity: Optional[Decimal] = None
     created_at: Optional[datetime] = None
     resolved: bool = False

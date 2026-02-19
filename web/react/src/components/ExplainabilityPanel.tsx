@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Brain, AlertTriangle, CheckCircle, XCircle, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface DecisionFactor {
   name: string;
@@ -23,7 +25,7 @@ interface DataSource {
   timestamp: string;
 }
 
-interface AgentDecision {
+interface ExplainabilityDecision {
   id: string;
   agent_name: string;
   decision: string;
@@ -43,39 +45,17 @@ interface ExplainabilityPanelProps {
 }
 
 export default function ExplainabilityPanel({ className = '' }: ExplainabilityPanelProps) {
-  const [decisions, setDecisions] = useState<AgentDecision[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [expandedDecision, setExpandedDecision] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string>('all');
 
-  useEffect(() => {
-    fetchDecisions();
-    const interval = setInterval(fetchDecisions, 20000);
-    return () => clearInterval(interval);
-  }, [selectedAgent]);
-
-  const fetchDecisions = async () => {
-    try {
-      const url = selectedAgent === 'all' 
-        ? '/api/v1/explainability/decisions'
-        : `/api/v1/explainability/decisions?agent=${selectedAgent}`;
-      
-      const response = await fetch(url);
-      if (response.ok) {
-        const data = await response.json();
-        setDecisions(data.decisions || []);
-        setError(null);
-      } else {
-        throw new Error('Failed to fetch decisions');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setDecisions([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const endpoint = selectedAgent === 'all'
+    ? API_ENDPOINTS.EXPLAINABILITY_DECISIONS
+    : `${API_ENDPOINTS.EXPLAINABILITY_DECISIONS}?agent=${selectedAgent}`;
+  const { data: rawData, loading, error, refetch } = useApiData<{ decisions: ExplainabilityDecision[] }>(
+    endpoint,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.EXPLAINABILITY },
+  );
+  const decisions = rawData?.decisions ?? [];
 
   const getOutcomeIcon = (outcome: string) => {
     switch (outcome) {
@@ -131,23 +111,25 @@ export default function ExplainabilityPanel({ className = '' }: ExplainabilityPa
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <select
+          <select aria-label="Selected Agent"
+            id="explainability-agent-filter"
+            name="agentFilter"
             value={selectedAgent}
             onChange={(e) => setSelectedAgent(e.target.value)}
             className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
             title="Filter by agent"
           >
-            {agents.map(agent => (
-              <option key={agent} value={agent}>
+            {agents.map((agent, idx) => (
+              <option key={`${agent}-${idx}`} value={agent}>
                 {agent === 'all' ? 'All Agents' : agent}
               </option>
             ))}
           </select>
-          <button
-            onClick={fetchDecisions}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
             title="Refresh decisions"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4 text-gray-400" />
           </button>
         </div>
@@ -158,7 +140,7 @@ export default function ExplainabilityPanel({ className = '' }: ExplainabilityPa
           <AlertTriangle className="w-5 h-5 text-yellow-500" />
           <div>
             <p className="text-yellow-500 font-medium">Data unavailable</p>
-            <p className="text-sm text-gray-400">{error}</p>
+            <p className="text-sm text-gray-400">{error?.message ?? 'Unknown error'}</p>
           </div>
         </div>
       )}
@@ -171,7 +153,7 @@ export default function ExplainabilityPanel({ className = '' }: ExplainabilityPa
             <div
               className="p-4 cursor-pointer hover:bg-slate-700/30 transition-colors"
               onClick={() => setExpandedDecision(expandedDecision === decision.id ? null : decision.id)}
-            >
+             role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => setExpandedDecision(expandedDecision === decision.id ? null : decision.id))(); } }}>
               <div className="flex items-start justify-between mb-3">
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-2">

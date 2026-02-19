@@ -3,9 +3,10 @@
  * Displays stocks, forex, and commodities in real-time
  */
 
+import React from 'react';
 import { useStocks, useForex, useCommodities } from '../hooks/useMarketsData';
 
-export default function MarketsOverview() {
+function MarketsOverview() {
   const { data: stocks, loading: stocksLoading } = useStocks();
   const { data: forex, loading: forexLoading } = useForex();
   const { data: commodities, loading: commoditiesLoading } = useCommodities();
@@ -75,3 +76,7 @@ export default function MarketsOverview() {
     </div>
   );
 }
+
+const MemoizedMarketsOverview = React.memo(MarketsOverview);
+MemoizedMarketsOverview.displayName = 'MarketsOverview';
+export default MemoizedMarketsOverview;

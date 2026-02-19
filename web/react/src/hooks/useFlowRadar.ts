@@ -177,7 +177,7 @@ export interface FlowRiskStatus {
 
 function usePolledData<T>(
   url: string,
-  intervalMs: number = 8000,
+  intervalMs = 8000,
   defaultValue: T,
 ): { data: T; loading: boolean; error: string | undefined; rawResponse: unknown } {
   const [data, setData] = useState<T>(defaultValue);

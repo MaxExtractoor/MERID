@@ -1,5 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { Trophy, RefreshCw, TrendingUp, TrendingDown, Star } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface StrategyRow {
   rank: number;
@@ -26,51 +29,22 @@ const DOMAIN_BADGE: Record<string, string> = {
 };
 
 export default function StrategyLeaderboard() {
-  const [rows, setRows] = useState<StrategyRow[]>([]);
-  const [xpEntries, setXpEntries] = useState<XpEntry[]>([]);
-  const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState<'totalPnl' | 'winRate' | 'sharpe'>('totalPnl');
 
-  const fetchData = useCallback(async () => {
-    // Fetch XP leaderboard from rewards API
-    try {
-      const xpRes = await fetch('/api/v1/rewards/leaderboard?limit=10');
-      if (xpRes.ok) {
-        const xpData = await xpRes.json();
-        if (xpData.items) setXpEntries(xpData.items);
-      }
-    } catch { /* ignore */ }
+  const { data: xpData } = useApiData<{ items: XpEntry[] }>(
+    `${API_ENDPOINTS.REWARDS_LEADERBOARD}?limit=10`,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND },
+  );
+  const { data: lbData, loading, error: lbError, refetch } = useApiData<{ strategies: StrategyRow[] }>(
+    API_ENDPOINTS.PIPELINE_LEADERBOARD,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND },
+  );
+  const rows = lbData?.strategies ?? [];
 
-    try {
-      const res = await fetch('/api/v1/pipeline/leaderboard');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.strategies) { setRows(data.strategies); setLoading(false); return; }
-      }
-    } catch { /* fallback */ }
-
-    setRows([
-      { rank: 1, agent: 'CryptoArbAgent', domain: 'crypto', strategy: 'Cross-Exchange Arb',
-        totalPnl: 1245.80, winRate: 0.87, trades: 156, avgHold: '2.3m', sharpe: 3.2, maxDrawdown: -85.40 },
-      { rank: 2, agent: 'PredictionMarketAgent', domain: 'prediction', strategy: 'Edge Speculative',
-        totalPnl: 420.50, winRate: 0.62, trades: 48, avgHold: '18.5h', sharpe: 1.8, maxDrawdown: -120.00 },
-      { rank: 3, agent: 'FundingArbAgent', domain: 'crypto', strategy: 'Funding Rate Arb',
-        totalPnl: 380.20, winRate: 0.91, trades: 89, avgHold: '8.1h', sharpe: 2.5, maxDrawdown: -45.60 },
-      { rank: 4, agent: 'EquityAgent', domain: 'equity', strategy: 'Momentum',
-        totalPnl: 156.30, winRate: 0.55, trades: 22, avgHold: '4.2d', sharpe: 1.1, maxDrawdown: -210.00 },
-      { rank: 5, agent: 'CryptoArbAgent', domain: 'crypto', strategy: 'Triangular Arb',
-        totalPnl: 98.40, winRate: 0.78, trades: 34, avgHold: '45s', sharpe: 2.1, maxDrawdown: -32.10 },
-      { rank: 6, agent: 'PredictionMarketAgent', domain: 'prediction', strategy: 'Arb Detection',
-        totalPnl: -15.20, winRate: 0.40, trades: 5, avgHold: '1.2h', sharpe: -0.3, maxDrawdown: -45.00 },
-    ]);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 30000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+  if (lbError && !lbData) {
+    return <ErrorBar label="Leaderboard" error={lbError} onRetry={refetch} />;
+  }
+  const xpEntries = xpData?.items ?? [];
 
   const sorted = [...rows].sort((a, b) => {
     if (sortBy === 'totalPnl') return b.totalPnl - a.totalPnl;
@@ -99,7 +73,7 @@ export default function StrategyLeaderboard() {
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
             {(['totalPnl', 'winRate', 'sharpe'] as const).map(s => (
-              <button
+              <button type="button"
                 key={s}
                 onClick={() => setSortBy(s)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
@@ -110,7 +84,7 @@ export default function StrategyLeaderboard() {
               </button>
             ))}
           </div>
-          <button onClick={fetchData} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh leaderboard">
+          <button type="button" onClick={() => refetch()} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh leaderboard" aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>

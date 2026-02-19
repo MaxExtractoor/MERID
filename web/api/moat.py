@@ -1,3 +1,4 @@
+"""Competitive moat analysis API — evaluates MERID's structural advantages."""
 from __future__ import annotations
 
 from typing import Any, Dict, Optional

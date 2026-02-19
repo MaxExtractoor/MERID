@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { useApiData } from './useApiData';
 import { useMeridSocket } from './useMeridSocket';
 import { API_ENDPOINTS } from '../config/constants';
+import { logUiError } from '../utils/logger';
+import { useFeatureFlags } from '../config/featureFlags';
 import type {
   RiskMetricsResponse,
   RiskAlert,
@@ -42,14 +44,16 @@ function isValidRiskPayload(payload: unknown): payload is { type: string } {
  * WS Events: risk:threshold_breached, risk:exposure_changed, risk:pnl_updated
  */
 export function useRiskMetrics(): UseRiskMetricsReturn {
+  const { kalshiOnly } = useFeatureFlags();
+  
   // Track metrics state
   const [metrics, setMetrics] = useState<RiskMetricsResponse | null>(null);
   const [alerts, setAlerts] = useState<RiskAlert[]>([]);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  // Fetch initial data via REST
+  // Fetch initial data via REST - use Kalshi risk in Kalshi mode
   const { data, loading, error } = useApiData<RiskMetricsResponse>(
-    `${API_ENDPOINTS.RISK_METRICS}`,
+    kalshiOnly ? API_ENDPOINTS.KALSHI_RISK : API_ENDPOINTS.RISK_METRICS,
     { pollingInterval: 10000 } // Poll every 10 seconds as fallback
   );
 
@@ -129,7 +133,7 @@ export function useRiskMetrics(): UseRiskMetricsReturn {
     };
 
     const handleError = (error: Error) => {
-      console.error('[useRiskMetrics] WebSocket error:', error);
+      logUiError('useRiskMetrics', 'WebSocket error', error);
     };
 
     socket.on('risk:threshold_breached', handleThresholdBreached);

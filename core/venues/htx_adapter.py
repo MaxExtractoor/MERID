@@ -15,6 +15,7 @@ logger = structlog.get_logger(__name__)
 
 
 class HTXAdapter(VenueAdapter):
+    _is_stub = True
     """HTX (Huobi) adapter - optional/data venue for US users."""
     
     def __init__(
@@ -99,7 +100,7 @@ class HTXAdapter(VenueAdapter):
             self.logger.error("candlestick_error", error=str(e))
             return []
     
-    async def place_order(
+    async def _place_order_impl(
         self,
         symbol: str,
         side: OrderSide,

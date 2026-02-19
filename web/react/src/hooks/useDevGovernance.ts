@@ -51,6 +51,7 @@ export interface DevProposal {
   forecast_question: string;
   forecast_probability: number;
   rollout_strategy: string;
+  meets_approval_threshold?: boolean;
   approvals: ApprovalRecord[];
   debate_rounds: DebateRound[];
   metrics: ProposalMetric[];
@@ -135,6 +136,16 @@ export interface SubmitApprovalRequest {
   justification?: string;
 }
 
+const getErrorMessage = (err: unknown, fallback: string) => {
+  if (axios.isAxiosError(err)) {
+    return err.response?.data?.detail || err.message || fallback;
+  }
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return fallback;
+};
+
 // ── useDevProposals ──────────────────────────────────────────────────
 
 export function useDevProposals(pollMs = 10000) {
@@ -157,7 +168,7 @@ export function useDevProposals(pollMs = 10000) {
       const res = await axios.get(API_ENDPOINTS.DEV_GOVERNANCE_PROPOSALS, { params });
       setProposals(res.data.proposals ?? []);
     } catch (err: unknown) {
-      setError(err.response?.data?.detail || 'Failed to load proposals');
+      setError(getErrorMessage(err, 'Failed to load proposals'));
     } finally {
       setLoading(false);
     }
@@ -178,7 +189,7 @@ export function useDevProposals(pollMs = 10000) {
       await fetchProposals();
       return res.data;
     } catch (err: unknown) {
-      setError(err.response?.data?.detail || 'Failed to create proposal');
+      setError(getErrorMessage(err, 'Failed to create proposal'));
       return null;
     }
   }, [fetchProposals]);
@@ -219,7 +230,7 @@ export function useDevApprovals() {
       const res = await axios.get(API_ENDPOINTS.DEV_GOVERNANCE_PENDING);
       setPending(res.data.pending ?? []);
     } catch (err: unknown) {
-      setError(err.response?.data?.detail || 'Failed to load pending approvals');
+      setError(getErrorMessage(err, 'Failed to load pending approvals'));
     } finally {
       setLoading(false);
     }
@@ -237,7 +248,7 @@ export function useDevApprovals() {
       await fetchPending();
       return res.data;
     } catch (err: unknown) {
-      setError(err.response?.data?.detail || 'Failed to submit approval');
+      setError(getErrorMessage(err, 'Failed to submit approval'));
       return null;
     }
   }, [fetchPending]);

@@ -13,6 +13,9 @@ import httpx
 
 from utils.deps import get_ccxt
 
+import logging
+logger = logging.getLogger("live_data")
+
 router = APIRouter(prefix="/api/v1/live", tags=["live"])
 
 
@@ -30,7 +33,6 @@ async def fetch_live_prices():
     
     try:
         from data.asset_universe import get_all_coingecko_ids, ASSET_UNIVERSE
-        import asyncio
         
         # Get all CoinGecko IDs
         coingecko_ids = get_all_coingecko_ids()
@@ -66,14 +68,14 @@ async def fetch_live_prices():
                     }
             
             _last_update = datetime.now()
-            print(f"[LiveData] Updated {len(_price_cache)} assets from CoinGecko")
+            logger.info(f"[LiveData] Updated {len(_price_cache)} assets from CoinGecko")
             return
         else:
-            print(f"[LiveData] CoinGecko returned status {response.status_code}")
+            logger.info(f"[LiveData] CoinGecko returned status {response.status_code}")
     except Exception as e:
         import traceback
-        print(f"[LiveData] Error fetching from CoinGecko: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[LiveData] Error fetching from CoinGecko: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
         _last_update = datetime.now()
 
 
@@ -98,9 +100,9 @@ async def fetch_crypto_news():
                     }
                     for item in data.get('data', [])[:10]
                 ]
-                print(f"[LiveData] Fetched {len(_news_cache)} news items")
+                logger.info(f"[LiveData] Fetched {len(_news_cache)} news items")
     except Exception as e:
-        print(f"[LiveData] Error fetching news: {e}")
+        logger.error(f"[LiveData] Error fetching news: {e}")
         _news_cache = []
 
 
@@ -110,8 +112,8 @@ async def fetch_prediction_markets():
     
     try:
         # Import Kalshi aggregator to get real markets
-        from monitoring.prediction_markets import get_prediction_market_aggregator
-        aggregator = get_prediction_market_aggregator()
+        from monitoring.prediction_markets import get_prediction_aggregator
+        aggregator = get_prediction_aggregator()
         
         # Get markets from Kalshi aggregator
         kalshi_markets = aggregator.get_all_markets()
@@ -126,9 +128,9 @@ async def fetch_prediction_markets():
             }
             for market_id, market in list(kalshi_markets.items())[:10]
         ]
-        print(f"[LiveData] Fetched {len(_predictions_cache)} Kalshi prediction markets")
+        logger.info(f"[LiveData] Fetched {len(_predictions_cache)} Kalshi prediction markets")
     except Exception as e:
-        print(f"Error fetching predictions: {e}")
+        logger.error(f"Error fetching predictions: {e}")
         # Don't use fallback - let frontend handle empty data
         _predictions_cache = []
 

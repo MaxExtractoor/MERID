@@ -5,9 +5,9 @@
  * Polls /api/metrics/radar with category filter.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { Radar, TrendingUp, TrendingDown, Minus, RefreshCw } from 'lucide-react';
-import { API_BASE_URL } from '../../config/constants';
+import { useState } from 'react';
+import { Radar, RefreshCw } from 'lucide-react';
+import { useApiData } from '../../hooks/useApiData';
 
 type Category = 'all' | 'core' | 'onchain' | 'perps' | 'defi' | 'meme';
 
@@ -68,31 +68,14 @@ function SignalDot({ strength }: { strength: number }) {
 
 export function InstrumentRadar({ className = '' }: InstrumentRadarProps) {
   const [category, setCategory] = useState<Category>('all');
-  const [instruments, setInstruments] = useState<Instrument[]>([]);
-  const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState<'symbol' | 'pnl' | 'change_24h' | 'volume_24h'>('symbol');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/metrics/radar?category=${category}`);
-      if (res.ok) {
-        const json = await res.json();
-        setInstruments(json.instruments || []);
-      }
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, [category]);
-
-  useEffect(() => {
-    setLoading(true);
-    fetchData();
-    const id = setInterval(fetchData, 10000);
-    return () => clearInterval(id);
-  }, [fetchData]);
+  const { data: rawData, loading, refetch } = useApiData<{ instruments: Instrument[] }>(
+    `/api/metrics/radar?category=${category}`,
+    { pollingInterval: 10000 },
+  );
+  const instruments = rawData?.instruments ?? [];
 
   const sorted = [...instruments].sort((a, b) => {
     const mul = sortDir === 'asc' ? 1 : -1;
@@ -113,7 +96,7 @@ export function InstrumentRadar({ className = '' }: InstrumentRadarProps) {
           <Radar className="w-4 h-4 text-blue-400" />
           <h3 className="text-sm font-semibold text-slate-300">Instrument Radar</h3>
         </div>
-        <button onClick={() => { setLoading(true); fetchData(); }} className="p-1 rounded hover:bg-slate-800" title="Refresh">
+        <button onClick={() => refetch()} className="p-1 rounded hover:bg-slate-800" title="Refresh">
           <RefreshCw className={`w-3.5 h-3.5 text-slate-500 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>

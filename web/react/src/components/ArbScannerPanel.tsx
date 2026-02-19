@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import {
   Zap, ArrowRightLeft, Clock, CheckCircle, XCircle,
   RefreshCw
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS, ARB_STATUS} from '../config/constants';
 
 interface ArbOpportunity {
   id: string;
@@ -53,82 +56,19 @@ const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: string }>
 };
 
 export default function ArbScannerPanel() {
-  const [opportunities, setOpportunities] = useState<ArbOpportunity[]>([]);
-  const [stats, setStats] = useState<ArbStats | null>(null);
-  const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>('all');
 
-  const fetchArbs = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/arbitrage/scanner');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.opportunities) setOpportunities(data.opportunities);
-        if (data.stats) setStats(data.stats);
-        return;
-      }
-    } catch {
-      // fallback
-    }
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ opportunities: ArbOpportunity[]; stats: ArbStats }>(
+    API_ENDPOINTS.ARBITRAGE_SCANNER,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+  );
 
-    const now = Date.now();
-    setOpportunities([
-      {
-        id: 'arb-1', pair: 'BTC/USDT', type: 'cross_exchange',
-        buyVenue: 'Binance', sellVenue: 'Coinbase', buyPrice: 104850.20, sellPrice: 104892.50,
-        spreadBps: 4.0, estimatedPnl: 42.30, confidence: 0.92, detectedAt: new Date(now - 3000).toISOString(),
-        status: 'live',
-        legs: [
-          { venue: 'Binance', side: 'buy', price: 104850.20, qty: 0.01, status: 'pending' },
-          { venue: 'Coinbase', side: 'sell', price: 104892.50, qty: 0.01, status: 'pending' },
-        ],
-      },
-      {
-        id: 'arb-2', pair: 'ETH/USDT', type: 'cross_exchange',
-        buyVenue: 'Kraken', sellVenue: 'Binance', buyPrice: 3245.10, sellPrice: 3248.80,
-        spreadBps: 1.1, estimatedPnl: 3.70, confidence: 0.78, detectedAt: new Date(now - 15000).toISOString(),
-        status: 'executing',
-        legs: [
-          { venue: 'Kraken', side: 'buy', price: 3245.10, qty: 1.0, status: 'filled', fillPrice: 3245.15 },
-          { venue: 'Binance', side: 'sell', price: 3248.80, qty: 1.0, status: 'submitted' },
-        ],
-      },
-      {
-        id: 'arb-3', pair: 'SOL/USDT', type: 'funding',
-        buyVenue: 'Binance Spot', sellVenue: 'Binance Perp', buyPrice: 178.50, sellPrice: 178.90,
-        spreadBps: 2.2, estimatedPnl: 0.40, confidence: 0.85, detectedAt: new Date(now - 60000).toISOString(),
-        status: 'filled',
-        legs: [
-          { venue: 'Binance Spot', side: 'buy', price: 178.50, qty: 10, status: 'filled', fillPrice: 178.52 },
-          { venue: 'Binance Perp', side: 'sell', price: 178.90, qty: 10, status: 'filled', fillPrice: 178.88 },
-        ],
-      },
-      {
-        id: 'arb-4', pair: 'KXBTC-YES', type: 'prediction',
-        buyVenue: 'Kalshi', sellVenue: 'Kalshi', buyPrice: 45, sellPrice: 52,
-        spreadBps: -300, estimatedPnl: 3.00, confidence: 0.70, detectedAt: new Date(now - 120000).toISOString(),
-        status: 'expired',
-        legs: [
-          { venue: 'Kalshi', side: 'buy', price: 45, qty: 100, status: 'pending' },
-        ],
-      },
-    ]);
-    setStats({
-      totalOpportunities24h: 47,
-      executedCount: 12,
-      realizedPnl: 156.80,
-      avgSpreadBps: 3.2,
-      hitRate: 83.3,
-    });
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchArbs();
-    const interval = setInterval(fetchArbs, 3000);
-    return () => clearInterval(interval);
-  }, [fetchArbs]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Arb scanner" error={fetchError} onRetry={refetch} />;
+  }
+  const opportunities = rawData?.opportunities ?? [];
+  const stats = rawData?.stats ?? null;
 
   const filtered = filter === 'all'
     ? opportunities
@@ -160,13 +100,13 @@ export default function ArbScannerPanel() {
           <ArrowRightLeft className="w-5 h-5 text-green-400" />
           <h3 className="text-lg font-bold text-white">Arb Scanner</h3>
           <span className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400">
-            {opportunities.filter(o => o.status === 'live').length} live
+            {opportunities.filter(o => o.status === ARB_STATUS.LIVE).length} live
           </span>
         </div>
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
             {['all', 'cross_exchange', 'funding', 'prediction'].map(f => (
-              <button
+              <button type="button"
                 key={f}
                 onClick={() => setFilter(f)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
@@ -177,11 +117,11 @@ export default function ArbScannerPanel() {
               </button>
             ))}
           </div>
-          <button
-            onClick={fetchArbs}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
             title="Refresh scanner"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
@@ -242,7 +182,7 @@ export default function ArbScannerPanel() {
                   <tr
                     key={opp.id}
                     className={`border-b border-slate-700/30 cursor-pointer hover:bg-slate-700/30 ${
-                      opp.status === 'live' ? 'bg-green-500/5' : ''
+                      opp.status === ARB_STATUS.LIVE ? 'bg-green-500/5' : ''
                     }`}
                     onClick={() => setExpandedId(isExpanded ? null : opp.id)}
                   >
@@ -304,9 +244,9 @@ export default function ArbScannerPanel() {
                                   </span>
                                 )}
                                 <span className={`px-1.5 py-0.5 rounded ${
-                                  leg.status === 'filled' ? 'bg-green-500/20 text-green-400' :
-                                  leg.status === 'submitted' ? 'bg-blue-500/20 text-blue-400' :
-                                  leg.status === 'failed' ? 'bg-red-500/20 text-red-400' :
+                                  leg.status === ARB_STATUS.FILLED ? 'bg-green-500/20 text-green-400' :
+                                  leg.status === ARB_STATUS.SUBMITTED ? 'bg-blue-500/20 text-blue-400' :
+                                  leg.status === ARB_STATUS.FAILED ? 'bg-red-500/20 text-red-400' :
                                   'bg-gray-500/20 text-gray-400'
                                 }`}>
                                   {leg.status}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { DEFAULTS, READINESS_STATUS} from "../config/constants";
 
 interface ReadinessCheck {
   area: string;
@@ -44,7 +45,7 @@ export default function DevSwarmReadiness() {
       ]);
       setData(readinessRes.data);
       if (sloRes) setSlo(sloRes.data);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(err.response?.data?.detail || 'Failed to load readiness');
     } finally {
       setLoading(false);
@@ -53,7 +54,7 @@ export default function DevSwarmReadiness() {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 60000);
+    const interval = setInterval(refresh, DEFAULTS.POLLING_INTERVALS.INFREQUENT);
     return () => clearInterval(interval);
   }, [refresh]);
 
@@ -121,16 +122,16 @@ export default function DevSwarmReadiness() {
           {loading && (
             <div className="animate-spin rounded-full h-3 w-3 border-b border-blue-500" />
           )}
-          <button
+          <button type="button"
             onClick={() => setExpanded(!expanded)}
             className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
           >
             {expanded ? 'Collapse' : 'Details'}
           </button>
-          <button
+          <button type="button"
             onClick={refresh}
             className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-          >
+           title="Refresh">
             Refresh
           </button>
         </div>
@@ -153,16 +154,16 @@ export default function DevSwarmReadiness() {
       {data && (
         <div className="flex gap-4 text-xs">
           <span className="text-green-400">
-            {data.checks.filter(c => c.status === 'OK').length} OK
+            {data.checks.filter(c => c.status === READINESS_STATUS.OK).length} OK
           </span>
-          {data.checks.filter(c => c.status === 'DRIFTED').length > 0 && (
+          {data.checks.filter(c => c.status === READINESS_STATUS.DRIFTED).length > 0 && (
             <span className="text-yellow-400">
-              {data.checks.filter(c => c.status === 'DRIFTED').length} Drifted
+              {data.checks.filter(c => c.status === READINESS_STATUS.DRIFTED).length} Drifted
             </span>
           )}
-          {data.checks.filter(c => c.status === 'MISSING').length > 0 && (
+          {data.checks.filter(c => c.status === READINESS_STATUS.MISSING).length > 0 && (
             <span className="text-red-400">
-              {data.checks.filter(c => c.status === 'MISSING').length} Missing
+              {data.checks.filter(c => c.status === READINESS_STATUS.MISSING).length} Missing
             </span>
           )}
           <span className="text-slate-500">

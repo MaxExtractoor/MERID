@@ -1,5 +1,8 @@
 import { Bell, X, CheckCheck, AlertCircle, Activity, Shield } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
+import { logUiError } from '../utils/logger';
 
 interface Notification {
   id: string;
@@ -16,14 +19,13 @@ interface NotificationPanelProps {
 
 export default function NotificationPanel({ className = '' }: NotificationPanelProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [notifications, setNotifications] = useState<Notification[]>([]);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    fetchNotifications();
-    const interval = setInterval(fetchNotifications, 30000);
-    return () => clearInterval(interval);
-  }, []);
+  const { data: rawData, refetch } = useApiData<{ notifications: Notification[] }>(
+    API_ENDPOINTS.NOTIFICATIONS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND },
+  );
+  const notifications = rawData?.notifications ?? [];
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -36,38 +38,27 @@ export default function NotificationPanel({ className = '' }: NotificationPanelP
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const fetchNotifications = async () => {
-    try {
-      const response = await fetch('/api/v1/notifications');
-      if (response.ok) {
-        const data = await response.json();
-        setNotifications(data.notifications || []);
-      } else {
-        setNotifications([]);
-      }
-    } catch (error) {
-      console.error('Failed to fetch notifications:', error);
-    }
-  };
-
   const markAsRead = async (id: string) => {
-    setNotifications(notifications.map(n => 
-      n.id === id ? { ...n, read: true } : n
-    ));
     try {
-      await fetch(`/api/v1/notifications/${id}/read`, { method: 'POST' });
-    } catch { /* silent */ }
+      await fetch(API_ENDPOINTS.NOTIFICATION_READ(id), { method: 'POST' });
+      refetch();
+    } catch (err) { logUiError('NotificationPanel', 'Mark read failed', err); }
   };
 
   const markAllAsRead = async () => {
-    setNotifications(notifications.map(n => ({ ...n, read: true })));
     try {
-      await fetch('/api/v1/notifications/read-all', { method: 'POST' });
-    } catch { /* silent */ }
+      await fetch(API_ENDPOINTS.NOTIFICATIONS_READ_ALL, { method: 'POST' });
+      refetch();
+    } catch (err) { logUiError('NotificationPanel', 'Mark all read failed', err); }
   };
 
-  const deleteNotification = (id: string) => {
-    setNotifications(notifications.filter(n => n.id !== id));
+  const deleteNotification = async (id: string) => {
+    try {
+      await fetch(API_ENDPOINTS.NOTIFICATION_READ(id), { method: 'DELETE' });
+      refetch();
+    } catch {
+      // Operation failed — UI state unchanged
+    }
   };
 
   const unreadCount = notifications.filter(n => !n.read).length;
@@ -107,7 +98,7 @@ export default function NotificationPanel({ className = '' }: NotificationPanelP
   return (
     <div className={`relative ${className}`} ref={panelRef}>
       {/* Bell Button */}
-      <button 
+      <button type="button" 
         onClick={() => setIsOpen(!isOpen)}
         className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105 relative" 
         title="Notifications"
@@ -138,10 +129,10 @@ export default function NotificationPanel({ className = '' }: NotificationPanelP
               )}
             </div>
             {unreadCount > 0 && (
-              <button
+              <button type="button"
                 onClick={markAllAsRead}
                 className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-              >
+               title="Mark all read">
                 Mark all read
               </button>
             )}
@@ -169,9 +160,11 @@ export default function NotificationPanel({ className = '' }: NotificationPanelP
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
                         <h4 className="text-white font-medium text-sm">{notification.title}</h4>
-                        <button
+                        <button type="button"
                           onClick={() => deleteNotification(notification.id)}
                           className="text-slate-400 hover:text-white transition-colors"
+                          title="Dismiss notification"
+                          aria-label="Dismiss notification"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -180,7 +173,7 @@ export default function NotificationPanel({ className = '' }: NotificationPanelP
                       <div className="flex items-center justify-between mt-2">
                         <span className="text-xs text-slate-500">{formatTimestamp(notification.timestamp)}</span>
                         {!notification.read && (
-                          <button
+                          <button type="button"
                             onClick={() => markAsRead(notification.id)}
                             className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
                           >
@@ -197,7 +190,7 @@ export default function NotificationPanel({ className = '' }: NotificationPanelP
 
           {/* Footer */}
           <div className="p-3 border-t border-slate-700 bg-slate-900/50">
-            <button 
+            <button type="button" 
               className="w-full text-center text-sm text-blue-400 hover:text-blue-300 transition-colors"
               title="View all notifications"
             >

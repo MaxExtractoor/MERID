@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useApiData } from './useApiData';
 import { useMeridSocket } from './useMeridSocket';
 import { API_ENDPOINTS } from '../config/constants';
+import { logUiError } from '../utils/logger';
 import type {
   PredictionMarket,
   PredictionsResponse,
@@ -60,7 +61,7 @@ export function usePredictions(): UsePredictionsReturn {
   useEffect(() => {
     if (data) {
       // Normalize markets - API may not return all fields
-      const normalized = (data.markets || []).map((m: any) => ({
+      const normalized = (data.markets || []).map((m: unknown) => ({
         id: m.id || '',
         symbol: m.symbol || '',
         marketType: m.marketType || 'BINARY',
@@ -183,7 +184,7 @@ export function usePredictions(): UsePredictionsReturn {
     };
 
     const handleError = (error: Error) => {
-      console.error('[usePredictions] WebSocket error:', error);
+      logUiError('usePredictions', 'WebSocket error', error);
     };
 
     socket.on('prediction:price_changed', handlePriceChanged);

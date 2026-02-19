@@ -1,6 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { DollarSign, RefreshCw } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { DataAgeBadge } from './DataAgeBadge';
+import ErrorBar from './ErrorBar';
 import { DEFAULTS, API_ENDPOINTS, CHART_COLORS} from "../config/constants";
+import { useFeatureFlags } from '../config/featureFlags';
 
 interface PnLDataPoint {
   timestamp: string;
@@ -17,29 +21,28 @@ const DOMAIN_COLORS: Record<string, string> = {
   total: CHART_COLORS.LIGHT_PURPLE,
 };
 
-export default function DomainPnLChart() {
-  const [data, setData] = useState<PnLDataPoint[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [timeRange, setTimeRange] = useState<'1h' | '4h' | '24h' | '7d'>('24h');
+export type TimeRange = '1h' | '4h' | '24h' | '7d';
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch(API_ENDPOINTS.PIPELINE_PNL(timeRange));
-      if (res.ok) {
-        const json = await res.json();
-        if (json.data) { setData(json.data); return; }
-      }
-    } catch { /* no data available */ }
+interface DomainPnLChartProps {
+  /** When provided, overrides the internal time range selector. */
+  externalTimeRange?: TimeRange;
+}
 
-    setData([]);
-    setLoading(false);
-  }, [timeRange]);
+export default function DomainPnLChart({ externalTimeRange }: DomainPnLChartProps = {}) {
+  const { kalshiOnly } = useFeatureFlags();
+  const [internalRange, setInternalRange] = useState<TimeRange>('24h');
+  const timeRange = externalTimeRange ?? internalRange;
 
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+  // Skip in Kalshi mode - this is crypto-specific domain PnL
+  const { data: rawData, loading, error, refetch, lastUpdated } = useApiData<{ data: PnLDataPoint[] }>(
+    kalshiOnly ? '' : API_ENDPOINTS.PIPELINE_PNL(timeRange),
+    { pollingInterval: kalshiOnly ? 0 : DEFAULTS.POLLING_INTERVALS.BACKGROUND },
+  );
+  const data = rawData?.data ?? [];
+
+  if (error && !rawData) {
+    return <ErrorBar label="PnL chart" error={error} onRetry={refetch} />;
+  }
 
   const latest = data.length > 0 ? data[data.length - 1] : null;
   const minVal = data.length > 0 ? Math.min(...data.map(d => Math.min(d.prediction, d.crypto, d.equity, d.total))) : 0;
@@ -70,12 +73,24 @@ export default function DomainPnLChart() {
     );
   }
 
+  if (data.length === 0) {
+    return (
+      <div className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-6">
+        <div className="flex items-center gap-2 text-gray-500">
+          <DollarSign className="w-5 h-5" />
+          <span>No PnL data yet — waiting for first trades</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <DollarSign className="w-5 h-5 text-green-400" />
           <h3 className="text-lg font-bold text-white">Domain PnL</h3>
+          <DataAgeBadge lastUpdated={lastUpdated} />
           {latest && (
             <span className={`text-sm font-mono font-medium ${latest.total >= 0 ? 'text-green-400' : 'text-red-400'}`}>
               {latest.total >= 0 ? '+' : ''}${latest.total.toFixed(2)}
@@ -87,7 +102,7 @@ export default function DomainPnLChart() {
             {(['1h', '4h', '24h', '7d'] as const).map(r => (
               <button type="button"
                 key={r}
-                onClick={() => setTimeRange(r)}
+                onClick={() => setInternalRange(r)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
                   timeRange === r ? 'bg-green-600 text-white' : 'bg-slate-700 text-gray-400 hover:text-white'
                 }`}
@@ -96,7 +111,7 @@ export default function DomainPnLChart() {
               </button>
             ))}
           </div>
-          <button type="button" onClick={fetchData} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh PnL" aria-label="Refresh">
+          <button type="button" onClick={() => refetch()} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh PnL" aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>

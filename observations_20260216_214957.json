@@ -1,0 +1,359 @@
+{
+  "run_timestamp": "2026-02-16T21:49:57.976443",
+  "duration_seconds": 300.2,
+  "mode": "paper",
+  "final_metrics": {
+    "timestamp": "2026-02-16T21:49:57.965427",
+    "elapsed_seconds": 300.2,
+    "bridge": {
+      "messages_received": 11,
+      "messages_published": 8,
+      "reconnect_count": 0,
+      "last_message_time": 1771296531030,
+      "markets": [
+        "KXQUICKSETTLE-26FEB16H2150-3",
+        "KXQUICKSETTLE-26FEB16H2150-2",
+        "KXETH15M-26FEB162145-45"
+      ],
+      "connected": false
+    },
+    "agent": {
+      "intents_generated": 14,
+      "snapshots_received": 4,
+      "deltas_received": 4,
+      "orderbooks_tracked": 3
+    },
+    "pipeline": {
+      "intents_received": 14,
+      "intents_executed": 14,
+      "intents_rejected_risk": 0,
+      "intents_rejected_rate": 0,
+      "positions": {},
+      "daily_pnl": 0.0,
+      "read_tokens": 20,
+      "write_tokens": 9
+    }
+  },
+  "all_snapshots": [
+    {
+      "timestamp": "2026-02-16T21:45:27.934696",
+      "elapsed_seconds": 30.2,
+      "bridge": {
+        "messages_received": 6,
+        "messages_published": 3,
+        "reconnect_count": 0,
+        "last_message_time": 1771296299010,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 1,
+        "snapshots_received": 3,
+        "deltas_received": 0,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 1,
+        "intents_executed": 1,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 9
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:45:58.199324",
+      "elapsed_seconds": 60.4,
+      "bridge": {
+        "messages_received": 7,
+        "messages_published": 4,
+        "reconnect_count": 0,
+        "last_message_time": 1771296342644,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 2,
+        "snapshots_received": 4,
+        "deltas_received": 0,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 2,
+        "intents_executed": 2,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 9
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:46:28.351044",
+      "elapsed_seconds": 90.6,
+      "bridge": {
+        "messages_received": 9,
+        "messages_published": 6,
+        "reconnect_count": 0,
+        "last_message_time": 1771296376694,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 5,
+        "snapshots_received": 4,
+        "deltas_received": 2,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 5,
+        "intents_executed": 5,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 8.166711807250977
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:46:58.735013",
+      "elapsed_seconds": 121.0,
+      "bridge": {
+        "messages_received": 9,
+        "messages_published": 6,
+        "reconnect_count": 0,
+        "last_message_time": 1771296376694,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 6,
+        "snapshots_received": 4,
+        "deltas_received": 2,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 6,
+        "intents_executed": 6,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 9
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:47:29.055060",
+      "elapsed_seconds": 151.3,
+      "bridge": {
+        "messages_received": 9,
+        "messages_published": 6,
+        "reconnect_count": 0,
+        "last_message_time": 1771296376694,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 7,
+        "snapshots_received": 4,
+        "deltas_received": 2,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 7,
+        "intents_executed": 7,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 9
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:47:59.410797",
+      "elapsed_seconds": 181.6,
+      "bridge": {
+        "messages_received": 9,
+        "messages_published": 6,
+        "reconnect_count": 0,
+        "last_message_time": 1771296376694,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 8,
+        "snapshots_received": 4,
+        "deltas_received": 2,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 8,
+        "intents_executed": 8,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 9
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:48:29.745241",
+      "elapsed_seconds": 212.0,
+      "bridge": {
+        "messages_received": 9,
+        "messages_published": 6,
+        "reconnect_count": 0,
+        "last_message_time": 1771296376694,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 9,
+        "snapshots_received": 4,
+        "deltas_received": 2,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 9,
+        "intents_executed": 9,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 9
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:49:00.110530",
+      "elapsed_seconds": 242.3,
+      "bridge": {
+        "messages_received": 11,
+        "messages_published": 8,
+        "reconnect_count": 0,
+        "last_message_time": 1771296531030,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 12,
+        "snapshots_received": 4,
+        "deltas_received": 4,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 12,
+        "intents_executed": 12,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 8.115561485290527
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:49:30.445026",
+      "elapsed_seconds": 272.7,
+      "bridge": {
+        "messages_received": 11,
+        "messages_published": 8,
+        "reconnect_count": 0,
+        "last_message_time": 1771296531030,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": true
+      },
+      "agent": {
+        "intents_generated": 13,
+        "snapshots_received": 4,
+        "deltas_received": 4,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 13,
+        "intents_executed": 13,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 9
+      }
+    },
+    {
+      "timestamp": "2026-02-16T21:49:57.965427",
+      "elapsed_seconds": 300.2,
+      "bridge": {
+        "messages_received": 11,
+        "messages_published": 8,
+        "reconnect_count": 0,
+        "last_message_time": 1771296531030,
+        "markets": [
+          "KXQUICKSETTLE-26FEB16H2150-3",
+          "KXQUICKSETTLE-26FEB16H2150-2",
+          "KXETH15M-26FEB162145-45"
+        ],
+        "connected": false
+      },
+      "agent": {
+        "intents_generated": 14,
+        "snapshots_received": 4,
+        "deltas_received": 4,
+        "orderbooks_tracked": 3
+      },
+      "pipeline": {
+        "intents_received": 14,
+        "intents_executed": 14,
+        "intents_rejected_risk": 0,
+        "intents_rejected_rate": 0,
+        "positions": {},
+        "daily_pnl": 0.0,
+        "read_tokens": 20,
+        "write_tokens": 9
+      }
+    }
+  ]
+}

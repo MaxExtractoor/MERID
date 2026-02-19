@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { Target, TrendingUp, TrendingDown, Award, RefreshCw, AlertCircle } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
 import { DEFAULTS } from "../config/constants";
 
 interface BrierScore {
@@ -39,38 +40,15 @@ interface BrierMetricsPanelProps {
 }
 
 export default function BrierMetricsPanel({ className = '' }: BrierMetricsPanelProps) {
-  const [metricsData, setMetricsData] = useState<BrierMetricsData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string>('all');
 
-  const fetchMetrics = useCallback(async () => {
-    try {
-      const url = selectedAgent === 'all'
-        ? '/api/v1/metrics/brier'
-        : `/api/v1/metrics/brier?agent=${selectedAgent}`;
-      
-      const response = await fetch(url);
-      if (response.ok) {
-        const data = await response.json();
-        setMetricsData(data);
-        setError(null);
-      } else {
-        throw new Error('Failed to fetch Brier metrics');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setMetricsData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedAgent]);
-
-  useEffect(() => {
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
-    return () => clearInterval(interval);
-  }, [fetchMetrics]);
+  const endpoint = selectedAgent === 'all'
+    ? '/api/v1/metrics/brier'
+    : `/api/v1/metrics/brier?agent=${selectedAgent}`;
+  const { data: metricsData, loading, error, refetch } = useApiData<BrierMetricsData>(
+    endpoint,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND },
+  );
 
   const getScoreColor = (score: number) => {
     if (score <= 0.15) return 'text-green-400';
@@ -133,7 +111,7 @@ export default function BrierMetricsPanel({ className = '' }: BrierMetricsPanelP
             ))}
           </select>
           <button type="button"
-            onClick={fetchMetrics}
+            onClick={() => refetch()}
             className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
             title="Refresh metrics"
            aria-label="Refresh">
@@ -147,7 +125,7 @@ export default function BrierMetricsPanel({ className = '' }: BrierMetricsPanelP
           <AlertCircle className="w-5 h-5 text-yellow-500" />
           <div>
             <p className="text-yellow-500 font-medium">Data unavailable</p>
-            <p className="text-sm text-gray-400">{error}</p>
+            <p className="text-sm text-gray-400">{error?.message ?? 'Unknown error'}</p>
           </div>
         </div>
       )}

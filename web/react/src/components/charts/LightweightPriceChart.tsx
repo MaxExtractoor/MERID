@@ -12,6 +12,7 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
+import { logUiError } from '../../utils/logger';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -63,11 +64,12 @@ const LightweightPriceChart: React.FC<LightweightPriceChartProps> = ({
           setLastCandle(msg);
           // When lightweight-charts is installed, call:
           // candlestickSeries.update(msg);
-        } catch { /* ignore malformed messages */ }
+        } catch (err) { logUiError('LightweightPriceChart', 'WS message parse failed', err); }
       };
       ws.onclose = () => setMode('disconnected');
       ws.onerror = () => setMode('disconnected');
-    } catch {
+    } catch (err) {
+      logUiError('LightweightPriceChart', 'WS connect failed', err);
       setMode('disconnected');
     }
 
@@ -97,7 +99,7 @@ const LightweightPriceChart: React.FC<LightweightPriceChartProps> = ({
             volume: quote.volume_24h,
           });
         }
-      } catch { /* swallow fetch errors */ }
+      } catch (err) { logUiError('LightweightPriceChart', 'REST fetch failed', err); }
     };
 
     fetchCandle();

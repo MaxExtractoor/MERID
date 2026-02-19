@@ -420,38 +420,29 @@ class TelegramBot(BotBase):
         # Emit command event
         await self._emit_event(command.to_event())
         
-        # Process command (in production, these would call actual services)
+        # Process command — wired to live Kalshi APIs
         if command.command_type == CommandType.HELP:
             return self._get_help_text()
-        
+
         elif command.command_type == CommandType.STATUS:
-            # Mock status
-            return self.format_status_response({
-                "mode": "paper",
-                "healthy_agents": 5,
-                "total_agents": 5,
-                "daily_pnl": 1234.56,
-            })
-        
+            return self._handle_status()
+
         elif command.command_type == CommandType.RISK:
-            return self.format_risk_response({
-                "total_exposure": 50000,
-                "leverage": 1.5,
-                "drawdown": 2.3,
-                "daily_loss": 500,
-                "kill_switch": False,
-            })
-        
+            return self._handle_risk()
+
+        elif command.command_type == CommandType.PORTFOLIO:
+            return self._handle_portfolio()
+
         elif command.command_type == CommandType.PAUSE:
-            reason = " ".join(command.arguments) or "Manual pause"
-            return f"⏸️ Trading paused: {reason}"
-        
+            reason = " ".join(command.arguments) or "Manual pause via bot"
+            return self._handle_pause(reason)
+
         elif command.command_type == CommandType.RESUME:
-            return "▶️ Trading resumed"
-        
+            return self._handle_resume()
+
         elif command.command_type == CommandType.KILL:
-            reason = " ".join(command.arguments) or "Emergency"
-            return f"🚨 **KILL SWITCH ACTIVATED**\nReason: {reason}\nAll trading halted."
+            reason = " ".join(command.arguments) or "Emergency via bot"
+            return self._handle_kill(reason)
         
         elif command.command_type == CommandType.MUTE:
             duration = int(command.arguments[0]) if command.arguments else 60
@@ -464,6 +455,122 @@ class TelegramBot(BotBase):
         
         return "Unknown command"
     
+    def _handle_status(self) -> str:
+        """Return live Kalshi grid + risk status."""
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            grid = get_agent_grid()
+            summary = grid.summary()
+            risk = get_kalshi_risk()
+            rs = risk.summary()
+            agent_count = summary.get("agent_count", 0)
+            running = sum(1 for a in summary.get("agents", []) if a.get("status") == "running")
+            mode = summary.get("mode", "unknown")
+            daily_pnl = rs.get("daily_pnl_usd", 0)
+            ks = "🔴 ACTIVE" if rs.get("kill_switch_active") else "🟢 Ready"
+            return (
+                f"📊 **MERID Kalshi Status**\n"
+                f"├ Mode: {mode}\n"
+                f"├ Agents: {running}/{agent_count} running\n"
+                f"├ Daily PnL: ${daily_pnl:,.2f}\n"
+                f"├ Kill Switch: {ks}\n"
+                f"└ Notional: ${rs.get('total_notional_usd', 0):,.2f}"
+            )
+        except Exception as exc:
+            return f"⚠️ Status unavailable: {exc}"
+
+    def _handle_risk(self) -> str:
+        """Return live Kalshi risk metrics."""
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            risk = get_kalshi_risk()
+            rs = risk.summary()
+            return self.format_risk_response({
+                "total_exposure": rs.get("total_notional_usd", 0),
+                "leverage": 1.0,
+                "drawdown": rs.get("drawdown_pct", 0),
+                "daily_loss": abs(min(rs.get("daily_pnl_usd", 0), 0)),
+                "kill_switch": rs.get("kill_switch_active", False),
+            })
+        except Exception as exc:
+            return f"⚠️ Risk data unavailable: {exc}"
+
+    def _handle_portfolio(self) -> str:
+        """Return live Kalshi portfolio summary."""
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+            grid = get_agent_grid()
+            summary = grid.summary()
+            tracker = get_agent_performance_tracker()
+            sys_perf = tracker.get_system_summary()
+            pr = summary.get("portfolio_risk", {})
+            snap = pr.get("latest_snapshot") or {}
+            notional = float(snap.get("total_notional_usd", 0))
+            pnl = float(sys_perf.get("system_pnl_usd", "0"))
+            win_rate = sys_perf.get("system_win_rate", 0)
+            open_trades = sys_perf.get("open_trades", 0)
+            return (
+                f"💼 **Kalshi Portfolio**\n"
+                f"├ Notional: ${notional:,.2f}\n"
+                f"├ Total PnL: ${pnl:,.2f}\n"
+                f"├ Win Rate: {win_rate:.1%}\n"
+                f"├ Open Trades: {open_trades}\n"
+                f"└ Agents: {summary.get('agent_count', 0)} active"
+            )
+        except Exception as exc:
+            return f"⚠️ Portfolio data unavailable: {exc}"
+
+    def _handle_pause(self, reason: str) -> str:
+        """Pause all Kalshi trading agents."""
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            grid = get_agent_grid()
+            paused = 0
+            for agent in grid._agents.values() if hasattr(grid, "_agents") else []:
+                if hasattr(agent, "pause"):
+                    agent.pause()
+                    paused += 1
+            return f"⏸️ Trading paused ({paused} agents): {reason}"
+        except Exception as exc:
+            return f"⚠️ Pause failed: {exc}"
+
+    def _handle_resume(self) -> str:
+        """Resume all paused Kalshi trading agents."""
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            grid = get_agent_grid()
+            resumed = 0
+            for agent in grid._agents.values() if hasattr(grid, "_agents") else []:
+                if hasattr(agent, "resume"):
+                    agent.resume()
+                    resumed += 1
+            return f"▶️ Trading resumed ({resumed} agents)"
+        except Exception as exc:
+            return f"⚠️ Resume failed: {exc}"
+
+    def _handle_kill(self, reason: str) -> str:
+        """Activate Kalshi kill switch — halts all trading immediately."""
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            from merid.prediction.agent_grid import get_agent_grid
+            risk = get_kalshi_risk()
+            risk._activate_kill_switch(f"Bot command: {reason}")
+            grid = get_agent_grid()
+            paused = 0
+            for agent in grid._agents.values() if hasattr(grid, "_agents") else []:
+                if hasattr(agent, "pause"):
+                    agent.pause()
+                    paused += 1
+            return (
+                f"🚨 **KILL SWITCH ACTIVATED**\n"
+                f"Reason: {reason}\n"
+                f"Paused {paused} agents. All trading halted."
+            )
+        except Exception as exc:
+            return f"⚠️ Kill switch failed: {exc}"
+
     def _get_help_text(self) -> str:
         """Get help text for all commands."""
         lines = ["📖 **Available Commands**\n"]

@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { 
   Power, Pause, Play, AlertTriangle, ShieldAlert, 
   TrendingUp, Bitcoin, BarChart3, RefreshCw 
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface DomainState {
   name: string;
@@ -38,52 +41,18 @@ const MODE_COLORS: Record<string, string> = {
 };
 
 export default function DomainControlPanel({ compact = false }: DomainControlPanelProps) {
-  const [domains, setDomains] = useState<DomainState[]>([]);
-  const [loading, setLoading] = useState(true);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<{ domain: string; action: string } | null>(null);
 
-  const fetchDomains = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/pipeline/summary');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.domains) {
-          setDomains(data.domains);
-        }
-      }
-    } catch {
-      // Fallback to defaults for display
-      setDomains([
-        {
-          name: 'Prediction Markets', key: 'prediction', icon: 'prediction',
-          mode: 'SIM', enabled: true, halted: false,
-          pnlToday: 0, exposure: 0, dailyLoss: 0, dailyLossLimit: 250,
-          allocationPct: 10, maxNotional: 5000, currentNotional: 0, positionCount: 0,
-        },
-        {
-          name: 'Crypto', key: 'crypto', icon: 'crypto',
-          mode: 'SIM', enabled: true, halted: false,
-          pnlToday: 0, exposure: 0, dailyLoss: 0, dailyLossLimit: 1000,
-          allocationPct: 50, maxNotional: 25000, currentNotional: 0, positionCount: 0,
-        },
-        {
-          name: 'Equities', key: 'equity', icon: 'equity',
-          mode: 'SIM', enabled: true, halted: false,
-          pnlToday: 0, exposure: 0, dailyLoss: 0, dailyLossLimit: 500,
-          allocationPct: 40, maxNotional: 20000, currentNotional: 0, positionCount: 0,
-        },
-      ]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ domains: DomainState[] }>(
+    API_ENDPOINTS.PIPELINE_SUMMARY,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
 
-  useEffect(() => {
-    fetchDomains();
-    const interval = setInterval(fetchDomains, 5000);
-    return () => clearInterval(interval);
-  }, [fetchDomains]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Domain control" error={fetchError} onRetry={refetch} />;
+  }
+  const domains = rawData?.domains ?? [];
 
   const executeAction = async (domainKey: string, action: string) => {
     setActionInProgress(`${domainKey}-${action}`);
@@ -97,9 +66,9 @@ export default function DomainControlPanel({ compact = false }: DomainControlPan
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ domain: domainKey }),
       });
-      await fetchDomains();
-    } catch (err) {
-      console.error(`Failed to ${action} ${domainKey}:`, err);
+      refetch();
+    } catch {
+      // Operation failed — UI state unchanged
     } finally {
       setActionInProgress(null);
       setConfirmAction(null);
@@ -150,11 +119,11 @@ export default function DomainControlPanel({ compact = false }: DomainControlPan
           <ShieldAlert className="w-5 h-5 text-orange-400" />
           <h3 className="text-lg font-bold text-white">Domain Control</h3>
         </div>
-        <button
-          onClick={fetchDomains}
+        <button type="button"
+          onClick={() => refetch()}
           className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
           title="Refresh domain status"
-        >
+         aria-label="Refresh">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -235,7 +204,7 @@ export default function DomainControlPanel({ compact = false }: DomainControlPan
               {/* Action Buttons */}
               <div className="flex gap-2">
                 {domain.halted ? (
-                  <button
+                  <button type="button"
                     onClick={() => handleAction(domain.key, 'resume')}
                     disabled={actionInProgress !== null}
                     className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm rounded transition-colors"
@@ -245,7 +214,7 @@ export default function DomainControlPanel({ compact = false }: DomainControlPan
                   </button>
                 ) : (
                   <>
-                    <button
+                    <button type="button"
                       onClick={() => handleAction(domain.key, 'halt')}
                       disabled={actionInProgress !== null}
                       className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm rounded transition-colors"
@@ -253,7 +222,7 @@ export default function DomainControlPanel({ compact = false }: DomainControlPan
                       <Pause className="w-3.5 h-3.5" />
                       Pause
                     </button>
-                    <button
+                    <button type="button"
                       onClick={() => handleAction(domain.key, 'kill_switch')}
                       disabled={actionInProgress !== null}
                       className="flex items-center justify-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm rounded transition-colors"
@@ -287,13 +256,13 @@ export default function DomainControlPanel({ compact = false }: DomainControlPan
               )}
             </p>
             <div className="flex gap-3 justify-end">
-              <button
+              <button type="button"
                 onClick={() => setConfirmAction(null)}
                 className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded transition-colors"
               >
                 Cancel
               </button>
-              <button
+              <button type="button"
                 onClick={() => executeAction(confirmAction.domain, confirmAction.action)}
                 disabled={actionInProgress !== null}
                 className={`px-4 py-2 text-white rounded transition-colors ${

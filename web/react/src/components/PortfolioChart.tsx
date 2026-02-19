@@ -1,3 +1,4 @@
+import React from 'react';
 import { useEquityChart } from '../hooks/useEquityChart';
 import ChartWrapper from './ChartWrapper';
 
@@ -5,7 +6,7 @@ interface PortfolioChartProps {
   data: { t: string; v: number }[];
 }
 
-export default function PortfolioChart({ data }: PortfolioChartProps) {
+function PortfolioChart({ data }: PortfolioChartProps) {
   useEquityChart(data);
 
   return (
@@ -14,3 +15,7 @@ export default function PortfolioChart({ data }: PortfolioChartProps) {
     </ChartWrapper>
   );
 }
+
+const MemoizedPortfolioChart = React.memo(PortfolioChart);
+MemoizedPortfolioChart.displayName = 'PortfolioChart';
+export default MemoizedPortfolioChart;

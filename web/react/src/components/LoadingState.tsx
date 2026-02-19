@@ -5,7 +5,7 @@ interface LoadingStateProps {
   className?: string;
 }
 
-export default function LoadingState({
+function LoadingState({
   message = "Loading...",
   subMessage,
   fullHeight = false,
@@ -25,3 +25,7 @@ export default function LoadingState({
     </div>
   );
 }
+
+const MemoizedLoadingState = React.memo(LoadingState);
+MemoizedLoadingState.displayName = 'LoadingState';
+export default MemoizedLoadingState;

@@ -6,7 +6,7 @@ Uses Pydantic Settings for type safety and validation.
 
 Usage:
     from merid.settings import settings
-    print(settings.MERID_ENV)
+    logger.info(settings.MERID_ENV)
 """
 
 from __future__ import annotations
@@ -139,6 +139,8 @@ class Settings(BaseSettings):
     BINANCE_API_SECRET: Optional[str] = Field(default=None, description="Binance API secret")
     COINBASE_API_KEY: Optional[str] = Field(default=None, description="Coinbase API key")
     COINBASE_API_SECRET: Optional[str] = Field(default=None, description="Coinbase API secret")
+    MERID_COINBASE_API_KEY: Optional[str] = Field(default=None, description="Coinbase API key (MERID prefix)")
+    MERID_COINBASE_API_SECRET: Optional[str] = Field(default=None, description="Coinbase API secret (MERID prefix)")
     KRAKEN_API_KEY: Optional[str] = Field(default=None, description="Kraken API key")
     KRAKEN_PRIVATE_KEY: Optional[str] = Field(default=None, description="Kraken private key")
     OKX_API_KEY: Optional[str] = Field(default=None, description="OKX API key")
@@ -149,16 +151,19 @@ class Settings(BaseSettings):
     BYBIT_API_SECRET: Optional[str] = Field(default=None, description="Bybit API secret")
     ALPACA_API_KEY: Optional[str] = Field(default=None, description="Alpaca API key")
     ALPACA_API_SECRET: Optional[str] = Field(default=None, description="Alpaca API secret")
+    MERID_ALPACA_API_KEY: Optional[str] = Field(default=None, description="Alpaca API key (MERID prefix)")
+    MERID_ALPACA_API_SECRET: Optional[str] = Field(default=None, description="Alpaca API secret (MERID prefix)")
     IBKR_PAPER_TRADING_USERNAME: Optional[str] = Field(default=None, description="IBKR paper trading username")
     IBKR_PAPER_TRADING_ACCOUNT_NUMBER: Optional[str] = Field(default=None, description="IBKR paper trading account")
     KALSHI_API_KEY_ID: Optional[str] = Field(default=None, description="Kalshi API key ID")
     KALSHI_PRIVATE_KEY_PATH: Optional[str] = Field(default="change_me", description="Kalshi private key path")
     KALSHI_PRIVATE_KEY_PEM: Optional[str] = Field(default=None, description="Kalshi private key PEM")
-    KALSHI_API_HOST: Optional[str] = Field(default="https://api.elections.kalshi.com/trade-api/v2", description="Kalshi API host")
+    KALSHI_API_HOST: Optional[str] = Field(default="https://api.kalshi.com/trade-api/v2", description="Kalshi API host")
     
     # =============================================================================
     # PREDICTION MARKET SETTINGS (Kalshi-first)
     # =============================================================================
+    KALSHI_ONLY: bool = Field(default=True, description="Kalshi-only mode: restricts UI/API to 8 canonical Kalshi views")
     MERID_PM_TRADING_MODE: str = Field(default="sim", description="Prediction market mode: sim/paper/live")
     MERID_PM_LIVE_ENABLED: bool = Field(default=False, description="Explicit unlock for live PM trading")
     MERID_PM_MAX_NOTIONAL_PER_MARKET: float = Field(default=500.0, description="Max notional per PM market (USD)")
@@ -212,11 +217,12 @@ class Settings(BaseSettings):
     # =============================================================================
     # FEATURE FLAGS
     # =============================================================================
+    PHASE0_ENABLED: bool = Field(default=False, description="Enable Phase0 minimal crypto scope")
     MERID_ENABLE_CHAINLINK: bool = Field(default=False, description="Enable Chainlink integration")
     MERID_ENABLE_AUGUR: bool = Field(default=False, description="Enable Augur integration")
     MERID_ENABLE_NEWS_AGENT: bool = Field(default=False, description="Enable news agent")
     MERID_ENABLE_WHALE_INTEL: bool = Field(default=False, description="Enable whale intelligence")
-    MERID_ENABLE_POLYMARKET: bool = Field(default=True, description="Enable Polymarket integration")
+    MERID_ENABLE_POLYMARKET: bool = Field(default=False, description="Enable Polymarket integration")
     
     # =============================================================================
     # WEB SERVER SETTINGS
@@ -384,10 +390,16 @@ class Settings(BaseSettings):
                 issues.append("POLYMARKET_WALLET_ADDRESS is required for Polymarket")
         
         elif venue.lower() == "alpaca":
-            if not self.ALPACA_API_KEY:
-                issues.append("ALPACA_API_KEY is required for Alpaca")
-            if not self.ALPACA_API_SECRET:
-                issues.append("ALPACA_API_SECRET is required for Alpaca")
+            if not (self.MERID_ALPACA_API_KEY or self.ALPACA_API_KEY):
+                issues.append("MERID_ALPACA_API_KEY or ALPACA_API_KEY is required for Alpaca")
+            if not (self.MERID_ALPACA_API_SECRET or self.ALPACA_API_SECRET):
+                issues.append("MERID_ALPACA_API_SECRET or ALPACA_API_SECRET is required for Alpaca")
+        
+        elif venue.lower() in ("coinbase", "coinbase_advanced"):
+            if not (self.MERID_COINBASE_API_KEY or self.COINBASE_API_KEY):
+                issues.append("MERID_COINBASE_API_KEY or COINBASE_API_KEY is required for Coinbase")
+            if not (self.MERID_COINBASE_API_SECRET or self.COINBASE_API_SECRET):
+                issues.append("MERID_COINBASE_API_SECRET or COINBASE_API_SECRET is required for Coinbase")
         
         return issues
     
@@ -400,7 +412,7 @@ class Settings(BaseSettings):
             - issues: list[str] - List of issues found
             - warnings: list[str] - Non-blocking warnings
         """
-        venues = venues or ["kalshi", "polymarket"]
+        venues = venues or ["kalshi", "alpaca", "coinbase_advanced"]
         issues = []
         warnings = []
         

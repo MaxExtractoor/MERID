@@ -476,7 +476,7 @@ class MarketRegimeClassifier:
             }
         }
     
-    def update_regime_definitions(self, new_definitions: Dict[str, Dict[str, Any]):
+    def update_regime_definitions(self, new_definitions: Dict[str, Dict[str, Any]]):
         """Update regime definitions."""
         self.regime_definitions.update(new_definitions)
         logger.info(f"Updated {len(new_definitions)} regime definitions")
@@ -676,7 +676,7 @@ class MarketRegimeAnalyzer:
             analysis_entry = {
                 "timestamp": transition.transition_time,
                 "from_regime": transition.from_regime,
-                "to_regime: transition.to_regime,
+                "to_regime": transition.to_regime,
                 "confidence": transition.confidence,
                 "duration": transition.transition_duration,
                 "trigger_factors": transition.trigger_factors
@@ -743,7 +743,7 @@ class MarketRegimeAnalyzer:
         """Get market cycle history."""
         return list(self.market_cycles)[-limit:]
     
-    def update_regime_definitions(self, new_definitions: Dict[str, Dict[str, Any]):
+    def update_regime_definitions(self, new_definitions: Dict[str, Dict[str, Any]]):
         """Update regime definitions."""
         self.classifier.update_regime_definitions(new_definitions)
     

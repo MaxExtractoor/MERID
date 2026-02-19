@@ -1,5 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import { Clock, AlertTriangle, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface DataFeed {
   name: string;
@@ -17,52 +20,15 @@ const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: string; b
 };
 
 export default function DataFreshnessPanel() {
-  const [feeds, setFeeds] = useState<DataFeed[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ feeds: DataFeed[] }>(
+    API_ENDPOINTS.DATA_FRESHNESS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+  );
 
-  const computeStatus = (stalenessMs: number, thresholdMs: number): 'fresh' | 'stale' | 'dead' => {
-    if (stalenessMs > thresholdMs * 3) return 'dead';
-    if (stalenessMs > thresholdMs) return 'stale';
-    return 'fresh';
-  };
-
-  const fetchFeeds = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/data/freshness');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.feeds) {
-          setFeeds(data.feeds);
-          setLoading(false);
-          return;
-        }
-      }
-    } catch {
-      // fallback
-    }
-
-    const now = Date.now();
-    const mock: DataFeed[] = [
-      { name: 'Kalshi Markets', source: 'kalshi', lastUpdate: new Date(now - 2000).toISOString(), stalenessMs: 2000, thresholdMs: 10000, status: 'fresh' },
-      { name: 'Binance Tickers', source: 'binance', lastUpdate: new Date(now - 1500).toISOString(), stalenessMs: 1500, thresholdMs: 5000, status: 'fresh' },
-      { name: 'Coinbase Tickers', source: 'coinbase', lastUpdate: new Date(now - 3000).toISOString(), stalenessMs: 3000, thresholdMs: 5000, status: 'fresh' },
-      { name: 'Kraken Tickers', source: 'kraken', lastUpdate: new Date(now - 4500).toISOString(), stalenessMs: 4500, thresholdMs: 5000, status: 'fresh' },
-      { name: 'Alpaca Quotes', source: 'alpaca', lastUpdate: new Date(now - 8000).toISOString(), stalenessMs: 8000, thresholdMs: 15000, status: 'fresh' },
-      { name: 'X/Twitter Sentiment', source: 'x_sentiment', lastUpdate: new Date(now - 45000).toISOString(), stalenessMs: 45000, thresholdMs: 60000, status: 'fresh' },
-      { name: 'News Feed', source: 'news', lastUpdate: new Date(now - 120000).toISOString(), stalenessMs: 120000, thresholdMs: 300000, status: 'fresh' },
-      { name: 'On-Chain (Helius)', source: 'helius', lastUpdate: new Date(now - 15000).toISOString(), stalenessMs: 15000, thresholdMs: 30000, status: 'fresh' },
-      { name: 'Pyth Oracle', source: 'pyth', lastUpdate: new Date(now - 5000).toISOString(), stalenessMs: 5000, thresholdMs: 10000, status: 'fresh' },
-    ].map(f => ({ ...f, status: computeStatus(f.stalenessMs, f.thresholdMs) }));
-
-    setFeeds(mock);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchFeeds();
-    const interval = setInterval(fetchFeeds, 3000);
-    return () => clearInterval(interval);
-  }, [fetchFeeds]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Data freshness" error={fetchError} onRetry={refetch} />;
+  }
+  const feeds = rawData?.feeds ?? [];
 
   const sortedFeeds = [...feeds].sort((a, b) => {
     const order = { dead: 0, stale: 1, fresh: 2 };
@@ -103,11 +69,11 @@ export default function DataFreshnessPanel() {
             </span>
           )}
         </div>
-        <button
-          onClick={fetchFeeds}
+        <button type="button"
+          onClick={() => refetch()}
           className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
           title="Refresh data freshness"
-        >
+         aria-label="Refresh">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>

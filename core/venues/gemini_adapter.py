@@ -15,6 +15,7 @@ logger = structlog.get_logger(__name__)
 
 
 class GeminiAdapter(VenueAdapter):
+    _is_stub = True
     """Gemini adapter for US crypto spot trading."""
     
     def __init__(
@@ -75,7 +76,7 @@ class GeminiAdapter(VenueAdapter):
             self.logger.error("market_data_error", error=str(e))
             return None
     
-    async def place_order(
+    async def _place_order_impl(
         self,
         symbol: str,
         side: OrderSide,

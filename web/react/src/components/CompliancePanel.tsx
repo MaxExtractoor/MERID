@@ -1,7 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import {
   Shield, RefreshCw, CheckCircle, XCircle, AlertTriangle
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS, COMPLIANCE_STATUS} from '../config/constants';
 
 interface VenueCompliance {
   venue: string;
@@ -24,55 +27,21 @@ const STATUS_STYLES: Record<string, { color: string; bg: string }> = {
 };
 
 export default function CompliancePanel() {
-  const [venues, setVenues] = useState<VenueCompliance[]>([]);
-  const [assets, setAssets] = useState<AssetCompliance[]>([]);
-  const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<'venues' | 'assets'>('venues');
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/blockchain/compliance');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.venues) setVenues(data.venues);
-        if (data.assets) setAssets(data.assets);
-        return;
-      }
-    } catch { /* fallback */ }
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ venues: VenueCompliance[]; assets: AssetCompliance[] }>(
+    API_ENDPOINTS.BLOCKCHAIN_COMPLIANCE,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.INFREQUENT },
+  );
 
-    setVenues([
-      { venue: 'Kalshi', status: 'ALLOWED', jurisdiction: 'US (CFTC)', lastReview: '2026-02-01', reviewOverdue: false },
-      { venue: 'Binance', status: 'ALLOWED', jurisdiction: 'Global', lastReview: '2026-01-15', reviewOverdue: false },
-      { venue: 'Coinbase', status: 'ALLOWED', jurisdiction: 'US', lastReview: '2026-02-01', reviewOverdue: false },
-      { venue: 'Kraken', status: 'ALLOWED', jurisdiction: 'US', lastReview: '2026-01-20', reviewOverdue: false },
-      { venue: 'OKX', status: 'RESTRICTED', jurisdiction: 'Non-US only', lastReview: '2026-01-10', reviewOverdue: true },
-      { venue: 'Alpaca', status: 'ALLOWED', jurisdiction: 'US', lastReview: '2026-02-05', reviewOverdue: false },
-      { venue: 'IBKR', status: 'ALLOWED', jurisdiction: 'US', lastReview: '2026-02-05', reviewOverdue: false },
-      { venue: 'Polymarket', status: 'PROHIBITED', jurisdiction: 'US blocked', lastReview: '2026-01-01', reviewOverdue: false },
-      { venue: 'Augur', status: 'PROHIBITED', jurisdiction: 'Unregulated', lastReview: '2026-01-01', reviewOverdue: false },
-    ]);
-    setAssets([
-      { asset: 'BTC', status: 'ALLOWED' },
-      { asset: 'ETH', status: 'ALLOWED' },
-      { asset: 'SOL', status: 'ALLOWED' },
-      { asset: 'USDC', status: 'ALLOWED' },
-      { asset: 'USDT', status: 'ALLOWED' },
-      { asset: 'AAPL', status: 'ALLOWED' },
-      { asset: 'TSLA', status: 'ALLOWED' },
-      { asset: 'SPY', status: 'ALLOWED' },
-      { asset: 'TORN', status: 'PROHIBITED', reason: 'OFAC sanctioned' },
-    ]);
-    setLoading(false);
-  }, []);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Compliance" error={fetchError} onRetry={refetch} />;
+  }
+  const venues = rawData?.venues ?? [];
+  const assets = rawData?.assets ?? [];
 
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 60000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
-
-  const allowedVenues = venues.filter(v => v.status === 'ALLOWED').length;
-  const prohibitedVenues = venues.filter(v => v.status === 'PROHIBITED').length;
+  const allowedVenues = venues.filter(v => v.status === COMPLIANCE_STATUS.ALLOWED).length;
+  const prohibitedVenues = venues.filter(v => v.status === COMPLIANCE_STATUS.PROHIBITED).length;
   const overdueCount = venues.filter(v => v.reviewOverdue).length;
 
   if (loading) {
@@ -102,7 +71,7 @@ export default function CompliancePanel() {
         </div>
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
-            <button
+            <button type="button"
               onClick={() => setTab('venues')}
               className={`px-2 py-1 text-xs rounded transition-colors ${
                 tab === 'venues' ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-gray-400 hover:text-white'
@@ -110,7 +79,7 @@ export default function CompliancePanel() {
             >
               Venues
             </button>
-            <button
+            <button type="button"
               onClick={() => setTab('assets')}
               className={`px-2 py-1 text-xs rounded transition-colors ${
                 tab === 'assets' ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-gray-400 hover:text-white'
@@ -119,7 +88,7 @@ export default function CompliancePanel() {
               Assets
             </button>
           </div>
-          <button onClick={fetchData} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh compliance">
+          <button type="button" onClick={() => refetch()} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh compliance" aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
@@ -132,8 +101,8 @@ export default function CompliancePanel() {
             return (
               <div key={v.venue} className={`${style.bg} rounded-lg border border-slate-700/50 p-3 flex items-center justify-between`}>
                 <div className="flex items-center gap-3">
-                  {v.status === 'ALLOWED' ? <CheckCircle className={`w-4 h-4 ${style.color}`} /> :
-                   v.status === 'RESTRICTED' ? <AlertTriangle className={`w-4 h-4 ${style.color}`} /> :
+                  {v.status === COMPLIANCE_STATUS.ALLOWED ? <CheckCircle className={`w-4 h-4 ${style.color}`} /> :
+                   v.status === COMPLIANCE_STATUS.RESTRICTED ? <AlertTriangle className={`w-4 h-4 ${style.color}`} /> :
                    <XCircle className={`w-4 h-4 ${style.color}`} />}
                   <div>
                     <span className="text-sm font-medium text-white">{v.venue}</span>

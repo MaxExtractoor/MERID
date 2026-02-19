@@ -329,7 +329,6 @@ async def get_json_schema(schema_name: str) -> Dict[str, Any]:
 @router.post("/json/{schema_name}/validate")
 async def validate_against_schema(schema_name: str, request: ValidateRequest) -> Dict[str, Any]:
     """Validate data against a canonical JSON schema."""
-    from schemas.validator import get_schema_registry
     registry = get_schema_registry()
     
     if not registry.get_schema(schema_name):
@@ -347,5 +346,4 @@ async def validate_against_schema(schema_name: str, request: ValidateRequest) ->
 @router.get("/json/status")
 async def get_json_schema_status() -> Dict[str, Any]:
     """Get status of the JSON schema registry."""
-    from schemas.validator import get_schema_registry
     return get_schema_registry().get_status()

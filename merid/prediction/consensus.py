@@ -32,7 +32,7 @@ logger = get_logger("merid.prediction.consensus")
 
 PRED_STANCES = ("strong_yes", "weak_yes", "neutral", "weak_no", "strong_no")
 PRED_PLAN_STATUSES = ("proposed", "approved", "executing", "closed", "expired")
-PRED_CATEGORIES = ("macro", "politics", "equities", "crypto", "sports", "weather", "entertainment", "other")
+PRED_CATEGORIES = ("macro", "politics", "equities", "crypto", "sports", "weather", "entertainment", "economics", "finance", "science", "other")
 
 # Edge thresholds for stance classification
 STRONG_EDGE_THRESHOLD = 0.10   # |edge| >= 10% → strong
@@ -105,10 +105,11 @@ class PredictionOpinion:
     reasoning: str = ""
     signal_sources: List[str] = field(default_factory=list)
     horizon: str = "event"            # event, short, medium
+    explanation: Optional[Dict[str, Any]] = None  # Structured explanation metadata
     created_at: float = field(default_factory=time.time)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
+    def to_dict(self, include_explanation: bool = True) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
             "id": self.id,
             "agent_id": self.agent_id,
             "agent_name": self.agent_name,
@@ -120,6 +121,9 @@ class PredictionOpinion:
             "horizon": self.horizon,
             "timestamp": datetime.fromtimestamp(self.created_at, tz=timezone.utc).isoformat(),
         }
+        if include_explanation and self.explanation:
+            d["explanation"] = self.explanation
+        return d
 
 
 @dataclass
@@ -209,8 +213,13 @@ CREATE TABLE IF NOT EXISTS pred_opinions (
     reasoning       TEXT NOT NULL DEFAULT '',
     signal_sources  TEXT NOT NULL DEFAULT '[]',
     horizon         TEXT NOT NULL DEFAULT 'event',
+    explanation     TEXT NOT NULL DEFAULT '',
     created_at      REAL NOT NULL
 );
+"""
+
+_MIGRATE_EXPLANATION_COL = """
+ALTER TABLE pred_opinions ADD COLUMN explanation TEXT NOT NULL DEFAULT '';
 """
 
 _CREATE_PRED_PLANS = """
@@ -255,6 +264,9 @@ class PredictionConsensusStore:
     def __init__(self, db_path: str = _DB_PATH):
         self._db_path = db_path
         self._lock = threading.Lock()
+        self._summary_cache: Optional[List[Dict[str, Any]]] = None
+        self._summary_cache_ts: float = 0.0
+        self._summary_cache_ttl: float = 15.0  # seconds
         self._init_db()
 
     def _init_db(self) -> None:
@@ -265,6 +277,11 @@ class PredictionConsensusStore:
             conn.execute(_CREATE_PRED_PLANS)
             conn.execute(_CREATE_RESOLVED)
             conn.executescript(_CREATE_INDEXES)
+            # Migration: add explanation column if missing (existing DBs)
+            try:
+                conn.execute(_MIGRATE_EXPLANATION_COL)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         logger.info("Prediction consensus store initialized: %s", self._db_path)
 
     def _connect(self) -> sqlite3.Connection:
@@ -323,17 +340,56 @@ class PredictionConsensusStore:
 
     # ── Opinions ─────────────────────────────────────────────────────
 
+    # Dedup window: reject opinions from same agent+symbol within this many seconds
+    OPINION_DEDUP_WINDOW: float = 60.0
+
+    def validate_opinion(self, op: PredictionOpinion) -> Optional[str]:
+        """Validate an opinion before insertion. Returns error message or None if valid."""
+        if not op.agent_id or not op.agent_id.strip():
+            return "agent_id is required"
+        if not op.symbol or not op.symbol.strip():
+            return "symbol is required"
+        if not (0.0 <= op.probability <= 1.0):
+            return f"probability must be 0–1, got {op.probability}"
+        if not (0.0 <= op.confidence <= 1.0):
+            return f"confidence must be 0–1, got {op.confidence}"
+        if op.horizon not in ("event", "short", "medium"):
+            return f"horizon must be event/short/medium, got {op.horizon}"
+        return None
+
     def add_opinion(self, op: PredictionOpinion) -> PredictionOpinion:
+        """Add an opinion with validation and dedup.
+
+        Raises ValueError if the opinion is malformed.
+        Silently skips if a duplicate (same agent+symbol) exists within the dedup window.
+        """
+        error = self.validate_opinion(op)
+        if error:
+            raise ValueError(f"Invalid opinion: {error}")
+
         with self._lock:
             with self._connect() as conn:
+                # Dedup: check for recent opinion from same agent on same symbol
+                cutoff = time.time() - self.OPINION_DEDUP_WINDOW
+                existing = conn.execute(
+                    "SELECT id FROM pred_opinions "
+                    "WHERE agent_id = ? AND symbol = ? AND created_at > ? "
+                    "LIMIT 1",
+                    (op.agent_id, op.symbol, cutoff),
+                ).fetchone()
+                if existing:
+                    logger.debug("Dedup: skipping opinion from %s on %s (recent exists)", op.agent_id, op.symbol)
+                    return op  # Return without inserting
+
+                explanation_json = json.dumps(op.explanation) if op.explanation else ""
                 conn.execute(
                     "INSERT INTO pred_opinions "
                     "(id, agent_id, agent_name, symbol, probability, confidence, reasoning, "
-                    " signal_sources, horizon, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " signal_sources, horizon, explanation, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (op.id, op.agent_id, op.agent_name, op.symbol, op.probability,
                      op.confidence, op.reasoning, json.dumps(op.signal_sources),
-                     op.horizon, op.created_at),
+                     op.horizon, explanation_json, op.created_at),
                 )
         return op
 
@@ -423,27 +479,85 @@ class PredictionConsensusStore:
 
     # ── Consensus summary ────────────────────────────────────────────
 
+    def invalidate_summary_cache(self) -> None:
+        """Force summary to be recomputed on next call."""
+        self._summary_cache = None
+        self._summary_cache_ts = 0.0
+
     def get_consensus_summary(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Per-symbol prediction consensus: swarm_prob vs market_prob, edge, stance."""
+        """Per-symbol prediction consensus: swarm_prob vs market_prob, edge, stance.
+
+        Uses batch SQL queries (3 total) instead of per-symbol N+1 pattern.
+        Results cached for 15s to avoid redundant recomputation.
+        """
+        now = time.monotonic()
+        if (
+            self._summary_cache is not None
+            and (now - self._summary_cache_ts) < self._summary_cache_ttl
+            and category is None
+        ):
+            return self._summary_cache
+
+        summaries = self._build_consensus_summary(category)
+
+        if category is None:
+            self._summary_cache = summaries
+            self._summary_cache_ts = time.monotonic()
+
+        return summaries
+
+    def _build_consensus_summary(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Batch-query instruments, opinions, and plans, then aggregate in Python."""
         instruments = self.list_instruments(status="active", category=category, limit=500)
+        if not instruments:
+            return []
+
+        symbols = [inst.symbol for inst in instruments]
+
+        # Batch fetch all opinions for these symbols in ONE query
+        opinions_by_symbol: Dict[str, List[PredictionOpinion]] = {s: [] for s in symbols}
+        with self._connect() as conn:
+            placeholders = ",".join("?" for _ in symbols)
+            rows = conn.execute(
+                f"SELECT * FROM pred_opinions WHERE symbol IN ({placeholders}) "
+                f"ORDER BY created_at DESC",
+                symbols,
+            ).fetchall()
+            for r in rows:
+                op = self._row_to_opinion(r)
+                if op.symbol in opinions_by_symbol:
+                    if len(opinions_by_symbol[op.symbol]) < 50:
+                        opinions_by_symbol[op.symbol].append(op)
+
+        # Batch fetch all plans for these symbols in ONE query
+        plans_by_symbol: Dict[str, List[PredictionPlan]] = {s: [] for s in symbols}
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM pred_plans WHERE symbol IN ({placeholders}) "
+                f"ORDER BY created_at DESC",
+                symbols,
+            ).fetchall()
+            for r in rows:
+                plan = self._row_to_plan(r)
+                if plan.symbol in plans_by_symbol:
+                    if len(plans_by_symbol[plan.symbol]) < 20:
+                        plans_by_symbol[plan.symbol].append(plan)
+
+        # Aggregate in Python — no more per-symbol queries
         summaries: List[Dict[str, Any]] = []
-
         for inst in instruments:
-            opinions = self.list_opinions(symbol=inst.symbol, limit=50)
-            plans = self.list_plans(symbol=inst.symbol, limit=20)
+            opinions = opinions_by_symbol.get(inst.symbol, [])
+            plans = plans_by_symbol.get(inst.symbol, [])
 
-            # Swarm probability: weighted average by confidence
             swarm_prob = self._aggregate_swarm_prob(opinions)
             market_prob = inst.market_implied_prob
             edge = swarm_prob - market_prob
             stance = self._classify_stance(edge)
 
-            # Agent counts
             yes_agents = [o.agent_id for o in opinions if o.probability >= 0.5]
             no_agents = [o.agent_id for o in opinions if o.probability < 0.5]
             avg_confidence = sum(o.confidence for o in opinions) / len(opinions) if opinions else 0.0
 
-            # Plan counts
             plan_counts = {"proposed": 0, "approved": 0, "executing": 0}
             for p in plans:
                 if p.status in plan_counts:
@@ -665,6 +779,180 @@ class PredictionConsensusStore:
             "recommendation": "none",
         }
 
+    def get_store_metrics(self) -> Dict[str, Any]:
+        """Operational metrics for the consensus store.
+
+        Exposes instrument counts, opinion volume, update rates, and
+        staleness indicators so operators can see whether agents are
+        keeping the store fresh.
+        """
+        now = time.time()
+        with self._connect() as conn:
+            # Instrument counts by status
+            inst_rows = conn.execute(
+                "SELECT status, COUNT(*) as cnt FROM pred_instruments GROUP BY status"
+            ).fetchall()
+            inst_by_status = {r["status"]: r["cnt"] for r in inst_rows}
+            total_instruments = sum(inst_by_status.values())
+
+            # Opinion volume
+            total_opinions = conn.execute("SELECT COUNT(*) FROM pred_opinions").fetchone()[0]
+
+            # Opinions in last hour / last 24h
+            opinions_1h = conn.execute(
+                "SELECT COUNT(*) FROM pred_opinions WHERE created_at > ?",
+                (now - 3600,),
+            ).fetchone()[0]
+            opinions_24h = conn.execute(
+                "SELECT COUNT(*) FROM pred_opinions WHERE created_at > ?",
+                (now - 86400,),
+            ).fetchone()[0]
+
+            # Distinct active agents (submitted opinion in last hour)
+            active_agents = conn.execute(
+                "SELECT COUNT(DISTINCT agent_id) FROM pred_opinions WHERE created_at > ?",
+                (now - 3600,),
+            ).fetchone()[0]
+
+            # Staleness: newest opinion age
+            newest_opinion = conn.execute(
+                "SELECT MAX(created_at) FROM pred_opinions"
+            ).fetchone()[0]
+            opinion_age_s = round(now - newest_opinion, 1) if newest_opinion else None
+
+            # Staleness: newest instrument refresh age
+            newest_refresh = conn.execute(
+                "SELECT MAX(last_refreshed) FROM pred_instruments"
+            ).fetchone()[0]
+            instrument_age_s = round(now - newest_refresh, 1) if newest_refresh else None
+
+            # Resolved count
+            resolved_count = conn.execute("SELECT COUNT(*) FROM pred_resolved").fetchone()[0]
+
+            # Plans by status
+            plan_rows = conn.execute(
+                "SELECT status, COUNT(*) as cnt FROM pred_plans GROUP BY status"
+            ).fetchall()
+            plans_by_status = {r["status"]: r["cnt"] for r in plan_rows}
+
+        return {
+            "instruments": {
+                "total": total_instruments,
+                "by_status": inst_by_status,
+                "newest_refresh_age_s": instrument_age_s,
+                "stale": instrument_age_s is not None and instrument_age_s > 300,
+            },
+            "opinions": {
+                "total": total_opinions,
+                "last_1h": opinions_1h,
+                "last_24h": opinions_24h,
+                "active_agents": active_agents,
+                "newest_age_s": opinion_age_s,
+                "stale": opinion_age_s is not None and opinion_age_s > 600,
+            },
+            "resolved": {
+                "total": resolved_count,
+            },
+            "plans": plans_by_status,
+        }
+
+    def get_explainability_metrics(self, window_s: float = 3600.0) -> Dict[str, Any]:
+        """Compute explainability metrics for recent opinions.
+
+        Returns:
+            coverage: % of recent opinions with non-null explanations.
+            rationale_distribution: count of each rationale tag.
+            strategy_variety: distinct rationale tags per strategy.
+            stability: proportion of instruments where agent opinion direction
+                flipped (YES↔NO) within the window — frequent unexplained
+                flips are a warning sign.
+        """
+        now = time.time()
+        cutoff = now - window_s
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pred_opinions WHERE created_at > ? ORDER BY created_at DESC",
+                (cutoff,),
+            ).fetchall()
+
+        if not rows:
+            return {
+                "coverage": {"total": 0, "with_explanation": 0, "pct": 0.0},
+                "rationale_distribution": {},
+                "strategy_variety": {},
+                "stability": {"instruments_checked": 0, "flips": 0, "flip_rate": 0.0},
+                "window_s": window_s,
+            }
+
+        total = len(rows)
+        with_explanation = 0
+        rationale_counts: Dict[str, int] = {}
+        # Track per-agent-symbol direction history for stability
+        direction_history: Dict[str, List[float]] = {}  # "agent:symbol" -> [prob, prob, ...]
+
+        for r in rows:
+            explanation_raw = r["explanation"] if "explanation" in r.keys() else ""
+            if explanation_raw:
+                try:
+                    exp = json.loads(explanation_raw)
+                    if exp:
+                        with_explanation += 1
+                        rationale = exp.get("rationale", "unknown")
+                        rationale_counts[rationale] = rationale_counts.get(rationale, 0) + 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            key = f"{r['agent_id']}:{r['symbol']}"
+            direction_history.setdefault(key, []).append(r["probability"])
+
+        # Strategy variety: group rationale tags by strategy prefix
+        strategy_variety: Dict[str, int] = {}
+        for tag in rationale_counts:
+            # Infer strategy from rationale tag
+            if tag.startswith("hash"):
+                strategy = "hash_bias"
+            elif tag.startswith("mean_reversion") or tag.startswith("mild_mean"):
+                strategy = "mean_reversion"
+            elif tag.startswith("calibration"):
+                strategy = "calibration_aware"
+            else:
+                strategy = "other"
+            strategy_variety[strategy] = strategy_variety.get(strategy, 0) + 1
+
+        # Stability: count direction flips per agent-symbol pair
+        flips = 0
+        instruments_checked = 0
+        for key, probs in direction_history.items():
+            if len(probs) < 2:
+                continue
+            instruments_checked += 1
+            for i in range(1, len(probs)):
+                prev_dir = "yes" if probs[i - 1] >= 0.5 else "no"
+                curr_dir = "yes" if probs[i] >= 0.5 else "no"
+                if prev_dir != curr_dir:
+                    flips += 1
+                    break  # Count at most one flip per pair in window
+
+        coverage_pct = round(with_explanation / total * 100, 1) if total > 0 else 0.0
+        flip_rate = round(flips / instruments_checked, 4) if instruments_checked > 0 else 0.0
+
+        return {
+            "coverage": {
+                "total": total,
+                "with_explanation": with_explanation,
+                "pct": coverage_pct,
+            },
+            "rationale_distribution": rationale_counts,
+            "strategy_variety": strategy_variety,
+            "stability": {
+                "instruments_checked": instruments_checked,
+                "flips": flips,
+                "flip_rate": flip_rate,
+            },
+            "window_s": window_s,
+        }
+
     def get_category_exposure_summary(self) -> Dict[str, Dict[str, int]]:
         """Count active instruments and plans per category."""
         instruments = self.list_instruments(status="active", limit=1000)
@@ -703,12 +991,20 @@ class PredictionConsensusStore:
 
     @staticmethod
     def _row_to_opinion(row: sqlite3.Row) -> PredictionOpinion:
+        explanation_raw = row["explanation"] if "explanation" in row.keys() else ""
+        explanation = None
+        if explanation_raw:
+            try:
+                explanation = json.loads(explanation_raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
         return PredictionOpinion(
             id=row["id"], agent_id=row["agent_id"], agent_name=row["agent_name"],
             symbol=row["symbol"], probability=row["probability"],
             confidence=row["confidence"], reasoning=row["reasoning"],
             signal_sources=json.loads(row["signal_sources"]),
-            horizon=row["horizon"], created_at=row["created_at"],
+            horizon=row["horizon"], explanation=explanation,
+            created_at=row["created_at"],
         )
 
     @staticmethod

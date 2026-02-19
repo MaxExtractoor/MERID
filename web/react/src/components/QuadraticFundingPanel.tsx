@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { Coins, FileText, Users, DollarSign, RefreshCw, CheckCircle, Clock, XCircle } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 // ── Types ───────────────────────────────────────────────────────
 
-interface Proposal {
+interface FundingProposal {
   proposal_id: string;
   title: string;
   description: string;
@@ -56,34 +58,17 @@ function usd(n: number): string {
 // ── Component ───────────────────────────────────────────────────
 
 export default function QuadraticFundingPanel() {
-  const [proposals, setProposals] = useState<Proposal[]>([]);
-  const [rounds, setRounds] = useState<RoundSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { data: proposals, loading: propLoading, error: propError } = useApiData<FundingProposal[]>(
+    API_ENDPOINTS.QUADRATIC_FUNDING_PROPOSALS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.INFREQUENT, initialData: [] },
+  );
+  const { data: rounds } = useApiData<RoundSummary[]>(
+    API_ENDPOINTS.QUADRATIC_FUNDING_ROUNDS + '?limit=10',
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.INFREQUENT, initialData: [] },
+  );
   const [tab, setTab] = useState<'proposals' | 'rounds'>('proposals');
-
-  const fetchData = useCallback(async () => {
-    try {
-      setError(null);
-      const [propRes, roundRes] = await Promise.all([
-        fetch('/api/v1/quadratic-funding/proposals'),
-        fetch('/api/v1/quadratic-funding/rounds/summary?limit=10'),
-      ]);
-
-      if (propRes.ok) setProposals(await propRes.json());
-      if (roundRes.ok) setRounds(await roundRes.json());
-    } catch (e: any) {
-      setError(e.message ?? 'Failed to load quadratic funding data');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 60000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+  const loading = propLoading && (!proposals || proposals.length === 0);
+  const error = propError?.message ?? null;
 
   if (loading) {
     return (
@@ -105,8 +90,10 @@ export default function QuadraticFundingPanel() {
     );
   }
 
-  const totalMatching = rounds.reduce((s, r) => s + r.matching_pool_usd, 0);
-  const totalAllocated = rounds.reduce((s, r) => s + r.total_allocated_usd, 0);
+  const pp = proposals ?? [];
+  const rr = rounds ?? [];
+  const totalMatching = rr.reduce((s, r) => s + r.matching_pool_usd, 0);
+  const totalAllocated = rr.reduce((s, r) => s + r.total_allocated_usd, 0);
 
   return (
     <div className="space-y-4">
@@ -116,7 +103,7 @@ export default function QuadraticFundingPanel() {
           <Coins className="w-5 h-5 text-amber-400" />
           <h3 className="text-lg font-bold text-white">Quadratic Funding</h3>
         </div>
-        <button onClick={() => { setLoading(true); fetchData(); }} className="p-1.5 rounded hover:bg-slate-700 text-slate-400 hover:text-white" title="Refresh">
+        <button type="button" onClick={() => { /* polling handles refresh */ }} className="p-1.5 rounded hover:bg-slate-700 text-slate-400 hover:text-white" title="Refresh">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -124,8 +111,8 @@ export default function QuadraticFundingPanel() {
       {/* Summary stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label: 'Proposals', value: proposals.length.toString(), icon: FileText, color: 'text-blue-400' },
-          { label: 'Rounds', value: rounds.length.toString(), icon: Coins, color: 'text-amber-400' },
+          { label: 'Proposals', value: pp.length.toString(), icon: FileText, color: 'text-blue-400' },
+          { label: 'Rounds', value: rr.length.toString(), icon: Coins, color: 'text-amber-400' },
           { label: 'Total Matching', value: usd(totalMatching), icon: DollarSign, color: 'text-green-400' },
           { label: 'Total Allocated', value: usd(totalAllocated), icon: Users, color: 'text-purple-400' },
         ].map(s => {
@@ -145,14 +132,14 @@ export default function QuadraticFundingPanel() {
       {/* Tab bar */}
       <div className="flex gap-1 bg-slate-800/50 rounded-lg p-1">
         {(['proposals', 'rounds'] as const).map(t => (
-          <button
+          <button type="button"
             key={t}
             onClick={() => setTab(t)}
             className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors capitalize ${
               tab === t ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            {t} ({t === 'proposals' ? proposals.length : rounds.length})
+            {t} ({t === 'proposals' ? pp.length : rr.length})
           </button>
         ))}
       </div>
@@ -160,10 +147,10 @@ export default function QuadraticFundingPanel() {
       {/* Proposals tab */}
       {tab === 'proposals' && (
         <div className="space-y-2">
-          {proposals.length === 0 ? (
+          {pp.length === 0 ? (
             <p className="text-sm text-slate-500 text-center py-6">No proposals submitted yet</p>
           ) : (
-            proposals.map(p => {
+            pp.map(p => {
               const Icon = statusIcon(p.status);
               return (
                 <div key={p.proposal_id} className="bg-slate-800/60 border border-slate-700/50 rounded-lg p-4 hover:border-blue-500/30 transition-colors">
@@ -192,10 +179,10 @@ export default function QuadraticFundingPanel() {
       {/* Rounds tab */}
       {tab === 'rounds' && (
         <div className="space-y-3">
-          {rounds.length === 0 ? (
+          {rr.length === 0 ? (
             <p className="text-sm text-slate-500 text-center py-6">No funding rounds yet</p>
           ) : (
-            rounds.map(r => (
+            rr.map(r => (
               <div key={r.round_id} className="bg-slate-800/60 border border-slate-700/50 rounded-lg p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">

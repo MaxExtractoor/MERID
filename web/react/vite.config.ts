@@ -1,35 +1,42 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
-export default defineConfig({
-  plugins: [react()],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
+export default defineConfig(({ mode }) => {
+  const rootDir = path.resolve(__dirname, '../..')
+  const env = loadEnv(mode, rootDir, '')
+  const backendHost = env.MERID_BACKEND_HOST || '127.0.0.1'
+  const backendPort = env.MERID_BACKEND_PORT || '8000'
+  const backendHttp = `http://${backendHost}:${backendPort}`
+  const backendWs = `ws://${backendHost}:${backendPort}`
+
+  return {
+    plugins: [react()],
+    build: {
+      target: 'esnext',
     },
-  },
-  server: {
-    port: 5173,
-    strictPort: true,  // Fail if port is already in use instead of incrementing
-    host: true,
-    proxy: {
-      '/api/v1/consensus/ws': {
-        target: 'ws://127.0.0.1:8000',
-        ws: true,
-        changeOrigin: true,
-      },
-      '/api': {
-        target: 'http://127.0.0.1:8000',
-        changeOrigin: true,
-        secure: false,
-        ws: true,
-      },
-      '/ws': {
-        target: 'ws://127.0.0.1:8000',
-        ws: true,
-        changeOrigin: true,
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src'),
       },
     },
-  },
+    server: {
+      port: 5173,
+      strictPort: true,  // Fail if port is already in use instead of incrementing
+      host: true,
+      proxy: {
+        '/api': {
+          target: backendHttp,
+          changeOrigin: true,
+          secure: false,
+          ws: true,
+        },
+        '/ws': {
+          target: backendWs,
+          ws: true,
+          changeOrigin: true,
+        },
+      },
+    },
+  }
 })

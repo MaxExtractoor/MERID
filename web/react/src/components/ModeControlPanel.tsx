@@ -1,8 +1,20 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import {
   Settings, Shield, AlertTriangle,
   RefreshCw, Play, Pause, Zap
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS} from '../config/constants';
+
+function authHeaders(headers?: HeadersInit): HeadersInit {
+  const token = localStorage.getItem('merid-access');
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(headers ?? {}),
+  };
+}
 
 interface VenueMode {
   venue: string;
@@ -25,40 +37,18 @@ const DOMAIN_COLORS: Record<string, string> = {
 };
 
 export default function ModeControlPanel() {
-  const [venues, setVenues] = useState<VenueMode[]>([]);
-  const [loading, setLoading] = useState(true);
   const [confirmAction, setConfirmAction] = useState<{ venue: string; mode: string } | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const fetchVenues = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/pipeline/venues');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.venues) {
-          setVenues(data.venues);
-          return;
-        }
-      }
-    } catch {
-      // fallback
-    }
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ venues: VenueMode[] }>(
+    API_ENDPOINTS.PIPELINE_VENUES,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM },
+  );
 
-    setVenues([
-      { venue: 'kalshi', domain: 'prediction', mode: 'PAPER', enabled: true, lastModeChange: new Date(Date.now() - 3600000).toISOString() },
-      { venue: 'binance', domain: 'crypto', mode: 'SIM', enabled: true, lastModeChange: new Date(Date.now() - 7200000).toISOString() },
-      { venue: 'coinbase', domain: 'crypto', mode: 'SIM', enabled: true, lastModeChange: new Date(Date.now() - 86400000).toISOString() },
-      { venue: 'kraken', domain: 'crypto', mode: 'SIM', enabled: false, lastModeChange: new Date(Date.now() - 172800000).toISOString() },
-      { venue: 'alpaca', domain: 'equity', mode: 'PAPER', enabled: true, lastModeChange: new Date(Date.now() - 43200000).toISOString() },
-      { venue: 'ibkr', domain: 'equity', mode: 'SIM', enabled: false, lastModeChange: new Date(Date.now() - 259200000).toISOString() },
-    ]);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchVenues();
-    const interval = setInterval(fetchVenues, 10000);
-    return () => clearInterval(interval);
-  }, [fetchVenues]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Mode control" error={fetchError} onRetry={refetch} />;
+  }
+  const venues = rawData?.venues ?? [];
 
   const changeMode = async (venue: string, newMode: string) => {
     if (newMode === 'LIVE') {
@@ -69,35 +59,37 @@ export default function ModeControlPanel() {
   };
 
   const doChangeMode = async (venue: string, newMode: string) => {
+    setActionError(null);
     try {
-      await fetch('/api/v1/pipeline/venue/mode', {
+      const modeRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.PIPELINE_VENUE_MODE}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ venue, mode: newMode.toLowerCase() }),
       });
-    } catch {
-      // ignore
+      if (!modeRes.ok) throw new Error(`HTTP ${modeRes.status}`);
+    } catch (err) {
+      setActionError(`Mode change failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
-    setVenues(prev => prev.map(v =>
-      v.venue === venue ? { ...v, mode: newMode as VenueMode['mode'], lastModeChange: new Date().toISOString() } : v
-    ));
+    refetch();
     setConfirmAction(null);
   };
 
   const toggleEnabled = async (venue: string, enabled: boolean) => {
-    const endpoint = enabled ? '/api/v1/pipeline/venue/enable' : '/api/v1/pipeline/venue/disable';
+    setActionError(null);
+    const endpoint = enabled
+      ? API_ENDPOINTS.PIPELINE_VENUE_TOGGLE('enable')
+      : API_ENDPOINTS.PIPELINE_VENUE_TOGGLE('disable');
     try {
-      await fetch(endpoint, {
+      const toggleRes = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ venue }),
       });
-    } catch {
-      // ignore
+      if (!toggleRes.ok) throw new Error(`HTTP ${toggleRes.status}`);
+    } catch (err) {
+      setActionError(`Toggle failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
-    setVenues(prev => prev.map(v =>
-      v.venue === venue ? { ...v, enabled } : v
-    ));
+    refetch();
   };
 
   const formatTimeAgo = (ts: string) => {
@@ -126,6 +118,13 @@ export default function ModeControlPanel() {
 
   return (
     <div className="space-y-4">
+      {actionError && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span className="truncate">{actionError}</span>
+          <button type="button" onClick={() => setActionError(null)} className="ml-auto shrink-0 text-slate-400 hover:text-white" aria-label="Dismiss error">&times;</button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -137,11 +136,11 @@ export default function ModeControlPanel() {
             <span className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-400">{liveCount} LIVE</span>
           </div>
         </div>
-        <button
-          onClick={fetchVenues}
+        <button type="button"
+          onClick={() => refetch()}
           className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
           title="Refresh venue modes"
-        >
+         aria-label="Refresh">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -150,7 +149,6 @@ export default function ModeControlPanel() {
       <div className="space-y-3">
         {venues.map(v => {
           const domainColor = DOMAIN_COLORS[v.domain] || 'border-l-gray-400';
-          const modeCfg = MODE_COLORS[v.mode];
 
           return (
             <div
@@ -169,7 +167,7 @@ export default function ModeControlPanel() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-gray-500">{formatTimeAgo(v.lastModeChange)}</span>
-                  <button
+                  <button type="button"
                     onClick={() => toggleEnabled(v.venue, !v.enabled)}
                     className={`p-1 rounded transition-colors ${
                       v.enabled
@@ -189,7 +187,7 @@ export default function ModeControlPanel() {
                   const isActive = v.mode === mode;
                   const cfg = MODE_COLORS[mode];
                   return (
-                    <button
+                    <button type="button"
                       key={mode}
                       onClick={() => v.enabled && changeMode(v.venue, mode)}
                       disabled={!v.enabled}
@@ -229,13 +227,13 @@ export default function ModeControlPanel() {
               Ensure all risk limits are configured and the venue adapter is properly connected.
             </p>
             <div className="flex gap-3">
-              <button
+              <button type="button"
                 onClick={() => setConfirmAction(null)}
                 className="flex-1 py-2 px-4 rounded-lg bg-slate-700 text-gray-300 hover:bg-slate-600 transition-colors"
               >
                 Cancel
               </button>
-              <button
+              <button type="button"
                 onClick={() => doChangeMode(confirmAction.venue, confirmAction.mode)}
                 className="flex-1 py-2 px-4 rounded-lg bg-red-600 text-white hover:bg-red-500 transition-colors font-medium"
               >

@@ -127,8 +127,8 @@ class CoinbasePriceFeed:
         if self._ws:
             try:
                 await self._ws.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("async_op_suppressed", error=str(exc))
         if self._task:
             self._task.cancel()
             try:
@@ -139,7 +139,6 @@ class CoinbasePriceFeed:
 
     async def _run_loop(self):
         """Main WS loop with auto-reconnect."""
-        import websockets
 
         while self._running:
             try:

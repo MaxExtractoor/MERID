@@ -8,6 +8,7 @@
 
 import { useState, useEffect } from 'react';
 import { Wifi, WifiOff, Clock } from 'lucide-react';
+import { DEFAULTS } from "../config/constants";
 
 interface StalenessIndicatorProps {
   lastUpdated: Date | null;
@@ -27,7 +28,7 @@ export function StalenessIndicator({
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(Date.now()), DEFAULTS.POLLING_INTERVALS.STALENESS);
     return () => clearInterval(id);
   }, []);
 

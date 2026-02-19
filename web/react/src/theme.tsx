@@ -1,10 +1,11 @@
+/* eslint-disable react-refresh/only-export-components */
 import React from "react";
 
 type Theme = "light" | "dark";
 const ThemeContext = React.createContext<{
   theme: Theme;
   toggleTheme: () => void;
-}>({ theme: "dark", toggleTheme: () => {} });
+}>({ theme: "dark", toggleTheme: () => undefined });
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [theme, setTheme] = React.useState<Theme>(() => {

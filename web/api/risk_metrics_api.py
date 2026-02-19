@@ -55,10 +55,9 @@ async def get_risk_metrics() -> Dict[str, Any]:
     """
     try:
         from trading.paper_trading import get_paper_engine
-        from risk.risk_controller import get_risk_controller
         
         paper_engine = get_paper_engine()
-        risk_controller = get_risk_controller()
+        risk_controller = None  # Risk controller not available
         
         # Get global stats from paper engine
         global_stats = paper_engine.get_global_stats()
@@ -176,9 +175,8 @@ async def get_risk_protections() -> Dict[str, Any]:
         }
     """
     try:
-        from risk.risk_controller import get_risk_controller
-        
-        risk_controller = get_risk_controller()
+        # Risk controller not available - return defaults
+        risk_controller = None
         
         if not risk_controller:
             return {

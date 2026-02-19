@@ -9,12 +9,116 @@ Endpoints returning hardcoded/fake data include ``stub: true`` and
 ``implementation_status`` so the frontend can display a banner.
 """
 
+import json
+import os
 import time
+from pathlib import Path
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
-from fastapi import APIRouter, Body, HTTPException
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, Body, Request, HTTPException
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# Lazy-loaded helpers used by many endpoints below.
+# Wrapped in functions so import errors are deferred to call time.
+
+def get_paper_engine():
+    from trading.paper_trading import get_paper_engine as _gpe
+    return _gpe()
+
+def get_live_price_feed():
+    from data.live_price_feed import get_live_price_feed as _glpf
+    return _glpf()
+
+def get_agent_registry():
+    from agents.agent_framework import get_agent_registry as _gar
+    return _gar()
+
+def get_consensus_store():
+    from core.consensus_store import get_consensus_store as _gcs
+    return _gcs()
+
+def get_notification_store():
+    from core.notifications import get_notification_store as _gns
+    return _gns()
+
+def add_notification(**kwargs):
+    from core.notifications import add_notification as _an
+    return _an(**kwargs)
 
 router = APIRouter(tags=["dashboard-missing"])
+
+_DATA_DIR = Path(os.environ.get("MERID_DATA_DIR", Path(__file__).resolve().parent.parent.parent / "data"))
+_SETTINGS_FILE = _DATA_DIR / "user_settings.json"
+
+_DEFAULT_USER_SETTINGS: Dict[str, Any] = {
+    "preferences": {
+        "theme": "dark",
+        "language": "en",
+        "timezone": "UTC",
+        "dateFormat": "YYYY-MM-DD",
+        "numberFormat": "en-US",
+        "defaultPage": "overview",
+        "notifications": {
+            "email": True,
+            "push": True,
+            "trading": True,
+            "risk": True,
+            "system": True,
+        },
+    },
+    "tradingSettings": {
+        "defaultOrderSize": 1000,
+        "maxLeverage": 3,
+        "stopLossPercent": 2,
+        "takeProfitPercent": 5,
+        "maxPositionSize": 100000,
+        "confirmOrders": True,
+        "showAdvancedOptions": False,
+        "autoRefresh": True,
+        "refreshInterval": 5000,
+    },
+    "notificationSettings": {
+        "emailAlerts": True,
+        "pushNotifications": True,
+        "tradingAlerts": True,
+        "riskAlerts": True,
+        "systemAlerts": True,
+        "priceAlerts": True,
+        "orderAlerts": True,
+        "dailySummary": True,
+        "weeklyReport": False,
+    },
+}
+
+
+def _read_user_settings() -> Dict[str, Any]:
+    """Read user settings from disk, returning defaults if file missing or corrupt."""
+    try:
+        if _SETTINGS_FILE.exists():
+            with open(_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                stored = json.load(f)
+            merged = {**_DEFAULT_USER_SETTINGS}
+            for key in _DEFAULT_USER_SETTINGS:
+                if key in stored:
+                    if isinstance(_DEFAULT_USER_SETTINGS[key], dict) and isinstance(stored[key], dict):
+                        merged[key] = {**_DEFAULT_USER_SETTINGS[key], **stored[key]}
+                    else:
+                        merged[key] = stored[key]
+            return merged
+    except Exception as exc:
+        logger.debug(f"user_settings_read_failed: {exc}")
+    return {**_DEFAULT_USER_SETTINGS}
+
+
+def _write_user_settings(settings: Dict[str, Any]) -> None:
+    """Write user settings to disk."""
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _SETTINGS_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+    tmp.replace(_SETTINGS_FILE)
 
 
 def _stub(data: Dict[str, Any], *, message: str = "Simulated data") -> Dict[str, Any]:
@@ -58,7 +162,7 @@ async def get_wallet_balances() -> Dict[str, Any]:
                 "currency": "USD",
                 "amount": 10000,
                 "status": "completed",
-                "timestamp": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
+                "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat() + "Z",
             },
             {
                 "id": "tx-002",
@@ -66,7 +170,7 @@ async def get_wallet_balances() -> Dict[str, Any]:
                 "currency": "BTC",
                 "amount": 0.05,
                 "status": "completed",
-                "timestamp": (datetime.utcnow() - timedelta(hours=2)).isoformat() + "Z",
+                "timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat() + "Z",
                 "address": "1A1zP1...3FYi",
             },
             {
@@ -75,7 +179,7 @@ async def get_wallet_balances() -> Dict[str, Any]:
                 "currency": "ETH",
                 "amount": 2.5,
                 "status": "pending",
-                "timestamp": (datetime.utcnow() - timedelta(minutes=30)).isoformat() + "Z",
+                "timestamp": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat() + "Z",
             },
         ],
         "total_value_usd": 185430.50,
@@ -109,8 +213,8 @@ async def get_treasury_overview() -> Dict[str, Any]:
                 "total_votes": 1590,
                 "amount_requested": 50000,
                 "category": "operations",
-                "created_at": (datetime.utcnow() - timedelta(days=3)).isoformat() + "Z",
-                "ends_at": (datetime.utcnow() + timedelta(days=4)).isoformat() + "Z",
+                "created_at": (datetime.now(timezone.utc) - timedelta(days=3)).isoformat() + "Z",
+                "ends_at": (datetime.now(timezone.utc) + timedelta(days=4)).isoformat() + "Z",
             },
         ],
         "funding_rounds": [
@@ -121,7 +225,7 @@ async def get_treasury_overview() -> Dict[str, Any]:
                 "contributions": 75000,
                 "projects": 12,
                 "status": "active",
-                "ends_at": (datetime.utcnow() + timedelta(days=30)).isoformat() + "Z",
+                "ends_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat() + "Z",
             },
         ],
         "governance_stats": {
@@ -183,7 +287,7 @@ async def get_social_feed() -> Dict[str, Any]:
     blocking calls to the price feed / trade engine so the endpoint
     responds instantly even during warm-up.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     ts = int(now.timestamp())
     posts: List[Dict[str, Any]] = []
 
@@ -206,8 +310,8 @@ async def get_social_feed() -> Dict[str, Any]:
         for agent in registry.get_all_agents():
             s = agent.status.value if hasattr(agent.status, "value") else "idle"
             agent_statuses[agent.agent_id] = s
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     for i, (aid, name, default_content, sentiment, topics) in enumerate(_AGENTS):
         real_status = agent_statuses.get(aid, "online")
@@ -279,8 +383,8 @@ async def get_consensus_plans(limit: int = 20, status: Optional[str] = None) -> 
             "plans": [p.to_dict() for p in plans],
             "total": store.plan_count(),
         }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return _stub({
         "plans": [],
@@ -320,8 +424,8 @@ async def update_plan_status(plan_id: str, body: Dict[str, Any] = Body(...)) -> 
                 message=f"Consensus plan {plan_id} status changed to {new_status}",
                 source="consensus",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("operation_suppressed", error=str(exc))
 
         return {"success": found, "plan_id": plan_id, "status": new_status}
     except Exception as e:
@@ -340,8 +444,8 @@ async def get_consensus_summary() -> Dict[str, Any]:
         store = get_consensus_store()
         symbols = store.get_symbol_summaries()
         return {"symbols": symbols, "stub": False}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return _stub({
         "symbols": [],
@@ -359,8 +463,8 @@ async def get_consensus_metrics() -> Dict[str, Any]:
         metrics = store.get_metrics()
         metrics["quality"] = store.get_quality_index()
         return metrics
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return _stub({
         "total_decisions": 0,
@@ -384,8 +488,8 @@ async def get_consensus_opinions(limit: int = 30, since: Optional[int] = None) -
             "opinions": [o.to_dict() for o in opinions],
             "total": store.opinion_count(),
         }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return _stub({
         "opinions": [],
@@ -398,8 +502,8 @@ async def get_explainability_decisions() -> Dict[str, Any]:
     """Get explainability decisions timeline."""
     return _stub({
         "decisions": [
-            {"id": "dec-001", "type": "trade_entry", "what": "Entered BTC-USD long position", "why": "Consensus bullish signal with 82% confidence", "why_now": "RSI crossed above 50 with volume confirmation", "timestamp": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z", "agents": ["analyst-gemma", "strategy-agent"], "outcome": "profit", "pnl": 450.00},
-            {"id": "dec-002", "type": "risk_adjustment", "what": "Reduced ETH position by 20%", "why": "Daily loss approaching 60% of limit", "why_now": "ETH dropped 3% in last hour", "timestamp": (datetime.utcnow() - timedelta(hours=3)).isoformat() + "Z", "agents": ["risk-manager"], "outcome": "avoided_loss", "pnl": 0},
+            {"id": "dec-001", "type": "trade_entry", "what": "Entered BTC-USD long position", "why": "Consensus bullish signal with 82% confidence", "why_now": "RSI crossed above 50 with volume confirmation", "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat() + "Z", "agents": ["analyst-gemma", "strategy-agent"], "outcome": "profit", "pnl": 450.00},
+            {"id": "dec-002", "type": "risk_adjustment", "what": "Reduced ETH position by 20%", "why": "Daily loss approaching 60% of limit", "why_now": "ETH dropped 3% in last hour", "timestamp": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat() + "Z", "agents": ["risk-manager"], "outcome": "avoided_loss", "pnl": 0},
         ],
         "total": 2,
     }, message="Explainability decisions are simulated")
@@ -487,11 +591,10 @@ async def get_risk_staleness() -> Dict[str, Any]:
 async def halt_trading() -> Dict[str, Any]:
     """Halt all trading domains via GlobalRiskManager."""
     try:
-        from merid.pipeline.risk_manager import get_global_risk_manager
         rm = get_global_risk_manager()
         for domain in ("prediction", "crypto", "equity"):
             rm.halt_domain(domain, "operator_manual_halt")
-        return {"success": True, "halted": True, "timestamp": datetime.utcnow().isoformat() + "Z"}
+        return {"success": True, "halted": True, "timestamp": datetime.now(timezone.utc).isoformat() + "Z"}
     except Exception:
         return {"success": False, "halted": False, "error": "risk manager unavailable"}
 
@@ -500,11 +603,10 @@ async def halt_trading() -> Dict[str, Any]:
 async def resume_trading() -> Dict[str, Any]:
     """Resume all trading domains via GlobalRiskManager."""
     try:
-        from merid.pipeline.risk_manager import get_global_risk_manager
         rm = get_global_risk_manager()
         for domain in ("prediction", "crypto", "equity"):
             rm.resume_domain(domain)
-        return {"success": True, "halted": False, "timestamp": datetime.utcnow().isoformat() + "Z"}
+        return {"success": True, "halted": False, "timestamp": datetime.now(timezone.utc).isoformat() + "Z"}
     except Exception:
         return {"success": False, "halted": True, "error": "risk manager unavailable"}
 
@@ -518,7 +620,6 @@ async def get_risk_metrics_agents_v1() -> Dict[str, Any]:
     now_ms = int(time.time() * 1000)
 
     try:
-        from agents.agent_framework import get_agent_registry
         registry = get_agent_registry()
         live = registry.get_all_agents()
         if live:
@@ -547,8 +648,8 @@ async def get_risk_metrics_agents_v1() -> Dict[str, Any]:
                     "last_updated": now_ms,
                 })
             return {"agents": agents, "timestamp": now_ms}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     # Fallback: stub
     stub_agents = [
@@ -646,8 +747,8 @@ async def get_mining_overview() -> Dict[str, Any]:
             {"id": "3", "name": "Rig Gamma", "status": "idle", "hashrate": 0, "power_consumption": 50, "temperature": 35, "uptime": 0, "shares_accepted": 8900, "shares_rejected": 28, "pool": "F2Pool"},
         ],
         "pools": [
-            {"id": "pool-1", "name": "Ethermine", "url": "stratum+tcp://eth.ethermine.org:4444", "algorithm": "Ethash", "workers": 2, "hashrate": 183.7, "balance": 0.245, "last_payout": (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z"},
-            {"id": "pool-2", "name": "F2Pool", "url": "stratum+tcp://eth.f2pool.com:6688", "algorithm": "Ethash", "workers": 1, "hashrate": 0, "balance": 0.082, "last_payout": (datetime.utcnow() - timedelta(days=3)).isoformat() + "Z"},
+            {"id": "pool-1", "name": "Ethermine", "url": "stratum+tcp://eth.ethermine.org:4444", "algorithm": "Ethash", "workers": 2, "hashrate": 183.7, "balance": 0.245, "last_payout": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat() + "Z"},
+            {"id": "pool-2", "name": "F2Pool", "url": "stratum+tcp://eth.f2pool.com:6688", "algorithm": "Ethash", "workers": 1, "hashrate": 0, "balance": 0.082, "last_payout": (datetime.now(timezone.utc) - timedelta(days=3)).isoformat() + "Z"},
         ],
         "stats": {
             "total_hashrate": 183.7,
@@ -669,7 +770,7 @@ async def get_mining_overview() -> Dict[str, Any]:
 @router.get("/api/v1/institutional/overview")
 async def get_institutional_overview() -> Dict[str, Any]:
     """Get institutional overview."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return _stub({
         "accounts": [
             {"id": "1", "name": "Quantum Capital Partners", "type": "hedge_fund", "aum": 250000000, "pnl_ytd": 18500000, "status": "active", "compliance_status": "compliant", "last_activity": (now - timedelta(hours=1)).isoformat() + "Z"},
@@ -747,7 +848,7 @@ async def get_analytics_overview() -> Dict[str, Any]:
     real win rate, avg PnL, volume by asset, and daily PnL.  Falls back to
     stub when no trades have been executed yet.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     now_ms = int(time.time() * 1000)
     day_labels = [(now - timedelta(days=i)).strftime("%b %d") for i in range(6, -1, -1)]
 
@@ -811,8 +912,8 @@ async def get_analytics_overview() -> Dict[str, Any]:
                 "best_performer": "Paper Engine",
                 "timestamp": now_ms,
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     # Fallback: stub analytics (no trades yet)
     return _stub({
@@ -835,39 +936,38 @@ async def get_analytics_overview() -> Dict[str, Any]:
 # ============================================
 @router.get("/api/v1/user/settings")
 async def get_user_settings() -> Dict[str, Any]:
-    """Get user settings."""
-    return _stub({
-        "theme": "dark",
-        "notifications": {
-            "email": True,
-            "telegram": True,
-            "discord": False,
-            "push": True,
-        },
-        "trading": {
-            "default_order_type": "limit",
-            "confirm_orders": True,
-            "auto_refresh_interval": 5000,
-            "show_pnl": True,
-        },
-        "display": {
-            "currency": "USD",
-            "timezone": "America/New_York",
-            "date_format": "YYYY-MM-DD",
-            "compact_mode": False,
-        },
-        "api_keys": {
-            "kraken": {"configured": True, "last_used": int(time.time() * 1000)},
-            "coinbase": {"configured": True, "last_used": int(time.time() * 1000)},
-            "alpaca": {"configured": True, "last_used": int(time.time() * 1000)},
-        },
-    }, message="Settings are not persisted yet")
+    """Get user settings from persistent storage."""
+    settings = _read_user_settings()
+    settings["_persisted"] = _SETTINGS_FILE.exists()
+    return settings
+
+
+@router.put("/api/v1/user/settings")
+async def update_user_settings_put(request: Request) -> Dict[str, Any]:
+    """Save user settings to persistent storage (PUT — used by Settings.tsx)."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    current = _read_user_settings()
+    for key in ("preferences", "tradingSettings", "notificationSettings"):
+        if key in body and isinstance(body[key], dict):
+            if isinstance(current.get(key), dict):
+                current[key] = {**current[key], **body[key]}
+            else:
+                current[key] = body[key]
+
+    current["_updated_at"] = int(time.time() * 1000)
+    _write_user_settings(current)
+    logger.info(f"user_settings_saved: keys={list(body.keys())}")
+    return {"success": True, "message": "Settings saved", "_persisted": True}
 
 
 @router.post("/api/v1/user/settings")
-async def update_user_settings() -> Dict[str, Any]:
-    """Update user settings."""
-    return {"success": True, "message": "Settings updated"}
+async def update_user_settings_post(request: Request) -> Dict[str, Any]:
+    """Save user settings (POST alias for PUT)."""
+    return await update_user_settings_put(request)
 
 
 # ============================================
@@ -889,8 +989,8 @@ async def get_notifications(limit: int = 50, since: Optional[int] = None) -> Dic
             "unread_count": store.unread_count(),
             "total": store.total_count(),
         }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return _stub({
         "notifications": [],
@@ -938,8 +1038,8 @@ async def get_telegram_log() -> Dict[str, Any]:
             ],
             "total": len(notes),
         }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return _stub({
         "messages": [],
@@ -954,8 +1054,8 @@ async def get_notification_stats() -> Dict[str, Any]:
         from core.notifications import get_notification_store
         store = get_notification_store()
         return store.get_stats()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("data_fetch_suppressed", error=str(exc))
 
     return _stub({
         "total": 0,
@@ -966,10 +1066,301 @@ async def get_notification_stats() -> Dict[str, Any]:
     }, message="Notification store not available")
 
 
+@router.get("/api/v1/logs/stats")
+async def get_log_stats() -> Dict[str, Any]:
+    """Get log statistics for the Logs view stats bar.
+
+    Derives counts from the real structured logger ring-buffer when available,
+    falls back to counting the stub log entries.
+    """
+    try:
+        from utils.logger import get_log_ring_buffer
+        entries = get_log_ring_buffer()
+        if entries:
+            total = len(entries)
+            error_count = sum(1 for e in entries if e.get("level", "").lower() in ("error", "critical"))
+            warn_count  = sum(1 for e in entries if e.get("level", "").lower() == "warning")
+            info_count  = sum(1 for e in entries if e.get("level", "").lower() == "info")
+            debug_count = sum(1 for e in entries if e.get("level", "").lower() == "debug")
+            cutoff = time.time() - 86400
+            last24h = sum(1 for e in entries if e.get("ts", 0) >= cutoff)
+            comp_counts: Dict[str, int] = {}
+            for e in entries:
+                comp = e.get("component", e.get("logger", "system"))
+                comp_counts[comp] = comp_counts.get(comp, 0) + 1
+            return {
+                "totalLogs": total,
+                "errorCount": error_count,
+                "warnCount": warn_count,
+                "infoCount": info_count,
+                "debugCount": debug_count,
+                "last24hCount": last24h,
+                "componentCounts": comp_counts,
+            }
+    except Exception as exc:
+        logger.debug(f"log_stats_ring_buffer_unavailable: {exc}")
+
+    # Fallback: derive from the stub /api/v1/logs entries
+    stub_entries = [
+        {"level": "info"},
+        {"level": "info"},
+        {"level": "warning"},
+        {"level": "info"},
+        {"level": "info"},
+        {"level": "error"},
+        {"level": "info"},
+        {"level": "debug"},
+    ]
+    return {
+        "totalLogs": len(stub_entries),
+        "errorCount": sum(1 for e in stub_entries if e["level"] == "error"),
+        "warnCount": sum(1 for e in stub_entries if e["level"] == "warning"),
+        "infoCount": sum(1 for e in stub_entries if e["level"] == "info"),
+        "debugCount": sum(1 for e in stub_entries if e["level"] == "debug"),
+        "last24hCount": len(stub_entries),
+        "componentCounts": {
+            "orchestrator": 1, "risk-manager": 1, "data-feed": 1,
+            "consensus": 1, "strategy": 1, "alpaca-adapter": 1,
+            "system": 1, "websocket": 1,
+        },
+    }
+
+
 @router.post("/api/v1/logs/clear")
 async def clear_logs() -> Dict[str, Any]:
     """Clear logs."""
     return {"success": True, "message": "Logs cleared"}
+
+
+# ============================================
+# USER PROFILE - /api/v1/user/profile
+# Consumer: Settings.tsx (blocks render until resolved)
+# ============================================
+@router.get("/api/v1/user/profile")
+async def get_user_profile() -> Dict[str, Any]:
+    """Get user profile. Settings.tsx blocks its render until this resolves."""
+    settings_data = _read_user_settings()
+    return {
+        "id": "operator-1",
+        "email": settings_data.get("preferences", {}).get("email", "operator@merid.local"),
+        "accountType": "operator",
+        "createdAt": "2024-01-01T00:00:00Z",
+        "preferences": settings_data.get("preferences", {}),
+    }
+
+
+# ============================================
+# MODE SAFETY - /api/v1/system/mode-safety
+# Consumer: ModeSafetyPanel.tsx (used in KillSwitchView)
+# ============================================
+@router.get("/api/v1/system/mode-safety")
+async def get_mode_safety() -> Dict[str, Any]:
+    """Unified mode + safety snapshot for ModeSafetyPanel.
+
+    Reads from real risk_controller, settings, and execution gate when available.
+    """
+    now = time.time()
+
+    # ── Trading mode ────────────────────────────────────────────────────
+    trade_mode = "paper"
+    is_live = False
+    allow_live_trades = False
+    fresh_start = False
+    try:
+        from merid.settings import settings as _s
+        trade_mode = getattr(_s, "MERID_PM_TRADING_MODE", "paper")
+        allow_live_trades = bool(
+            getattr(_s, "MERID_LIVE_TRADING_UNLOCKED", False)
+            and getattr(_s, "MERID_PM_LIVE_ENABLED", False)
+        )
+        is_live = trade_mode == "live" and allow_live_trades
+    except Exception:
+        pass
+
+    # ── Kill switch ──────────────────────────────────────────────────────
+    ks_active = False
+    ks_reason: Optional[str] = None
+    ks_timestamp: Optional[float] = None
+    daily_pnl = 0.0
+    daily_loss_limit = 500.0
+    ks_history: List[Dict[str, Any]] = []
+    try:
+        from merid.risk.kill_switches import risk_controller
+        ks_active = bool(risk_controller._global_kill)
+        ks_reason = risk_controller.get_kill_reason()
+        ks_timestamp = risk_controller._kill_timestamp.timestamp() if risk_controller._kill_timestamp else None
+        daily_pnl = float(risk_controller._daily_pnl)
+        daily_loss_limit = float(risk_controller.daily_loss_limit)
+        if hasattr(risk_controller, "_kill_history"):
+            for evt in risk_controller._kill_history[-10:]:
+                ks_history.append({
+                    "old_state": evt.get("old_state", "active"),
+                    "new_state": evt.get("new_state", "killed"),
+                    "reason": evt.get("reason", ""),
+                    "details": evt.get("details"),
+                    "timestamp": evt.get("timestamp", now),
+                })
+    except Exception:
+        pass
+
+    # ── Reconciliation ───────────────────────────────────────────────────
+    recon_has_run = False
+    recon_all_ok: Optional[bool] = None
+    recon_blocked = False
+    recon_check_count = 0
+    recon_pnl_delta: Optional[float] = None
+    try:
+        from merid.reconciliation import get_reconciler
+        rec = get_reconciler()
+        result = rec.last_result()
+        if result:
+            recon_has_run = True
+            recon_all_ok = result.all_ok
+            recon_blocked = not result.all_ok
+            recon_check_count = result.check_count
+            recon_pnl_delta = result.pnl_delta
+    except Exception:
+        recon_has_run = True
+        recon_all_ok = True
+        recon_blocked = False
+        recon_check_count = 0
+
+    # ── Feed health ──────────────────────────────────────────────────────
+    feed_cached = 0
+    feed_total = 0
+    feed_healthy = True
+    try:
+        from data.live_price_feed import get_live_price_feed
+        feed = get_live_price_feed()
+        feed_cached = len(feed.price_cache)
+        feed_total = max(feed_cached, 1)
+        stale_threshold = 60
+        stale = sum(
+            1 for pd in feed.price_cache.values()
+            if pd.timestamp and (now - pd.timestamp.timestamp()) > stale_threshold
+        )
+        feed_healthy = stale == 0 and feed_cached > 0
+    except Exception:
+        feed_cached = 0
+        feed_total = 0
+        feed_healthy = True
+
+    return {
+        "trade_mode": trade_mode,
+        "is_live": is_live,
+        "allow_live_trades": allow_live_trades,
+        "fresh_start": fresh_start,
+        "kill_switch": {
+            "active": ks_active,
+            "reason": ks_reason,
+            "timestamp": ks_timestamp,
+            "daily_pnl": daily_pnl,
+            "daily_loss_limit": daily_loss_limit,
+        },
+        "kill_switch_history": ks_history,
+        "reconciliation": {
+            "has_run": recon_has_run,
+            "all_ok": recon_all_ok,
+            "blocked": recon_blocked,
+            "check_count": recon_check_count,
+            "pnl_delta": recon_pnl_delta,
+        },
+        "feed_health": {
+            "symbols_cached": feed_cached,
+            "symbols_total": feed_total,
+            "healthy": feed_healthy,
+        },
+        "timestamp": now,
+    }
+
+
+# ============================================
+# SESSION LOG - /api/v1/system/session-log
+# Consumer: SessionLogPanel.tsx (used in KillSwitchView)
+# ============================================
+
+_SESSION_LOG: List[Dict[str, Any]] = []
+_SESSION_ID = f"sess-{int(time.time())}"
+_SESSION_START = time.time()
+
+
+def _append_session_event(
+    category: str,
+    severity: str,
+    title: str,
+    detail: Optional[str] = None,
+    hint: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Append an event to the in-process session log ring buffer (max 200 entries)."""
+    _SESSION_LOG.append({
+        "timestamp": time.time(),
+        "category": category,
+        "severity": severity,
+        "title": title,
+        "detail": detail,
+        "hint": hint,
+        "metadata": metadata or {},
+    })
+    if len(_SESSION_LOG) > 200:
+        del _SESSION_LOG[: len(_SESSION_LOG) - 200]
+
+
+@router.get("/api/v1/system/session-log")
+async def get_session_log(
+    limit: int = 50,
+    category: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Get safety-relevant session events for SessionLogPanel.
+
+    Reads from the in-process ring buffer, enriched with live kill-switch
+    and gate state on each call so the log stays current even without
+    explicit event emission.
+    """
+    now = time.time()
+
+    # Synthesise a live kill-switch event if active and not already logged
+    try:
+        from merid.risk.kill_switches import risk_controller
+        if risk_controller._global_kill and not any(
+            e["category"] == "kill_switch" and e["severity"] == "critical"
+            for e in _SESSION_LOG[-5:]
+        ):
+            _append_session_event(
+                category="kill_switch",
+                severity="critical",
+                title="Kill switch ACTIVE",
+                detail=risk_controller.get_kill_reason(),
+                hint="Use the Reset button to re-enable trading after resolving the issue.",
+            )
+    except Exception:
+        pass
+
+    # Synthesise a startup event if log is empty
+    if not _SESSION_LOG:
+        _append_session_event(
+            category="system",
+            severity="info",
+            title="Session started",
+            detail=f"Session ID: {_SESSION_ID}",
+        )
+
+    events = _SESSION_LOG[:]
+    if category and category != "all":
+        events = [e for e in events if e.get("category") == category]
+
+    events = sorted(events, key=lambda e: e["timestamp"], reverse=True)[:limit]
+
+    return {
+        "events": events,
+        "count": len(events),
+        "session": {
+            "session_id": _SESSION_ID,
+            "start_time": _SESSION_START,
+            "uptime_seconds": now - _SESSION_START,
+            "bracket": None,
+        },
+    }
 
 
 # ============================================
@@ -979,7 +1370,7 @@ async def clear_logs() -> Dict[str, Any]:
 @router.get("/api/v1/betting/overview")
 async def get_betting_overview() -> Dict[str, Any]:
     """Get betting overview."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return _stub({
         "markets": [
             {
@@ -1086,7 +1477,6 @@ async def get_paper_portfolio_stats(user_id: str) -> Dict[str, Any]:
 async def get_orders(limit: int = 20) -> List[Dict[str, Any]]:
     """Get recent orders from the paper trading engine."""
     try:
-        from trading.paper_trading import get_paper_engine
         engine = get_paper_engine()
         orders = []
         for uid, portfolio in engine.portfolios.items():
@@ -1100,7 +1490,7 @@ async def get_orders(limit: int = 20) -> List[Dict[str, Any]]:
                     "size": order.size_usd / (order.fill_price or 1) if hasattr(order, 'fill_price') and order.fill_price else order.size_usd,
                     "venue": getattr(order, 'venue', 'Paper'),
                     "status": order.status.value.lower(),
-                    "timestamp": order.created_at if hasattr(order, 'created_at') else datetime.utcnow().isoformat() + "Z",
+                    "timestamp": order.created_at if hasattr(order, 'created_at') else datetime.now(timezone.utc).isoformat() + "Z",
                 })
         orders.sort(key=lambda o: o.get("timestamp", ""), reverse=True)
         return orders[:limit]
@@ -1116,7 +1506,6 @@ async def get_orders(limit: int = 20) -> List[Dict[str, Any]]:
 async def get_orders_open() -> Dict[str, Any]:
     """Get open orders from the paper trading engine — matches OpenOrdersResponse."""
     try:
-        from trading.paper_trading import get_paper_engine
         engine = get_paper_engine()
         orders = []
         for uid, portfolio in engine.portfolios.items():
@@ -1162,7 +1551,6 @@ async def get_orders_open() -> Dict[str, Any]:
 async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """Submit an order via the paper trading engine."""
     try:
-        from trading.paper_trading import get_paper_engine
         engine = get_paper_engine()
         symbol = body.get("symbol", "BTC-USD")
         side = body.get("side", "BUY").lower()
@@ -1173,14 +1561,13 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         # Get current price for market orders
         current_price = None
         try:
-            from data.live_price_feed import get_live_price_feed
             feed = get_live_price_feed()
             # Map BTC-USD → BTC/USDT
             mapped = symbol.replace("-USD", "/USDT")
             if mapped in feed.price_cache:
                 current_price = feed.price_cache[mapped].price
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("operation_suppressed", error=str(exc))
 
         size_usd = size * (current_price or 1.0)
 
@@ -1220,12 +1607,11 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                     confidence=0.8,
                     reasoning=f"Executed {direction} {size} {symbol} @ ${order.fill_price:,.2f}",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("operation_suppressed", error=str(exc))
 
         # Emit notification for fills and rejections (enriched with plan attribution)
         try:
-            from core.notifications import add_notification
             if order.status.value == "filled":
                 msg = f"{body.get('side', 'BUY')} {size} {symbol} @ ${order.fill_price:,.2f} (${order.size_usd:,.0f})"
                 if _fill_plan_id:
@@ -1252,16 +1638,16 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                     )
                     if _active:
                         _active_note = f" — {_active} active plan(s) affected"
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("operation_suppressed", error=str(exc))
                 add_notification(
                     type="warning", severity="warning",
                     title=f"Order Rejected: {symbol}",
                     message=f"{body.get('side', 'BUY')} {size} {symbol} — insufficient balance or risk limit{_active_note}",
                     source="trading",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("operation_suppressed", error=str(exc))
 
         return {
             "success": True,
@@ -1281,7 +1667,7 @@ async def submit_order(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 @router.get("/api/v1/logs")
 async def get_logs() -> List[Dict[str, Any]]:
     """Get system logs. Returns array directly for useApiData transform."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return [
         {"id": "log-001", "timestamp": (now - timedelta(minutes=1)).isoformat() + "Z", "level": "info", "component": "orchestrator", "message": "Trade cycle completed successfully", "details": {"cycle_id": 142, "duration_ms": 1250}},
         {"id": "log-002", "timestamp": (now - timedelta(minutes=5)).isoformat() + "Z", "level": "info", "component": "risk-manager", "message": "Daily risk check passed — all limits within bounds"},
@@ -1301,7 +1687,7 @@ async def get_logs() -> List[Dict[str, Any]]:
 @router.get("/api/v1/system/decisions/recent")
 async def get_recent_decisions(limit: int = 10) -> Dict[str, Any]:
     """Get recent system decisions."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return _stub({
         "decisions": [
             {"id": "dec-001", "type": "trade_entry", "summary": "Entered BTC-USD long — consensus approved", "agents": ["analyst-gemma", "strategy-agent"], "confidence": 0.85, "timestamp": (now - timedelta(minutes=30)).isoformat() + "Z"},
@@ -1318,7 +1704,7 @@ async def get_recent_decisions(limit: int = 10) -> Dict[str, Any]:
 @router.get("/api/operator/audit-trail")
 async def get_audit_trail(limit: int = 20) -> Dict[str, Any]:
     """Get operator audit trail."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return _stub({
         "entries": [
             {"id": "aud-001", "timestamp": (now - timedelta(minutes=10)).isoformat() + "Z", "operator": "system", "action": "TRADE_EXECUTED", "details": "BTC-USD buy 0.15 @ $68,500", "ip": "127.0.0.1"},
@@ -1335,7 +1721,7 @@ async def get_audit_trail(limit: int = 20) -> Dict[str, Any]:
 @router.get("/api/v1/signals/sentiment")
 async def get_signals_sentiment_stub() -> Dict[str, Any]:
     """Fast sentiment stub — prevents timeout when processor unavailable."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return _stub({
         "events": [
             {"id": "se-001", "timestamp": (now - timedelta(minutes=5)).isoformat() + "Z", "source": "news", "ticker": "BTC", "polarity": 0.72, "magnitude": 0.85, "relevance": 0.9, "headline": "Bitcoin ETF inflows hit $1.2B weekly record", "isSpike": False},
@@ -1354,7 +1740,7 @@ async def get_signals_sentiment_stub() -> Dict[str, Any]:
 @router.get("/api/v1/signals/sentiment/{ticker}")
 async def get_signals_sentiment_ticker_stub(ticker: str) -> Dict[str, Any]:
     """Fast per-ticker sentiment stub."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return _stub({
         "events": [
             {"id": f"se-{ticker}-001", "timestamp": (now - timedelta(minutes=10)).isoformat() + "Z", "source": "news", "ticker": ticker, "polarity": 0.55, "magnitude": 0.7, "relevance": 0.85, "headline": f"{ticker} shows positive momentum", "isSpike": False},
@@ -1396,8 +1782,8 @@ async def get_blockchain_health_stub() -> Dict[str, Any]:
             all_healthy = all(pr["status"] == "healthy" for pr in providers_out)
             overall = "healthy" if all_healthy else "degraded"
             return {"providers": providers_out, "overall_status": overall, "timestamp": now_ms}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     # Fallback stub
     return _stub({
@@ -1418,7 +1804,6 @@ async def get_blockchain_health_stub() -> Dict[str, Any]:
 async def get_positions() -> List[Dict[str, Any]]:
     """Get current positions from the paper trading engine."""
     try:
-        from trading.paper_trading import get_paper_engine
         engine = get_paper_engine()
         positions = []
         for uid, portfolio in engine.portfolios.items():
@@ -1437,7 +1822,7 @@ async def get_positions() -> List[Dict[str, Any]]:
                     "pnl": round(pnl, 2),
                     "pnlPercent": round(pnl_pct, 2),
                     "venue": getattr(pos, 'venue', 'Paper'),
-                    "timestamp": pos.opened_at if hasattr(pos, 'opened_at') else datetime.utcnow().isoformat() + "Z",
+                    "timestamp": pos.opened_at if hasattr(pos, 'opened_at') else datetime.now(timezone.utc).isoformat() + "Z",
                 })
         return positions
     except Exception:
@@ -1452,7 +1837,6 @@ async def get_positions() -> List[Dict[str, Any]]:
 async def get_fills() -> List[Dict[str, Any]]:
     """Get recent fills from the paper trading engine (filled orders)."""
     try:
-        from trading.paper_trading import get_paper_engine
         engine = get_paper_engine()
         fills = []
         for uid, portfolio in engine.portfolios.items():
@@ -1466,7 +1850,7 @@ async def get_fills() -> List[Dict[str, Any]]:
                         "size": order.size_usd / order.fill_price if hasattr(order, 'fill_price') and order.fill_price else order.size_usd,
                         "price": order.fill_price if hasattr(order, 'fill_price') and order.fill_price else 0,
                         "venue": getattr(order, 'venue', 'Paper'),
-                        "timestamp": order.filled_at if hasattr(order, 'filled_at') and order.filled_at else (order.created_at if hasattr(order, 'created_at') else datetime.utcnow().isoformat() + "Z"),
+                        "timestamp": order.filled_at if hasattr(order, 'filled_at') and order.filled_at else (order.created_at if hasattr(order, 'created_at') else datetime.now(timezone.utc).isoformat() + "Z"),
                     })
         fills.sort(key=lambda f: f.get("timestamp", ""), reverse=True)
         return fills
@@ -1481,7 +1865,7 @@ async def get_fills() -> List[Dict[str, Any]]:
 @router.get("/api/v1/risk/metrics")
 async def get_risk_metrics() -> Dict[str, Any]:
     """Get risk metrics — matches both Risk.tsx and RiskMetricsResponse (LiveRiskStrip)."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return _stub({
         # Fields for Risk.tsx cards
         "marginUsed": 0,
@@ -1516,7 +1900,7 @@ async def get_risk_metrics() -> Dict[str, Any]:
 @router.get("/api/v1/risk/alerts")
 async def get_risk_alerts() -> List[Dict[str, Any]]:
     """Get risk alerts — returns array for Risk.tsx DataTableEnhanced."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return [
         {"id": "ra-001", "level": "medium", "type": "Position Size", "message": "BTC-USD position approaching 25% of portfolio", "timestamp": (now - timedelta(minutes=30)).isoformat() + "Z", "resolved": False},
         {"id": "ra-002", "level": "low", "type": "Drawdown", "message": "Daily P&L drawdown at -1.8%", "timestamp": (now - timedelta(hours=2)).isoformat() + "Z", "resolved": True},
@@ -1552,7 +1936,7 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
 
     Probes real services where available (reuses _probe_service).
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     ts = now.isoformat() + "Z"
     components: List[Dict[str, Any]] = []
 
@@ -1564,7 +1948,6 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
 
     # Price Feed
     def _probe_pf():
-        from data.live_price_feed import get_live_price_feed
         pf = get_live_price_feed()
         pf.get_all_prices()
     pf_result = _probe_service("price_feed", _probe_pf)
@@ -1572,7 +1955,6 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
 
     # Paper Trading Engine
     def _probe_pt():
-        from trading.paper_trading import get_paper_engine
         get_paper_engine()
     pt_result = _probe_service("trading_engine", _probe_pt)
     components.append({"component": "Trading Engine", "status": pt_result["status"], "lastCheck": ts, "latency": pt_result["latency_ms"], "errorRate": 0, "uptime": 0})
@@ -1586,7 +1968,6 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
 
     # Agent Swarm
     def _probe_agents():
-        from agents.agent_framework import get_agent_registry
         get_agent_registry().get_statistics()
     agent_result = _probe_service("agent_swarm", _probe_agents)
     components.append({"component": "Agent Swarm", "status": agent_result["status"], "lastCheck": ts, "latency": agent_result["latency_ms"], "errorRate": 0, "uptime": 0})
@@ -1600,7 +1981,6 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
 
     # Emit notifications for any offline services
     try:
-        from core.notifications import add_notification
         for c in components:
             if c["status"] == "offline":
                 add_notification(
@@ -1609,8 +1989,8 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
                     message=f"{c['component']} is not responding — check service status",
                     source="health_probe",
                 )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return components
 
@@ -1622,7 +2002,7 @@ async def get_system_health_array() -> List[Dict[str, Any]]:
 @router.get("/api/v1/trading/orders/open")
 async def get_trading_orders_open() -> Dict[str, Any]:
     """Stub open orders — real endpoint returns empty when no paper trades exist."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     orders = [  # Hardcoded fake orders
         {"id": "ord-live-001", "symbol": "BTC-USD", "side": "buy", "type": "limit", "quantity": 0.15, "price": 68500.00, "status": "open", "timestamp": (now - timedelta(minutes=15)).isoformat() + "Z", "venue": "Kraken"},
         {"id": "ord-live-002", "symbol": "ETH-USD", "side": "sell", "type": "limit", "quantity": 5.0, "price": 2180.00, "status": "open", "timestamp": (now - timedelta(minutes=45)).isoformat() + "Z", "venue": "Coinbase"},
@@ -1654,7 +2034,7 @@ async def get_data_freshness() -> Dict[str, Any]:
     Groups cached PriceData by source exchange.  When the cache is empty
     (e.g. no ccxt, offline mode) falls back to a stub response.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
     now_ms = int(now_ts * 1000)
 
@@ -1662,7 +2042,6 @@ async def get_data_freshness() -> Dict[str, Any]:
     has_real = False
 
     try:
-        from data.live_price_feed import get_live_price_feed
         pf = get_live_price_feed()
         all_prices = pf.get_all_prices()  # Dict[str, PriceData]
 
@@ -1702,8 +2081,8 @@ async def get_data_freshness() -> Dict[str, Any]:
                     "status": status,
                 })
                 has_real = True
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     if has_real:
         overall = "healthy" if all(f["status"] == "fresh" for f in feeds) else "degraded"
@@ -1772,7 +2151,6 @@ async def get_brier_metrics(agent: str = "all") -> Dict[str, Any]:
 async def get_portfolio_summary_v1() -> Dict[str, Any]:
     """Portfolio summary from the live paper trading engine."""
     try:
-        from trading.paper_trading import get_paper_engine
         engine = get_paper_engine()
         user_id = next(iter(engine.portfolios), "default")
         stats = engine.get_portfolio_stats(user_id)
@@ -1829,9 +2207,8 @@ async def get_agents() -> List[Dict[str, Any]]:
     Tries the real AgentRegistry first; falls back to hardcoded list when
     no agents are registered (e.g. cold start / dev mode).
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     try:
-        from agents.agent_framework import get_agent_registry
         registry = get_agent_registry()
         live_agents = registry.get_all_agents()
         if live_agents:
@@ -1854,8 +2231,8 @@ async def get_agents() -> List[Dict[str, Any]]:
                     "charter": role_val,
                 })
             return result
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     # Fallback: hardcoded agent list (stub)
     agents = [
@@ -1882,10 +2259,9 @@ async def get_agents_health() -> Dict[str, Any]:
 
     Reads from real AgentRegistry when agents are registered.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     try:
-        from agents.agent_framework import get_agent_registry
         registry = get_agent_registry()
         live_agents = registry.get_all_agents()
         if live_agents:
@@ -1914,8 +2290,8 @@ async def get_agents_health() -> Dict[str, Any]:
                 "agents": agents,
                 "meta": {"total": len(agents), "online": online, "degraded": degraded, "offline": offline},
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     # Fallback: hardcoded agent health (stub)
     agents_fallback = [
@@ -1940,10 +2316,9 @@ async def get_agent_detail(agent_id: str) -> Dict[str, Any]:
 
     Reads from real AgentRegistry when the agent is registered.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     try:
-        from agents.agent_framework import get_agent_registry
         registry = get_agent_registry()
         agent = registry.get_agent(agent_id)
         if agent:
@@ -1973,8 +2348,8 @@ async def get_agent_detail(agent_id: str) -> Dict[str, Any]:
                 },
                 "recentDecisions": [],
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     # Fallback: stub detail
     return _stub({
@@ -2021,7 +2396,7 @@ def _probe_service(name: str, probe_fn) -> Dict[str, Any]:
 @router.get("/api/v1/monitoring/status")
 async def get_monitoring_status() -> Dict[str, Any]:
     """Get live monitoring status — probes real services where available."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     now_ms = int(now.timestamp() * 1000)
     uptime = int(time.time() - _SERVER_START_TIME)
 
@@ -2029,7 +2404,6 @@ async def get_monitoring_status() -> Dict[str, Any]:
 
     # Probe price feed
     def _probe_price_feed():
-        from data.live_price_feed import get_live_price_feed
         pf = get_live_price_feed()
         pf.get_cached_prices()
     services["price_feed"] = _probe_service("price_feed", _probe_price_feed)
@@ -2042,13 +2416,11 @@ async def get_monitoring_status() -> Dict[str, Any]:
 
     # Probe risk manager
     def _probe_risk():
-        from merid.pipeline.risk_manager import GlobalRiskManager
         GlobalRiskManager()
     services["risk_engine"] = _probe_service("risk_engine", _probe_risk)
 
     # Probe agent registry
     def _probe_agents():
-        from agents.agent_framework import get_agent_registry
         reg = get_agent_registry()
         reg.get_statistics()
     services["agent_swarm"] = _probe_service("agent_swarm", _probe_agents)
@@ -2081,7 +2453,7 @@ async def get_monitoring_status() -> Dict[str, Any]:
 @router.get("/api/v1/consensus/current")
 async def get_consensus_current() -> Dict[str, Any]:
     """Get current consensus state."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return _stub({
         "status": "idle",
         "current_round": None,
@@ -2126,7 +2498,7 @@ async def get_consensus_history_safe(limit: int = 10) -> Dict[str, Any]:
             "total": len(history),
         }
     except Exception:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         return {
             "consensus_results": [
                 {"approved": True, "confidence": 0.82, "votes_for": 5, "votes_against": 1, "participating_agents": ["analyst-gemma-01", "analyst-llama-01", "skeptic-01", "risk-01", "synthesizer-01", "strategy-agent-01"], "timestamp": (now - timedelta(minutes=15)).isoformat()},

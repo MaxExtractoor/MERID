@@ -1,4 +1,5 @@
 """Global test fixtures for MERID test suite."""
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -21,6 +22,61 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if QUARANTINE_MARKERS & {m.name for m in item.iter_markers()}:
             item.add_marker(skip_q)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_integration_like_node(node) -> bool:
+    integration_markers = {"integration", "e2e", "prod_integration", "contract"}
+    if any(node.get_closest_marker(marker) for marker in integration_markers):
+        return True
+
+    node_path = str(getattr(node, "fspath", "")).replace("\\", "/")
+    return "/tests/integration/" in node_path
+
+
+@pytest.fixture(scope="session")
+def swarm_integrity_report():
+    """Session-scoped swarm integrity report (enabled via env flag)."""
+    enforced = _env_flag("MERID_SWARM_INTEGRITY_ENFORCE", default=False)
+    if not enforced:
+        return {
+            "enforced": False,
+            "ok": True,
+            "issues": [],
+            "warning": None,
+        }
+
+    from merid.safeguards.swarm_integrity_guard import run_swarm_integrity_gate
+
+    report = run_swarm_integrity_gate(
+        snapshot_path=os.getenv("MERID_SWARM_HEALTH_SNAPSHOT"),
+        policy_path=os.getenv("MERID_SWARM_SAFEGUARD_CONFIG", ".merid_safeguard.yml"),
+    )
+    payload = report.to_dict()
+    payload["enforced"] = True
+    return payload
+
+
+@pytest.fixture(autouse=True)
+def enforce_swarm_integrity_for_integration_tests(request, swarm_integrity_report):
+    """Fail integration-like tests when swarm integrity enforcement is enabled."""
+    if not swarm_integrity_report.get("enforced"):
+        return
+    if not _is_integration_like_node(request.node):
+        return
+    if swarm_integrity_report.get("ok"):
+        return
+
+    issues = "; ".join(swarm_integrity_report.get("issues", [])) or "unknown integrity failure"
+    warning = swarm_integrity_report.get("warning")
+    suffix = f" {warning}" if warning else ""
+    pytest.fail(f"Swarm integrity guard failed: {issues}.{suffix}")
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

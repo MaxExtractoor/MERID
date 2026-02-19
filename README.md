@@ -288,6 +288,16 @@ See `.env.example` for the full list.
 
 ---
 
+### OpenClaw Control-Room Assistant
+
+Use OpenClaw as an external operator by loading the system prompt at:
+
+- `prompts/OPENCLAW_MERID_SYSTEM_PROMPT.md`
+
+It encodes MERID's safety constraints and preferred control surfaces (API, Make targets, dashboard). Keep OpenClaw in SIM mode unless explicitly approved otherwise.
+
+---
+
 ## Architecture
 
 ```text

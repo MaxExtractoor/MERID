@@ -12,7 +12,7 @@ import { API_ENDPOINTS } from "../config/constants";
 
 // ── Generic polling hook ─────────────────────────────────────────────
 
-function usePolled<T>(url: string, interval: number = 10000, initial: T): {
+function usePolled<T>(url: string, interval = 10000, initial: T): {
   data: T; loading: boolean; error: string | undefined;
 } {
   const [data, setData] = useState<T>(initial);
@@ -26,8 +26,8 @@ function usePolled<T>(url: string, interval: number = 10000, initial: T): {
       const json = await res.json();
       setData(json);
       setError(undefined);
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setLoading(false);
     }
@@ -45,7 +45,7 @@ function usePolled<T>(url: string, interval: number = 10000, initial: T): {
 // ── Feature hooks ────────────────────────────────────────────────────
 
 export function useSignalFeatures(symbol: string) {
-  return usePolled<any>(
+  return usePolled<unknown>(
     `${API_ENDPOINTS.SIGNAL_FEATURES}/${symbol}`,
     15000,
     null,
@@ -53,7 +53,7 @@ export function useSignalFeatures(symbol: string) {
 }
 
 export function useSignalSocial(symbol: string) {
-  return usePolled<any>(
+  return usePolled<unknown>(
     `${API_ENDPOINTS.SIGNAL_SOCIAL}/${symbol}`,
     8000,
     null,
@@ -104,13 +104,13 @@ export interface ArbSignal {
   is_actionable: boolean;
   decay_weight: number;
   status: string;
-  venues: any[];
+  venues: unknown[];
 }
 
 export interface ArbResponse {
   signals: ArbSignal[];
   count: number;
-  metrics: any;
+  metrics: unknown;
 }
 
 export function useSignalArbs() {
@@ -124,7 +124,7 @@ export function useSignalArbs() {
 // ── Metrics hook ─────────────────────────────────────────────────────
 
 export function useSignalMetrics() {
-  return usePolled<any>(
+  return usePolled<unknown>(
     API_ENDPOINTS.SIGNAL_METRICS,
     20000,
     null,
@@ -134,7 +134,7 @@ export function useSignalMetrics() {
 // ── Decay configs hook ───────────────────────────────────────────────
 
 export function useDecayConfigs() {
-  return usePolled<Record<string, any>>(
+  return usePolled<Record<string, unknown>>(
     API_ENDPOINTS.SIGNAL_DECAY_CONFIGS,
     60000,
     {},

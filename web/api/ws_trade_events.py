@@ -247,6 +247,27 @@ async def publish_pnl_update(
     await get_trade_broadcaster().publish(event)
 
 
+async def publish_risk_alert(
+    title: str,
+    severity: str = "warning",
+    category: str = "general",
+    detail: Optional[str] = None,
+    extra: Optional[Dict] = None,
+) -> None:
+    """Publish a risk alert event to all WS subscribers."""
+    event = TradeEvent(
+        event_type=EventType.RISK_ALERT.value,
+        trader_type=TraderType.SYSTEM.value,
+        trader_id="risk-monitor",
+        timestamp=time.time(),
+        status=severity,
+        signal=category,
+        reasoning=title,
+        extra={**(extra or {}), "detail": detail or "", "category": category},
+    )
+    await get_trade_broadcaster().publish(event)
+
+
 async def publish_mode_change(mode: str, is_simulated: bool) -> None:
     """Publish a mode change event."""
     event = TradeEvent(
