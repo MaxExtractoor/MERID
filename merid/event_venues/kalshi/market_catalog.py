@@ -183,9 +183,17 @@ class KalshiMarketCatalog:
         """
         async with self._lock:
             try:
-                raw_markets = await self._client.list_markets(
+                result = await self._client.list_markets_result(
                     MarketFilter(active_only=True, limit=self._max_markets)
                 )
+                if not result.success:
+                    logger.warning(
+                        "Failed to fetch markets: %s (status=%s, retries=%s, circuit_open=%s)",
+                        result.error, getattr(result, 'status_code', None),
+                        result.retries, getattr(result, 'circuit_open', False),
+                    )
+                    return len(self._markets)
+                raw_markets = result.data
             except Exception as exc:
                 logger.warning(f"Failed to fetch markets: {exc}")
                 return len(self._markets)

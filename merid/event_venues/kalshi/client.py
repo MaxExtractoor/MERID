@@ -49,6 +49,10 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.client")
 
+# Module-level RSA key cache — loaded once from disk, shared across all instances
+_cached_private_key: Optional[Any] = None
+_cached_key_id: Optional[str] = None
+
 T = TypeVar("T")
 
 # Retry configuration for Kalshi
@@ -227,7 +231,7 @@ class KalshiVenueClient(EventVenueClient):
     async def _ensure_client(self) -> httpx.AsyncClient:
         """Ensure HTTP client is initialized and authenticated."""
         if self._http_client is None or self._http_client.is_closed:
-            logger.info("[kalshi] Initializing new HTTP client")
+            logger.debug("[kalshi] Initializing new HTTP client")
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.config.timeout),
                 headers={
@@ -289,8 +293,18 @@ class KalshiVenueClient(EventVenueClient):
         Key loading priority:
           1. private_key_path (file on disk)
           2. private_key_pem  (inline PEM string from env/settings)
+
+        Uses module-level cache to avoid repeated disk I/O and log spam.
         """
+        global _cached_private_key, _cached_key_id
         try:
+            # Fast path: reuse cached key
+            if _cached_private_key is not None:
+                self._private_key = _cached_private_key
+                self._auth_mode = "rsa"
+                logger.debug("Kalshi RSA auth ready (cached, key_id: %s...)", _cached_key_id)
+                return
+
             from cryptography.hazmat.primitives import serialization
 
             pem_bytes: Optional[bytes] = None
@@ -307,7 +321,9 @@ class KalshiVenueClient(EventVenueClient):
 
             self._private_key = serialization.load_pem_private_key(pem_bytes, password=None)
             self._auth_mode = "rsa"
-            logger.info(f"Kalshi RSA auth ready (key_id: {self.config.api_key[:8]}...)")
+            _cached_private_key = self._private_key
+            _cached_key_id = self.config.api_key[:8] if self.config.api_key else "unknown"
+            logger.info(f"Kalshi RSA auth ready (key_id: {_cached_key_id}...)")
         except ImportError:
             logger.warning("cryptography package not installed — RSA auth unavailable, falling back")
             if self.config.email and self.config.password:
@@ -456,7 +472,7 @@ class KalshiVenueClient(EventVenueClient):
                     # Auth errors — log details and attempt re-auth once
                     if response.status_code in (401, 403):
                         body_text = response.text[:200] if response.text else ""
-                        logger.debug(
+                        logger.warning(
                             f"[kalshi] {operation_name} auth error "
                             f"{response.status_code}: {body_text}. "
                             f"Check: key ID, private key path, timestamp (ms), "
@@ -548,7 +564,7 @@ class KalshiVenueClient(EventVenueClient):
             except CircuitOpenError as e:
                 # Circuit is open - fail fast
                 latency_ms = (time.time() - start_time) * 1000
-                logger.debug(f"[kalshi] Circuit open for {operation_name}: {e}")
+                logger.warning(f"[kalshi] Circuit open for {operation_name}: {e}")
                 return OperationResult.fail(
                     e,
                     latency_ms=latency_ms,
@@ -572,7 +588,7 @@ class KalshiVenueClient(EventVenueClient):
                 last_error = e
                 if attempt < KALSHI_MAX_RETRIES:
                     wait_time = KALSHI_BACKOFF_BASE ** attempt
-                    logger.debug(
+                    logger.warning(
                         f"[kalshi] {operation_name} connection error, retrying in {wait_time}s "
                         f"(attempt {attempt + 1}): {e}"
                     )
