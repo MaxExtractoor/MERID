@@ -210,7 +210,7 @@ export default function TradingHaltBanner() {
                       : 'text-emerald-400 font-medium'
                   }
                 >
-                  {entry.action.toUpperCase()}
+                  {(entry.action ?? '').toUpperCase()}
                 </span>
                 <span className="text-slate-400 truncate">
                   {entry.reason || entry.previous_reason || ''}

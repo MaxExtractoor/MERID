@@ -48,16 +48,19 @@ export function useFillToast() {
         if (seenIds.current.has(f.trade_id)) continue;
         seenIds.current.add(f.trade_id);
 
-        const priceCents = Math.round(f.price * 100);
-        const side = f.side.toUpperCase();
+        const price = f.price ?? 0;
+        const size = f.size ?? 0;
+        const fee = f.fee ?? 0;
+        const priceCents = Math.round(price * 100);
+        const side = (f.side ?? '').toUpperCase();
         const pnl = f.side === 'yes'
-          ? (1 - f.price) * f.size - f.fee
-          : f.price * f.size - f.fee;
+          ? (1 - price) * size - fee
+          : price * size - fee;
 
         toast({
           type: 'success',
-          title: `Fill: ${f.size}× ${side} ${f.ticker}`,
-          message: `@ ${priceCents}¢  ·  Net if win: $${pnl.toFixed(2)}  ·  Fee: $${f.fee.toFixed(2)}`,
+          title: `Fill: ${size}× ${side} ${f.ticker}`,
+          message: `@ ${priceCents}¢  ·  Net if win: $${pnl.toFixed(2)}  ·  Fee: $${fee.toFixed(2)}`,
           durationMs: 8000,
         });
       }

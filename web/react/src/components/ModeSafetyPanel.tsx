@@ -178,8 +178,8 @@ export default function ModeSafetyPanel() {
             <p className="text-xs text-red-300/80 mb-1">{data.kill_switch.reason}</p>
           )}
           <div className="flex items-center gap-3 text-[10px] text-slate-500">
-            <span>Daily PnL: <span className={data.kill_switch.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400'}>${data.kill_switch.daily_pnl?.toFixed(2)}</span></span>
-            <span>Limit: ${data.kill_switch.daily_loss_limit?.toFixed(0)}</span>
+            <span>Daily PnL: <span className={(data.kill_switch.daily_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}>${(data.kill_switch.daily_pnl ?? 0).toFixed(2)}</span></span>
+            <span>Limit: ${(data.kill_switch.daily_loss_limit ?? 0).toFixed(0)}</span>
           </div>
         </div>
 

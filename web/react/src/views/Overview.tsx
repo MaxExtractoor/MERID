@@ -47,8 +47,8 @@ interface CatalogResponseLite {
 }
 
 /* ── Helpers ───────────────────────────────────────── */
-function fmtUsd(v: number): string {
-  return v.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+function fmtUsd(v: number | null | undefined): string {
+  return (v ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
 }
 
 function Skeleton({ className = '' }: { className?: string }) {
@@ -313,7 +313,7 @@ function KalshiRecentOrders({ orders, fills }: { orders: KalshiOrder[]; fills: K
             <div key={f.trade_id} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-800/50">
               <div className="flex items-center gap-2">
                 <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${isBuy ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
-                  {f.side.toUpperCase()}
+                  {(f.side ?? '').toUpperCase()}
                 </span>
                 <div>
                   <div className="text-sm font-medium text-slate-200 truncate max-w-[160px]">{f.ticker}</div>
@@ -334,7 +334,7 @@ function KalshiRecentOrders({ orders, fills }: { orders: KalshiOrder[]; fills: K
           <div key={o.order_id} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-800/50">
             <div className="flex items-center gap-2">
               <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${o.status === 'resting' ? 'bg-amber-500/20 text-amber-400' : o.status === 'executed' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-500/20 text-slate-400'}`}>
-                {o.status.toUpperCase().slice(0, 6)}
+                {(o.status ?? '').toUpperCase().slice(0, 6)}
               </span>
               <div>
                 <div className="text-sm font-medium text-slate-200 truncate max-w-[160px]">{o.ticker}</div>
