@@ -516,12 +516,12 @@ const KalshiPortfolioView: React.FC = () => {
                           </span>
                         </td>
                         <td className="p-3 text-right text-white">{p.size}</td>
-                        <td className="p-3 text-right text-gray-300">{(p.avg_price * 100).toFixed(1)}¢</td>
+                        <td className="p-3 text-right text-gray-300">{((p.avg_price ?? 0) * 100).toFixed(1)}¢</td>
                         <td className={`p-3 text-right font-medium ${p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          ${p.unrealized_pnl.toFixed(2)}
+                          ${(p.unrealized_pnl ?? 0).toFixed(2)}
                         </td>
                         <td className={`p-3 text-right ${p.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          ${p.realized_pnl.toFixed(2)}
+                          ${(p.realized_pnl ?? 0).toFixed(2)}
                         </td>
                       </tr>
                     ))
@@ -687,8 +687,8 @@ const KalshiPortfolioView: React.FC = () => {
                             </span>
                           </td>
                           <td className="p-3 text-right text-white">{f.size}</td>
-                          <td className="p-3 text-right text-gray-300">{(f.price * 100).toFixed(1)}¢</td>
-                          <td className="p-3 text-right text-yellow-400">${f.fee.toFixed(2)}</td>
+                          <td className="p-3 text-right text-gray-300">{((f.price ?? 0) * 100).toFixed(1)}¢</td>
+                          <td className="p-3 text-right text-yellow-400">${(f.fee ?? 0).toFixed(2)}</td>
                           <td className="p-3 text-right text-gray-300">${net.toFixed(2)}</td>
                         </tr>
                       );
