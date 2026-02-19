@@ -14,6 +14,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import PaperLadderCard from '../components/PaperLadderCard';
 import KalshiModeBadge from '../components/KalshiModeBadge';
+import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import {
   BarChart3, Play, Square, Pause, RotateCcw, RefreshCw,
   Shield, AlertTriangle, Clock, ChevronRight,
@@ -383,6 +384,8 @@ export default function KalshiGridView() {
 
   return (
     <div className="space-y-6">
+      <ExecutionGateStrip />
+
       {/* ── Header ──────────────────────────────────────── */}
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div className="flex items-center gap-3">

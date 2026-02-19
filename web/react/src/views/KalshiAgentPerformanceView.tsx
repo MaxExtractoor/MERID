@@ -7,6 +7,7 @@ import { Award, Download, BarChart3, Activity, Trophy, Crosshair } from 'lucide-
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
+import KalshiModeBadge from '../components/KalshiModeBadge';
 
 interface AgentMetrics {
   agent_id: string;
@@ -128,7 +129,7 @@ export default function KalshiAgentPerformanceView() {
         <div>
           <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
             <Award className="w-6 h-6 text-orange-400" />
-            Agent Performance
+            Agent Performance <KalshiModeBadge />
           </h1>
           <p className="text-sm text-slate-400 mt-1">
             Track win rates, edge accuracy, and calibration metrics
@@ -204,7 +205,7 @@ export default function KalshiAgentPerformanceView() {
                 { label: 'Total P&L', value: fmtUsd(agentDetail.total_pnl), pos: agentDetail.total_pnl >= 0 },
                 { label: 'Sharpe', value: agentDetail.sharpe_ratio != null ? agentDetail.sharpe_ratio.toFixed(2) : 'N/A' },
                 { label: 'Edge Accuracy', value: fmtPct(agentDetail.edge_accuracy), highlight: agentDetail.edge_accuracy >= 0.6 },
-                { label: 'Calib Error', value: agentDetail.confidence_calibration_error.toFixed(3) },
+                { label: 'Calib Error', value: (agentDetail.confidence_calibration_error ?? 0).toFixed(3) },
                 { label: 'Volume USD', value: fmtUsd(agentDetail.total_volume_usd) },
                 { label: 'Last Trade', value: agentDetail.last_trade_at ? new Date(agentDetail.last_trade_at).toLocaleString() : 'Never' },
               ].map(m => (
@@ -306,7 +307,7 @@ export default function KalshiAgentPerformanceView() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-sm text-center text-slate-300">
-                        {agent.sharpe_ratio !== null ? agent.sharpe_ratio.toFixed(2) : 'N/A'}
+                        {agent.sharpe_ratio != null ? agent.sharpe_ratio.toFixed(2) : 'N/A'}
                       </td>
                       <td className="px-4 py-3 text-sm text-center">
                         <span className={agent.edge_accuracy >= 0.6 ? 'text-emerald-400' : 'text-yellow-400'}>
@@ -314,8 +315,8 @@ export default function KalshiAgentPerformanceView() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-sm text-center">
-                        <span className={agent.confidence_calibration_error < 0.1 ? 'text-emerald-400' : 'text-yellow-400'}>
-                          {agent.confidence_calibration_error.toFixed(3)}
+                        <span className={(agent.confidence_calibration_error ?? 0) < 0.1 ? 'text-emerald-400' : 'text-yellow-400'}>
+                          {(agent.confidence_calibration_error ?? 0).toFixed(3)}
                         </span>
                       </td>
                     </tr>
@@ -358,8 +359,8 @@ export default function KalshiAgentPerformanceView() {
                     <tr key={c.agent_id} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 text-sm font-mono text-slate-200">{c.agent_id.replace('kalshi-', '')}</td>
                       <td className="px-4 py-3 text-sm text-center">
-                        <span className={c.calibration_error < 0.1 ? 'text-emerald-400' : c.calibration_error < 0.2 ? 'text-yellow-400' : 'text-red-400'}>
-                          {c.calibration_error.toFixed(3)}
+                        <span className={(c.calibration_error ?? 0) < 0.1 ? 'text-emerald-400' : (c.calibration_error ?? 0) < 0.2 ? 'text-yellow-400' : 'text-red-400'}>
+                          {(c.calibration_error ?? 0).toFixed(3)}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-sm text-center text-slate-300">{fmtPct(c.avg_confidence)}</td>

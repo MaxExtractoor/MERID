@@ -17,6 +17,7 @@ import {
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';
+import ExecutionGateStrip from '../components/ExecutionGateStrip';
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -184,7 +185,6 @@ export default function KalshiSentimentView() {
 
   const globalScore = data?.global?.score ?? 50;
   const globalRegime = data?.global?.regime ?? 'greed';
-  const globalCfg = regimeCfg(globalRegime);
 
   if (isLoading && !data) {
     return (
@@ -197,6 +197,8 @@ export default function KalshiSentimentView() {
 
   return (
     <div className="space-y-6 p-4 md:p-6">
+      <ExecutionGateStrip />
+
       {/* ── Header ────────────────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

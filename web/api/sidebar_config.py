@@ -100,6 +100,21 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 ],
             },
             {
+                "id": "kalshi-performance",
+                "label": "Performance",
+                "href": "kalshi-performance",
+                "icon": "Award",
+                "color": "text-emerald-400",
+                "endpoints": [
+                    "/api/v1/kalshi-grid/performance/agents",
+                    "/api/v1/kalshi-grid/performance/summary",
+                    "/api/v1/kalshi-grid/performance/top",
+                    "/api/v1/kalshi-grid/performance/calibration",
+                ],
+                "workflow_phase": "monitoring",
+                "links_to": ["kalshi-grid", "kalshi-portfolio"],
+            },
+            {
                 "id": "kalshi-portfolio",
                 "label": "Portfolio",
                 "href": "kalshi-portfolio",

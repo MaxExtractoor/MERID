@@ -22,6 +22,7 @@ const COMMANDS: CommandItem[] = [
   { id: 'orders', label: 'Orders', section: 'Live Trading', icon: ClipboardList, keywords: ['order', 'open', 'pending', 'fill', 'cancel'] },
   { id: 'kalshi-vol-dashboard', label: 'Vol & Sizing', section: 'Live Trading', icon: Gauge, keywords: ['kalshi', 'volatility', 'sizing', 'kelly', 'sharpe'] },
   { id: 'kalshi-sentiment', label: 'Fear / Greed', section: 'Live Trading', icon: Activity, keywords: ['fear', 'greed', 'sentiment', 'regime', 'index'] },
+  { id: 'kalshi-performance', label: 'Performance', section: 'Live Trading', icon: BarChart3, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
   { id: 'kill-switch', label: 'Kill Switch', section: 'Risk & Limits', icon: ShieldAlert, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
   { id: 'operator', label: 'Orchestrator', section: 'System', icon: Monitor, keywords: ['ops', 'control', 'status', 'operator'] },
   { id: 'logs', label: 'Logs', section: 'System', icon: Terminal, keywords: ['log', 'error', 'debug'] },

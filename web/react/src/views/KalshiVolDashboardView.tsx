@@ -17,6 +17,7 @@ import {
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';
+import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiInsightsPanel from '../components/KalshiInsightsPanel';
 import PublishPipelinePanel from '../components/PublishPipelinePanel';
 import type { SizingMetrics, KalshiRiskSummary } from '../types/kalshi';
@@ -213,6 +214,8 @@ const KalshiVolDashboardView: React.FC = () => {
 
   return (
     <div className="space-y-4">
+      <ExecutionGateStrip />
+
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
