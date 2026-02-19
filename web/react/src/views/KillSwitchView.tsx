@@ -6,6 +6,7 @@ import SessionLogPanel from '../components/SessionLogPanel';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { formatCurrency } from '../utils/formatters';
+import KalshiModeBadge from '../components/KalshiModeBadge';
 
 interface BlockReason {
   source: string;
@@ -201,7 +202,7 @@ export default function KillSwitchView() {
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <ShieldAlert className="w-6 h-6 text-red-400" />
-        <h1 className="text-xl font-bold text-slate-100">Kill Switch & Safety</h1>
+        <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">Kill Switch & Safety <KalshiModeBadge /></h1>
       </div>
 
       {/* Gate Status Hero */}
