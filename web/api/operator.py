@@ -18,7 +18,7 @@ from utils.logger import get_logger
 
 logger = get_logger("web.api.operator")
 
-router = APIRouter(prefix="/api/operator", tags=["operator"])
+router = APIRouter(prefix="/api/v1/operator", tags=["operator"])
 
 
 @router.get("/summary")
@@ -71,8 +71,8 @@ async def get_operator_summary() -> Dict[str, Any]:
 
     # --- Swarm health ---
     try:
-        from web.api.dev_swarm_routes import get_swarm
-        swarm = await get_swarm()
+        from web.api.dev_swarm_routes import _get_swarm
+        swarm = await _get_swarm()
         completed = sum(1 for t in swarm.task_history if t.status == "completed")
         failed = sum(1 for t in swarm.task_history if t.status == "failed")
         total = len(swarm.task_history)
@@ -181,6 +181,11 @@ _equity_buffer: List[Dict[str, Any]] = []
 _EQUITY_BUFFER_MAX = 360  # ~30 min at 5s intervals
 
 
+def reset_equity_buffer() -> None:
+    """Clear the in-memory equity ring buffer.  Used by fresh-start mode."""
+    _equity_buffer.clear()
+
+
 def _record_equity_snapshot(total_value: float, unrealized_pnl: float) -> None:
     """Append a snapshot to the in-memory ring buffer."""
     _equity_buffer.append({
@@ -204,6 +209,7 @@ async def get_equity_series(
     """
     # Take a fresh snapshot
     try:
+        from trading.paper_trading import get_paper_engine
         engine = get_paper_engine()
         total_value = 100_000.0
         unrealized_pnl = 0.0

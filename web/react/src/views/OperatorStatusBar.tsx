@@ -1,4 +1,4 @@
-import { Activity, Wifi, WifiOff, AlertTriangle, Clock, Shield } from 'lucide-react';
+import { Wifi, WifiOff, AlertTriangle, Clock, Shield } from 'lucide-react';
 import { useMeridSocket } from '../hooks/useMeridSocket';
 import { useRiskProtections, getOverallRiskStatus } from '../hooks/useRiskProtections';
 import { formatTime } from '../utils/formatters';
@@ -29,7 +29,7 @@ export function OperatorStatusBar({ summary, lastUpdated, alertCount = 0 }: Oper
   const modeColor = MODE_COLORS[modeName] || MODE_COLORS.UNKNOWN;
 
   const circuitStatus = protections ? getOverallRiskStatus(protections) : null;
-  const circuitOk = !circuitStatus || circuitStatus === 'GOOD';
+  const circuitOk = !circuitStatus || circuitStatus.status === 'good';
 
   return (
     <div className="flex flex-wrap items-center gap-3 px-4 py-2 bg-slate-900/80 border border-slate-800 rounded-xl">

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, Activity, Shield, Bot, Eye, Terminal, Settings, Zap, Brain, Code2, Layers, Star, Radio, Target, Trophy, FileSpreadsheet, GitBranch, Monitor, Wallet, Coins, Twitter, Cpu, Building2, Package, Database, BarChart3 } from 'lucide-react';
-
-type View = "overview" | "trading" | "agents" | "predictions" | "prediction-consensus" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "betting-consensus" | "flow-radar" | "signal-layer" | "mining" | "institutional" | "plugins" | "operator" | "tradefloor" | "devswarm" | "devswarm-governance" | "positions" | "orders" | "rewards" | "cognitive" | "paper-trading" | "sports-live" | "observability" | "loop-orchestration" | "cross-asset";
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Bot, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, ClipboardList } from 'lucide-react';
+import type { View } from '../types/views';
+import { DEFAULTS } from '../config/constants';
+import { useFeatureFlags } from '../config/featureFlags';
 
 interface CommandItem {
   id: View;
@@ -9,44 +10,23 @@ interface CommandItem {
   section: string;
   icon: React.ElementType;
   keywords: string[];
+  legacy?: boolean;
 }
 
 const COMMANDS: CommandItem[] = [
-  { id: 'overview', label: 'Overview', section: 'Main', icon: LayoutDashboard, keywords: ['home', 'dashboard', 'summary'] },
-  { id: 'trading', label: 'Live Trading', section: 'Main', icon: Activity, keywords: ['trade', 'buy', 'sell', 'order'] },
-  { id: 'tradefloor', label: 'Trade Floor', section: 'Main', icon: Zap, keywords: ['floor', 'live', 'stream'] },
-  { id: 'positions', label: 'Positions', section: 'Main', icon: BarChart3, keywords: ['portfolio', 'holdings'] },
-  { id: 'orders', label: 'Orders', section: 'Main', icon: BarChart3, keywords: ['open', 'pending', 'filled'] },
-  { id: 'wallet', label: 'Wallet', section: 'Main', icon: Wallet, keywords: ['balance', 'funds', 'deposit'] },
-  { id: 'treasury', label: 'Treasury', section: 'Main', icon: Coins, keywords: ['governance', 'funding', 'proposals'] },
-  { id: 'predictions', label: 'Prediction Markets', section: 'Main', icon: Target, keywords: ['kalshi', 'markets', 'forecast'] },
-  { id: 'prediction-consensus', label: 'Prediction Consensus', section: 'Main', icon: Target, keywords: ['debate', 'calibration', 'brier'] },
-  { id: 'betting', label: 'Betting Markets', section: 'Main', icon: Trophy, keywords: ['bet', 'wager', 'odds'] },
-  { id: 'betting-consensus', label: 'Swarm Betting', section: 'Main', icon: Zap, keywords: ['consensus', 'sports', 'edge'] },
-  { id: 'sports-live', label: 'Sports Live', section: 'Main', icon: Radio, keywords: ['live', 'scores', 'events'] },
-  { id: 'flow-radar', label: 'Flow Radar', section: 'Main', icon: Target, keywords: ['memecoin', 'whale', 'sniper', 'mev'] },
-  { id: 'signal-layer', label: 'Signal Layer', section: 'Main', icon: Activity, keywords: ['signal', 'decay', 'drift', 'arb'] },
-  { id: 'rewards', label: 'Rewards', section: 'Main', icon: Star, keywords: ['xp', 'quest', 'leaderboard'] },
-  { id: 'social', label: 'Social Feed', section: 'Main', icon: Twitter, keywords: ['twitter', 'telegram', 'post'] },
-  { id: 'paper-trading', label: 'Paper Trading', section: 'Main', icon: FileSpreadsheet, keywords: ['paper', 'simulation', 'backtest'] },
-  { id: 'cross-asset', label: 'Cross-Asset', section: 'Main', icon: Layers, keywords: ['portfolio', 'multi', 'allocation'] },
-  { id: 'research', label: 'Research', section: 'Main', icon: Search, keywords: ['backtest', 'strategy'] },
-  { id: 'operator', label: 'Operator Dashboard', section: 'Management', icon: Monitor, keywords: ['ops', 'control', 'status'] },
-  { id: 'risk', label: 'Risk & Health', section: 'Management', icon: Shield, keywords: ['risk', 'exposure', 'limits'] },
-  { id: 'agents', label: 'Bots/Agents', section: 'Management', icon: Bot, keywords: ['agent', 'swarm', 'bot'] },
-  { id: 'cognitive', label: 'Cognitive Layer', section: 'Management', icon: Brain, keywords: ['regime', 'reality', 'hypothesis'] },
-  { id: 'devswarm', label: 'Dev Swarm', section: 'Management', icon: Code2, keywords: ['dev', 'task', 'code'] },
-  { id: 'devswarm-governance', label: 'Swarm Governance', section: 'Management', icon: Shield, keywords: ['proposal', 'approval', 'governance'] },
-  { id: 'mining', label: 'Mining', section: 'Management', icon: Cpu, keywords: ['hash', 'rig', 'pool'] },
-  { id: 'institutional', label: 'Institutional', section: 'Management', icon: Building2, keywords: ['compliance', 'audit', 'account'] },
-  { id: 'plugins', label: 'Plugins', section: 'Management', icon: Package, keywords: ['extension', 'install'] },
-  { id: 'api', label: 'API Dashboard', section: 'Management', icon: Database, keywords: ['api', 'endpoint', 'status'] },
-  { id: 'analytics', label: 'Analytics', section: 'Management', icon: BarChart3, keywords: ['chart', 'report'] },
-  { id: 'settings', label: 'Settings', section: 'Management', icon: Settings, keywords: ['config', 'preference', 'theme'] },
-  { id: 'loop-orchestration', label: 'Loop Orchestration', section: 'System', icon: GitBranch, keywords: ['loop', 'pipeline', 'cadence'] },
-  { id: 'observability', label: 'Observability', section: 'System', icon: Eye, keywords: ['slo', 'metrics', 'alerts', 'llm'] },
-  { id: 'health', label: 'System Health', section: 'System', icon: Shield, keywords: ['uptime', 'latency', 'service'] },
+  { id: 'overview', label: 'Overview', section: 'Live Trading', icon: LayoutDashboard, keywords: ['home', 'dashboard', 'summary'] },
+  { id: 'kalshi-terminal', label: 'Terminal', section: 'Live Trading', icon: Monitor, keywords: ['terminal', 'trade', 'kalshi', 'orderbook', 'ticket'] },
+  { id: 'kalshi-dashboard', label: 'Markets', section: 'Live Trading', icon: BarChart3, keywords: ['kalshi', 'markets', 'catalog', 'discovery'] },
+  { id: 'kalshi-grid', label: 'Agent Grid', section: 'Live Trading', icon: BarChart3, keywords: ['kalshi', 'grid', 'agents', 'paper'] },
+  { id: 'kalshi-portfolio', label: 'Portfolio', section: 'Live Trading', icon: Briefcase, keywords: ['kalshi', 'positions', 'pnl', 'equity'] },
+  { id: 'orders', label: 'Orders', section: 'Live Trading', icon: ClipboardList, keywords: ['order', 'open', 'pending', 'fill', 'cancel'] },
+  { id: 'kalshi-vol-dashboard', label: 'Vol & Sizing', section: 'Live Trading', icon: Gauge, keywords: ['kalshi', 'volatility', 'sizing', 'kelly', 'sharpe'] },
+  { id: 'kill-switch', label: 'Kill Switch', section: 'Risk & Limits', icon: ShieldAlert, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
+  { id: 'agent-health', label: 'Agent Health', section: 'System', icon: Bot, keywords: ['agent', 'health', 'leaderboard', 'strategy'] },
+  { id: 'operator', label: 'Orchestrator', section: 'System', icon: Monitor, keywords: ['ops', 'control', 'status', 'operator'] },
   { id: 'logs', label: 'Logs', section: 'System', icon: Terminal, keywords: ['log', 'error', 'debug'] },
+  { id: 'settings', label: 'Settings', section: 'System', icon: Settings, keywords: ['config', 'preference', 'theme'] },
+  { id: 'positions', label: 'Kalshi Positions', section: 'Live Trading', icon: Briefcase, keywords: ['positions', 'holdings', 'kalshi', 'contracts'] },
 ];
 
 interface CommandPaletteProps {
@@ -59,6 +39,7 @@ export default function CommandPalette({ onNavigate }: CommandPaletteProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const { kalshiOnly } = useFeatureFlags();
 
   // Ctrl+K / Cmd+K to open
   useEffect(() => {
@@ -78,20 +59,21 @@ export default function CommandPalette({ onNavigate }: CommandPaletteProps) {
     if (open) {
       setQuery('');
       setSelectedIndex(0);
-      const timer = setTimeout(() => inputRef.current?.focus(), 50);
+      const timer = setTimeout(() => inputRef.current?.focus(), DEFAULTS.TIMEOUTS.DEBOUNCE);
       return () => clearTimeout(timer);
     }
   }, [open]);
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return COMMANDS;
+    const base = kalshiOnly ? COMMANDS.filter(c => !c.legacy) : COMMANDS;
+    if (!query.trim()) return base;
     const q = query.toLowerCase();
-    return COMMANDS.filter(cmd =>
+    return base.filter(cmd =>
       cmd.label.toLowerCase().includes(q) ||
       cmd.section.toLowerCase().includes(q) ||
       cmd.keywords.some(kw => kw.includes(q))
     );
-  }, [query]);
+  }, [query, kalshiOnly]);
 
   // Scroll selected item into view
   useEffect(() => {
@@ -140,7 +122,7 @@ export default function CommandPalette({ onNavigate }: CommandPaletteProps) {
         {/* Search input */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-700/60">
           <Search className="w-5 h-5 text-slate-400 shrink-0" />
-          <input aria-label="Query"
+          <input
             ref={inputRef}
             value={query}
             onChange={e => { setQuery(e.target.value); setSelectedIndex(0); }}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { DEFAULTS } from "../config/constants";
 
 interface DriftItem {
   id: string;
@@ -7,8 +8,8 @@ interface DriftItem {
   category: string;
   severity: 'OK' | 'INFO' | 'WARNING' | 'CRITICAL';
   summary: string;
-  current_value: any;
-  baseline_value: any;
+  current_value: unknown;
+  baseline_value: unknown;
   fix_plan: string;
 }
 
@@ -32,7 +33,7 @@ export default function CodebaseHealth() {
     try {
       const response = await axios.get('/api/dev-swarm/codebase-drift');
       setData(response.data);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(err.response?.data?.detail || 'Failed to load codebase health');
     } finally {
       setLoading(false);
@@ -41,7 +42,7 @@ export default function CodebaseHealth() {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 120000);
+    const interval = setInterval(refresh, DEFAULTS.POLLING_INTERVALS.RARE);
     return () => clearInterval(interval);
   }, [refresh]);
 
@@ -101,16 +102,16 @@ export default function CodebaseHealth() {
           {loading && (
             <div className="animate-spin rounded-full h-3 w-3 border-b border-blue-500" />
           )}
-          <button
+          <button type="button"
             onClick={() => setExpanded(!expanded)}
             className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
           >
             {expanded ? 'Collapse' : 'Details'}
           </button>
-          <button
+          <button type="button"
             onClick={refresh}
             className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-          >
+           title="Refresh">
             Refresh
           </button>
         </div>

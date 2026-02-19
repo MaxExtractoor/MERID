@@ -36,7 +36,7 @@ export function updateChartTooltip(chart: Chart) {
 }
 
 // Usage in chart configuration
-export function getChartOptions(baseOptions: any = {}) {
+export function getChartOptions(baseOptions: Record<string, unknown> = {}) {
   return {
     ...baseOptions,
     plugins: {

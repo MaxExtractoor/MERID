@@ -157,8 +157,8 @@ async def trades_websocket(websocket: WebSocket):
         await manager.unsubscribe(websocket)
         try:
             unsubscribe()
-        except:
-            pass
+        except Exception as exc:
+            logger.debug("operation_suppressed", error=str(exc))
 
 
 # ============================================
@@ -401,7 +401,6 @@ async def portfolio_websocket(websocket: WebSocket):
             })
         
         # Subscribe to paper trading engine for portfolio updates
-        from trading.paper_trading import get_paper_engine
         
         paper_engine = get_paper_engine()
         
@@ -459,5 +458,5 @@ async def portfolio_websocket(websocket: WebSocket):
         try:
             unsubscribe_summary()
             unsubscribe_positions()
-        except:
-            pass
+        except Exception as exc:
+            logger.debug("operation_suppressed", error=str(exc))

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { TrendingUp, TrendingDown } from 'lucide-react';
 import { useRealtimeData } from '../hooks/useRealtimeData';
+import { WS_PRICE_URL } from '../config/constants';
 
 interface PriceUpdate {
   symbol: string;
@@ -10,6 +11,17 @@ interface PriceUpdate {
   timestamp: number;
 }
 
+interface RawPriceUpdate {
+  symbol?: string;
+  price?: number;
+  change24h?: number;
+  change_24h?: number;
+  volume24h?: number;
+  volume_24h?: number;
+  volume?: number;
+  timestamp?: number | string;
+}
+
 interface LivePriceStreamProps {
   symbols?: string[];
   className?: string;
@@ -17,13 +29,34 @@ interface LivePriceStreamProps {
 
 export default function LivePriceStream({ symbols = ['BTC', 'ETH', 'SOL'], className = '' }: LivePriceStreamProps) {
   const [prices, setPrices] = useState<Map<string, PriceUpdate>>(new Map());
-  const [priceData, isConnected] = useRealtimeData<PriceUpdate>('price_update');
+  const [priceData, isConnected] = useRealtimeData<RawPriceUpdate>('price_tick', null, WS_PRICE_URL);
+
+  const normalizePriceUpdate = (payload: RawPriceUpdate): PriceUpdate | null => {
+    const rawSymbol = payload.symbol?.toString() ?? '';
+    const symbol = rawSymbol.split('/')[0]?.split('-')[0] ?? '';
+    if (!symbol) return null;
+    const change24h = payload.change24h ?? payload.change_24h ?? 0;
+    const volume24h = payload.volume24h ?? payload.volume_24h ?? payload.volume ?? 0;
+    const timestamp = typeof payload.timestamp === 'string'
+      ? Date.parse(payload.timestamp)
+      : (payload.timestamp ?? Date.now());
+
+    return {
+      symbol,
+      price: payload.price ?? 0,
+      change24h: Number.isFinite(change24h) ? change24h : 0,
+      volume24h: Number.isFinite(volume24h) ? volume24h : 0,
+      timestamp,
+    };
+  };
 
   useEffect(() => {
     if (priceData) {
+      const normalized = normalizePriceUpdate(priceData);
+      if (!normalized) return;
       setPrices(prev => {
         const newPrices = new Map(prev);
-        newPrices.set(priceData.symbol, priceData);
+        newPrices.set(normalized.symbol, normalized);
         return newPrices;
       });
     }

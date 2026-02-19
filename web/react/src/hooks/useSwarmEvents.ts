@@ -109,7 +109,7 @@ export interface WatchdogAlert {
   agent_id?: string;
   symbol?: string;
   message: string;
-  details: Record<string, any>;
+  details: Record<string, unknown>;
   timestamp: number;
 }
 
@@ -182,28 +182,28 @@ export function useSwarmEvents(): UseSwarmEventsResult {
     if (!socket || handlersRegistered.current) return;
     handlersRegistered.current = true;
     
-    const handleOpinion = (data: any) => {
-      const opinion = data.data || data;
+    const handleOpinion = (data: Record<string, unknown>) => {
+      const opinion = (data.data || data) as StrategyOpinion;
       setOpinions(prev => [opinion, ...prev].slice(0, 100));
     };
     
-    const handleConsensus = (data: any) => {
-      const decision = data.data || data;
+    const handleConsensus = (data: Record<string, unknown>) => {
+      const decision = (data.data || data) as ConsensusDecision;
       setConsensus(prev => [decision, ...prev].slice(0, 50));
     };
     
-    const handleTradeIntent = (data: any) => {
-      const intent = data.data || data;
+    const handleTradeIntent = (data: Record<string, unknown>) => {
+      const intent = (data.data || data) as TradeIntent;
       setTradeIntents(prev => [intent, ...prev].slice(0, 50));
     };
     
-    const handleOrder = (data: any) => {
-      const order = data.data || data;
+    const handleOrder = (data: Record<string, unknown>) => {
+      const order = (data.data || data) as OrderEvent;
       setOrders(prev => [order, ...prev].slice(0, 50));
     };
     
-    const handleHeartbeat = (data: any) => {
-      const heartbeat = data.data || data;
+    const handleHeartbeat = (data: Record<string, unknown>) => {
+      const heartbeat = (data.data || data) as AgentHeartbeat;
       setHeartbeats(prev => {
         const updated = new Map(prev);
         updated.set(heartbeat.agent_id, heartbeat);
@@ -211,13 +211,13 @@ export function useSwarmEvents(): UseSwarmEventsResult {
       });
     };
     
-    const handleAlert = (data: any) => {
-      const alert = data.data || data;
+    const handleAlert = (data: Record<string, unknown>) => {
+      const alert = (data.data || data) as WatchdogAlert;
       setAlerts(prev => [alert, ...prev].slice(0, 20));
     };
     
-    const handleTelemetry = (data: any) => {
-      const stats = data.data || data;
+    const handleTelemetry = (data: Record<string, unknown>) => {
+      const stats = (data.data || data) as SwarmTelemetry;
       setTelemetry(stats);
     };
     

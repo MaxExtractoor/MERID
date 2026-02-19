@@ -21,6 +21,9 @@ from typing import Dict, List, Optional
 
 from utils.logger import get_logger
 
+import logging
+logger = logging.getLogger("metrics")
+
 logger = get_logger("merid.resilience.metrics")
 
 

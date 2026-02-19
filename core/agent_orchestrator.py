@@ -103,9 +103,9 @@ class AgentOrchestrator:
         logger.info("Starting agent orchestration...")
         
         # Start background tasks
+        # Note: price_feed.start_streaming() is started by main.py lifespan — not duplicated here
         tasks = [
             asyncio.create_task(self.news_monitor.start_monitoring()),
-            asyncio.create_task(self.price_feed.start_streaming()),
             asyncio.create_task(self._orchestration_loop())
         ]
         

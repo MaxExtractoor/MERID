@@ -119,6 +119,53 @@ async def betting_consensus_summary(
     })
 
 
+@router.get("/live")
+async def betting_live_all(
+    sport: Optional[str] = None,
+):
+    """All live/upcoming events with consensus — used by SportsLiveView dashboard."""
+    store = _get_store()
+    if store:
+        try:
+            _ensure_events_seeded(store)
+            consensuses = store.build_all_consensus(sport=sport, state=None)
+            events = []
+            live_odds: List[Dict[str, Any]] = []
+            anomalies: List[Dict[str, Any]] = []
+            for c in consensuses:
+                d = c.to_dict()
+                events.append({
+                    "event_id": d.get("event_id", ""),
+                    "sport": d.get("sport", ""),
+                    "league": d.get("league", ""),
+                    "home_team": d.get("home_team", d.get("event_id", "")),
+                    "away_team": d.get("away_team", ""),
+                    "start_time": d.get("start_time", 0),
+                    "is_live": d.get("state") == "live",
+                    "status": d.get("state", "upcoming"),
+                })
+            return {
+                "events": events,
+                "live_odds": live_odds,
+                "anomalies": anomalies,
+                "stats": {
+                    "total_events": len(events),
+                    "live_events": sum(1 for e in events if e["is_live"]),
+                    "total_anomalies": 0,
+                    "unacknowledged": 0,
+                },
+            }
+        except Exception as exc:
+            logger.warning(f"betting/consensus/live failed: {exc}")
+
+    return {
+        "events": [],
+        "live_odds": [],
+        "anomalies": [],
+        "stats": {"total_events": 0, "live_events": 0, "total_anomalies": 0, "unacknowledged": 0},
+    }
+
+
 @router.get("/live/{event_id}")
 async def betting_live_consensus(event_id: str):
     """Single event live consensus — for drill-down and in-play view."""
@@ -259,8 +306,8 @@ async def settle_bet(req: SettleBetRequest):
             level="info", category="betting",
             metadata={"bet_id": req.bet_id, "result": req.result, "pnl_usd": req.pnl_usd},
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return {"status": "ok", "settled": sb.to_dict()}
 

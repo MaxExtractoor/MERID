@@ -27,7 +27,7 @@ export interface WebSocketWithBackoffOptions {
   /** Add jitter to delays (default: true) */
   useJitter?: boolean;
   /** Callback when message received */
-  onMessage?: (data: any) => void;
+  onMessage?: (data: Record<string, unknown>) => void;
   /** Callback when status changes */
   onStatusChange?: (status: WebSocketStatus, reason?: string) => void;
   /** Callback on error (called once per session, not every retry) */
@@ -42,7 +42,7 @@ export interface WebSocketController {
   /** Reason if unavailable */
   unavailableReason?: string;
   /** Send a message */
-  send: (data: any) => boolean;
+  send: (data: Record<string, unknown>) => boolean;
   /** Manually reconnect (resets retry counter) */
   reconnect: () => void;
   /** Close connection and stop retrying */
@@ -147,7 +147,7 @@ export function createWebSocketWithBackoff(
         }
       };
 
-      ws.onclose = (event) => {
+      ws.onclose = () => {
         ws = null;
 
         // Don't reconnect if manually closed or feature unavailable
@@ -168,7 +168,7 @@ export function createWebSocketWithBackoff(
         
         // Only log reconnect on first few attempts
         if (reconnectCount <= 3) {
-          console.log(`[WS] Reconnecting to ${url} in ${delay}ms (attempt ${reconnectCount}/${maxRetries})`);
+          console.debug(`[WS] Reconnecting to ${url} in ${delay}ms (attempt ${reconnectCount}/${maxRetries})`);
         }
 
         setStatus('disconnected');
@@ -184,7 +184,7 @@ export function createWebSocketWithBackoff(
     }
   };
 
-  const send = (data: any): boolean => {
+  const send = (data: unknown): boolean => {
     if (ws?.readyState === WebSocket.OPEN) {
       const payload = typeof data === 'string' ? data : JSON.stringify(data);
       ws.send(payload);

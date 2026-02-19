@@ -8,7 +8,6 @@
 
 import { useMemo } from "react";
 import { useApiData } from "./useApiData";
-import { isStub } from "../utils/stub";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -63,7 +62,7 @@ export function useConsensusSummary(
     { pollingInterval },
   );
 
-  const symbols = data?.symbols ?? [];
+  const symbols = useMemo(() => data?.symbols ?? [], [data?.symbols]);
 
   const bySymbol = useMemo(() => {
     const map: Record<string, ConsensusSymbolSummary> = {};

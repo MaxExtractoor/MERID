@@ -1,8 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
 import {
   Globe, WifiOff, RefreshCw, AlertTriangle,
   CheckCircle, Clock, Zap
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface ChainProvider {
   name: string;
@@ -45,51 +47,20 @@ const STATUS_ICONS: Record<string, { icon: typeof CheckCircle; color: string }> 
   down: { icon: WifiOff, color: 'text-red-400' },
 };
 
+const DEFAULT_STATUS_ICON = { icon: AlertTriangle, color: 'text-gray-400' };
+
 export default function OnChainHealthPanel() {
-  const [providers, setProviders] = useState<ChainProvider[]>([]);
-  const [circuitBreakers, setCBs] = useState<CircuitBreakerState[]>([]);
-  const [oracles, setOracles] = useState<OracleStatus[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ providers: ChainProvider[]; circuitBreakers: CircuitBreakerState[]; oracles: OracleStatus[] }>(
+    API_ENDPOINTS.BLOCKCHAIN_HEALTH,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM },
+  );
 
-  const fetchHealth = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/blockchain/health');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.providers) setProviders(data.providers);
-        if (data.circuitBreakers) setCBs(data.circuitBreakers);
-        if (data.oracles) setOracles(data.oracles);
-        return;
-      }
-    } catch {
-      // fallback
-    }
-
-    setProviders([
-      { name: 'Helius', chain: 'solana', status: 'healthy', latencyMs: 45, priority: 1, blockHeight: 298456123, lastBlock: new Date(Date.now() - 400).toISOString() },
-      { name: 'Infura', chain: 'ethereum', status: 'healthy', latencyMs: 82, priority: 1, blockHeight: 19845632, lastBlock: new Date(Date.now() - 12000).toISOString() },
-      { name: 'Infura', chain: 'polygon', status: 'healthy', latencyMs: 65, priority: 1, blockHeight: 62345678, lastBlock: new Date(Date.now() - 2000).toISOString() },
-      { name: 'Alchemy', chain: 'ethereum', status: 'degraded', latencyMs: 250, priority: 2, blockHeight: 19845631, lastBlock: new Date(Date.now() - 15000).toISOString() },
-      { name: 'Infura', chain: 'arbitrum', status: 'healthy', latencyMs: 55, priority: 1, blockHeight: 187654321, lastBlock: new Date(Date.now() - 500).toISOString() },
-    ]);
-    setCBs([
-      { chain: 'solana', state: 'closed', trippedAt: '', reason: '' },
-      { chain: 'ethereum', state: 'closed', trippedAt: '', reason: '' },
-      { chain: 'polygon', state: 'closed', trippedAt: '', reason: '' },
-      { chain: 'arbitrum', state: 'closed', trippedAt: '', reason: '' },
-    ]);
-    setOracles([
-      { name: 'Pyth', chain: 'solana', status: 'live', lastUpdate: new Date(Date.now() - 800).toISOString(), priceFeeds: 45, staleFeedCount: 0 },
-      { name: 'Chainlink', chain: 'ethereum', status: 'live', lastUpdate: new Date(Date.now() - 5000).toISOString(), priceFeeds: 120, staleFeedCount: 2 },
-    ]);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchHealth();
-    const interval = setInterval(fetchHealth, 10000);
-    return () => clearInterval(interval);
-  }, [fetchHealth]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="On-chain health" error={fetchError} onRetry={refetch} />;
+  }
+  const providers = rawData?.providers ?? [];
+  const circuitBreakers = rawData?.circuitBreakers ?? [];
+  const oracles = rawData?.oracles ?? [];
 
   const healthyCount = providers.filter(p => p.status === 'healthy').length;
   const trippedCBs = circuitBreakers.filter(cb => cb.state !== 'closed');
@@ -121,11 +92,11 @@ export default function OnChainHealthPanel() {
             </span>
           )}
         </div>
-        <button
-          onClick={fetchHealth}
+        <button type="button"
+          onClick={() => refetch()}
           className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
           title="Refresh on-chain health"
-        >
+         aria-label="Refresh">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -133,7 +104,7 @@ export default function OnChainHealthPanel() {
       {/* RPC Providers */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {providers.map((p, i) => {
-          const cfg = STATUS_ICONS[p.status];
+          const cfg = STATUS_ICONS[p.status] ?? DEFAULT_STATUS_ICON;
           const StatusIcon = cfg.icon;
           const chainColor = CHAIN_COLORS[p.chain] || 'border-l-gray-400';
 
@@ -164,7 +135,7 @@ export default function OnChainHealthPanel() {
                     <Clock className="w-3 h-3" /> Block
                   </span>
                   <span className="font-medium text-gray-300 font-mono">
-                    {p.blockHeight.toLocaleString()}
+                    {(p.blockHeight ?? 0).toLocaleString()}
                   </span>
                 </div>
               </div>
@@ -179,11 +150,11 @@ export default function OnChainHealthPanel() {
         <div className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-4">
           <h4 className="text-sm font-medium text-gray-400 mb-3">Chain Circuit Breakers</h4>
           <div className="space-y-2">
-            {circuitBreakers.map(cb => {
+            {circuitBreakers.map((cb, idx) => {
               const isTripped = cb.state !== 'closed';
               return (
                 <div
-                  key={cb.chain}
+                  key={cb.chain || `cb-${idx}`}
                   className={`flex items-center justify-between px-3 py-2 rounded ${
                     isTripped ? 'bg-red-500/10' : 'bg-slate-900/50'
                   }`}
@@ -207,7 +178,7 @@ export default function OnChainHealthPanel() {
           <h4 className="text-sm font-medium text-gray-400 mb-3">Price Oracles</h4>
           <div className="space-y-2">
             {oracles.map(oracle => {
-              const cfg = STATUS_ICONS[oracle.status];
+              const cfg = STATUS_ICONS[oracle.status] ?? DEFAULT_STATUS_ICON;
               const OracleIcon = cfg.icon;
               return (
                 <div
@@ -220,8 +191,8 @@ export default function OnChainHealthPanel() {
                     <span className="text-xs text-gray-500 uppercase">{oracle.chain}</span>
                   </div>
                   <div className="flex items-center gap-3 text-xs">
-                    <span className="text-gray-400">{oracle.priceFeeds} feeds</span>
-                    {oracle.staleFeedCount > 0 && (
+                    <span className="text-gray-400">{oracle.priceFeeds ?? 0} feeds</span>
+                    {(oracle.staleFeedCount ?? 0) > 0 && (
                       <span className="text-amber-400">{oracle.staleFeedCount} stale</span>
                     )}
                   </div>

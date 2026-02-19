@@ -9,8 +9,8 @@ Usage:
     from merid.risk import can_trade, emergency_stop, get_risk_status
     
     if not can_trade():
-        print("Trading halted!")
-        print(get_risk_status())
+        logger.info("Trading halted!")
+        logger.info(get_risk_status())
 """
 
 from merid.risk.kill_switches import (

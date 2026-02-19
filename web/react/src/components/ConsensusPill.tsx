@@ -56,7 +56,7 @@ const STANCE_CONFIG: Record<
   },
 };
 
-export default function ConsensusPill({ symbol, summary }: ConsensusPillProps) {
+function ConsensusPill({ symbol, summary }: ConsensusPillProps) {
   const entry = summary.bySymbol[symbol];
   const stubbed = isStub(summary.rawResponse) || !entry;
 
@@ -88,3 +88,7 @@ export default function ConsensusPill({ symbol, summary }: ConsensusPillProps) {
     </span>
   );
 }
+
+const MemoizedConsensusPill = React.memo(ConsensusPill);
+MemoizedConsensusPill.displayName = 'ConsensusPill';
+export default MemoizedConsensusPill;

@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
 import { TrendingDown, AlertTriangle, Activity } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, CHART_COLORS} from "../config/constants";
+import type { EquityHistoryPoint, DrawdownHistoryPoint } from '../types/api';
 
 interface DrawdownChartProps {
   agentId?: string;
@@ -25,56 +26,27 @@ export default function DrawdownChart({
   height = 200,
   showEquity = true,
 }: DrawdownChartProps) {
-  const [timestamps, setTimestamps] = useState<number[]>(propTimestamps ?? []);
-  const [equity, setEquity] = useState<number[]>(propEquity ?? []);
-  const [drawdown, setDrawdown] = useState<number[]>(propDrawdown ?? []);
-  const [maxDrawdown, setMaxDrawdown] = useState(propMaxDrawdown ?? 0);
-  const [loading, setLoading] = useState(!propTimestamps && !!agentId);
+  // Fetch via useApiData when agentId is provided and no prop data exists
+  const shouldFetch = !!agentId && !propTimestamps;
+  const { data: equityData, loading: eqLoading } = useApiData<{ history: EquityHistoryPoint[] }>(
+    agentId ? API_ENDPOINTS.RISK_AGENT_EQUITY_HISTORY(agentId) : '',
+    { pollingInterval: 15000, enabled: shouldFetch },
+  );
+  const { data: drawdownData } = useApiData<{ history: DrawdownHistoryPoint[] }>(
+    agentId ? API_ENDPOINTS.RISK_AGENT_DRAWDOWN_HISTORY(agentId) : '',
+    { pollingInterval: 15000, enabled: shouldFetch },
+  );
+  const { data: metricsData } = useApiData<{ max_drawdown?: number }>(
+    agentId ? API_ENDPOINTS.RISK_AGENT_METRICS(agentId) : '',
+    { pollingInterval: 15000, enabled: shouldFetch },
+  );
 
-  useEffect(() => {
-    if (propTimestamps) setTimestamps(propTimestamps);
-    if (propEquity) setEquity(propEquity);
-    if (propDrawdown) setDrawdown(propDrawdown);
-    if (propMaxDrawdown !== undefined) setMaxDrawdown(propMaxDrawdown);
-  }, [propTimestamps, propEquity, propDrawdown, propMaxDrawdown]);
-
-  useEffect(() => {
-    if (agentId && !propTimestamps) {
-      fetchData();
-    }
-  }, [agentId]);
-
-  const fetchData = async () => {
-    if (!agentId) return;
-    
-    try {
-      const [equityRes, drawdownRes, metricsRes] = await Promise.all([
-        fetch(API_ENDPOINTS.RISK_AGENT_EQUITY_HISTORY(agentId)),
-        fetch(API_ENDPOINTS.RISK_AGENT_DRAWDOWN_HISTORY(agentId)),
-        fetch(API_ENDPOINTS.RISK_AGENT_METRICS(agentId)),
-      ]);
-
-      if (equityRes.ok) {
-        const data = await equityRes.json();
-        setTimestamps(data.history.map((h: Record<string, unknown>) => h.timestamp));
-        setEquity(data.history.map((h: Record<string, unknown>) => h.equity));
-      }
-
-      if (drawdownRes.ok) {
-        const data = await drawdownRes.json();
-        setDrawdown(data.history.map((h: Record<string, unknown>) => h.drawdown));
-      }
-
-      if (metricsRes.ok) {
-        const data = await metricsRes.json();
-        setMaxDrawdown(data.max_drawdown ?? 0);
-      }
-    } catch {
-      // Operation failed — UI state unchanged
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Merge props with fetched data (props take priority)
+  const timestamps = propTimestamps ?? (equityData?.history?.map((h) => h.timestamp) ?? []);
+  const equity = propEquity ?? (equityData?.history?.map((h) => h.equity) ?? []);
+  const drawdown = propDrawdown ?? (drawdownData?.history?.map((h) => h.drawdown) ?? []);
+  const maxDrawdown = propMaxDrawdown ?? (metricsData?.max_drawdown ?? 0);
+  const loading = shouldFetch && eqLoading && !equityData;
 
   const formatPercent = (value: number) => {
     return `${(value * 100).toFixed(1)}%`;

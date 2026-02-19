@@ -1,6 +1,18 @@
 """Kalshi venue package for MERID."""
 
-from merid.event_venues.kalshi.client import KalshiVenueClient
+from merid.event_venues.kalshi.client import (
+    KalshiVenueClient,
+    KalshiSessionError,
+    KalshiBusinessError,
+    KalshiBusinessReject,
+    KalshiTokenBucket,
+    KALSHI_RATE_TIERS,
+    KALSHI_REJECT_REASONS,
+    KALSHI_BUSINESS_REJECT_CAUSES,
+    parse_fix,
+    handle_fix_reject,
+    get_kalshi_client,
+)
 from merid.event_venues.kalshi.models import (
     KalshiBalance,
     KalshiConfig,
@@ -13,11 +25,72 @@ from merid.event_venues.kalshi.models import (
 )
 from merid.event_venues.kalshi.trading import KalshiTrader
 from merid.event_venues.kalshi.ws import KalshiWebSocket
+from merid.event_venues.kalshi.market_catalog import (
+    KalshiMarketCatalog,
+    CatalogMarket,
+    CatalogSnapshot,
+    get_market_catalog,
+)
+from merid.event_venues.kalshi.kalshi_risk import (
+    KalshiRiskManager,
+    KalshiRiskConfig,
+    kalshi_fee_cents,
+    kelly_size_kalshi,
+    dynamic_position_sizes,
+    multi_market_kelly_sizes,
+    get_kalshi_risk,
+    edge_from_prediction,
+    kelly_size_from_kalman,
+)
+from merid.event_venues.kalshi.ws_bridge import (
+    KalshiWebSocketBridge,
+    get_ws_bridge,
+)
+from merid.event_venues.kalshi.backtest import (
+    MarketSnapshot,
+    TradeDecision,
+    BacktestState,
+    PriceCandle,
+    backtest,
+    backtest_summary,
+    backtest_kalman_strategy,
+)
+from merid.event_venues.kalshi.volume_monitor import (
+    VolumeMonitor,
+    get_volume_monitor,
+    make_telegram_sink,
+    make_discord_sink,
+    Kalman1D,
+    PriceKalman,
+    tune_kalman_params,
+    KALSHI_ADVANCED_API_FORM,
+)
+from merid.event_venues.kalshi.trade_analytics import (
+    compute_vwap,
+    detect_large_trades,
+)
+from merid.event_venues.kalshi.order_router import (
+    OrderIntent,
+    OrderResult,
+    route_order,
+    simulate_paper_fill,
+    KALSHI_CHANNEL_PRICE,
+    KALSHI_CHANNEL_TRADE,
+    KALSHI_CHANNEL_ORDERBOOK,
+    KALSHI_CHANNEL_ORDER_FILL,
+    KALSHI_CHANNEL_ORDER_REJECT,
+)
 
 __all__ = [
     "KalshiVenueClient",
+    "KalshiSessionError",
+    "KalshiBusinessError",
+    "KalshiTokenBucket",
+    "KALSHI_RATE_TIERS",
+    "KalshiBusinessReject",
     "KalshiWebSocket",
     "KalshiTrader",
+    "get_kalshi_client",
     "KalshiConfig",
     "KalshiMarket",
     "KalshiOutcome",
@@ -26,4 +99,49 @@ __all__ = [
     "KalshiPosition",
     "KalshiTrade",
     "KalshiBalance",
+    "KalshiMarketCatalog",
+    "CatalogMarket",
+    "CatalogSnapshot",
+    "get_market_catalog",
+    "KalshiRiskManager",
+    "KalshiRiskConfig",
+    "kalshi_fee_cents",
+    "kelly_size_kalshi",
+    "dynamic_position_sizes",
+    "multi_market_kelly_sizes",
+    "get_kalshi_risk",
+    "KalshiWebSocketBridge",
+    "get_ws_bridge",
+    "MarketSnapshot",
+    "TradeDecision",
+    "BacktestState",
+    "backtest",
+    "backtest_summary",
+    "VolumeMonitor",
+    "get_volume_monitor",
+    "make_telegram_sink",
+    "make_discord_sink",
+    "Kalman1D",
+    "PriceKalman",
+    "KALSHI_ADVANCED_API_FORM",
+    "KALSHI_REJECT_REASONS",
+    "KALSHI_BUSINESS_REJECT_CAUSES",
+    "parse_fix",
+    "handle_fix_reject",
+    "tune_kalman_params",
+    "compute_vwap",
+    "detect_large_trades",
+    "edge_from_prediction",
+    "kelly_size_from_kalman",
+    "PriceCandle",
+    "backtest_kalman_strategy",
+    "OrderIntent",
+    "OrderResult",
+    "route_order",
+    "simulate_paper_fill",
+    "KALSHI_CHANNEL_PRICE",
+    "KALSHI_CHANNEL_TRADE",
+    "KALSHI_CHANNEL_ORDERBOOK",
+    "KALSHI_CHANNEL_ORDER_FILL",
+    "KALSHI_CHANNEL_ORDER_REJECT",
 ]

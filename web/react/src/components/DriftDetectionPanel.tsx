@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { TrendingUp, TrendingDown, Activity, RefreshCw, AlertCircle, Clock, Zap } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface DriftSignal {
   signal_id: string;
@@ -20,34 +22,13 @@ interface DriftDetectionPanelProps {
 }
 
 export default function DriftDetectionPanel({ className = '' }: DriftDetectionPanelProps) {
-  const [signals, setSignals] = useState<DriftSignal[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'up' | 'down'>('all');
 
-  useEffect(() => {
-    fetchDriftSignals();
-    const interval = setInterval(fetchDriftSignals, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchDriftSignals = async () => {
-    try {
-      const response = await fetch('/api/v1/us-compliant/drift-signals?limit=50');
-      if (response.ok) {
-        const data = await response.json();
-        setSignals(data.signals || []);
-        setError(null);
-      } else {
-        throw new Error('Failed to fetch drift signals');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setSignals([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: rawData, loading, error, refetch } = useApiData<{ signals: DriftSignal[] }>(
+    `${API_ENDPOINTS.DRIFT_SIGNALS}?limit=50`,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND },
+  );
+  const signals = rawData?.signals ?? [];
 
   const formatTimeAgo = (timestamp: string | null) => {
     if (!timestamp) return 'Unknown';
@@ -103,7 +84,7 @@ export default function DriftDetectionPanel({ className = '' }: DriftDetectionPa
           <AlertCircle className="w-5 h-5 text-yellow-500" />
           <div>
             <p className="text-yellow-500 font-medium">Data unavailable</p>
-            <p className="text-sm text-gray-400">{error}</p>
+            <p className="text-sm text-gray-400">{error?.message ?? 'Unknown error'}</p>
           </div>
         </div>
       )}
@@ -154,7 +135,7 @@ export default function DriftDetectionPanel({ className = '' }: DriftDetectionPa
             <div className="flex items-center gap-4">
               <div className="flex gap-2">
                 {(['all', 'up', 'down'] as const).map(f => (
-                  <button
+                  <button type="button"
                     key={f}
                     onClick={() => setFilter(f)}
                     className={`px-3 py-1 text-sm rounded transition-colors ${
@@ -169,8 +150,8 @@ export default function DriftDetectionPanel({ className = '' }: DriftDetectionPa
                   </button>
                 ))}
               </div>
-              <button
-                onClick={fetchDriftSignals}
+              <button type="button"
+                onClick={() => refetch()}
                 className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
                 title="Refresh drift signals"
                 aria-label="Refresh drift signals"

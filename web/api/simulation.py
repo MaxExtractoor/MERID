@@ -180,7 +180,6 @@ async def save_simulation_state() -> Response:
     global _simulation_state
     
     try:
-        from trading.paper_trading import get_paper_trading_engine
         engine = get_paper_trading_engine()
         
         # Collect all portfolio data

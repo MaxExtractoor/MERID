@@ -1,3 +1,4 @@
+import React from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { isStub, stubMessage } from '../utils/stub';
 
@@ -20,7 +21,7 @@ interface StubBannerProps {
  *     </>
  *   );
  */
-export default function StubBanner({ data, className = '' }: StubBannerProps) {
+function StubBanner({ data, className = '' }: StubBannerProps) {
   if (!isStub(data)) return null;
 
   const message = stubMessage(data);
@@ -36,3 +37,7 @@ export default function StubBanner({ data, className = '' }: StubBannerProps) {
     </div>
   );
 }
+
+const MemoizedStubBanner = React.memo(StubBanner);
+MemoizedStubBanner.displayName = 'StubBanner';
+export default MemoizedStubBanner;

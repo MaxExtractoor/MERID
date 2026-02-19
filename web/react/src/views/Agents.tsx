@@ -1,13 +1,14 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useApiData } from "../hooks/useApiData";
 import { useMeridSocket } from "../hooks/useMeridSocket";
-import { API_ENDPOINTS, STATUS_TYPES } from "../config/constants";
+import { API_ENDPOINTS, STATUS_TYPES, DEFAULTS } from "../config/constants";
 import { formatCurrency, formatPercent, formatDateTime } from "../utils/formatters";
 import MetricCard from "../components/MetricCard";
 import StatusIndicator from "../components/StatusIndicator";
 import DataTableEnhanced from "../components/DataTableEnhanced";
 import SwarmPanel from "../components/SwarmPanel";
 import ExplainabilityPanel from "../components/ExplainabilityPanel";
+import ErrorAlert from "../components/ErrorAlert";
 import { RiskStatus } from "../types/risk";
 import { LiveAgentHealthPanel } from "./LiveAgentHealthPanel";
 import { Activity, HeartPulse, Brain } from "lucide-react";
@@ -56,15 +57,80 @@ interface AgentDetail {
   }>;
 }
 
+interface KalshiGridAgent {
+  name: string;
+  enabled: boolean;
+  running: boolean;
+  cycles_run: number;
+  orders_placed: number;
+  fill_count: number;
+  last_cycle_at: string | null;
+  last_error: string | null;
+  active_tickers: string[];
+  config: { assets: string[]; timeframes: string[] };
+  performance?: { win_rate?: number; total_pnl_usd?: number; sharpe_ratio?: number };
+  signals?: Array<{ ticker: string; confidence: number; timestamp: string }>;
+}
+
+interface KalshiGridResponse {
+  agents: KalshiGridAgent[];
+  count: number;
+}
+
+interface KalshiPerformanceSummary {
+  total_agents: number;
+  total_fills: number;
+  system_win_rate: number;
+  total_pnl: number;
+  avg_sharpe: number;
+}
+
+function kalshiAgentToAgent(a: KalshiGridAgent): Agent {
+  const running = a.running && a.enabled;
+  const hasError = !!a.last_error;
+  const status: Agent["status"] = !a.enabled ? "offline" : hasError ? "degraded" : running ? "online" : "offline";
+  const perf = a.performance ?? {};
+  const assets = a.config?.assets ?? [];
+  const timeframes = a.config?.timeframes ?? [];
+  const role = assets.length > 0 && timeframes.length > 0
+    ? `${assets[0]} ${timeframes[0]}`
+    : assets[0] ?? "kalshi-agent";
+  const lastSignal = a.signals?.[0];
+  return {
+    id: a.name,
+    name: a.name,
+    role,
+    status,
+    confidence: Math.round((perf.win_rate ?? 0) * 100),
+    pnl: perf.total_pnl_usd ?? 0,
+    winRate: perf.win_rate ?? 0,
+    totalTrades: a.fill_count ?? a.orders_placed ?? 0,
+    lastDecision: lastSignal ? `${lastSignal.ticker} @ ${(lastSignal.confidence * 100).toFixed(0)}%` : undefined,
+    lastDecisionTime: lastSignal?.timestamp ?? a.last_cycle_at ?? undefined,
+  };
+}
+
 export default function Agents() {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [showDetail, setShowDetail] = useState(false);
   const [activeTab, setActiveTab] = useState<"fleet" | "health" | "explainability">("fleet");
 
-  // Fetch agents data
-  const { data: agents } = useApiData<Agent[]>(
-    API_ENDPOINTS.AGENTS,
-    { pollingInterval: 10000 }
+  // Fetch Kalshi grid agents (real, live data)
+  const { data: gridData, error: agentsError, refetch: refetchAgents } = useApiData<KalshiGridResponse>(
+    API_ENDPOINTS.KALSHI_GRID_AGENTS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+  );
+
+  // Fetch performance summary for aggregate metrics
+  const { data: perfSummary } = useApiData<KalshiPerformanceSummary>(
+    API_ENDPOINTS.KALSHI_GRID_PERFORMANCE_SUMMARY,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+  );
+
+  // Transform Kalshi grid agents to the Agent shape this view expects
+  const agents: Agent[] = useMemo(
+    () => (gridData?.agents ?? []).map(kalshiAgentToAgent),
+    [gridData]
   );
 
   // WebSocket for real-time updates
@@ -72,24 +138,53 @@ export default function Agents() {
 
   React.useEffect(() => {
     if (socket && connected) {
-      const handleAgentUpdate = (data: any) => {
-        // This would trigger a refetch of agents
-        console.log("Agent update:", data);
-      };
-
+      const handleAgentUpdate = () => { refetchAgents(); };
       socket.on("agent_update", handleAgentUpdate);
-
-      return () => {
-        socket.off("agent_update", handleAgentUpdate);
-      };
+      return () => { socket.off("agent_update", handleAgentUpdate); };
     }
-  }, [socket, connected]);
+  }, [socket, connected, refetchAgents]);
 
-  // Fetch agent detail when selected
-  const { data: agentDetail } = useApiData<AgentDetail>(
-    selectedAgent ? API_ENDPOINTS.AGENT_DETAIL(selectedAgent.id) : "",
+  // Fetch agent detail (Kalshi grid per-agent endpoint)
+  const { data: rawAgentDetail } = useApiData<KalshiGridAgent>(
+    selectedAgent ? API_ENDPOINTS.KALSHI_GRID_AGENT(selectedAgent.id) : "",
     { enabled: !!selectedAgent }
   );
+
+  const agentDetail: AgentDetail | null = useMemo(() => {
+    if (!rawAgentDetail) return null;
+    const base = kalshiAgentToAgent(rawAgentDetail);
+    const perf = rawAgentDetail.performance ?? {};
+    return {
+      ...base,
+      lastDecision: base.lastDecision ?? "",
+      lastDecisionTime: base.lastDecisionTime ?? "",
+      charter: `Kalshi trading agent — assets: ${(rawAgentDetail.config?.assets ?? []).join(", ")}, timeframes: ${(rawAgentDetail.config?.timeframes ?? []).join(", ")}`,
+      metrics: {
+        avgTradeSize: 0,
+        avgHoldTime: 0,
+        sharpeRatio: (perf as Record<string, number>).sharpe_ratio ?? 0,
+        maxDrawdown: (perf as Record<string, number>).max_drawdown_pct ?? 0,
+        dailyPnl: (perf as Record<string, number>).total_pnl_usd ?? 0,
+        weeklyPnl: 0,
+        monthlyPnl: 0,
+      },
+      recentDecisions: (rawAgentDetail.signals ?? []).slice(0, 10).map(s => ({
+        timestamp: s.timestamp,
+        decision: s.ticker,
+        confidence: s.confidence,
+      })),
+    };
+  }, [rawAgentDetail]);
+
+  // Error state
+  if (agentsError && !agents) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">Bots & Agents</h1>
+        <ErrorAlert message="Failed to load agents data" onRetry={refetchAgents} />
+      </div>
+    );
+  }
 
   // Early return if no agents data
   if (!agents || agents.length === 0) {
@@ -186,17 +281,22 @@ export default function Agents() {
     return colors[role as keyof typeof colors] || "text-slate-500";
   };
 
-  const columns = [
+  const columns: Array<{
+    key: keyof Agent;
+    label: string;
+    sortable?: boolean;
+    render?: (value: unknown, row: Agent) => React.ReactNode;
+  }> = [
     {
       key: "name" as keyof Agent,
       label: "Agent Name",
       sortable: true,
-      render: (value: string, row: Agent) => (
-        <button
+      render: (value: unknown, row: Agent) => (
+        <button type="button"
           onClick={() => handleAgentClick(row)}
           className="text-blue-400 hover:text-blue-300 font-medium text-left"
         >
-          {value}
+          {typeof value === "string" ? value : String(value ?? "")}
         </button>
       ),
     },
@@ -204,16 +304,18 @@ export default function Agents() {
       key: "role" as keyof Agent,
       label: "Role",
       sortable: true,
-      render: (value: string) => (
-        <span className={`px-2 py-1 rounded text-xs font-medium ${getRoleColor(value)}`}>
-          {value.replace("_", " ").toUpperCase()}
+      render: (value: unknown) => (
+        <span className={`px-2 py-1 rounded text-xs font-medium ${getRoleColor(value as string)}`}>
+          {(typeof value === "string" ? value : String(value ?? ""))
+            .replace("_", " ")
+            .toUpperCase()}
         </span>
       ),
     },
     {
       key: "status" as keyof Agent,
       label: "Status",
-      render: (_value: string, row: Agent) => (
+      render: (_value: unknown, row: Agent) => (
         <StatusIndicator status={convertRiskStatus(getAgentStatus(row))} showText />
       ),
     },
@@ -221,60 +323,83 @@ export default function Agents() {
       key: "confidence" as keyof Agent,
       label: "Confidence",
       sortable: true,
-      render: (value: number, _row: Agent) => (
+      render: (value: unknown) => {
+        const numeric = typeof value === "number" ? value : Number(value) || 0;
+        return (
         <div className="flex items-center gap-2">
           <div className="w-16 bg-slate-700 rounded-full h-2">
             <div
               className={`h-2 rounded-full ${
-                value >= 80 ? "bg-green-500" : value >= 60 ? "bg-amber-500" : "bg-red-500"
+                numeric >= 80 ? "bg-green-500" : numeric >= 60 ? "bg-amber-500" : "bg-red-500"
               }`}
-              style={{ width: `${value}%` }}
+              style={{ width: `${numeric}%` }}
             />
           </div>
-          <span className="text-sm">{value}%</span>
+          <span className="text-sm">{numeric}%</span>
         </div>
-      ),
+        );
+      },
     },
     {
       key: "pnl" as keyof Agent,
       label: "P&L",
       sortable: true,
-      render: (value: number) => (
-        <span className={value >= 0 ? "text-green-500" : "text-red-500"}>
-          {formatCurrency(value)}
+      render: (value: unknown) => {
+        const numeric = typeof value === "number" ? value : Number(value) || 0;
+        return (
+        <span className={numeric >= 0 ? "text-green-500" : "text-red-500"}>
+          {formatCurrency(numeric)}
         </span>
-      ),
+        );
+      },
     },
     {
       key: "winRate" as keyof Agent,
       label: "Win Rate",
       sortable: true,
-      render: (value: number) => (
-        <span className={value >= 0.6 ? "text-green-500" : value >= 0.4 ? "text-amber-500" : "text-red-500"}>
-          {formatPercent(value)}
+      render: (value: unknown) => {
+        const numeric = typeof value === "number" ? value : Number(value) || 0;
+        return (
+        <span className={numeric >= 0.6 ? "text-green-500" : numeric >= 0.4 ? "text-amber-500" : "text-red-500"}>
+          {formatPercent(numeric)}
         </span>
-      ),
+        );
+      },
     },
     {
       key: "totalTrades" as keyof Agent,
       label: "Total Trades",
       sortable: true,
-      render: (value: number) => value.toLocaleString(),
+      render: (value: unknown) => {
+        const numeric = typeof value === "number" ? value : Number(value) || 0;
+        return numeric.toLocaleString();
+      },
     },
     {
       key: "lastDecisionTime" as keyof Agent,
       label: "Last Decision",
       sortable: true,
-      render: (value: string) => value ? formatDateTime(value) : "Never",
+      render: (value: unknown) => {
+        const timestamp = typeof value === "string" ? value : "";
+        return timestamp ? formatDateTime(timestamp) : "Never";
+      },
     },
   ];
 
-  const detailColumns = [
+  const detailColumns: Array<{
+    key: keyof AgentDetail["recentDecisions"][0];
+    label: string;
+    sortable?: boolean;
+    render?: (value: unknown, row: AgentDetail["recentDecisions"][0]) => React.ReactNode;
+  }> = [
     {
       key: "timestamp" as keyof AgentDetail["recentDecisions"][0],
       label: "Time",
       sortable: true,
-      render: (value: string) => formatDateTime(value),
+      render: (value: unknown) => {
+        const timestamp = typeof value === "string" ? value : "";
+        return timestamp ? formatDateTime(timestamp) : "-";
+      },
     },
     {
       key: "decision" as keyof AgentDetail["recentDecisions"][0],
@@ -285,34 +410,43 @@ export default function Agents() {
       key: "confidence" as keyof AgentDetail["recentDecisions"][0],
       label: "Confidence",
       sortable: true,
-      render: (value: number) => (
-        <span className={value >= 0.8 ? "text-green-500" : value >= 0.5 ? "text-amber-500" : "text-red-500"}>
-          {formatPercent(value)}
+      render: (value: unknown) => {
+        const numeric = typeof value === "number" ? value : Number(value) || 0;
+        return (
+        <span className={numeric >= 0.8 ? "text-green-500" : numeric >= 0.5 ? "text-amber-500" : "text-red-500"}>
+          {formatPercent(numeric)}
         </span>
-      ),
+        );
+      },
     },
     {
       key: "outcome" as keyof AgentDetail["recentDecisions"][0],
       label: "Outcome",
       sortable: true,
-      render: (value: string) => (
+      render: (value: unknown) => {
+        const outcome = typeof value === "string" ? value : "";
+        return (
         <span className={`px-2 py-1 rounded text-xs font-medium ${
-          value === "profit" ? "bg-green-500/20 text-green-500" : 
-          value === "loss" ? "bg-red-500/20 text-red-500" : 
+          outcome === "profit" ? "bg-green-500/20 text-green-500" : 
+          outcome === "loss" ? "bg-red-500/20 text-red-500" : 
           "bg-slate-500/20 text-slate-500"
         }`}>
-          {value?.toUpperCase() || "PENDING"}
+          {outcome ? outcome.toUpperCase() : "PENDING"}
         </span>
-      ),
+        );
+      },
     },
     {
       key: "pnl" as keyof AgentDetail["recentDecisions"][0],
       label: "P&L",
-      render: (value?: number) => value !== undefined ? (
-        <span className={value >= 0 ? "text-green-500" : "text-red-500"}>
-          {formatCurrency(value)}
+      render: (value: unknown) => {
+        const numeric = typeof value === "number" ? value : undefined;
+        return numeric !== undefined ? (
+        <span className={numeric >= 0 ? "text-green-500" : "text-red-500"}>
+          {formatCurrency(numeric)}
         </span>
-      ) : "-",
+        ) : "-";
+      },
     },
   ];
 
@@ -330,7 +464,7 @@ export default function Agents() {
       {/* Tabs */}
       <div className="border-b border-slate-800">
         <div className="flex gap-4">
-          <button
+          <button type="button"
             onClick={() => setActiveTab("fleet")}
             className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               activeTab === "fleet"
@@ -341,7 +475,7 @@ export default function Agents() {
             <Activity className="w-4 h-4" />
             Fleet
           </button>
-          <button
+          <button type="button"
             onClick={() => setActiveTab("health")}
             className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               activeTab === "health"
@@ -352,7 +486,7 @@ export default function Agents() {
             <HeartPulse className="w-4 h-4" />
             Health
           </button>
-          <button
+          <button type="button"
             onClick={() => setActiveTab("explainability")}
             className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               activeTab === "explainability"
@@ -376,29 +510,27 @@ export default function Agents() {
           {/* Swarm Intelligence Panel */}
           <SwarmPanel />
 
-          {/* Summary Cards */}
+          {/* Summary Cards — wired to real Kalshi grid performance */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <MetricCard
               label="Total Agents"
-              value={safeAgents.length}
+              value={perfSummary?.total_agents ?? safeAgents.length}
               status="GOOD"
             />
             <MetricCard
               label="Active Agents"
               value={safeAgents.filter(a => a.status === "online").length}
-              delta={safeAgents.filter(a => a.status === "online").length - safeAgents.filter(a => a.status === "offline").length}
               status="GOOD"
             />
             <MetricCard
               label="Total P&L"
-              value={safeAgents.reduce((sum, a) => sum + a.pnl, 0)}
-              status={convertRiskStatus(getPnLStatus(safeAgents.reduce((sum, a) => sum + a.pnl, 0)))}
+              value={perfSummary?.total_pnl ?? safeAgents.reduce((sum, a) => sum + a.pnl, 0)}
+              status={convertRiskStatus(getPnLStatus(perfSummary?.total_pnl ?? 0))}
             />
             <MetricCard
-              label="Avg Confidence"
-              value={safeAgents.reduce((sum, a) => sum + a.confidence, 0) / safeAgents.length}
-              deltaPercent={5.2}
-              status={convertRiskStatus(getConfidenceStatus(safeAgents.reduce((sum, a) => sum + a.confidence, 0) / safeAgents.length))}
+              label="System Win Rate"
+              value={perfSummary ? `${(perfSummary.system_win_rate * 100).toFixed(1)}%` : "—"}
+              status={convertRiskStatus(getWinRateStatus(perfSummary?.system_win_rate ?? 0))}
             />
           </div>
 
@@ -422,7 +554,7 @@ export default function Agents() {
           <div className="bg-slate-800 rounded-xl border border-slate-700 p-6 max-w-4xl max-h-[80vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold text-white">{selectedAgent.name}</h2>
-              <button
+              <button type="button"
                 onClick={() => setShowDetail(false)}
                 className="text-slate-400 hover:text-white"
               >

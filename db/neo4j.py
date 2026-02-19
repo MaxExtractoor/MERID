@@ -199,5 +199,10 @@ class Neo4jMemory:
             return [record.data() for record in result]
 
 
-# Instantiate once at startup
-memory = Neo4jMemory()
+# Instantiate once at startup — graceful fallback if Neo4j is unavailable
+try:
+    memory = Neo4jMemory()
+except Exception as _neo4j_err:
+    import logging as _logging
+    _logging.getLogger(__name__).warning("Neo4j unavailable (%s) — running without graph memory", _neo4j_err)
+    memory = None

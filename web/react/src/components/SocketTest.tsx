@@ -10,12 +10,12 @@ export default function SocketTest() {
     // Subscribe to price updates when connected
     if (connected) {
       socket.emit("subscribe_prices", ["BTC-USD", "ETH-USD"]);
-      console.log("Subscribed to price updates");
+      // Subscribed to price updates
     }
 
     // Listen for price ticks
-    const handlePriceTick = (data: any) => {
-      console.log("Price tick received:", data);
+    const handlePriceTick = (data: unknown) => {
+      void data;
     };
 
     socket.on("price_tick", handlePriceTick);

@@ -16,6 +16,7 @@ logger = structlog.get_logger(__name__)
 
 class BinanceUSAdapter(VenueAdapter):
     """Binance.US adapter for US crypto spot trading."""
+    _is_stub = True
     
     def __init__(
         self,
@@ -70,7 +71,7 @@ class BinanceUSAdapter(VenueAdapter):
             self.logger.error("market_data_error", error=str(e))
             return None
     
-    async def place_order(
+    async def _place_order_impl(
         self,
         symbol: str,
         side: OrderSide,

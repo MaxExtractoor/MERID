@@ -246,7 +246,6 @@ async def get_websocket_metrics() -> Dict[str, Any]:
         
         # Get metrics for trades endpoint
         try:
-            from web.api.ws_dedicated_streams import get_trades_manager
             trades_manager = get_trades_manager()
             
             recent_trades = trades_manager.get_recent_trades(limit=100)
@@ -265,7 +264,6 @@ async def get_websocket_metrics() -> Dict[str, Any]:
         
         # Get metrics for prices endpoint
         try:
-            from web.api.ws_dedicated_streams import get_prices_manager
             prices_manager = get_prices_manager()
             
             current_prices = prices_manager.get_current_prices()
@@ -284,8 +282,6 @@ async def get_websocket_metrics() -> Dict[str, Any]:
         
         # Get metrics for portfolio endpoint
         try:
-            from web.api.ws_dedicated_streams import get_portfolio_manager
-            from trading.paper_trading import get_paper_engine
             
             portfolio_manager = get_portfolio_manager()
             paper_engine = get_paper_engine()

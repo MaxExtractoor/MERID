@@ -188,6 +188,8 @@ make codebase-drift-audit
 - Follow existing import patterns
 - Maintain backward compatibility
 - Add health checks for new components
+- No new `# type: ignore` without a justifying comment (e.g. `# type: ignore[arg-type]  # reason`)
+- No new bare `except: pass` — log with `logger.debug`
 
 ---
 
@@ -257,6 +259,7 @@ make preflight
 - [ ] Health check passes (`make preflight`)
 - [ ] Documentation updated
 - [ ] Code follows style guidelines
+- [ ] No new `# type: ignore` without a justifying comment
 
 ### **Pre-Merge/Pre-Push Checklist**
 Run these checks before merging or pushing to ensure system integrity:

@@ -303,7 +303,6 @@ async def check_alpha_vantage_api() -> ServiceStatus:
     start_time = datetime.now()
     
     try:
-        import httpx
         
         api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
         if not api_key or api_key == 'change_me':
@@ -392,7 +391,6 @@ async def check_helius_api() -> ServiceStatus:
     start_time = datetime.now()
     
     try:
-        import httpx
         
         rpc_url = os.getenv("HELIUS_RPC_URL")
         if not rpc_url:
@@ -447,7 +445,6 @@ async def check_openai_api() -> ServiceStatus:
     start_time = datetime.now()
     
     try:
-        import httpx
         
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key or api_key == 'change_me':
@@ -510,7 +507,6 @@ async def check_huggingface_api() -> ServiceStatus:
     start_time = datetime.now()
     
     try:
-        import httpx
         
         api_key = os.getenv("HUGGINGFACE_API_KEY")
         if not api_key or api_key == 'change_me':

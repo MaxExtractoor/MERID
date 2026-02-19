@@ -44,11 +44,12 @@ docker-compose up -d
 ```
 
 This starts:
+
 - **Redis** — state and pub/sub
 - **Neo4j** — knowledge graph
 - **Prometheus** — metrics collection
 - **Alertmanager** — alert routing
-- **Grafana** — dashboards (http://localhost:3000, admin/admin)
+- **Grafana** — dashboards (<http://localhost:3000>, admin/admin)
 
 Verify:
 
@@ -105,7 +106,7 @@ make serve
 Key endpoints:
 
 | Endpoint | Description |
-|----------|-------------|
+| --- | --- |
 | `GET /healthz` | Health check |
 | `GET /api/operator/summary` | Operator dashboard data |
 | `GET /api/v1/pipeline/summary` | Pipeline status |
@@ -114,7 +115,7 @@ Key endpoints:
 | `GET /risk/commitments` | Historical commitments audit |
 | `POST /risk/kill-switch/enable` | Emergency stop |
 
-API docs: http://localhost:8000/docs (Swagger UI)
+API docs: <http://localhost:8000/docs> (Swagger UI)
 
 ---
 
@@ -122,7 +123,7 @@ API docs: http://localhost:8000/docs (Swagger UI)
 
 ### Mental Model
 
-```
+```text
 Research Agents → Strategy Agents → Consensus Engine → Risk Gate → Trade Router → Venue Adapters
        ↑                                    ↑              ↑
   Market Data                          Explainability   Audit Trail
@@ -141,7 +142,7 @@ Research Agents → Strategy Agents → Consensus Engine → Risk Gate → Trade
 ### Key Files
 
 | File | Purpose |
-|------|---------|
+| --- | --- |
 | `config/agent_manifest.yml` | Agent capabilities registry |
 | `merid/pipeline/router.py` | Trade routing pipeline |
 | `merid/pipeline/risk_manager.py` | 7-point risk check |
@@ -150,6 +151,20 @@ Research Agents → Strategy Agents → Consensus Engine → Risk Gate → Trade
 | `core/feed_staleness_monitor.py` | Data freshness monitoring |
 | `core/automated_risk_controls.py` | Circuit breakers + halt manager |
 | `web/main.py` | FastAPI server entry point |
+
+---
+
+## 6.5 OpenClaw Control-Room Assistant (Optional)
+
+If you are using OpenClaw as an external operator, load the MERID-aware system prompt:
+
+- `prompts/OPENCLAW_MERID_SYSTEM_PROMPT.md`
+
+Guidelines:
+
+- Keep OpenClaw in SIM mode unless explicitly approved for PAPER or LIVE.
+- Use MERID's APIs, Make targets, and dashboard as the control surface.
+- Never bypass execution guardrails such as `ExecutionGuard`, `GlobalRiskManager`, or `ModeManager`.
 
 ---
 
@@ -167,7 +182,7 @@ Research Agents → Strategy Agents → Consensus Engine → Risk Gate → Trade
 ## Troubleshooting
 
 | Issue | Fix |
-|-------|-----|
+| --- | --- |
 | `ModuleNotFoundError` | Activate venv: `.venv\Scripts\activate` |
 | Docker services won't start | Check ports 6379, 7474, 9090, 9093, 3000 are free |
 | Tests fail with import errors | Run `pip install -r requirements.txt` again |
@@ -175,4 +190,4 @@ Research Agents → Strategy Agents → Consensus Engine → Risk Gate → Trade
 
 ---
 
-*Last updated: 2026-02-09*
+Last updated: 2026-02-09.

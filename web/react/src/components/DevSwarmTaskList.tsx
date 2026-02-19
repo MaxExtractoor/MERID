@@ -45,7 +45,10 @@ export default function DevSwarmTaskList({ tasks, onRefresh }: DevSwarmTaskListP
           <h2 className="text-xl font-semibold text-white">Tasks</h2>
           <div className="flex items-center gap-4">
             {/* Filter */}
-            <select
+            <select aria-label="Tasks"
+              id="devswarm-task-filter"
+              name="taskFilter"
+              title="Filter tasks by status"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               className="bg-slate-800 border border-slate-700 rounded px-3 py-1 text-sm text-white"
@@ -57,10 +60,10 @@ export default function DevSwarmTaskList({ tasks, onRefresh }: DevSwarmTaskListP
               <option value="pending">Pending</option>
             </select>
             
-            <button
+            <button type="button"
               onClick={onRefresh}
               className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-white rounded text-sm transition-colors"
-            >
+             title="Refresh">
               ↻ Refresh
             </button>
           </div>
@@ -129,7 +132,7 @@ export default function DevSwarmTaskList({ tasks, onRefresh }: DevSwarmTaskListP
                     </div>
                   </td>
                   <td className="px-6 py-4">
-                    <button
+                    <button type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         setSelectedTask(task);
@@ -151,11 +154,11 @@ export default function DevSwarmTaskList({ tasks, onRefresh }: DevSwarmTaskListP
         <div 
           className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center"
           onClick={() => setSelectedTask(null)}
-        >
+         role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => setSelectedTask(null))(); } }}>
           <div 
             className="bg-slate-900 rounded-xl border border-slate-700 max-w-4xl w-full mx-4 max-h-[80vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
-          >
+           role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); ((e) => e.stopPropagation())(); } }}>
             <div className="p-6 border-b border-slate-800">
               <div className="flex items-start justify-between">
                 <div>
@@ -164,7 +167,7 @@ export default function DevSwarmTaskList({ tasks, onRefresh }: DevSwarmTaskListP
                     {selectedTask.status}
                   </span>
                 </div>
-                <button
+                <button type="button"
                   onClick={() => setSelectedTask(null)}
                   className="text-slate-400 hover:text-white"
                 >

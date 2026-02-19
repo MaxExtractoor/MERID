@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect } from 'react';
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -8,7 +8,9 @@ import {
   Zap,
   Clock
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
 import { useConsensusStream } from '../hooks/useConsensusStream';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface ConsensusStatus {
   symbol: string;
@@ -48,8 +50,15 @@ interface ConsensusData {
 }
 
 export default function ConsensusBoard() {
-  const [data, setData] = useState<ConsensusData | null>(null);
-  const [restPlans, setRestPlans] = useState<TradePlan[]>([]);
+  const { data, refetch: refetchStatus } = useApiData<ConsensusData>(
+    API_ENDPOINTS.CONSENSUS_STATUS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
+  );
+  const { data: plansData } = useApiData<{ plans: TradePlan[] }>(
+    API_ENDPOINTS.CONSENSUS_PLANS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
+  );
+  const restPlans = plansData?.plans ?? [];
 
   // Shared consensus WebSocket — one connection for the entire app
   const { connected: wsConnected, plans: streamPlans, lastEvent } = useConsensusStream();
@@ -59,50 +68,12 @@ export default function ConsensusBoard() {
     ? streamPlans.map(p => ({ ...p, status: p.status || 'pending' } as TradePlan))
     : restPlans;
 
-  useEffect(() => {
-    // Initial REST fetch
-    fetchConsensusStatus();
-    fetchActivePlans();
-
-    // Poll fallback at a relaxed interval (stream handles real-time)
-    const interval = setInterval(() => {
-      fetchConsensusStatus();
-      fetchActivePlans();
-    }, 15000);
-
-    return () => clearInterval(interval);
-  }, []);
-
   // Re-fetch consensus status when stream delivers a new event
   useEffect(() => {
     if (lastEvent) {
-      fetchConsensusStatus();
+      refetchStatus();
     }
-  }, [lastEvent]);
-
-  const fetchConsensusStatus = async () => {
-    try {
-      const res = await fetch('/api/v1/consensus/status');
-      if (res.ok) {
-        const data = await res.json();
-        setData(data);
-      }
-    } catch (err) {
-      console.error('Failed to fetch consensus status:', err);
-    }
-  };
-
-  const fetchActivePlans = async () => {
-    try {
-      const res = await fetch('/api/v1/consensus/plans');
-      if (res.ok) {
-        const data = await res.json();
-        setRestPlans(data.plans || []);
-      }
-    } catch (err) {
-      console.error('Failed to fetch active plans:', err);
-    }
-  };
+  }, [lastEvent, refetchStatus]);
 
   const getDirectionIcon = (direction: string) => {
     switch (direction) {

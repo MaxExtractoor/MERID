@@ -7,11 +7,37 @@ env:
   CELERY_BROKER_URL: redis://localhost:6379/0
   PACT_BROKER_BASE_URL: ${{ secrets.PACT_BROKER_URL }}
   PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+  MERID_SWARM_INTEGRITY_ENFORCE: "1"
+  MERID_SWARM_HEALTH_SNAPSHOT: tests/fixtures/swarm/healthy_snapshot.json
+  MERID_SWARM_SAFEGUARD_CONFIG: .merid_safeguard.yml
 
 jobs:
+  swarm-integrity-gate:
+    name: Swarm Integrity Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run swarm integrity policy gate
+        run: |
+          python scripts/enforce_swarm_integrity.py \
+            --config .merid_safeguard.yml \
+            --snapshot tests/fixtures/swarm/healthy_snapshot.json \
+            --strict
+
   contract-tests:
     name: Contract Tests (Pact)
     runs-on: ubuntu-latest
+    needs: swarm-integrity-gate
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +63,7 @@ jobs:
   http-mock-tests:
     name: HTTP Mock Tests
     runs-on: ubuntu-latest
+    needs: swarm-integrity-gate
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +83,7 @@ jobs:
   integration-component-tests:
     name: Integration Component Tests
     runs-on: ubuntu-latest
+    needs: swarm-integrity-gate
     services:
       redis:
         image: redis:7-alpine
@@ -82,6 +110,7 @@ jobs:
   e2e-integration:
     name: E2E Integration Tests
     runs-on: ubuntu-latest
+    needs: swarm-integrity-gate
     services:
       redis:
         image: redis:7-alpine

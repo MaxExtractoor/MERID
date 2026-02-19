@@ -89,8 +89,6 @@ async def register_market_assertions_batch(batch: MarketDataBatch):
         source = get_market_assertion_source()
         
         # Get blind spots before
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         current_time = time.time()
@@ -154,8 +152,6 @@ async def get_market_assertions():
 async def get_market_blind_spots():
     """Get current blind spots and market domain status."""
     try:
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         current_time = time.time()
@@ -202,8 +198,6 @@ async def load_demo_market_data():
         ]
         
         # Get blind spots before
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         current_time = time.time()

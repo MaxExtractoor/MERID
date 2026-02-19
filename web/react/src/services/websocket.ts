@@ -1,4 +1,7 @@
-type MessageHandler = (data: any) => void;
+import { WS_URL } from '../config/constants';
+import { logUiError } from '../utils/logger';
+
+type MessageHandler = (data: unknown) => void;
 type ErrorHandler = (error: Event) => void;
 type ConnectionHandler = () => void;
 
@@ -48,20 +51,25 @@ export class WebSocketService {
         console.log('[WebSocket] ← Message received:', event.data.substring(0, 100));
         try {
           const message = JSON.parse(event.data);
-          const { type, data } = message;
-          
-          const handlers = this.messageHandlers.get(type);
+          if (!message || typeof message !== 'object') {
+            return;
+          }
+          const messageType = message.type || message.event_type || message.event || null;
+          if (!messageType) {
+            return;
+          }
+          const payload = message.data ?? message.payload ?? message;
+          const handlers = this.messageHandlers.get(messageType);
           if (handlers) {
-            handlers.forEach(handler => handler(data));
+            handlers.forEach(handler => handler(payload));
           }
         } catch (error) {
-          console.error('[WebSocket] ✗ Error parsing WebSocket message:', error);
+          logUiError('WebSocket', 'Error parsing WebSocket message', error);
         }
       };
 
       this.ws.onerror = (error) => {
-        console.error('[WebSocket] ✗ Connection error:', error);
-        console.error('[WebSocket] URL:', this.config.url);
+        logUiError('WebSocket', 'Connection error', error, { url: this.config.url });
         this.errorHandlers.forEach(handler => handler(error));
       };
 
@@ -74,14 +82,14 @@ export class WebSocketService {
         }
       };
     } catch (error) {
-      console.error('Error creating WebSocket:', error);
+      logUiError('WebSocket', 'Error creating WebSocket', error);
       this.attemptReconnect();
     }
   }
 
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= (this.config.maxReconnectAttempts || 10)) {
-      console.error('Max reconnection attempts reached');
+      logUiError('WebSocket', 'Max reconnection attempts reached');
       return;
     }
 
@@ -107,7 +115,7 @@ export class WebSocketService {
     }
   }
 
-  send(type: string, data: any): void {
+  send(type: string, data: unknown): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type, data }));
     } else {
@@ -116,11 +124,13 @@ export class WebSocketService {
   }
 
   subscribe(type: string, handler: MessageHandler): () => void {
-    if (!this.messageHandlers.has(type)) {
-      this.messageHandlers.set(type, new Set());
+    let handlers = this.messageHandlers.get(type);
+    if (!handlers) {
+      handlers = new Set();
+      this.messageHandlers.set(type, handlers);
     }
     
-    this.messageHandlers.get(type)!.add(handler);
+    handlers.add(handler);
 
     // Return unsubscribe function
     return () => {
@@ -155,7 +165,8 @@ export class WebSocketService {
 }
 
 // Create singleton instance
-const wsUrl = (import.meta as any).env?.VITE_WS_URL || `ws://${window?.location?.host || '127.0.0.1:8000'}/ws`;
+const metaEnv = (import.meta as { env?: { VITE_WS_URL?: string } }).env;
+const wsUrl = metaEnv?.VITE_WS_URL || WS_URL;
 export const websocketService = new WebSocketService({ url: wsUrl });
 
 // Auto-connect on import

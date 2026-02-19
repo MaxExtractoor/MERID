@@ -31,14 +31,14 @@ export function LiveRiskStrip() {
   }, [metrics.exposure]);
 
   // Count alerts by severity
-  const safeAlerts = alerts || [];
   const alertCounts = useMemo(() => {
+    const safeAlerts = alerts ?? [];
     return {
       critical: safeAlerts.filter(a => a.severity === 'CRITICAL').length,
       warning: safeAlerts.filter(a => a.severity === 'WARNING').length,
       info: safeAlerts.filter(a => a.severity === 'INFO').length,
     };
-  }, [safeAlerts]);
+  }, [alerts]);
 
   // Get circuit breaker status
   const circuitStatus = useMemo(() => {

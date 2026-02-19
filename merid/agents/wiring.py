@@ -101,8 +101,8 @@ class WiredPredictionMarketAgent(PredictionMarketAgentV2):
         finally:
             try:
                 await client.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("async_op_suppressed", error=str(exc))
 
         return opportunities
 
@@ -258,7 +258,6 @@ class WiredMarketResearchAgent(MarketResearchAgent):
 
         for symbol in watchlist:
             try:
-                import asyncio
                 bars = await asyncio.to_thread(
                     client.get_bars, symbol, "1Day", limit=5
                 )

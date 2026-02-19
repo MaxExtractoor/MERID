@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
-import { Scale, Users, CheckCircle, XCircle, AlertTriangle, RefreshCw, Clock, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { Scale, Users, CheckCircle, XCircle, RefreshCw, Clock, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface Vote {
   agent_id: string;
@@ -12,7 +14,7 @@ interface Vote {
   timestamp: number;
 }
 
-interface ConsensusStatus {
+interface ConsensusPanelStatus {
   running: boolean;
   pending_votes: number;
   min_votes_required: number;
@@ -43,51 +45,22 @@ interface ConsensusPanelProps {
 }
 
 export default function ConsensusPanel({ className = '' }: ConsensusPanelProps) {
-  const [status, setStatus] = useState<ConsensusStatus | null>(null);
-  const [votes, setVotes] = useState<Vote[]>([]);
-  const [metrics, setMetrics] = useState<ConsensusMetrics | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchConsensusData();
-    const interval = setInterval(fetchConsensusData, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchConsensusData = async () => {
-    try {
-      const [statusRes, votesRes, metricsRes] = await Promise.all([
-        fetch('/api/v1/consensus/status'),
-        fetch('/api/v1/consensus/votes'),
-        fetch('/api/v1/consensus/metrics')
-      ]);
-
-      if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        setStatus(statusData);
-      }
-
-      if (votesRes.ok) {
-        const votesData = await votesRes.json();
-        setVotes(votesData.votes || []);
-      }
-
-      if (metricsRes.ok) {
-        const metricsData = await metricsRes.json();
-        setMetrics(metricsData);
-      }
-
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch consensus data');
-      setStatus(null);
-      setVotes([]);
-      setMetrics(null);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: status, loading: statusLoading, error: statusError, refetch: refetchStatus } = useApiData<ConsensusPanelStatus>(
+    API_ENDPOINTS.CONSENSUS_STATUS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const { data: votesData } = useApiData<{ votes: Vote[] }>(
+    API_ENDPOINTS.CONSENSUS_VOTES,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const { data: metrics } = useApiData<ConsensusMetrics>(
+    API_ENDPOINTS.CONSENSUS_METRICS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const votes = votesData?.votes ?? [];
+  const loading = statusLoading && !status;
+  const error = statusError?.message ?? null;
+  const fetchConsensusData = refetchStatus;
 
   const formatAgentName = (id: string) => {
     return id.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
@@ -122,15 +95,7 @@ export default function ConsensusPanel({ className = '' }: ConsensusPanelProps) 
 
   return (
     <div className={`space-y-6 ${className}`}>
-      {error && (
-        <div className="bg-yellow-900/20 border border-yellow-600/50 rounded-lg p-4 flex items-center gap-3">
-          <AlertTriangle className="w-5 h-5 text-yellow-500" />
-          <div>
-            <p className="text-yellow-500 font-medium">Data unavailable</p>
-            <p className="text-sm text-gray-400">{error}</p>
-          </div>
-        </div>
-      )}
+      {error && <ErrorBar label="Consensus" error={statusError} onRetry={fetchConsensusData} />}
 
       {/* Status Bar */}
       <div className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-4">
@@ -147,7 +112,7 @@ export default function ConsensusPanel({ className = '' }: ConsensusPanelProps) 
               <span className="text-gray-400">Next resolution in:</span>
               <span className="text-blue-400 font-mono">{status?.time_until_next.toFixed(1)}s</span>
             </div>
-            <button
+            <button type="button"
               onClick={fetchConsensusData}
               className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
               title="Refresh consensus data"

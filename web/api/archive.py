@@ -66,7 +66,6 @@ async def get_outcome_status() -> Dict[str, Any]:
 @router.get("/outcomes/leaderboard")
 async def get_agent_leaderboard(min_outcomes: int = 10) -> Dict[str, Any]:
     """Get agent leaderboard by accuracy."""
-    from archive.outcome_scoring import get_outcome_scoring
     
     engine = get_outcome_scoring()
     return {"leaderboard": engine.get_leaderboard(min_outcomes)}
@@ -75,7 +74,6 @@ async def get_agent_leaderboard(min_outcomes: int = 10) -> Dict[str, Any]:
 @router.get("/outcomes/agent/{agent_id}")
 async def get_agent_scorecard(agent_id: str) -> Dict[str, Any]:
     """Get scorecard for an agent."""
-    from archive.outcome_scoring import get_outcome_scoring
     
     engine = get_outcome_scoring()
     scorecard = engine.get_agent_scorecard(agent_id)
@@ -93,7 +91,6 @@ async def get_agent_outcome_history(
     include_pending: bool = True,
 ) -> Dict[str, Any]:
     """Get outcome history for an agent."""
-    from archive.outcome_scoring import get_outcome_scoring
     
     engine = get_outcome_scoring()
     outcomes = engine.get_agent_outcomes(agent_id, limit, include_pending)
@@ -107,7 +104,6 @@ async def get_agent_outcome_history(
 @router.get("/outcomes/pending")
 async def get_pending_outcomes(max_age_hours: float = 24) -> Dict[str, Any]:
     """Get pending outcomes that need resolution."""
-    from archive.outcome_scoring import get_outcome_scoring
     
     engine = get_outcome_scoring()
     pending = engine.get_pending_outcomes(max_age_hours)
@@ -181,7 +177,6 @@ async def get_autopsy_status() -> Dict[str, Any]:
 @router.get("/autopsy/all")
 async def get_all_autopsies(limit: int = 50) -> Dict[str, Any]:
     """Get all strategy autopsies."""
-    from archive.strategy_autopsy import get_strategy_autopsy
     
     engine = get_strategy_autopsy()
     return {"autopsies": engine.get_all_autopsies(limit)}
@@ -190,7 +185,6 @@ async def get_all_autopsies(limit: int = 50) -> Dict[str, Any]:
 @router.get("/autopsy/{autopsy_id}")
 async def get_autopsy(autopsy_id: str) -> Dict[str, Any]:
     """Get a specific autopsy."""
-    from archive.strategy_autopsy import get_strategy_autopsy
     
     engine = get_strategy_autopsy()
     autopsy = engine.get_autopsy(autopsy_id)
@@ -204,7 +198,6 @@ async def get_autopsy(autopsy_id: str) -> Dict[str, Any]:
 @router.get("/autopsy/strategy/{strategy_id}")
 async def get_strategy_autopsies(strategy_id: str) -> Dict[str, Any]:
     """Get all autopsies for a strategy."""
-    from archive.strategy_autopsy import get_strategy_autopsy
     
     engine = get_strategy_autopsy()
     autopsies = engine.get_autopsies_by_strategy(strategy_id)
@@ -237,7 +230,6 @@ async def get_autopsies_by_category(category: str) -> Dict[str, Any]:
 @router.get("/autopsy/statistics")
 async def get_failure_statistics() -> Dict[str, Any]:
     """Get failure statistics."""
-    from archive.strategy_autopsy import get_strategy_autopsy
     
     engine = get_strategy_autopsy()
     return engine.get_failure_statistics()
@@ -246,7 +238,6 @@ async def get_failure_statistics() -> Dict[str, Any]:
 @router.get("/autopsy/lessons")
 async def get_all_lessons() -> Dict[str, Any]:
     """Get all lessons learned."""
-    from archive.strategy_autopsy import get_strategy_autopsy
     
     engine = get_strategy_autopsy()
     return {"lessons": engine.get_all_lessons()}
@@ -291,7 +282,6 @@ async def create_autopsy(request: CreateAutopsyRequest) -> Dict[str, Any]:
 @router.post("/autopsy/{autopsy_id}/lesson")
 async def add_lesson(autopsy_id: str, lesson: str) -> Dict[str, Any]:
     """Add a lesson to an autopsy."""
-    from archive.strategy_autopsy import get_strategy_autopsy
     
     engine = get_strategy_autopsy()
     success = engine.add_lesson(autopsy_id, lesson)
@@ -305,7 +295,6 @@ async def add_lesson(autopsy_id: str, lesson: str) -> Dict[str, Any]:
 @router.post("/autopsy/{autopsy_id}/review")
 async def mark_reviewed(autopsy_id: str, reviewer: str) -> Dict[str, Any]:
     """Mark an autopsy as reviewed."""
-    from archive.strategy_autopsy import get_strategy_autopsy
     
     engine = get_strategy_autopsy()
     success = engine.mark_reviewed(autopsy_id, reviewer)
@@ -323,8 +312,6 @@ async def mark_reviewed(autopsy_id: str, reviewer: str) -> Dict[str, Any]:
 @router.get("/status")
 async def get_archive_status() -> Dict[str, Any]:
     """Get combined ARCHIVE status."""
-    from archive.outcome_scoring import get_outcome_scoring
-    from archive.strategy_autopsy import get_strategy_autopsy
     
     outcomes = get_outcome_scoring()
     autopsy = get_strategy_autopsy()

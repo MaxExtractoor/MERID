@@ -1,13 +1,13 @@
 interface DataTableProps {
-  data: any[];
+  data: Record<string, unknown>[];
   columns: {
     key: string;
     label: string;
-    render?: (value: any) => React.ReactNode;
+    render?: (value: unknown) => React.ReactNode;
   }[];
 }
 
-export default function DataTable({ data, columns }: DataTableProps) {
+function DataTable({ data, columns }: DataTableProps) {
   return (
     <table className="w-full text-sm text-left border-collapse bg-slate-900/70 text-slate-100 dark:bg-slate-900/80">
       <thead className="bg-slate-800/80 text-xs uppercase text-slate-400 dark:bg-slate-800">
@@ -61,3 +61,7 @@ export function DataTableLight({ data, columns }: DataTableProps) {
     </table>
   );
 }
+
+const MemoizedDataTable = React.memo(DataTable);
+MemoizedDataTable.displayName = 'DataTable';
+export default MemoizedDataTable;

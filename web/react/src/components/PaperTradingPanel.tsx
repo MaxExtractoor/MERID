@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { TrendingUp, TrendingDown, DollarSign, X, RefreshCw, AlertCircle, Activity, Clock, Target } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { DEFAULTS, API_ENDPOINTS} from "../config/constants";
 
 interface PaperPosition {
   position_id: string;
@@ -43,58 +45,36 @@ interface PaperTradingPanelProps {
 }
 
 export default function PaperTradingPanel({ className = '', userId = 'default' }: PaperTradingPanelProps) {
-  const [stats, setStats] = useState<PortfolioStats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedTab, setSelectedTab] = useState<'positions' | 'orders' | 'history'>('positions');
 
-  useEffect(() => {
-    fetchPortfolioData();
-    const interval = setInterval(fetchPortfolioData, 5000);
-    return () => clearInterval(interval);
-  }, [userId]);
-
-  const fetchPortfolioData = async () => {
-    try {
-      const response = await fetch(`/api/v1/paper-trading/portfolio/${userId}`);
-      if (response.ok) {
-        const data = await response.json();
-        setStats(data);
-        setError(null);
-      } else {
-        throw new Error('Failed to fetch portfolio data');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setStats(null);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: stats, loading, error, refetch } = useApiData<PortfolioStats>(
+    API_ENDPOINTS.PAPER_TRADING_PORTFOLIO(userId),
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
 
   const closePosition = async (positionId: string) => {
     try {
-      const response = await fetch(`/api/v1/paper-trading/positions/${positionId}/close`, {
+      const response = await fetch(API_ENDPOINTS.PAPER_TRADING_CLOSE_POSITION(positionId), {
         method: 'POST'
       });
       if (response.ok) {
-        fetchPortfolioData();
+        refetch();
       }
-    } catch (err) {
-      console.error('Failed to close position:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     }
   };
 
   const cancelOrder = async (orderId: string) => {
     try {
-      const response = await fetch(`/api/v1/paper-trading/orders/${orderId}/cancel`, {
+      const response = await fetch(API_ENDPOINTS.PAPER_TRADING_CANCEL_ORDER(orderId), {
         method: 'POST'
       });
       if (response.ok) {
-        fetchPortfolioData();
+        refetch();
       }
-    } catch (err) {
-      console.error('Failed to cancel order:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     }
   };
 
@@ -127,7 +107,7 @@ export default function PaperTradingPanel({ className = '', userId = 'default' }
           <AlertCircle className="w-5 h-5 text-yellow-500" />
           <div>
             <p className="text-yellow-500 font-medium">Data unavailable</p>
-            <p className="text-sm text-gray-400">{error}</p>
+            <p className="text-sm text-gray-400">{error?.message ?? 'Unknown error'}</p>
           </div>
         </div>
       )}
@@ -189,7 +169,7 @@ export default function PaperTradingPanel({ className = '', userId = 'default' }
         <div className="border-b border-slate-700/50 px-4">
           <div className="flex gap-4">
             {(['positions', 'orders', 'history'] as const).map(tab => (
-              <button
+              <button type="button"
                 key={tab}
                 onClick={() => setSelectedTab(tab)}
                 className={`py-3 px-2 text-sm font-medium border-b-2 transition-colors ${
@@ -236,7 +216,7 @@ export default function PaperTradingPanel({ className = '', userId = 'default' }
                           {formatTime(position.opened_at)} ago
                         </p>
                       </div>
-                      <button
+                      <button type="button"
                         onClick={() => closePosition(position.position_id)}
                         className="p-2 hover:bg-red-500/20 rounded transition-colors"
                         title="Close position"
@@ -299,7 +279,7 @@ export default function PaperTradingPanel({ className = '', userId = 'default' }
                         </div>
                         <p className="text-xs text-gray-400">{formatTime(order.created_at)} ago</p>
                       </div>
-                      <button
+                      <button type="button"
                         onClick={() => cancelOrder(order.order_id)}
                         className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition-colors"
                       >

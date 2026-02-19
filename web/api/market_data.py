@@ -48,7 +48,6 @@ async def get_snapshot(
 async def get_watchlist() -> Dict[str, Any]:
     """Get snapshots for all watchlist symbols."""
     try:
-        from core.market_data_dxfeed import get_dxfeed_adapter
         adapter = get_dxfeed_adapter()
         ticks = adapter.get_watchlist()
         return {
@@ -64,7 +63,6 @@ async def get_watchlist() -> Dict[str, Any]:
 async def add_to_watchlist(req: WatchlistModifyRequest) -> Dict[str, Any]:
     """Add a symbol to the watchlist."""
     try:
-        from core.market_data_dxfeed import get_dxfeed_adapter
         adapter = get_dxfeed_adapter()
         adapter.add_symbol(req.symbol)
         return {"success": True, "symbol": req.symbol, "watchlist_size": len(adapter.watchlist_symbols)}
@@ -77,7 +75,6 @@ async def add_to_watchlist(req: WatchlistModifyRequest) -> Dict[str, Any]:
 async def remove_from_watchlist(req: WatchlistModifyRequest) -> Dict[str, Any]:
     """Remove a symbol from the watchlist."""
     try:
-        from core.market_data_dxfeed import get_dxfeed_adapter
         adapter = get_dxfeed_adapter()
         adapter.remove_symbol(req.symbol)
         return {"success": True, "symbol": req.symbol, "watchlist_size": len(adapter.watchlist_symbols)}
@@ -109,7 +106,6 @@ async def ws_market_stream(websocket: WebSocket, symbol: str):
     logger.info("ws_market_connect", symbol=symbol)
 
     try:
-        from core.market_data_dxfeed import get_dxfeed_adapter
         adapter = get_dxfeed_adapter()
         adapter.add_symbol(symbol)
 
@@ -136,5 +132,5 @@ async def ws_market_stream(websocket: WebSocket, symbol: str):
         logger.error("ws_market_error", symbol=symbol, error=str(exc))
         try:
             await websocket.close(code=1011, reason=str(exc))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("async_op_suppressed", error=str(exc))

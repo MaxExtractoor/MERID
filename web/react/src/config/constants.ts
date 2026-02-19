@@ -3,166 +3,161 @@
 // Environment-based URLs - fallback for non-Vite environments (Jest)
 const getEnv = (key: string, fallback: string): string => {
   try {
-    // @ts-ignore - import.meta.env may not exist in test environment
-    return import.meta.env?.[key] ?? fallback;
+    const metaEnv = (import.meta as { env?: Record<string, string | undefined> }).env;
+    return metaEnv?.[key] ?? fallback;
   } catch {
     return fallback;
   }
 };
 
 export const API_BASE_URL = getEnv('VITE_API_BASE', "");
-export const WS_URL = getEnv('VITE_WS_URL', `ws://${window?.location?.host || '127.0.0.1:8000'}/ws`);
+export const WS_URL = getEnv('VITE_WS_URL', `ws://${window?.location?.host || '127.0.0.1:8000'}/ws/trades`);
+export const WS_PRICE_URL = getEnv('VITE_WS_PRICE_URL', `ws://${window?.location?.host || '127.0.0.1:8000'}/ws/dashboard-prices`);
+export const WS_PORTFOLIO_URL = getEnv('VITE_WS_PORTFOLIO_URL', `ws://${window?.location?.host || '127.0.0.1:8000'}/ws/portfolio`);
 
 // API Endpoints
 export const API_ENDPOINTS = {
-  // Portfolio & Positions
-  PORTFOLIO_SUMMARY: "/api/v1/portfolio/summary",
-  POSITIONS: "/api/v1/positions",
-  POSITIONS_SUMMARY: "/api/v1/positions/summary",
-  ORDERS: "/api/v1/orders",
-  ORDERS_SUMMARY: "/api/v1/orders/summary",
-  FILLS: "/api/v1/fills",
-  
-  // Trading
-  SUBMIT_ORDER: "/api/v1/orders/submit",
-  CANCEL_ORDER: "/api/v1/orders/cancel",
-  TRADING_SUMMARY: "/api/trading/summary",
-  
-  // Agents
+  // System Health
+  SYSTEM_HEALTH: "/api/v1/system/health",
+  SYSTEM_EXECUTION_GATE: "/api/v1/system/execution-gate",
+  SYSTEM_FRESH_START: "/api/v1/system/fresh-start",
+  EQUITY_SERIES: "/api/operator/equity-series",
+
+  // Risk Protections (circuit breaker / kill switch) — used by RiskProtectionsPanel
+  RISK_PROTECTIONS: "/api/risk/protections",
+  RISK_CIRCUIT_BREAKER_RESET: "/api/risk/circuit-breaker/reset",
+  RISK_KILL_SWITCH: (action: string) => `/api/risk/kill-switch/${action}`,
+  RISK_METRICS: "/api/v1/risk/metrics",
+
+  // Notifications — used by LiveNotifications component
+  NOTIFICATIONS: "/api/v1/notifications",
+  NOTIFICATIONS_READ_ALL: "/api/v1/notifications/read-all",
+  NOTIFICATIONS_TELEGRAM_LOG: "/api/v1/notifications/telegram/log",
+  NOTIFICATION_READ: (id: string) => `/api/v1/notifications/${id}/read`,
+
+  // User / Settings
+  USER_PROFILE: "/api/v1/user/profile",
+  USER_SETTINGS: "/api/v1/user/settings",
+
+  // Paper trading (referenced by PaperTradingView — not actively routed)
+  PAPER_PORTFOLIO: "/api/v1/paper/portfolio",
+  PAPER_POSITIONS: "/api/v1/paper/positions",
+  PAPER_ORDERS: "/api/v1/paper/orders",
+
+  // Legacy agent endpoints (referenced by Agents.tsx — not actively routed)
   AGENTS: "/api/v1/agents",
-  AGENTS_SUMMARY: "/api/agents/summary",
   AGENT_DETAIL: (id: string) => `/api/v1/agents/${id}`,
   AGENT_CHARTERS: "/api/v1/charters",
-  
-  // Prediction Markets
-  PREDICTION_MARKETS: "/api/v1/us-compliant/prediction-markets",
-  PREDICTION_POSITIONS: "/api/v1/prediction-markets/positions",
-  
-  // Risk & Health
-  RISK_METRICS: "/api/v1/risk/metrics",
-  RISK_PNL_SUMMARY: "/api/risk/pnl-summary",
-  RISK_EXPOSURE: "/api/risk/exposure",
-  RISK_LIMITS: "/api/risk/limits",
-  RISK_PROTECTIONS: "/api/risk/protections",
-  SYSTEM_HEALTH: "/api/v1/system/health",
-  SYSTEM_HEALTH_V2: "/api/system/health",
-  SYSTEM_VERSION: "/api/system/version",
-  SYSTEM_COMPONENTS: "/api/system/components",
-  
-  // Prime Screen
-  PRIME_STATUS: "/api/prime/status",
-  
-  // API Status
-  API_STATUS: "/api/v1/api/status",
-  API_METRICS: "/api/v1/api/metrics",
-  
-  // Research
-  BACKTEST: "/api/v1/research/backtest",
-  BACKTEST_RESULTS: "/api/v1/research/backtest/results",
-  
-  // Consensus
-  CONSENSUS_SUMMARY: "/api/v1/consensus/summary",
+
+  // Operator sub-components
+  ARBITRAGE_SCANNER: "/api/v1/arbitrage/scanner",
+  ARBITRAGE_OPPORTUNITIES: "/api/v1/arbitrage/opportunities",
+  ARBITRAGE_EXECUTE: "/api/v1/arbitrage/execute",
+  CONSENSUS_STATUS: "/api/v1/consensus/status",
+  CONSENSUS_VOTES: "/api/v1/consensus/votes",
   CONSENSUS_METRICS: "/api/v1/consensus/metrics",
-  
-  // Flow Domain (Memecoins, Whales, KOLs, Snipers, MEV)
-  FLOW_RADAR: "/api/v1/flow/radar",
-  FLOW_TOKENS: "/api/v1/flow/tokens",
-  FLOW_ENTITIES: "/api/v1/flow/entities",
-  FLOW_EVENTS: "/api/v1/flow/events",
-  FLOW_PLANS: "/api/v1/flow/plans",
-  FLOW_SNIPER_STATUS: "/api/v1/flow/sniper/status",
-  FLOW_SNIPER_FILLS: "/api/v1/flow/sniper/fills",
-  FLOW_RISK: "/api/v1/flow/risk",
-  FLOW_METRICS: "/api/v1/flow/metrics",
-
-  // Signal Layer (Decay, Features, Arbs, Drift, CQI)
-  SIGNAL_FEATURES: "/api/v1/signal-layer/features",
-  SIGNAL_SOCIAL: "/api/v1/signal-layer/social",
-  SIGNAL_MACRO: "/api/v1/signal-layer/macro",
-  SIGNAL_ONCHAIN: "/api/v1/signal-layer/onchain",
-  SIGNAL_SNAPSHOT: "/api/v1/signal-layer/snapshot",
-  SIGNAL_ARBS: "/api/v1/signal-layer/arbs",
-  SIGNAL_ARB_PLANS: "/api/v1/signal-layer/arb-plans",
-  SIGNAL_DRIFT: "/api/v1/signal-layer/drift",
-  SIGNAL_CQI: "/api/v1/signal-layer/cqi",
-  SIGNAL_METRICS: "/api/v1/signal-layer/metrics",
-  SIGNAL_DECAY_CONFIGS: "/api/v1/signal-layer/decay-configs",
-
-  // Betting Consensus
-  BETTING_CONSENSUS_SUMMARY: "/api/v1/betting/consensus/summary",
-  BETTING_CONSENSUS_LIVE: "/api/v1/betting/consensus/live",
-  BETTING_CONSENSUS_EVENTS: "/api/v1/betting/consensus/events",
-  BETTING_CONSENSUS_PLANS: "/api/v1/betting/consensus/plans",
-  BETTING_CONSENSUS_METRICS: "/api/v1/betting/consensus/metrics",
-
-  // Prediction Consensus
-  PREDICTION_CONSENSUS_SUMMARY: "/api/v1/prediction/consensus/summary",
-  PREDICTION_CONSENSUS_OPINIONS: "/api/v1/prediction/consensus/opinions",
-  PREDICTION_CONSENSUS_PLANS: "/api/v1/prediction/consensus/plans",
-  PREDICTION_CONSENSUS_INSTRUMENTS: "/api/v1/prediction/consensus/instruments",
-  PREDICTION_METRICS: "/api/v1/prediction/metrics",
-
-  // Debate & Calibration
-  DEBATE_METRICS: "/api/v1/prediction/consensus/debate-metrics",
-  DEBATE_LEADERBOARD: "/api/v1/prediction/consensus/leaderboard",
-  DEBATE_BACKTEST: "/api/v1/prediction/consensus/backtest",
-  AGENT_CALIBRATION: (agentId: string) => `/api/v1/prediction/consensus/calibration/${agentId}`,
-  AGENT_BADGES: (agentId: string) => `/api/v1/prediction/consensus/badges/${agentId}`,
-  AGENT_REWARDS: (agentId: string) => `/api/v1/prediction/consensus/rewards/${agentId}`,
-  TEAM_LIST: "/api/v1/prediction/consensus/teams",
-  TEAM_DIVERSITY: (teamId: string) => `/api/v1/prediction/consensus/teams/${teamId}/diversity`,
-
-  // Cognitive / Reality-Debug
-  COGNITIVE_SNAPSHOT: "/api/v1/cognitive/snapshot",
-  COGNITIVE_HYPOTHESES: "/api/v1/cognitive/hypotheses",
-  COGNITIVE_METRICS: "/api/v1/cognitive/metrics",
-  COGNITIVE_STUCK: "/api/v1/cognitive/stuck-models",
-  COGNITIVE_HEALTH: "/api/v1/cognitive/health",
-  COGNITIVE_REALITY_DEBUG: "/api/v1/cognitive/reality-debug",
-  COGNITIVE_ACTIONS: "/api/v1/cognitive/actions",
-
-  // Paper Trading
-  PAPER_PORTFOLIO: "/api/v1/paper-trading/portfolio",
-  PAPER_POSITIONS: "/api/v1/paper-trading/positions",
-  PAPER_ORDERS: "/api/v1/paper-trading/orders",
-  PAPER_PNL_HISTORY: "/api/v1/paper-trading/pnl-history",
-  PAPER_SUBMIT_ORDER: "/api/v1/paper-trading/orders/submit",
-
-  // Sports Live / Odds
-  SPORTS_LIVE_ODDS: "/api/v1/betting/consensus/live",
-  SPORTS_LIVE_EVENT: (eventId: string) => `/api/v1/betting/consensus/live/${eventId}`,
-  SPORTS_ANOMALIES: "/api/v1/betting/consensus/summary",
-  SPORTS_DEBATES: "/api/v1/betting/consensus/events",
-  SPORTS_SLO_METRICS: "/api/v1/betting/sports/slo-metrics",
-  SPORTS_ODDS_HISTORY: (eventId: string) => `/api/v1/betting/consensus/live/${eventId}`,
-
-  // Loop Orchestration
+  CONSENSUS_PLANS: "/api/v1/consensus/plans",
+  CONSENSUS_OPINIONS: "/api/v1/consensus/opinions",
+  ASSISTANT_QUERY: "/api/v1/assistant/query",
+  PRIME_STATUS: "/api/v1/prime/status",
+  DRIFT_SIGNALS: "/api/v1/signals/drift",
+  PIPELINE_PNL: (timeRange: string) => `/api/v1/pipeline/pnl?range=${timeRange}`,
+  PIPELINE_VENUES: "/api/v1/pipeline/venues",
+  PIPELINE_VENUE_TOGGLE: (action: string) => `/api/v1/pipeline/venue/${action}`,
+  SENTIMENT_TIMELINE: "/api/v1/signals/sentiment",
+  BRIER_METRICS: "/api/v1/brier/metrics",
+  DOMAIN_PNL: "/api/v1/domain/pnl",
+  DATA_FRESHNESS: "/api/v1/data/freshness",
   ORCHESTRATOR_SUMMARY: "/api/v1/orchestrator/summary",
   ORCHESTRATOR_HISTORY: "/api/v1/orchestrator/history",
   DECISIONS_RECENT: "/api/v1/system/decisions/recent",
   CONSENSUS_HISTORY: "/api/v1/system/consensus/history",
-
-  // System Observability
-  OBSERVABILITY_SUMMARY: "/api/v1/system/observability",
-  OBSERVABILITY_ALERTS: "/api/v1/system/alerts",
-  OBSERVABILITY_SLO: "/api/v1/system/slo",
-  SIGNAL_SLO_METRICS: "/api/v1/signal-layer/metrics",
-
-  // LLM Governance
-  LLM_TRACES_SUMMARY: "/api/v1/llm/traces/summary",
-  LLM_TOOLS_SUMMARY: "/api/v1/llm/tools/summary",
-  LLM_GUARDRAILS: "/api/v1/llm/guardrails",
-  LLM_PROMPTS: "/api/v1/llm/prompts",
-  
-  // Promotion Report
+  REWARDS_LEADERBOARD: "/api/v1/rewards/leaderboard",
+  PIPELINE_LEADERBOARD: "/api/v1/pipeline/leaderboard",
+  BLOCKCHAIN_COMPLIANCE: "/api/v1/blockchain/compliance",
   PROMOTION_REPORT: "/api/operator/promotion-report",
   PROMOTION_REPORT_REFRESH: "/api/operator/promotion-report/refresh",
   PROMOTION_CHECKLIST: "/api/operator/promotion-checklist",
   PROMOTION_LOG: "/api/operator/promotion-log",
   PROMOTION_OVERRIDE: "/api/operator/promotion-override",
   GOVERNANCE_STATUS: "/api/operator/governance-status",
-
-  // Dev Swarm Governance
+  PAPER_LADDER_STATUS: "/api/v1/paper-ladder/status",
+  PAPER_LADDER_SEED: "/api/v1/paper-ladder/seed",
+  PAPER_LADDER_SEED_ALL: "/api/v1/paper-ladder/seed-all",
+  PAPER_LADDER_TIERS: "/api/v1/paper-ladder/tiers",
+  BENCHMARKS_REPORT: "/api/v1/benchmarks/report",
+  SIGNALS_ALERTS_HISTORY: "/api/v1/signals/alerts/history",
+  EXPLAINABILITY_DECISIONS: "/api/v1/explainability/decisions",
+  PIPELINE_SUMMARY: "/api/v1/pipeline/summary",
+  BLOCKCHAIN_HEALTH: "/api/v1/blockchain/health",
+  RISK_AGENTS: "/api/v1/risk-metrics/agents",
+  ANALYTICS_OVERVIEW: "/api/v1/analytics/overview",
+  SWARM_STATUS: "/api/v1/swarm/status",
+  RISK_HALT_STATUS: "/api/v1/risk/halt-status",
+  RISK_STALENESS: "/api/v1/risk/staleness",
+  RISK_HALT: "/api/v1/risk/halt",
+  RISK_RESUME: "/api/v1/risk/resume",
+  RISK_ALERTS: "/api/v1/risk/alerts",
+  RISK_POSITION_LIMITS: "/api/v1/risk/position-limits",
+  OBSERVABILITY_SUMMARY: "/api/v1/monitoring/observability/summary",
+  LLM_TRACES_SUMMARY: "/api/v1/llm/traces/summary",
+  LLM_TOOLS_SUMMARY: "/api/v1/llm/tools/summary",
+  LLM_GUARDRAILS: "/api/v1/llm/guardrails",
+  LLM_PROMPTS: "/api/v1/llm/prompts",
+  SPORTS_SLO_METRICS: "/api/v1/sports/slo/metrics",
+  MARKETS_STOCKS: "/api/v1/markets/stocks",
+  MARKETS_FOREX: "/api/v1/markets/forex",
+  MARKETS_COMMODITIES: "/api/v1/markets/commodities",
+  MARKETS_ALL: "/api/v1/markets",
+  ORDERS: "/api/v1/orders",
+  PREDICTION_CONSENSUS_SUMMARY: "/api/v1/prediction-consensus/summary",
+  PREDICTION_METRICS: "/api/v1/prediction-consensus/metrics",
+  PREDICTION_MARKETS: "/api/v1/prediction-markets",
+  SIGNAL_FEATURES: "/api/v1/signals/features",
+  SIGNAL_SOCIAL: "/api/v1/signals/social",
+  SIGNAL_CQI: "/api/v1/signals/cqi",
+  SIGNAL_ARBS: "/api/v1/signals/arbs",
+  SIGNAL_METRICS: "/api/v1/signals/metrics",
+  SIGNAL_DECAY_CONFIGS: "/api/v1/signals/decay-configs",
+  SPORTS_LIVE_ODDS: "/api/v1/sports/live-odds",
+  TELEMETRY: "/api/v1/telemetry",
+  COGNITIVE_REALITY_DEBUG: "/api/v1/cognitive/reality-debug",
+  COGNITIVE_HEALTH: "/api/v1/cognitive/health",
+  COGNITIVE_ACTIONS: "/api/v1/cognitive/actions",
+  COGNITIVE_SNAPSHOT: "/api/v1/cognitive/snapshot",
+  QUADRATIC_FUNDING_PROPOSALS: "/api/v1/quadratic-funding/proposals",
+  QUADRATIC_FUNDING_ROUNDS: "/api/v1/quadratic-funding/rounds",
+  RISK_SUMMARY: "/api/v1/risk/summary",
+  LIVE_REFRESH: "/api/v1/live/refresh",
+  REFLECTION_SUMMARY: "/api/v1/reflection/summary",
+  REFLECTION_LIST: "/api/v1/reflection/list",
+  SIMULATION_STATUS: "/api/v1/simulation/status",
+  SIMULATION_RESET: "/api/v1/simulation/reset",
+  SIMULATION_SPEED: (speed: number) => `/api/v1/simulation/speed/${speed}`,
+  SIMULATION_SAVE: "/api/v1/simulation/save",
+  BETTING_CONSENSUS_SUMMARY: "/api/v1/betting-consensus/summary",
+  BETTING_CONSENSUS_METRICS: "/api/v1/betting-consensus/metrics",
+  DEBATE_METRICS: "/api/v1/debate/metrics",
+  DEBATE_LEADERBOARD: "/api/v1/debate/leaderboard",
+  AGENT_CALIBRATION: (agentId: string) => `/api/v1/agents/${agentId}/calibration`,
+  AGENT_BADGES: (agentId: string) => `/api/v1/agents/${agentId}/badges`,
+  AGENT_REWARDS: (agentId: string) => `/api/v1/agents/${agentId}/rewards`,
+  TEAM_DIVERSITY: (teamId: string) => `/api/v1/agents/teams/${teamId}/diversity`,
+  CANCEL_ORDER: (id: string) => `/api/v1/orders/${id}/cancel`,
+  PAPER_TRADING_STATS: (userId: string) => `/api/v1/paper/stats/${userId}`,
+  FLOW_RADAR: "/api/v1/flow/radar",
+  FLOW_METRICS: "/api/v1/flow/metrics",
+  FLOW_SNIPER_STATUS: "/api/v1/flow/sniper/status",
+  FLOW_SNIPER_FILLS: "/api/v1/flow/sniper/fills",
+  FLOW_RISK: "/api/v1/flow/risk",
+  SPORTS_LIVE_EVENT: (eventId: string) => `/api/v1/sports/events/${eventId}`,
+  TRADE_MODE: "/api/v1/trade-mode",
+  PORTFOLIO_SUMMARY: "/api/v1/portfolio/summary",
+  PORTFOLIO_LIVE: "/api/v1/portfolio/live",
+  PIPELINE_VENUE_MODE: "/api/v1/pipeline/venue-mode",
+  PAPER_TRADING_PORTFOLIO: (userId: string) => `/api/v1/paper/portfolio/${userId}`,
+  PAPER_TRADING_CLOSE_POSITION: (id: string) => `/api/v1/paper/positions/${id}/close`,
+  PAPER_TRADING_CANCEL_ORDER: (id: string) => `/api/v1/paper/orders/${id}/cancel`,
   DEV_GOVERNANCE_PROPOSALS: "/api/dev-swarm/governance/proposals",
   DEV_GOVERNANCE_PROPOSAL: (id: string) => `/api/dev-swarm/governance/proposals/${id}`,
   DEV_GOVERNANCE_PROPOSAL_STATUS: (id: string) => `/api/dev-swarm/governance/proposals/${id}/status`,
@@ -174,188 +169,103 @@ export const API_ENDPOINTS = {
   DEV_GOVERNANCE_RISK_POLICY: "/api/dev-swarm/governance/risk-policy",
   DEV_GOVERNANCE_AUDIT_LOG: "/api/dev-swarm/governance/audit-log",
   DEV_GOVERNANCE_PENDING: "/api/dev-swarm/governance/pending-approvals",
-
-  // Wallet
-  WALLET_BALANCES: "/api/v1/wallet/balances",
-
-  // Treasury
-  TREASURY_OVERVIEW: "/api/v1/treasury/overview",
-
-  // Social
-  SOCIAL_FEED: "/api/v1/social/feed",
-  SOCIAL_POST: "/api/v1/social/post",
-
-  // Mining
-  MINING_OVERVIEW: "/api/v1/mining/overview",
-
-  // Institutional
-  INSTITUTIONAL_OVERVIEW: "/api/v1/institutional/overview",
-
-  // Plugins
-  PLUGINS_LIST: "/api/v1/plugins/list",
-
-  // Betting (basic)
-  BETTING_OVERVIEW: "/api/v1/betting/overview",
-  BETTING_PLACE: "/api/v1/betting/place",
-
-  // Rewards
-  REWARDS_SUMMARY: "/api/v1/rewards/summary",
-  REWARDS_QUESTS: "/api/v1/rewards/quests",
-  REWARDS_LEADERBOARD: "/api/v1/rewards/leaderboard",
-
-  // Overview / Portfolio
-  PORTFOLIO_LIVE: "/api/portfolio/summary",
-  PRICES_LIVE: "/api/prices/live",
-  ORDERS_RECENT: "/api/orders/recent",
-  EQUITY_SERIES: "/api/operator/equity-series",
-
-  // Positions & Orders (trading)
-  TRADING_PORTFOLIO_SUMMARY: "/api/v1/trading/portfolio/summary",
-  TRADING_ORDERS_OPEN: "/api/v1/trading/orders/open",
-
-  // Predictions (additional)
-  PREDICTION_MARKETS_SUMMARY: "/api/v1/prediction-markets/summary",
-  PREDICTION_DRIFT_SIGNALS: "/api/v1/us-compliant/drift-signals",
-  SPECTATOR_RECORD: "/api/v1/trading-mode/spectator/record",
-  SPECTATOR_LIVE: "/api/v1/trading-mode/spectator/live",
+  RISK_AGENT_EQUITY_HISTORY: (agentId: string) => `/api/v1/risk-metrics/agents/${agentId}/equity-history?limit=100`,
+  RISK_AGENT_DRAWDOWN_HISTORY: (agentId: string) => `/api/v1/risk-metrics/agents/${agentId}/drawdown-history?limit=100`,
+  RISK_AGENT_METRICS: (agentId: string) => `/api/v1/risk-metrics/agents/${agentId}`,
 
   // Logs
   LOGS: "/api/v1/logs",
   LOGS_STATS: "/api/v1/logs/stats",
   LOGS_CLEAR: "/api/v1/logs/clear",
 
-  // User / Settings
-  USER_PROFILE: "/api/v1/user/profile",
-  USER_SETTINGS: "/api/v1/user/settings",
-  
-  // Risk (extended)
-  RISK_AGENTS: "/api/v1/risk-metrics/agents",
-  RISK_HALT_STATUS: "/api/v1/risk/halt-status",
-  RISK_STALENESS: "/api/v1/risk/staleness",
-  RISK_ALERTS: "/api/v1/risk/alerts",
-  RISK_POSITION_LIMITS: "/api/v1/risk/position-limits",
-  RISK_HALT: "/api/v1/risk/halt",
-  RISK_RESUME: "/api/v1/risk/resume",
-
-  // Operator Activity
+  // Operator Summary
+  OPERATOR_SUMMARY: "/api/v1/operator/summary",
+  OPERATOR_KILL_SWITCH_STATUS: "/api/v1/operator/kill-switch-status",
+  OPERATOR_RISK_STATE: "/api/v1/operator/risk-state",
+  OPERATOR_AGENT_ACTIVITY: "/api/v1/operator/agent-activity",
+  OPERATOR_EMERGENCY_STOP: "/api/v1/operator/emergency-stop",
+  OPERATOR_RESET_KILL_SWITCH: "/api/v1/operator/reset-kill-switch",
+  DEV_SWARM_PAUSE: "/api/dev-swarm/pause",
+  DEV_SWARM_RESUME: "/api/dev-swarm/resume",
+  TRADING_MODE_SET: "/api/v1/trading-mode/mode",
+  GUARD_STATUS: "/api/v1/loop/guard/status",
+  GUARD_KILL: "/api/v1/loop/guard/kill",
+  GUARD_UNKILL: "/api/v1/loop/guard/unkill",
   OPERATOR_ORDERS: "/api/v1/orders",
   SYSTEM_DECISIONS: "/api/v1/system/decisions/recent",
   OPERATOR_AUDIT_TRAIL: "/api/operator/audit-trail",
   DEV_SWARM_SHUTDOWN: "/api/dev-swarm/shutdown",
   SYSTEM_STOP: "/api/v1/monitoring/system/stop",
 
-  // Signals (extended)
-  SIGNALS_ALERTS_HISTORY: "/api/v1/signals/alerts/history",
+  // Kalshi Agent Grid
+  KALSHI_GRID_STATUS: "/api/v1/kalshi-grid/status",
+  KALSHI_GRID_MATRIX: "/api/v1/kalshi-grid/matrix",
+  KALSHI_GRID_AGENTS: "/api/v1/kalshi-grid/agents",
+  KALSHI_GRID_AGENT: (name: string) => `/api/v1/kalshi-grid/agents/${name}`,
+  KALSHI_GRID_AGENT_SIGNALS: (name: string) => `/api/v1/kalshi-grid/agents/${name}/signals`,
+  KALSHI_GRID_AGENT_ORDERS: (name: string) => `/api/v1/kalshi-grid/agents/${name}/orders`,
+  KALSHI_GRID_FILLS: "/api/v1/kalshi-grid/fills",
+  KALSHI_GRID_PNL: "/api/v1/kalshi-grid/pnl",
+  KALSHI_GRID_PORTFOLIO: "/api/v1/kalshi-grid/portfolio",
+  KALSHI_GRID_SESSION: "/api/v1/kalshi-grid/session",
+  KALSHI_GRID_START: "/api/v1/kalshi-grid/start",
+  KALSHI_GRID_STOP: "/api/v1/kalshi-grid/stop",
+  KALSHI_GRID_PAUSE: "/api/v1/kalshi-grid/pause",
+  KALSHI_GRID_RESUME: "/api/v1/kalshi-grid/resume",
+  KALSHI_GRID_AGENT_PAUSE: (name: string) => `/api/v1/kalshi-grid/agents/${name}/pause`,
+  KALSHI_GRID_AGENT_RESUME: (name: string) => `/api/v1/kalshi-grid/agents/${name}/resume`,
+  KALSHI_GRID_KILL_SWITCH_RESET: "/api/v1/kalshi-grid/kill-switch/reset",
+  KALSHI_GRID_HEALTH: "/api/v1/kalshi-grid/health",
+  KALSHI_GRID_MODE: "/api/v1/kalshi-grid/mode",
+  
+  // Kalshi Agent Performance
+  KALSHI_GRID_PERFORMANCE_AGENTS: "/api/v1/kalshi-grid/performance/agents",
+  KALSHI_GRID_PERFORMANCE_AGENT: (agentId: string) => `/api/v1/kalshi-grid/performance/agents/${agentId}`,
+  KALSHI_GRID_PERFORMANCE_SUMMARY: "/api/v1/kalshi-grid/performance/summary",
+  KALSHI_GRID_PERFORMANCE_TOP: "/api/v1/kalshi-grid/performance/top",
+  KALSHI_GRID_PERFORMANCE_EXPORT: "/api/v1/kalshi-grid/performance/export",
+  KALSHI_GRID_PERFORMANCE_CALIBRATION: "/api/v1/kalshi-grid/performance/calibration",
 
-  // Analytics
-  ANALYTICS_OVERVIEW: "/api/v1/analytics/overview",
+  // Kalshi Deep Integration
+  KALSHI_MARKETS: "/api/v1/kalshi/markets",
+  KALSHI_MARKET_DETAIL: (ticker: string) => `/api/v1/kalshi/markets/${ticker}`,
+  KALSHI_CATALOG: "/api/v1/kalshi/catalog",
+  KALSHI_CATALOG_REFRESH: "/api/v1/kalshi/catalog/refresh",
+  KALSHI_POSITIONS: "/api/v1/kalshi/positions",
+  KALSHI_ORDERS: "/api/v1/kalshi/orders",
+  KALSHI_FILLS: "/api/v1/kalshi/fills",
+  KALSHI_BALANCE: "/api/v1/kalshi/balance",
+  KALSHI_PNL: "/api/v1/kalshi/pnl",
+  KALSHI_RISK: "/api/v1/kalshi/risk",
+  KALSHI_WS: "/api/v1/kalshi/ws",
+  KALSHI_HEALTH: "/api/v1/kalshi/health",
+  KALSHI_KILL_SWITCH: "/api/v1/kalshi/kill-switch",
+  KALSHI_ORDERBOOK: (ticker: string) => `/api/v1/kalshi/markets/${ticker}/orderbook`,
+  KALSHI_EVENT: (event: string) => `/api/v1/kalshi/events/${event}`,
+  KALSHI_EXPORT: "/api/v1/kalshi/export",
+  KALSHI_VOLUME_CHANGES: "/api/v1/kalshi/volume-changes",
+  KALSHI_VOLUME_HISTORY: (ticker: string) => `/api/v1/kalshi/volume-history/${ticker}`,
+  KALSHI_VOLUME_SMOOTHED: (ticker: string) => `/api/v1/kalshi/volume-history/${ticker}/smoothed`,
+  KALSHI_VOLUME_ANOMALIES: "/api/v1/kalshi/volume-anomalies",
+  KALSHI_VOLUME_ALERTS: "/api/v1/kalshi/volume-alerts",
+  KALSHI_SIZING_METRICS: "/api/v1/kalshi/sizing-metrics",
+  KALSHI_PNL_HISTORY: "/api/v1/kalshi/pnl-history",
+  KALSHI_LIQUIDITY_ALERTS: "/api/v1/kalshi/liquidity-alerts",
+  KALSHI_LIQUIDITY_HEALTH: (marketId: string) => `/api/v1/kalshi/liquidity-health/${marketId}`,
+  KALSHI_EDGE: "/api/v1/kalshi/edge",
+  KALSHI_RISK_EVENTS: "/api/v1/kalshi/risk/events",
+  KALSHI_RISK_DOWNSIZE: "/api/v1/kalshi/risk/downsize",
+  KALSHI_CONSENSUS_SIGNALS: "/api/v1/kalshi/consensus-signals",
+  KALSHI_NEWS_SIGNALS: "/api/v1/kalshi/news-signals",
+  KALSHI_PUBLISH_PIPELINE: "/api/v1/kalshi/publish-pipeline",
+  KALSHI_PUBLISH_PIPELINE_TRIGGER: "/api/v1/kalshi/publish-pipeline/trigger",
+  KALSHI_FAVORITES: "/api/v1/kalshi/favorites",
+  KALSHI_FAVORITES_TOGGLE: "/api/v1/kalshi/favorites/toggle",
+  KALSHI_CATEGORIES: "/api/v1/kalshi/categories",
+  KALSHI_ORDER_CANCEL: (orderId: string) => `/api/v1/kalshi/orders/${orderId}`,
+  KALSHI_ORDER_AMEND: (orderId: string) => `/api/v1/kalshi/orders/${orderId}`,
+  KALSHI_ORDERS_BATCH_CANCEL: "/api/v1/kalshi/orders",
 
-  // Arbitrage
-  ARBITRAGE_OPPORTUNITIES: "/api/v1/arbitrage/opportunities",
-  ARBITRAGE_EXECUTE: "/api/v1/arbitrage/execute",
-  ARBITRAGE_SCANNER: "/api/v1/arbitrage/scanner",
-
-  // Blockchain
-  BLOCKCHAIN_COMPLIANCE: "/api/v1/blockchain/compliance",
-  BLOCKCHAIN_HEALTH: "/api/v1/blockchain/health",
-
-  // Consensus (extended)
-  CONSENSUS_STATUS: "/api/v1/consensus/status",
-  CONSENSUS_PLANS: "/api/v1/consensus/plans",
-  CONSENSUS_VOTES: "/api/v1/consensus/votes",
-  CONSENSUS_OPINIONS: "/api/v1/consensus/opinions",
-
-  // Data
-  DATA_FRESHNESS: "/api/v1/data/freshness",
-
-  // Drift
-  DRIFT_SIGNALS: "/api/v1/us-compliant/drift-signals",
-
-  // Explainability
-  EXPLAINABILITY_DECISIONS: "/api/v1/explainability/decisions",
-
-  // Pipeline
-  PIPELINE_SUMMARY: "/api/v1/pipeline/summary",
-  PIPELINE_VENUES: "/api/v1/pipeline/venues",
-  PIPELINE_VENUE_MODE: "/api/v1/pipeline/venue/mode",
-  PIPELINE_LEADERBOARD: "/api/v1/pipeline/leaderboard",
-
-  // Quadratic Funding
-  QUADRATIC_FUNDING_PROPOSALS: "/api/v1/quadratic-funding/proposals",
-  QUADRATIC_FUNDING_ROUNDS: "/api/v1/quadratic-funding/rounds/summary",
-
-  // Reflection
-  REFLECTION_SUMMARY: "/api/v1/reflection/summary",
-  REFLECTION_LIST: "/api/v1/reflection/reflections",
-
-  // Simulation
-  SIMULATION_STATUS: "/api/v1/simulation/status",
-  SIMULATION_RESET: "/api/v1/simulation/reset",
-  SIMULATION_SAVE: "/api/v1/simulation/save",
-
-  // Swarm
-  SWARM_STATUS: "/api/v1/swarm/status",
-
-  // Notifications
-  NOTIFICATIONS: "/api/v1/notifications",
-  NOTIFICATIONS_READ_ALL: "/api/v1/notifications/read-all",
-  NOTIFICATIONS_TELEGRAM_LOG: "/api/v1/notifications/telegram/log",
-
-  // Charts (operator dashboard)
-  BRIER_METRICS: "/api/v1/brier/metrics",
-  DOMAIN_PNL: "/api/v1/domain/pnl",
-  SENTIMENT_TIMELINE: "/api/v1/signals/sentiment",
-
-  // Markets
-  MARKETS_ALL: "/api/v1/markets/all",
-  MARKETS_STOCKS: "/api/v1/markets/stocks",
-  MARKETS_FOREX: "/api/v1/markets/forex",
-  MARKETS_COMMODITIES: "/api/v1/markets/commodities",
-
-  // Risk Protections (circuit breaker / kill switch)
-  RISK_CIRCUIT_BREAKER_RESET: "/api/risk/circuit-breaker/reset",
-  RISK_KILL_SWITCH: (action: string) => `/api/risk/kill-switch/${action}`,
-
-  // Assistant
-  ASSISTANT_QUERY: "/api/v1/assistant/query",
-  ASSISTANT_CONTEXTS: "/api/v1/assistant/contexts",
-
-  // Plugins
-  PLUGINS_INSTALL: (pluginId: string) => `/api/v1/plugins/install/${pluginId}`,
-  PLUGINS_UNINSTALL: (pluginId: string) => `/api/v1/plugins/uninstall/${pluginId}`,
-  PLUGINS_TOGGLE: (pluginId: string) => `/api/v1/plugins/toggle/${pluginId}`,
-
-  // Prediction Markets (actions)
-  PREDICTION_MARKET_ACTION: (action: string) => `/api/v1/prediction-markets/${action}`,
-
-  // Signal Layer
-  SIGNAL_LAYER_FEATURES: (symbol: string) => `/api/v1/signal-layer/features/${symbol}`,
-
-  // Pipeline
-  PIPELINE_PNL: (timeRange: string) => `/api/v1/pipeline/pnl?range=${timeRange}`,
-  PIPELINE_VENUE_TOGGLE: (action: string) => `/api/v1/pipeline/venue/${action}`,
-
-  // Risk Metrics (agent-specific)
-  RISK_AGENT_EQUITY_HISTORY: (agentId: string) => `/api/v1/risk-metrics/agents/${agentId}/equity-history?limit=100`,
-  RISK_AGENT_DRAWDOWN_HISTORY: (agentId: string) => `/api/v1/risk-metrics/agents/${agentId}/drawdown-history?limit=100`,
-  RISK_AGENT_METRICS: (agentId: string) => `/api/v1/risk-metrics/agents/${agentId}`,
-
-  // Notifications (per-item)
-  NOTIFICATION_READ: (id: string) => `/api/v1/notifications/${id}/read`,
-
-  // Paper Trading
-  PAPER_TRADING_PORTFOLIO: (userId: string) => `/api/v1/paper-trading/portfolio/${userId}`,
-  PAPER_TRADING_CLOSE_POSITION: (positionId: string) => `/api/v1/paper-trading/positions/${positionId}/close`,
-  PAPER_TRADING_CANCEL_ORDER: (orderId: string) => `/api/v1/paper-trading/orders/${orderId}/cancel`,
-  PAPER_TRADING_STATS: (userId: string) => `/api/v1/paper/portfolio/${userId}/stats`,
-
-  // Simulation (speed)
-  SIMULATION_SPEED: (speed: number) => `/api/v1/simulation/speed/${speed}`,
-
-  // Authentication
-  AUTH_LOGIN: "/auth/login",
-  AUTH_REFRESH: "/auth/refresh",
-  AUTH_LOGOUT: "/auth/logout",
 } as const;
 
 // Chart Colors — centralized hex values for Recharts visualizations
@@ -417,28 +327,28 @@ export const AUTH_TOKEN_KEY = "merid-access";
 export const DEFAULTS = {
   PAGE_SIZE: 25,
   POLLING_INTERVALS: {
-    PORTFOLIO: 5000, // 5 seconds
-    POSITIONS: 10000, // 10 seconds
-    ORDERS: 10000,   // 10 seconds
-    AGENTS: 10000,   // 10 seconds
+    PORTFOLIO: 10000, // 10 seconds
+    POSITIONS: 15000, // 15 seconds
+    ORDERS: 15000,   // 15 seconds
+    AGENTS: 15000,   // 15 seconds
     RISK: 30000,     // 30 seconds
-    RISK_ALERTS: 15000, // 15 seconds
+    RISK_ALERTS: 30000, // 30 seconds
     SYSTEM_HEALTH: 60000, // 60 seconds
-    API_STATUS: 30000, // 30 seconds
-    LOGS: 5000,      // 5 seconds
-    LOG_STATS: 30000, // 30 seconds
-    BACKTESTS: 5000, // 5 seconds
-    RISK_POSITION_LIMITS: 10000, // 10 seconds
-    STALENESS: 5000,       // 5 seconds
-    SIMULATION: 5000,      // 5 seconds
-    FAST_REFRESH: 10000,   // 10 seconds
-    STANDARD: 5000,        // 5 seconds
-    MEDIUM: 10000,         // 10 seconds
-    SLOW: 15000,           // 15 seconds
-    EXPLAINABILITY: 20000, // 20 seconds
-    BACKGROUND: 30000,     // 30 seconds
-    INFREQUENT: 60000,     // 60 seconds
-    RARE: 120000,          // 2 minutes
+    API_STATUS: 60000, // 60 seconds
+    LOGS: 10000,     // 10 seconds
+    LOG_STATS: 60000, // 60 seconds
+    BACKTESTS: 30000, // 30 seconds
+    RISK_POSITION_LIMITS: 30000, // 30 seconds
+    STALENESS: 15000,      // 15 seconds
+    SIMULATION: 30000,     // 30 seconds
+    FAST_REFRESH: 15000,   // 15 seconds
+    STANDARD: 10000,       // 10 seconds
+    MEDIUM: 15000,         // 15 seconds
+    SLOW: 30000,           // 30 seconds
+    EXPLAINABILITY: 30000, // 30 seconds
+    BACKGROUND: 60000,     // 60 seconds
+    INFREQUENT: 120000,    // 2 minutes
+    RARE: 300000,          // 5 minutes
   },
   TIMEOUTS: {
     DEBOUNCE: 50,         // 50ms debounce
@@ -446,18 +356,9 @@ export const DEFAULTS = {
     TOAST: 3000,          // 3s toast/notification
     STATUS_RESET: 5000,   // 5s status message reset
   },
-  SYMBOLS: [
-    "BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD",
-    "ADA-USD", "DOT-USD", "ATOM-USD", "NEAR-USD",
-    "APT-USD", "SUI-USD", "LINK-USD", "UNI-USD",
-    "DOGE-USD", "SHIB-USD", "PEPE-USD", "WIF-USD",
-    "ARB-USD", "OP-USD", "POL-USD", "FIL-USD",
-    "AAVE-USD", "MKR-USD", "RENDER-USD",
-  ],
-  VENUES: ["Coinbase", "Kraken", "Binance", "Alpaca", "Kalshi", "IBKR"],
-  ASSET_CLASSES: ["crypto", "prediction_markets", "equities", "forex", "memecoins", "defi", "rwa"],
-  ORDER_TYPES: ["MARKET", "LIMIT", "STOP", "BRACKET"],
-  SIDES: ["BUY", "SELL"],
+  KALSHI_SIDES: ["yes", "no"],
+  KALSHI_ACTIONS: ["buy", "sell"],
+  KALSHI_ORDER_TYPES: ["limit", "market"],
 } as const;
 
 // Status Types

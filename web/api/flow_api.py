@@ -26,6 +26,10 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 # ── Router ────────────────────────────────────────────────────────────
 
@@ -245,8 +249,8 @@ def list_tokens(chain: Optional[str] = Query(None)):
         tokens = store.list_tokens(chain=chain)
         if tokens:
             return {"tokens": [t.to_dict() for t in tokens], "source": "live"}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     svc = _get_ingestion()
     data = svc.ingest_all(chain=chain)
@@ -264,8 +268,8 @@ def get_token_consensus(token_id: str):
         consensus = store.build_token_consensus(token_id)
         if consensus:
             return {"consensus": consensus, "source": "live"}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
     raise HTTPException(status_code=404, detail=f"Token {token_id} not found")
 
 
@@ -277,8 +281,8 @@ def list_entities(entity_type: Optional[str] = Query(None)):
         entities = store.list_entities(entity_type=entity_type)
         if entities:
             return {"entities": [e.to_dict() for e in entities], "source": "live"}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     from merid.flow.ingestion import WhaleTracker
     tracker = WhaleTracker()
@@ -302,8 +306,8 @@ def list_events(
         )
         if events:
             return {"events": [e.to_dict() for e in events], "source": "live"}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     svc = _get_ingestion()
     data = svc.ingest_all()

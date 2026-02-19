@@ -5,7 +5,7 @@
  * of equity over the session. Uses data from equity-series endpoint.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -13,7 +13,8 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { TrendingDown, Activity } from 'lucide-react';
-import { API_BASE_URL } from '../../config/constants';
+import { useApiData } from '../../hooks/useApiData';
+import { API_ENDPOINTS } from '../../config/constants';
 import { useRiskMetrics } from '../../hooks/useRiskMetrics';
 
 interface DrawdownCardProps {
@@ -28,25 +29,11 @@ interface EquityPoint {
 
 export function DrawdownCard({ className = '' }: DrawdownCardProps) {
   const { metrics } = useRiskMetrics();
-  const [points, setPoints] = useState<EquityPoint[]>([]);
-
-  const fetchSeries = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/operator/equity-series?window=1h`);
-      if (res.ok) {
-        const json = await res.json();
-        setPoints(json.points || []);
-      }
-    } catch {
-      // silent
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchSeries();
-    const id = setInterval(fetchSeries, 10000);
-    return () => clearInterval(id);
-  }, [fetchSeries]);
+  const { data: rawData } = useApiData<{ points: EquityPoint[] }>(
+    `${API_ENDPOINTS.EQUITY_SERIES}?window=1h`,
+    { pollingInterval: 10000 },
+  );
+  const points = rawData?.points ?? [];
 
   // Compute session stats from points
   const sessionHigh = points.length > 0 ? Math.max(...points.map((p) => p.equity)) : 0;

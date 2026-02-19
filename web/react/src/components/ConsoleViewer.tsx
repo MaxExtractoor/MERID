@@ -1,6 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, PauseCircle, Trash, Copy, RefreshCw, Terminal } from 'lucide-react';
-import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS} from '../config/constants';
+
+function authHeaders(headers?: HeadersInit): HeadersInit {
+  const token = localStorage.getItem('merid-access');
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(headers ?? {}),
+  };
+}
 
 interface ConsoleMessage {
   id: string;
@@ -51,7 +60,9 @@ export default function ConsoleViewer() {
   const fetchPrimeData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const response = await fetch(API_ENDPOINTS.PRIME_STATUS);
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.PRIME_STATUS}`, {
+        headers: authHeaders(),
+      });
       if (response.ok) {
         const data = await response.json();
         addMessage('api', 'Prime API', data);

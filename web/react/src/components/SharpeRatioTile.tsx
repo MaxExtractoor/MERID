@@ -1,5 +1,8 @@
-import { useState, useEffect } from 'react';
+import React from 'react';
 import { TrendingUp, TrendingDown, Minus, Award } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, CHART_COLORS} from "../config/constants";
 
 interface SharpeRatioTileProps {
   agentId?: string;
@@ -18,40 +21,19 @@ export default function SharpeRatioTile({
   label = "Sharpe Ratio",
   compact = false,
 }: SharpeRatioTileProps) {
-  const [sharpe, setSharpe] = useState(propSharpe ?? 0);
-  const [history, setHistory] = useState(propHistory ?? []);
-  const [loading, setLoading] = useState(!propSharpe && !!agentId);
+  const shouldFetch = !!agentId && propSharpe === undefined;
+  const { data: metricsData, loading: fetchLoading, error: fetchError, refetch } = useApiData<{ sharpe_ratio: number }>(
+    agentId ? API_ENDPOINTS.RISK_AGENT_METRICS(agentId) : '',
+    { enabled: shouldFetch },
+  );
 
-  useEffect(() => {
-    if (propSharpe !== undefined) {
-      setSharpe(propSharpe);
-    }
-    if (propHistory) {
-      setHistory(propHistory);
-    }
-  }, [propSharpe, propHistory]);
+  if (fetchError && !metricsData && shouldFetch) {
+    return <ErrorBar label="Sharpe ratio" error={fetchError} onRetry={refetch} />;
+  }
 
-  useEffect(() => {
-    if (agentId && propSharpe === undefined) {
-      fetchAgentMetrics();
-    }
-  }, [agentId]);
-
-  const fetchAgentMetrics = async () => {
-    if (!agentId) return;
-    
-    try {
-      const res = await fetch(`/api/v1/risk-metrics/agents/${agentId}`);
-      if (res.ok) {
-        const data = await res.json();
-        setSharpe(data.sharpe_ratio ?? 0);
-      }
-    } catch (err) {
-      console.error('Failed to fetch agent metrics:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const sharpe = propSharpe ?? metricsData?.sharpe_ratio ?? 0;
+  const history = propHistory ?? [];
+  const loading = shouldFetch && fetchLoading;
 
   const getColor = (value: number) => {
     if (value < 0) return 'text-red-400';
@@ -157,7 +139,7 @@ export default function SharpeRatioTile({
             <path
               d={getSparklinePath()}
               fill="none"
-              stroke={sharpe >= 1 ? '#4ade80' : sharpe >= 0 ? '#facc15' : '#f87171'}
+              stroke={sharpe >= 1 ? CHART_COLORS.LIGHT_GREEN : sharpe >= 0 ? CHART_COLORS.YELLOW : CHART_COLORS.LIGHT_RED}
               strokeWidth="1.5"
             />
           </svg>

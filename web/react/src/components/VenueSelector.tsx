@@ -80,7 +80,7 @@ export default function VenueSelector({ selected, onChange, className = '' }: Ve
   return (
     <div className={`relative ${className}`} ref={dropdownRef}>
       {/* Selected Venue Button */}
-      <button
+      <button type="button"
         onClick={() => setIsOpen(!isOpen)}
         className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors"
       >
@@ -103,7 +103,7 @@ export default function VenueSelector({ selected, onChange, className = '' }: Ve
           {/* Filter Tabs */}
           <div className="flex gap-1 p-2 border-b border-slate-700">
             {(['all', 'crypto', 'stocks', 'prediction', 'paper'] as const).map(type => (
-              <button
+              <button type="button"
                 key={type}
                 onClick={() => setFilter(type)}
                 className={`px-3 py-1 text-xs rounded transition-colors ${
@@ -120,7 +120,7 @@ export default function VenueSelector({ selected, onChange, className = '' }: Ve
           {/* Venue List */}
           <div className="max-h-96 overflow-y-auto">
             {filteredVenues.map(venue => (
-              <button
+              <button type="button"
                 key={venue.id}
                 onClick={() => {
                   onChange(venue.id);

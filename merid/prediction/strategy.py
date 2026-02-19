@@ -34,6 +34,7 @@ class SignalAction(str, Enum):
     CLOSE = "close"
     HOLD = "hold"
     NO_ACTION = "no_action"
+    QUOTE = "quote"  # For market making: provides bid/ask
 
 
 class ExpiryPhase(str, Enum):
@@ -69,6 +70,12 @@ class StrategyConfig:
     min_open_interest: Decimal = Decimal("100")
     min_depth_contracts: int = 5                      # Min depth at best price
 
+    # Market Making
+    mm_max_spread_cents: Decimal = Decimal("10")     # Don't quote if spread > 10c
+    mm_target_spread_cents: Decimal = Decimal("2")   # Try to quote 2c spread
+    mm_inventory_limit: int = 50                     # Max contracts to hold per side
+    mm_skew_factor: Decimal = Decimal("0.5")         # How much to lean based on inventory
+
     # Confidence
     min_confidence: Decimal = Decimal("0.5")
 
@@ -78,9 +85,11 @@ class StrategySignal:
     """Output of strategy evaluation for one market."""
     market_id: str
     action: SignalAction
-    side: str                  # "yes" or "no"
+    side: str                  # "yes", "no", or "both"
     contracts: int             # Recommended size
     limit_price_cents: Optional[int] = None
+    bid_price_cents: Optional[int] = None  # For QUOTE
+    ask_price_cents: Optional[int] = None  # For QUOTE
     edge: Optional[EdgeEstimate] = None
     phase: Optional[ExpiryPhase] = None
     reason: str = ""
@@ -93,6 +102,8 @@ class StrategySignal:
             "side": self.side,
             "contracts": self.contracts,
             "limit_price_cents": self.limit_price_cents,
+            "bid_price_cents": self.bid_price_cents,
+            "ask_price_cents": self.ask_price_cents,
             "phase": self.phase.value if self.phase else None,
             "reason": self.reason,
             "net_edge": str(self.edge.net_edge) if self.edge else None,
@@ -155,52 +166,77 @@ class KalshiStrategy:
     # ------------------------------------------------------------------
 
     def _kelly_size(self, edge: EdgeEstimate, phase: ExpiryPhase) -> int:
-        """Compute position size using fractional Kelly criterion.
+        """Compute position size via PositionSizer (fee-aware, adaptive Kelly).
 
-        Kelly fraction = (p * b - q) / b
-        where p = model_prob, q = 1 - p, b = payout odds.
-        For binary contracts: b = (1 / market_prob) - 1.
+        Delegates to the singleton PositionSizer which applies:
+        - Fractional Kelly with Kalshi fee schedule
+        - PF/expectancy scaling gates
+        - Drawdown and vol-based adaptive shrinkage
+        - Per-underlying hourly exposure caps
+
+        Falls back to a simple inline calculation if the sizer is unavailable.
         """
+        try:
+            from merid.event_venues.kalshi.position_sizer import get_position_sizer
+            sizer = get_position_sizer()
+
+            # Convert edge fields to sizer inputs
+            edge_pct = float(edge.net_edge) * 100.0  # fraction → percent
+            market_prob = float(edge.market_prob)
+            price_cents = max(1, min(99, int(round(market_prob * 100))))
+
+            # Phase-based drawdown proxy: terminal = higher perceived vol
+            local_vol_pct = {
+                ExpiryPhase.EARLY: 10.0,
+                ExpiryPhase.MID: 15.0,
+                ExpiryPhase.LATE: 20.0,
+                ExpiryPhase.TERMINAL: 35.0,
+            }.get(phase, 15.0)
+
+            size = sizer.compute(
+                agent_name="strategy",
+                edge_pct=edge_pct,
+                price_cents=price_cents,
+                local_vol_pct=local_vol_pct,
+            )
+            return min(size, self.config.max_contracts_per_order)
+        except Exception:
+            pass
+
+        # Fallback: simple fractional Kelly (no fee/PF awareness)
         p = edge.model_prob
         q = Decimal("1") - p
         market_prob = edge.market_prob
-
         if market_prob <= Decimal("0") or market_prob >= Decimal("1"):
             return 0
-
         b = (Decimal("1") / market_prob) - Decimal("1")
         if b <= Decimal("0"):
             return 0
-
         kelly = (p * b - q) / b
         if kelly <= Decimal("0"):
             return 0
-
-        # Apply fractional Kelly
         fraction = self.config.kelly_fraction
-        # Reduce size in terminal phase
-        if phase == ExpiryPhase.TERMINAL:
+        if phase == ExpiryPhase.EARLY:
+            fraction = fraction * Decimal("1.5")
+        elif phase == ExpiryPhase.MID:
+            fraction = fraction * Decimal("1.2")
+        elif phase == ExpiryPhase.TERMINAL:
             fraction = fraction / 2
-
         raw_size = kelly * fraction * self.config.max_contracts_per_market
         size = int(raw_size.quantize(Decimal("1"), ROUND_HALF_UP))
-
         return min(size, self.config.max_contracts_per_order)
 
     # ------------------------------------------------------------------
     # Entry evaluation
     # ------------------------------------------------------------------
 
-    def evaluate(self, snapshot: MarketSnapshot) -> StrategySignal:
+    def evaluate(self, snapshot: MarketSnapshot, archetype: str = "directional") -> StrategySignal:
         """Evaluate a market snapshot and produce a signal.
 
-        Decision tree:
-        1. Skip if market not in TRADING or CLOSING state.
-        2. Skip if volume / OI below minimums.
-        3. Check for pure arb first (highest priority).
-        4. Find best speculative edge across yes/no.
-        5. Apply time-to-expiry edge threshold.
-        6. Size with Kelly, cap per config.
+        Decision tree based on archetype:
+        - directional: Takes YES/NO positions based on speculative edge.
+        - market_maker: Quotes two-sided markets.
+        - arbitrage: Specifically looks for cross-market or internal arb.
         """
         phase = self._expiry_phase(snapshot.time_to_expiry_hours)
 
@@ -236,7 +272,17 @@ class KalshiStrategy:
                 reason=f"OI {snapshot.open_interest} below minimum {self.config.min_open_interest}.",
             )
 
-        # 3. Arb check
+        # Dispatch to archetype handler
+        if archetype == "market_maker":
+            return self._evaluate_mm(snapshot, phase)
+        elif archetype == "arbitrage":
+            return self._evaluate_arb(snapshot, phase)
+        else:
+            return self._evaluate_directional(snapshot, phase)
+
+    def _evaluate_directional(self, snapshot: MarketSnapshot, phase: ExpiryPhase) -> StrategySignal:
+        """Standard directional strategy."""
+        # 3. Arb check (high priority even for directional)
         arb_edges = [e for e in snapshot.edges if e.edge_type == "arb"]
         if arb_edges:
             best_arb = max(arb_edges, key=lambda e: e.net_edge)
@@ -330,8 +376,77 @@ class KalshiStrategy:
             limit_price_cents=limit_cents,
             edge=best,
             phase=phase,
-            reason=f"{phase.value} phase, {best.edge_type} edge {best.net_edge:.4f}, "
-                   f"Kelly size {size}.",
+            reason=f"{phase.value} phase, {best.edge_type} edge {best.net_edge:.4f}, Kelly size {size}.",
+        )
+
+    def _evaluate_mm(self, snapshot: MarketSnapshot, phase: ExpiryPhase) -> StrategySignal:
+        """Market Maker strategy: quote bid and ask."""
+        # Check spread
+        if snapshot.implied.spread_cents is None or snapshot.implied.spread_cents > self.config.mm_max_spread_cents:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none",
+                contracts=0,
+                phase=phase,
+                reason=f"Spread {snapshot.implied.spread_cents} exceeds MM limit.",
+            )
+
+        # Simple mid-price based quoting
+        yes_mid = (snapshot.implied.yes_bid + snapshot.implied.yes_ask) / 2 if snapshot.implied.yes_bid and snapshot.implied.yes_ask else Decimal("50")
+        
+        # Apply target spread
+        half_spread = self.config.mm_target_spread_cents / 2
+        bid = int((yes_mid - half_spread).quantize(Decimal("1"), ROUND_HALF_UP))
+        ask = int((yes_mid + half_spread).quantize(Decimal("1"), ROUND_HALF_UP))
+
+        # Clamp to 1-99
+        bid = max(1, min(98, bid))
+        ask = max(bid + 1, min(99, ask))
+
+        return StrategySignal(
+            market_id=snapshot.market_id,
+            action=SignalAction.QUOTE,
+            side="yes",
+            contracts=self.config.min_depth_contracts,
+            bid_price_cents=bid,
+            ask_price_cents=ask,
+            phase=phase,
+            reason=f"MM quoting {bid}c/{ask}c around mid {yes_mid:.1f}c.",
+        )
+
+    def _evaluate_arb(self, snapshot: MarketSnapshot, phase: ExpiryPhase) -> StrategySignal:
+        """Arbitrage strategy: specifically focused on mispricings."""
+        arb_edges = [e for e in snapshot.edges if e.edge_type == "arb"]
+        if not arb_edges:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none",
+                contracts=0,
+                phase=phase,
+                reason="No arb edge detected.",
+            )
+
+        best_arb = max(arb_edges, key=lambda e: e.net_edge)
+        if best_arb.net_edge < self.config.min_arb_edge:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side="none",
+                contracts=0,
+                phase=phase,
+                reason=f"Arb edge {best_arb.net_edge:.4f} below threshold.",
+            )
+
+        return StrategySignal(
+            market_id=snapshot.market_id,
+            action=SignalAction.BUY_YES, # Arb usually involves both, buy_yes side used as trigger
+            side="both",
+            contracts=self.config.max_contracts_per_order,
+            edge=best_arb,
+            phase=phase,
+            reason=f"Arb opportunity: {best_arb.net_edge:.4f} edge.",
         )
 
     # ------------------------------------------------------------------

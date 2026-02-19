@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import {
   Brain, ChevronDown, ChevronRight, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, Clock, Zap
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface DecisionEvent {
   id: string;
@@ -34,84 +37,18 @@ const OUTCOME_CONFIG: Record<string, { icon: typeof CheckCircle; color: string }
 };
 
 export default function ExplainabilityTimeline() {
-  const [events, setEvents] = useState<DecisionEvent[]>([]);
-  const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [phaseFilter, setPhaseFilter] = useState<string>('all');
 
-  const fetchEvents = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/explainability/decisions');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.decisions) {
-          setEvents(data.decisions);
-          return;
-        }
-      }
-    } catch {
-      // fallback
-    }
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ decisions: DecisionEvent[] }>(
+    API_ENDPOINTS.EXPLAINABILITY_DECISIONS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
 
-    const now = Date.now();
-    setEvents([
-      {
-        id: 'dec-1', timestamp: new Date(now - 5000).toISOString(),
-        agent: 'CryptoArbAgent', phase: 'RESEARCH',
-        action: 'Detected cross-exchange spread BTC/USDT',
-        reasoning: 'Binance ask 104850 < Coinbase bid 104892. Spread 4.0 bps exceeds 2.0 bps threshold.',
-        inputs: { binance_ask: '104850.20', coinbase_bid: '104892.50', threshold_bps: '2.0' },
-        outcome: 'approved', confidence: 0.92, durationMs: 45,
-      },
-      {
-        id: 'dec-2', timestamp: new Date(now - 12000).toISOString(),
-        agent: 'CryptoArbAgent', phase: 'STRATEGY',
-        action: 'Generated arb proposal BTC cross-exchange',
-        reasoning: 'Quarter-Kelly sizing: $42.30 expected PnL on 0.01 BTC. Risk-adjusted edge 3.8 bps after fees.',
-        inputs: { expected_pnl: '$42.30', position_size: '0.01 BTC', fee_estimate: '$1.20' },
-        outcome: 'approved', confidence: 0.88, durationMs: 12,
-      },
-      {
-        id: 'dec-3', timestamp: new Date(now - 15000).toISOString(),
-        agent: 'GlobalRiskManager', phase: 'RISK',
-        action: 'Pre-trade risk check: 7-point validation',
-        reasoning: 'All 7 checks passed. Domain crypto enabled, notional within limits, daily loss $45/$1000.',
-        inputs: { domain: 'crypto', notional: '$1048.50', daily_loss_used: '$45.00', daily_loss_limit: '$1000.00' },
-        outcome: 'approved', confidence: 1.0, durationMs: 3,
-      },
-      {
-        id: 'dec-4', timestamp: new Date(now - 60000).toISOString(),
-        agent: 'PredictionMarketAgent', phase: 'STRATEGY',
-        action: 'Evaluated KXBTC-105K-YES edge',
-        reasoning: 'Implied prob 61% vs model estimate 64.2%. Speculative edge 3.2% in MID phase. Below EARLY threshold 5%.',
-        inputs: { implied_prob: '0.61', model_prob: '0.642', phase: 'MID', threshold: '3.0%' },
-        outcome: 'approved', confidence: 0.70, durationMs: 85,
-      },
-      {
-        id: 'dec-5', timestamp: new Date(now - 120000).toISOString(),
-        agent: 'GlobalRiskManager', phase: 'RISK',
-        action: 'Rejected ETH/USDT arb: daily loss limit proximity',
-        reasoning: 'Daily loss at $920/$1000 (92%). New trade risk $15 would bring to 93.5%. Rejected per 90% soft limit.',
-        inputs: { daily_loss: '$920', limit: '$1000', trade_risk: '$15', soft_limit: '90%' },
-        outcome: 'rejected', confidence: 1.0, durationMs: 2, tradeId: 'arb-eth-003',
-      },
-      {
-        id: 'dec-6', timestamp: new Date(now - 300000).toISOString(),
-        agent: 'EquityAgent', phase: 'EXECUTION',
-        action: 'Submitted AAPL buy order via Alpaca (PAPER)',
-        reasoning: 'Momentum signal confirmed. RSI 42 with bullish divergence. Entry at $185.20, stop $183.50.',
-        inputs: { symbol: 'AAPL', side: 'buy', qty: '10', price: '$185.20', mode: 'PAPER' },
-        outcome: 'approved', confidence: 0.75, durationMs: 120,
-      },
-    ]);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchEvents();
-    const interval = setInterval(fetchEvents, 5000);
-    return () => clearInterval(interval);
-  }, [fetchEvents]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Explainability" error={fetchError} onRetry={refetch} />;
+  }
+  const events = rawData?.decisions ?? [];
 
   const filtered = phaseFilter === 'all'
     ? events
@@ -152,7 +89,7 @@ export default function ExplainabilityTimeline() {
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
             {['all', 'RESEARCH', 'STRATEGY', 'RISK', 'EXECUTION'].map(f => (
-              <button
+              <button type="button"
                 key={f}
                 onClick={() => setPhaseFilter(f)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
@@ -163,11 +100,11 @@ export default function ExplainabilityTimeline() {
               </button>
             ))}
           </div>
-          <button
-            onClick={fetchEvents}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
             title="Refresh decisions"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
@@ -199,7 +136,7 @@ export default function ExplainabilityTimeline() {
                     event.outcome === 'rejected' ? 'border-l-2 border-l-red-500' : ''
                   }`}
                   onClick={() => setExpandedId(isExpanded ? null : event.id)}
-                >
+                 role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => setExpandedId(isExpanded ? null : event.id))(); } }}>
                   {/* Header Row */}
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">

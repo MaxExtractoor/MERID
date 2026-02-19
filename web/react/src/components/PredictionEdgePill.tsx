@@ -49,7 +49,7 @@ const STANCE_CONFIG: Record<
   },
 };
 
-export default function PredictionEdgePill({
+function PredictionEdgePill({
   stance,
   edge,
   swarmProb,
@@ -95,3 +95,7 @@ export default function PredictionEdgePill({
     </div>
   );
 }
+
+const MemoizedPredictionEdgePill = React.memo(PredictionEdgePill);
+MemoizedPredictionEdgePill.displayName = 'PredictionEdgePill';
+export default MemoizedPredictionEdgePill;

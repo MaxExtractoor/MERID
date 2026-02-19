@@ -1,8 +1,39 @@
+/* eslint-disable react-refresh/only-export-components */
 import { useState, useEffect } from 'react';
 import { Activity, AlertCircle, CheckCircle, TrendingUp, Server, Cpu } from 'lucide-react';
 import { api } from '../services/api';
 import type { SystemHealth } from '../services/api';
-import { DEFAULTS } from '../config/constants';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useApiData } from './useApiData';
+import { logUiError } from '../utils/logger';
+
+const RETRY_DELAY_MS = 500;
+const LOG_THROTTLE_MS = 10000;
+const logDedup = new Map<string, number>();
+
+async function retryOnce<T>(request: () => Promise<T>): Promise<T> {
+  try {
+    return await request();
+  } catch {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, RETRY_DELAY_MS);
+    });
+    return request();
+  }
+}
+
+function logUiErrorThrottled(scope: string, message: string, error: unknown): void {
+  const key = `${scope}:${message}`;
+  const now = Date.now();
+  const lastLogged = logDedup.get(key) ?? 0;
+
+  if (now - lastLogged < LOG_THROTTLE_MS) {
+    return;
+  }
+
+  logDedup.set(key, now);
+  logUiError(scope, message, error);
+}
 
 interface PnLSummary {
   today_pnl: number;
@@ -23,6 +54,8 @@ interface Agent {
   state: string;
   positions_count: number;
   today_pnl: number;
+  tasks_completed?: number;
+  uptime?: number;
 }
 
 interface AgentsSummary {
@@ -61,12 +94,12 @@ export function useSystemHealth() {
   useEffect(() => {
     async function fetchHealth() {
       try {
-        const data = await api.getSystemHealth();
+        const data = await retryOnce(() => api.getSystemHealth());
         setHealth(data);
         setError(null);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to fetch health');
-        console.error('System health fetch error:', e);
+        logUiErrorThrottled('useDashboard', 'System health fetch error', e);
       } finally {
         setLoading(false);
       }
@@ -88,9 +121,9 @@ export function usePnLSummary() {
     async function fetchPnL() {
       try {
         const data = await api.getPnLSummary();
-        setPnL(data as unknown);
+        setPnL(data);
       } catch (e) {
-        console.error('Failed to fetch P&L:', e);
+        logUiErrorThrottled('useDashboard', 'Failed to fetch P&L', e);
       } finally {
         setLoading(false);
       }
@@ -112,9 +145,9 @@ export function useAgentsSummary() {
     async function fetchAgents() {
       try {
         const data = await api.getAgentSummary();
-        setAgents(data as unknown);
+        setAgents(data);
       } catch (e) {
-        console.error('Failed to fetch agents:', e);
+        logUiErrorThrottled('useDashboard', 'Failed to fetch agents', e);
       } finally {
         setLoading(false);
       }
@@ -135,10 +168,10 @@ export function useTradingSummary() {
   useEffect(() => {
     async function fetchTrading() {
       try {
-        const data = await api.getTradingSummary();
-        setTrading(data as unknown);
+        const data = await retryOnce(() => api.getTradingSummary());
+        setTrading(data);
       } catch (e) {
-        console.error('Failed to fetch trading:', e);
+        logUiErrorThrottled('useDashboard', 'Failed to fetch trading', e);
       } finally {
         setLoading(false);
       }
@@ -152,28 +185,38 @@ export function useTradingSummary() {
   return { trading, loading };
 }
 
+interface HealthStatus {
+  status?: string;
+  venue?: {
+    connected?: boolean;
+    circuit?: { state?: string };
+    rate_limits?: { read?: number; write?: number };
+  };
+  venue_health?: {
+    connected?: boolean;
+    circuit?: { state?: string };
+  };
+  metrics?: {
+    active_markets?: number;
+    covered_markets?: number;
+    coverage_pct?: number;
+  };
+}
+
+export function useKalshiHealth() {
+  const { data, loading, error } = useApiData<HealthStatus>(
+    API_ENDPOINTS.KALSHI_GRID_STATUS, // Use status for full data including health
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+  );
+  return { health: data, loading, error };
+}
+
 export function usePrimeStatus() {
-  const [prime, setPrime] = useState<PrimeStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    async function fetchPrime() {
-      try {
-        const data = await api.getPrimeStatus();
-        setPrime(data as unknown);
-      } catch (e) {
-        console.error('Failed to fetch prime status:', e);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    const t = setTimeout(() => { fetchPrime(); }, 8000);
-    const interval = setInterval(fetchPrime, DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
-    return () => { clearTimeout(t); clearInterval(interval); };
-  }, []);
-
-  return { prime, loading };
+  const { data, loading, error } = useApiData<PrimeStatus>(
+    API_ENDPOINTS.PRIME_STATUS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  return { prime: data, loading, error };
 }
 
 // System Health Card Component
@@ -396,6 +439,54 @@ export function PrimeStatusCard() {
   );
 }
 
+// Kalshi Health Card
+export function KalshiHealthCard() {
+  const { health, loading } = useKalshiHealth();
+
+  if (loading) {
+    return (
+      <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800 animate-pulse">
+        <div className="h-4 bg-slate-700 rounded mb-2"></div>
+        <div className="h-8 bg-slate-700 rounded"></div>
+      </div>
+    );
+  }
+
+  const isConnected = health?.venue_health?.connected ?? health?.venue?.connected ?? false;
+  const circuitState = health?.venue_health?.circuit?.state ?? health?.venue?.circuit?.state ?? 'unknown';
+  const coveragePct = health?.metrics?.coverage_pct;
+
+  return (
+    <div className={`bg-slate-900/70 rounded-xl p-4 border ${isConnected ? 'border-orange-500/30' : 'border-rose-500/30'}`}>
+      <div className="flex items-center gap-2 mb-3">
+        <Activity className={`w-5 h-5 ${isConnected ? 'text-orange-400' : 'text-rose-400'}`} />
+        <h3 className="text-sm font-medium text-slate-400">Kalshi Health</h3>
+      </div>
+      
+      <div className="flex items-center gap-2 mb-2">
+        <span className={`text-2xl font-semibold ${isConnected ? 'text-orange-400' : 'text-rose-400'}`}>
+          {isConnected ? 'Connected' : 'Offline'}
+        </span>
+      </div>
+      
+      <div className="text-xs text-slate-400 space-y-1">
+        <div className="flex justify-between">
+          <span>Breaker:</span>
+          <span className={circuitState === 'closed' ? 'text-emerald-400' : 'text-amber-400'}>
+            {circuitState.toUpperCase()}
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span>Coverage:</span>
+          <span className="text-blue-400">
+            {typeof coveragePct === 'number' ? coveragePct.toFixed(1) : '0.0'}%
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Agent Status Card
 export function AgentStatusCard() {
   const { agents, loading } = useAgentsSummary();
@@ -451,9 +542,9 @@ export function AgentStatusCard() {
               <span className="text-sm">{agent.name}</span>
             </div>
             <div className="flex items-center gap-3 text-xs">
-              <span className="text-slate-500">{(agent as unknown).tasks_completed || 0} tasks</span>
+              <span className="text-slate-500">{agent.tasks_completed ?? 0} tasks</span>
               <span className="text-emerald-400">
-                {(agent as unknown).uptime ? `${(agent as unknown).uptime.toFixed(1)}%` : 'N/A'}
+                {typeof agent.uptime === 'number' ? `${agent.uptime.toFixed(1)}%` : 'N/A'}
               </span>
             </div>
           </div>

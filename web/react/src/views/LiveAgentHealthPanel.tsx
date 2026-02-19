@@ -4,6 +4,7 @@ import DataTableEnhanced from '../components/DataTableEnhanced';
 import { useAgentsHealth } from '../hooks/useAgentsHealth';
 import { formatTime } from '../utils/formatters';
 import { RefreshCw } from 'lucide-react';
+import { ExecutionGateChip } from '../components/ExecutionGateChip';
 
 /**
  * Live Agent Health Panel
@@ -63,13 +64,16 @@ export function LiveAgentHealthPanel() {
         />
       </div>
 
-      {/* Last Updated Indicator */}
-      {lastUpdated && (
-        <div className="flex items-center gap-2 text-sm text-slate-400 px-1">
-          <RefreshCw className="w-3 h-3" />
-          <span>Last updated: {formatTime(lastUpdated.toISOString())}</span>
-        </div>
-      )}
+      {/* Execution Gate + Last Updated */}
+      <div className="flex items-center justify-between px-1">
+        <ExecutionGateChip variant="inline" />
+        {lastUpdated && (
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            <RefreshCw className="w-3 h-3" />
+            <span>Last updated: {formatTime(lastUpdated.toISOString())}</span>
+          </div>
+        )}
+      </div>
 
       {/* Agent Data Table */}
       {loading ? (

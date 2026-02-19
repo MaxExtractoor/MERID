@@ -9,6 +9,7 @@ Provides prediction-market-scoped risk controls:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -30,6 +31,15 @@ class RiskAction(str, Enum):
 
 
 @dataclass
+class CategoryLimit:
+    """Exposure limit for a market category."""
+    category: str
+    max_notional_usd: Decimal = Decimal("5000.0")
+    max_contracts: int = 500
+    max_pct_of_portfolio: float = 0.20  # 20% max in any one category
+    enabled: bool = True
+
+@dataclass
 class PredictionRiskConfig:
     """Risk limits for prediction market trading."""
     # Per-market limits
@@ -45,10 +55,22 @@ class PredictionRiskConfig:
     max_daily_loss_usd: Decimal = Decimal("250")
     max_open_markets: int = 20
 
+    # Category-specific limits
+    category_limits: Dict[str, CategoryLimit] = field(default_factory=dict)
+
     # Pre-trade checks
     max_slippage_cents: Decimal = Decimal("3")  # Max 3 cents worse than best
     min_depth_contracts: int = 5                 # Min depth at target price
     max_spread_cents: Decimal = Decimal("10")    # Reject if spread > 10 cents
+    
+    # Kalshi Platform Constraints
+    min_order_size: int = 1                      # 1 contract min
+    max_order_size: int = 100000                 # 100k contracts max (typicalretail)
+    tick_size_cents: Decimal = Decimal("1")      # 1 cent tick
+
+    # Rate limiting
+    max_orders_per_minute: int = 30
+    max_orders_per_hour: int = 300
 
     # Kill switch
     drawdown_halt_pct: Decimal = Decimal("0.10")   # Halt at 10 % drawdown
@@ -57,6 +79,15 @@ class PredictionRiskConfig:
     # Circuit breaker: halt if odds move > X cents in Y seconds
     odds_move_threshold_cents: Decimal = Decimal("15")
     odds_move_window_seconds: int = 60
+
+    def __post_init__(self):
+        if not self.category_limits:
+            self.category_limits = {
+                "crypto": CategoryLimit("crypto", max_notional_usd=Decimal("5000"), max_contracts=500),
+                "economics": CategoryLimit("economics", max_notional_usd=Decimal("3000"), max_contracts=300),
+                "financials": CategoryLimit("financials", max_notional_usd=Decimal("3000"), max_contracts=300),
+                "politics": CategoryLimit("politics", max_notional_usd=Decimal("2000"), max_contracts=200),
+            }
 
 
 @dataclass
@@ -106,6 +137,31 @@ class DailyPnL:
         return self.realized_pnl_usd + self.unrealized_pnl_usd
 
 
+# ── Fee schedule ─────────────────────────────────────────────────────────
+
+def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
+    """Calculate Kalshi fee in cents for a trade.
+
+    Tiered:
+      1-99 contracts:   7% of payout, min 2¢ per contract
+      100-999:          5% of payout, min 2¢
+      1000+:            3% of payout, min 2¢
+    """
+    if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
+        return 0
+
+    payout_per = 100 - price_cents  # cents won per contract if correct
+
+    if contracts < 100:
+        rate = 0.07
+    elif contracts < 1000:
+        rate = 0.05
+    else:
+        rate = 0.03
+
+    fee_per = max(2, math.ceil(payout_per * rate))
+    return fee_per * contracts
+
 class PredictionMarketRisk:
     """Prediction-market-scoped risk manager.
 
@@ -122,6 +178,12 @@ class PredictionMarketRisk:
         self._unwind_requested: bool = False
         self._recent_prices: Dict[str, List[tuple]] = {}  # market_id -> [(ts, price)]
         self._breach_log: List[dict] = []
+        self._category_notional: Dict[str, Decimal] = {}
+        self._category_contracts: Dict[str, int] = {}
+        self._orders_this_minute = 0
+        self._orders_this_hour = 0
+        self._last_minute_reset = datetime.now(timezone.utc)
+        self._last_hour_reset = datetime.now(timezone.utc)
 
     # ------------------------------------------------------------------
     # Properties
@@ -231,6 +293,8 @@ class PredictionMarketRisk:
         best_bid_cents: Optional[Decimal] = None,
         best_ask_cents: Optional[Decimal] = None,
         depth_at_price: Optional[int] = None,
+        category: Optional[str] = None,
+        edge: Decimal = Decimal("0"),
     ) -> PreTradeCheck:
         """Run all pre-trade checks for a proposed order.
 
@@ -242,10 +306,16 @@ class PredictionMarketRisk:
         5. Portfolio-wide notional limit.
         6. Daily loss limit.
         7. Max open markets.
-        8. Spread check.
-        9. Slippage guard.
-        10. Depth check.
+        8. Category exposure.
+        9. Rate limit.
+        10. Post-fee edge minimum.
+        11. Tick size.
+        12. Spread check.
+        13. Slippage guard.
+        14. Depth check.
         """
+        now = datetime.now(timezone.utc)
+
         # 1. Kill switch
         if self._halted:
             return PreTradeCheck(
@@ -260,16 +330,45 @@ class PredictionMarketRisk:
             return PreTradeCheck(
                 allowed=False,
                 action=RiskAction.REDUCE_SIZE,
-                reason=f"Order size {contracts} exceeds max {self.config.max_contracts_per_order}.",
+                reason=f"Order size {contracts} exceeds agent max {self.config.max_contracts_per_order}.",
                 adjusted_size=self.config.max_contracts_per_order,
                 market_id=market_id,
             )
+        
+        if contracts < self.config.min_order_size:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"Order size {contracts} below platform min {self.config.min_order_size}.",
+                market_id=market_id,
+            )
+            
+        if contracts > self.config.max_order_size:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"Order size {contracts} exceeds platform max {self.config.max_order_size}.",
+                market_id=market_id,
+            )
+
+        # Tick size check
+        if price_cents % self.config.tick_size_cents != 0:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"Price {price_cents}¢ must be multiple of tick size {self.config.tick_size_cents}¢.",
+                market_id=market_id,
+            )
+
+        order_notional = (Decimal(contracts) * price_cents / Decimal("100")).quantize(
+            Decimal("0.01"), ROUND_HALF_UP
+        )
 
         # 3. Per-market limit
         existing = self._exposures.get(market_id)
         current_contracts = existing.contracts if existing else 0
-        new_total = current_contracts + contracts
-        if new_total > self.config.max_contracts_per_market:
+        new_total_contracts = current_contracts + contracts
+        if new_total_contracts > self.config.max_contracts_per_market:
             allowed = self.config.max_contracts_per_market - current_contracts
             if allowed <= 0:
                 return PreTradeCheck(
@@ -286,7 +385,7 @@ class PredictionMarketRisk:
                 market_id=market_id,
             )
 
-        new_notional = (Decimal(new_total) * price_cents / Decimal("100")).quantize(
+        new_notional = (Decimal(new_total_contracts) * price_cents / Decimal("100")).quantize(
             Decimal("0.01"), ROUND_HALF_UP
         )
         if new_notional > self.config.max_notional_per_market_usd:
@@ -301,9 +400,6 @@ class PredictionMarketRisk:
         event_notional = sum(
             e.notional_usd for e in self._exposures.values()
             if e.event_id == event_id
-        )
-        order_notional = (Decimal(contracts) * price_cents / Decimal("100")).quantize(
-            Decimal("0.01"), ROUND_HALF_UP
         )
         if event_notional + order_notional > self.config.max_notional_per_event_usd:
             return PreTradeCheck(
@@ -324,9 +420,10 @@ class PredictionMarketRisk:
             )
 
         # 6. Daily loss limit
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = now.strftime("%Y-%m-%d")
         daily = self._daily_pnl.get(today)
         if daily and daily.total_pnl_usd < -self.config.max_daily_loss_usd:
+            self.halt(f"Daily loss ${abs(daily.total_pnl_usd)} exceeds max ${self.config.max_daily_loss_usd}.")
             return PreTradeCheck(
                 allowed=False,
                 action=RiskAction.HALT,
@@ -344,7 +441,69 @@ class PredictionMarketRisk:
                 market_id=market_id,
             )
 
-        # 8. Spread check
+        # 8. Category exposure
+        if category and category in self.config.category_limits:
+            cat_limit = self.config.category_limits[category]
+            if cat_limit.enabled:
+                cat_notional = self._category_notional.get(category, Decimal("0")) + order_notional
+                if cat_notional > cat_limit.max_notional_usd:
+                    return PreTradeCheck(
+                        allowed=False,
+                        action=RiskAction.REJECT,
+                        reason=f"Category '{category}' notional ${cat_notional:.2f} exceeds cap ${cat_limit.max_notional_usd:.2f}",
+                        market_id=market_id,
+                    )
+
+                cat_contracts = self._category_contracts.get(category, 0) + contracts
+                if cat_contracts > cat_limit.max_contracts:
+                    return PreTradeCheck(
+                        allowed=False,
+                        action=RiskAction.REJECT,
+                        reason=f"Category '{category}' contracts {cat_contracts} exceeds cap {cat_limit.max_contracts}",
+                        market_id=market_id,
+                    )
+
+        # 9. Rate limit
+        self._reset_rate_counters(now)
+        if self._orders_this_minute >= self.config.max_orders_per_minute:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"Rate limit: {self._orders_this_minute} orders this minute",
+                market_id=market_id,
+            )
+        if self._orders_this_hour >= self.config.max_orders_per_hour:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"Rate limit: {self._orders_this_hour} orders this hour",
+                market_id=market_id,
+            )
+
+        # 10. Post-fee edge minimum
+        if edge > 0:
+            fee = Decimal(str(kalshi_fee_cents(int(price_cents), contracts)))
+            fee_per = fee / max(contracts, 1)
+            payout_per = Decimal("100") - price_cents
+            post_fee_edge = edge - (fee_per / payout_per) if payout_per > 0 else Decimal("0")
+            if post_fee_edge < Decimal("0.01"):
+                return PreTradeCheck(
+                    allowed=False,
+                    action=RiskAction.REJECT,
+                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.01",
+                    market_id=market_id,
+                )
+
+        # 11. Tick size check
+        if price_cents % self.config.tick_size_cents != 0:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"Price {price_cents}¢ must be multiple of tick size {self.config.tick_size_cents}¢.",
+                market_id=market_id,
+            )
+
+        # 12. Spread check
         if best_bid_cents is not None and best_ask_cents is not None:
             spread = best_ask_cents - best_bid_cents
             if spread > self.config.max_spread_cents:
@@ -355,7 +514,7 @@ class PredictionMarketRisk:
                     market_id=market_id,
                 )
 
-        # 9. Slippage guard
+        # 13. Slippage guard
         if side in ("buy", "buy_yes", "buy_no") and best_ask_cents is not None:
             if price_cents > best_ask_cents + self.config.max_slippage_cents:
                 return PreTradeCheck(
@@ -373,7 +532,7 @@ class PredictionMarketRisk:
                     market_id=market_id,
                 )
 
-        # 10. Depth check
+        # 14. Depth check
         if depth_at_price is not None and depth_at_price < self.config.min_depth_contracts:
             return PreTradeCheck(
                 allowed=False,
@@ -496,35 +655,43 @@ class PredictionMarketRisk:
 
         total_notional = sum(e.notional_usd for e in self._exposures.values())
         total_unrealized = sum(e.unrealized_pnl_usd for e in self._exposures.values())
-
+        
+        # Calculate drawdown if we have peak equity tracking (not fully implemented in state yet)
+        drawdown_pct = 0.0
+        
         return {
+            "kill_switch_active": self._halted,
+            "kill_switch_reason": self._halt_reason,
             "halted": self._halted,
             "halt_reason": self._halt_reason,
             "unwind_requested": self._unwind_requested,
-            "open_markets": len(self._exposures),
-            "total_notional_usd": str(total_notional),
-            "total_unrealized_pnl_usd": str(total_unrealized),
-            "daily_realized_pnl_usd": str(daily.realized_pnl_usd),
-            "daily_total_pnl_usd": str(daily.total_pnl_usd),
+            "open_market_count": len(self._exposures),
+            "total_notional_usd": float(total_notional),
+            "total_unrealized_pnl_usd": float(total_unrealized),
+            "daily_realized_pnl_usd": float(daily.realized_pnl_usd),
+            "daily_total_pnl_usd": float(daily.total_pnl_usd),
             "daily_trades": daily.trades,
-            "daily_fees_usd": str(daily.fees_usd),
+            "daily_fees_usd": float(daily.fees_usd),
+            "drawdown_pct": drawdown_pct,
+            "category_notional": {k: float(v) for k, v in self._category_notional.items()},
+            "category_contracts": self._category_contracts,
             "exposures": [
                 {
                     "market_id": e.market_id,
                     "event_id": e.event_id,
                     "side": e.side,
                     "contracts": e.contracts,
-                    "notional_usd": str(e.notional_usd),
-                    "unrealized_pnl_usd": str(e.unrealized_pnl_usd),
+                    "notional_usd": float(e.notional_usd),
+                    "unrealized_pnl_usd": float(e.unrealized_pnl_usd),
                 }
                 for e in self._exposures.values()
             ],
             "recent_breaches": self._breach_log[-10:],
             "limits": {
-                "max_notional_per_market_usd": str(self.config.max_notional_per_market_usd),
-                "max_notional_per_event_usd": str(self.config.max_notional_per_event_usd),
-                "max_total_notional_usd": str(self.config.max_total_notional_usd),
-                "max_daily_loss_usd": str(self.config.max_daily_loss_usd),
+                "max_notional_per_market_usd": float(self.config.max_notional_per_market_usd),
+                "max_notional_per_event_usd": float(self.config.max_notional_per_event_usd),
+                "max_total_notional_usd": float(self.config.max_total_notional_usd),
+                "max_daily_loss_usd": float(self.config.max_daily_loss_usd),
                 "max_open_markets": self.config.max_open_markets,
             },
         }
@@ -534,3 +701,24 @@ class PredictionMarketRisk:
         if not self._unwind_requested:
             return []
         return list(self._exposures.keys())
+
+    def _reset_rate_counters(self, now: datetime) -> None:
+        if self._last_minute_reset is None or (now - self._last_minute_reset).total_seconds() >= 60:
+            self._orders_this_minute = 0
+            self._last_minute_reset = now
+        if self._last_hour_reset is None or (now - self._last_hour_reset).total_seconds() >= 3600:
+            self._orders_this_hour = 0
+            self._last_hour_reset = now
+
+
+# ── Singleton ────────────────────────────────────────────────────────────
+
+_risk: Optional[PredictionMarketRisk] = None
+
+
+def get_prediction_risk(config: Optional[PredictionRiskConfig] = None) -> PredictionMarketRisk:
+    """Get or create the singleton PredictionMarketRisk."""
+    global _risk
+    if _risk is None:
+        _risk = PredictionMarketRisk(config)
+    return _risk

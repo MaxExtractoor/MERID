@@ -1,5 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Play, Pause, RotateCcw, FastForward, Settings, Save, Upload, Clock, Zap } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface SimulationState {
   running: boolean;
@@ -14,14 +17,25 @@ interface SimulationControlPanelProps {
 }
 
 export default function SimulationControlPanel({ className = '' }: SimulationControlPanelProps) {
-  const [state, setState] = useState<SimulationState>({
-    running: false,
-    speed: 1,
-    current_time: new Date().toISOString(),
-    elapsed_seconds: 0,
-    events_processed: 0
-  });
   const [loading, setLoading] = useState(false);
+
+  const { data: state, error: fetchError, refetch } = useApiData<SimulationState>(
+    API_ENDPOINTS.SIMULATION_STATUS,
+    {
+      pollingInterval: DEFAULTS.POLLING_INTERVALS.SIMULATION,
+      initialData: {
+        running: false,
+        speed: 1,
+        current_time: new Date().toISOString(),
+        elapsed_seconds: 0,
+        events_processed: 0,
+      },
+    },
+  );
+
+  if (fetchError && !state) {
+    return <ErrorBar label="Simulation" error={fetchError} onRetry={refetch} />;
+  }
 
   const speedOptions = [
     { value: 1, label: '1x', color: 'text-gray-400' },
@@ -30,34 +44,16 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
     { value: 1000, label: '1000x', color: 'text-red-400' }
   ];
 
-  useEffect(() => {
-    fetchSimulationState();
-    const interval = setInterval(fetchSimulationState, 2000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchSimulationState = async () => {
-    try {
-      const response = await fetch('/api/v1/simulation/status');
-      if (response.ok) {
-        const data = await response.json();
-        setState(data);
-      }
-    } catch (err) {
-      // Use current state if fetch fails
-    }
-  };
-
   const handlePlayPause = async () => {
     setLoading(true);
     try {
-      const endpoint = state.running ? '/api/v1/simulation/pause' : '/api/v1/simulation/start';
+      const endpoint = state?.running ? '/api/v1/simulation/pause' : '/api/v1/simulation/start';
       const response = await fetch(endpoint, { method: 'POST' });
       if (response.ok) {
-        await fetchSimulationState();
+        refetch();
       }
-    } catch (err) {
-      console.error('Failed to toggle simulation:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     } finally {
       setLoading(false);
     }
@@ -68,12 +64,12 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
     
     setLoading(true);
     try {
-      const response = await fetch('/api/v1/simulation/reset', { method: 'POST' });
+      const response = await fetch(API_ENDPOINTS.SIMULATION_RESET, { method: 'POST' });
       if (response.ok) {
-        await fetchSimulationState();
+        refetch();
       }
-    } catch (err) {
-      console.error('Failed to reset simulation:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     } finally {
       setLoading(false);
     }
@@ -82,12 +78,12 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
   const handleSpeedChange = async (speed: number) => {
     setLoading(true);
     try {
-      const response = await fetch(`/api/v1/simulation/speed/${speed}`, { method: 'POST' });
+      const response = await fetch(API_ENDPOINTS.SIMULATION_SPEED(speed), { method: 'POST' });
       if (response.ok) {
-        setState(prev => ({ ...prev, speed }));
+        refetch();
       }
-    } catch (err) {
-      console.error('Failed to change speed:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     } finally {
       setLoading(false);
     }
@@ -95,7 +91,7 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
 
   const handleSaveState = async () => {
     try {
-      const response = await fetch('/api/v1/simulation/save', { method: 'POST' });
+      const response = await fetch(API_ENDPOINTS.SIMULATION_SAVE, { method: 'POST' });
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
@@ -104,8 +100,8 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
         a.download = `simulation_state_${Date.now()}.json`;
         a.click();
       }
-    } catch (err) {
-      console.error('Failed to save state:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     }
   };
 
@@ -140,7 +136,7 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
         <div className="space-y-3">
           <h3 className="text-sm font-medium text-gray-400">Playback Controls</h3>
           <div className="flex items-center gap-3">
-            <button
+            <button type="button"
               onClick={handlePlayPause}
               disabled={loading}
               className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-medium transition-colors ${
@@ -163,7 +159,7 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
               )}
             </button>
 
-            <button
+            <button type="button"
               onClick={handleReset}
               disabled={loading}
               className="px-4 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
@@ -180,7 +176,7 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
           <h3 className="text-sm font-medium text-gray-400">Simulation Speed</h3>
           <div className="grid grid-cols-4 gap-2">
             {speedOptions.map(option => (
-              <button
+              <button type="button"
                 key={option.value}
                 onClick={() => handleSpeedChange(option.value)}
                 disabled={loading}
@@ -242,7 +238,7 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
         <div className="space-y-3">
           <h3 className="text-sm font-medium text-gray-400">State Management</h3>
           <div className="grid grid-cols-2 gap-3">
-            <button
+            <button type="button"
               onClick={handleSaveState}
               className="flex items-center justify-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
               title="Save simulation state"
@@ -251,7 +247,7 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
               Save State
             </button>
 
-            <button
+            <button type="button"
               className="flex items-center justify-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
               title="Load simulation state"
             >
@@ -263,7 +259,7 @@ export default function SimulationControlPanel({ className = '' }: SimulationCon
 
         {/* Advanced Settings */}
         <div className="pt-4 border-t border-slate-700/50">
-          <button
+          <button type="button"
             className="w-full flex items-center justify-center gap-2 px-4 py-2 text-gray-400 hover:text-white transition-colors"
             title="Advanced settings"
           >

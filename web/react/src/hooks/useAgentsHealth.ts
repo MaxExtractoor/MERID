@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useApiData } from './useApiData';
 import { useMeridSocket } from './useMeridSocket';
+import { logUiError } from '../utils/logger';
 import { 
   AgentRow, 
   AgentsResponse, 
@@ -153,7 +154,7 @@ export function useAgentsHealth() {
     };
 
     const handleError = (error: Error) => {
-      console.error('[useAgentsHealth] WebSocket error:', error);
+      logUiError('useAgentsHealth', 'WebSocket error', error);
     };
 
     socket.on('agent:heartbeat', handleHeartbeat);

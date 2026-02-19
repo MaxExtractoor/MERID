@@ -1,12 +1,18 @@
 import React from "react";
+import { RefreshCw, Shield } from 'lucide-react';
 import { useApiData } from "../hooks/useApiData";
 import { useMeridSocket } from "../hooks/useMeridSocket";
-import { API_ENDPOINTS, STATUS_TYPES } from "../config/constants";
+import { API_ENDPOINTS, STATUS_TYPES, DEFAULTS } from "../config/constants";
 import { formatCurrency, formatPercent, formatDateTime } from "../utils/formatters";
 import MetricCard from "../components/MetricCard";
 import StatusIndicator from "../components/StatusIndicator";
 import DataTableEnhanced from "../components/DataTableEnhanced";
+import ErrorAlert from "../components/ErrorAlert";
+import EmptyState from "../components/EmptyState";
+import { StubBadge } from "../components/DataGuard";
+import { DataAgeBadge } from "../components/DataAgeBadge";
 import { RiskStatus } from "../types/risk";
+import { useFeatureFlags } from "../config/featureFlags";
 
 interface RiskMetrics {
   marginUsed: number;
@@ -48,29 +54,33 @@ interface PositionLimit {
 }
 
 export default function Risk() {
-  // Fetch risk metrics
-  const { data: riskMetrics } = useApiData<RiskMetrics>(
-    API_ENDPOINTS.RISK_METRICS,
-    { pollingInterval: 30000 }
+  const { kalshiOnly } = useFeatureFlags();
+
+  // Fetch risk metrics (skip in Kalshi mode)
+  const { data: riskMetrics, loading: riskLoading, error: riskError, refetch: refetchRisk, lastUpdated: riskUpdated, rawResponse: riskRaw, isStub: riskIsStub } = useApiData<RiskMetrics>(
+    kalshiOnly ? '' : API_ENDPOINTS.RISK_METRICS,
+    { pollingInterval: kalshiOnly ? 0 : DEFAULTS.POLLING_INTERVALS.RISK }
   );
 
   // Fetch risk alerts
   const { data: alerts } = useApiData<RiskAlert[]>(
-    "/api/v1/risk/alerts",
-    { pollingInterval: 15000 }
+    kalshiOnly ? '' : API_ENDPOINTS.RISK_ALERTS,
+    { pollingInterval: kalshiOnly ? 0 : DEFAULTS.POLLING_INTERVALS.RISK_ALERTS }
   );
 
   // Fetch system health
   const { data: systemHealth } = useApiData<SystemHealth[]>(
-    API_ENDPOINTS.SYSTEM_HEALTH,
-    { pollingInterval: 60000 }
+    kalshiOnly ? '' : API_ENDPOINTS.SYSTEM_HEALTH,
+    { pollingInterval: kalshiOnly ? 0 : DEFAULTS.POLLING_INTERVALS.SYSTEM_HEALTH }
   );
 
   // Fetch position limits
   const { data: positionLimits } = useApiData<PositionLimit[]>(
-    "/api/v1/risk/position-limits",
-    { pollingInterval: 10000 }
+    kalshiOnly ? '' : API_ENDPOINTS.RISK_POSITION_LIMITS,
+    { pollingInterval: kalshiOnly ? 0 : DEFAULTS.POLLING_INTERVALS.RISK_POSITION_LIMITS }
   );
+
+  const isLoading = riskLoading && !riskMetrics && !alerts && !systemHealth;
 
   // WebSocket for real-time updates
   const { socket, connected } = useMeridSocket();
@@ -116,6 +126,19 @@ export default function Risk() {
     return "GOOD";
   };
 
+  // Crypto-only view - show message in Kalshi mode (after all hooks)
+  if (kalshiOnly) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center">
+          <Shield className="w-12 h-12 text-slate-600 mx-auto mb-4" />
+          <h2 className="text-xl font-semibold text-slate-400 mb-2">Crypto-Only View</h2>
+          <p className="text-slate-500">This view is not available in Kalshi mode.</p>
+        </div>
+      </div>
+    );
+  }
+
   const getLeverageStatus = (leverage: number): RiskStatus => {
     if (leverage >= 5) return "BAD";
     if (leverage >= 3) return "WARNING";
@@ -150,35 +173,35 @@ export default function Risk() {
       key: "timestamp" as keyof RiskAlert,
       label: "Time",
       sortable: true,
-      render: (value: string) => formatDateTime(value),
+      render: (value: unknown) => formatDateTime(String(value)),
     },
     {
       key: "level" as keyof RiskAlert,
       label: "Level",
-      render: (value: string) => (
-        <span className={`px-2 py-1 rounded text-xs font-medium ${getAlertColor(value)}`}>
-          {value.toUpperCase()}
+      render: (value: unknown) => (
+        <span className={`px-2 py-1 rounded text-xs font-medium ${getAlertColor(String(value))}`}>
+          {String(value).toUpperCase()}
         </span>
       ),
     },
     {
       key: "type" as keyof RiskAlert,
       label: "Type",
-      render: (value: string) => (
-        <span className="text-slate-300">{value}</span>
+      render: (value: unknown) => (
+        <span className="text-slate-300">{String(value)}</span>
       ),
     },
     {
       key: "message" as keyof RiskAlert,
       label: "Message",
-      render: (value: string) => (
-        <span className="text-slate-300 text-sm">{value}</span>
+      render: (value: unknown) => (
+        <span className="text-slate-300 text-sm">{String(value)}</span>
       ),
     },
     {
       key: "resolved" as keyof RiskAlert,
       label: "Status",
-      render: (value: boolean) => (
+      render: (value: unknown) => (
         <span className={`px-2 py-1 rounded text-xs font-medium ${
           value ? "bg-green-500/20 text-green-500" : "bg-red-500/20 text-red-500"
         }`}>
@@ -197,45 +220,54 @@ export default function Risk() {
     {
       key: "status" as keyof SystemHealth,
       label: "Status",
-      render: (value: string) => (
-        <StatusIndicator status={getHealthStatus(value)} showText />
+      render: (value: unknown) => (
+        <StatusIndicator status={getHealthStatus(String(value))} showText />
       ),
     },
     {
       key: "lastCheck" as keyof SystemHealth,
       label: "Last Check",
       sortable: true,
-      render: (value: string) => formatDateTime(value),
+      render: (value: unknown) => formatDateTime(String(value)),
     },
     {
       key: "latency" as keyof SystemHealth,
       label: "Latency",
       sortable: true,
-      render: (value: number) => (
-        <span className={value >= 1000 ? "text-red-500" : value >= 500 ? "text-amber-500" : "text-green-500"}>
-          {value}ms
-        </span>
-      ),
+      render: (value: unknown) => {
+        const v = Number(value);
+        return (
+          <span className={v >= 1000 ? "text-red-500" : v >= 500 ? "text-amber-500" : "text-green-500"}>
+            {v}ms
+          </span>
+        );
+      },
     },
     {
       key: "errorRate" as keyof SystemHealth,
       label: "Error Rate",
       sortable: true,
-      render: (value: number) => (
-        <span className={value >= 5 ? "text-red-500" : value >= 1 ? "text-amber-500" : "text-green-500"}>
-          {value}%
-        </span>
-      ),
+      render: (value: unknown) => {
+        const v = Number(value);
+        return (
+          <span className={v >= 5 ? "text-red-500" : v >= 1 ? "text-amber-500" : "text-green-500"}>
+            {v}%
+          </span>
+        );
+      },
     },
     {
       key: "uptime" as keyof SystemHealth,
       label: "Uptime",
       sortable: true,
-      render: (value: number) => (
-        <span className={value >= 99.9 ? "text-green-500" : value >= 99 ? "text-amber-500" : "text-red-500"}>
-          {formatPercent(value)}
-        </span>
-      ),
+      render: (value: unknown) => {
+        const v = Number(value);
+        return (
+          <span className={v >= 99.9 ? "text-green-500" : v >= 99 ? "text-amber-500" : "text-red-500"}>
+            {formatPercent(v)}
+          </span>
+        );
+      },
     },
   ];
 
@@ -259,39 +291,73 @@ export default function Risk() {
       key: "utilizationPercent" as keyof PositionLimit,
       label: "Utilization",
       sortable: true,
-      render: (value: number) => (
-        <div className="flex items-center gap-2">
-          <div className="w-16 bg-slate-700 rounded-full h-2">
-            <div
-              className={`h-2 rounded-full ${
-                value >= 90 ? "bg-red-500" : value >= 75 ? "bg-amber-500" : "bg-green-500"
-              }`}
-              style={{ width: `${value}%` }}
-            />
+      render: (value: unknown) => {
+        const v = Number(value);
+        return (
+          <div className="flex items-center gap-2">
+            <div className="w-16 bg-slate-700 rounded-full h-2">
+              <div
+                className={`h-2 rounded-full ${
+                  v >= 90 ? "bg-red-500" : v >= 75 ? "bg-amber-500" : "bg-green-500"
+                }`}
+                style={{ width: `${v}%` }}
+              />
+            </div>
+            <span className={`text-sm ${
+              v >= 90 ? "text-red-500" : v >= 75 ? "text-amber-500" : "text-green-500"
+            }`}>
+              {formatPercent(v)}
+            </span>
           </div>
-          <span className={`text-sm ${
-            value >= 90 ? "text-red-500" : value >= 75 ? "text-amber-500" : "text-green-500"
-          }`}>
-            {formatPercent(value)}
-          </span>
-        </div>
-      ),
+        );
+      },
     },
     {
       key: "status" as keyof PositionLimit,
       label: "Status",
-      render: (value: string) => (
-        <StatusIndicator status={convertRiskStatus(getLeverageStatus(parseFloat(value)))} showText />
+      render: (value: unknown) => (
+        <StatusIndicator status={convertRiskStatus(getLeverageStatus(parseFloat(String(value))))} showText />
       ),
     },
   ];
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <RefreshCw className="w-6 h-6 text-blue-400 animate-spin" />
+        <span className="ml-3 text-slate-400">Loading risk dashboard…</span>
+      </div>
+    );
+  }
+
+  if (riskError && !riskMetrics) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">Risk & Health</h1>
+        <ErrorAlert message="Failed to load risk metrics" onRetry={refetchRisk} />
+      </div>
+    );
+  }
+
+  if (!riskMetrics && !alerts && !systemHealth) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">Risk & Health</h1>
+        <EmptyState title="No risk data" message="Risk metrics will appear here once the system is active." />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-white">Risk & Health</h1>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-white">Risk & Health</h1>
+          {riskIsStub && <StubBadge data={riskRaw} />}
+        </div>
+        <div className="flex items-center gap-3">
+          <DataAgeBadge lastUpdated={riskUpdated} />
           <StatusIndicator status={connected ? "ONLINE" : "OFFLINE"} showText />
           <span className="text-sm text-slate-400">Live Monitoring</span>
         </div>

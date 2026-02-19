@@ -128,8 +128,8 @@ async def trade_stream(websocket: WebSocket):
                             })
                             trades_sent = True
                         last_trade_count = len(history)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("operation_suppressed", error=str(exc))
 
             # Fallback to execution agent
             if not trades_sent and execution_agent is not None:
@@ -146,8 +146,8 @@ async def trade_stream(websocket: WebSocket):
                             "entry_price": trade.get('fill_price', 0),
                             "status": trade.get('status', 'filled'),
                         })
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("operation_suppressed", error=str(exc))
 
             # Send heartbeat so client knows connection is alive
             if not trades_sent:
@@ -226,7 +226,6 @@ async def simulation_stream(websocket: WebSocket):
     
     logger.info("Simulation stream client connected")
     
-    from core.agent_orchestrator import get_agent_orchestrator
     orchestrator = get_agent_orchestrator()
     
     try:
@@ -270,8 +269,6 @@ async def position_stream(websocket: WebSocket):
     
     logger.info("Position stream client connected")
     
-    from trading.paper_trading import get_paper_engine
-    from data.live_price_feed import get_live_price_feed
     
     paper_engine = get_paper_engine()
     price_feed = get_live_price_feed()
@@ -341,7 +338,6 @@ async def risk_stream(websocket: WebSocket):
     try:
         while True:
             try:
-                from trading.paper_trading import get_paper_engine
                 engine = get_paper_engine()
                 total_equity = 0.0
                 total_pnl = 0.0

@@ -70,6 +70,8 @@ class MarketCategory(Enum):
     ENTERTAINMENT = "entertainment"
     SCIENCE = "science"
     FINANCE = "finance"
+    MACRO = "macro"
+    OTHER = "other"
 
 
 class ResolutionStatus(Enum):
@@ -550,7 +552,7 @@ class KalshiConnector(PredictionMarketConnector):
     def __init__(self):
         super().__init__(PredictionPlatform.KALSHI)
         self._api_key_id = os.getenv("KALSHI_API_KEY_ID")
-        self._api_host = os.getenv("KALSHI_API_HOST", "https://api.elections.kalshi.com/trade-api/v2")
+        self._api_host = os.getenv("KALSHI_API_HOST", "https://trading-api.kalshi.com/trade-api/v2")
         self._http_client = None
     
     def _get_http_client(self):
@@ -568,8 +570,7 @@ class KalshiConnector(PredictionMarketConnector):
         """Fetch markets from Kalshi API using httpx."""
         try:
             if not self._api_key_id:
-                logger.warning("KalshiConnector: No API key configured, using mock data")
-                return self._get_mock_markets()
+                logger.info("KalshiConnector: No API key configured — using public (unauthenticated) market list")
             
             client = self._get_http_client()
             
@@ -623,16 +624,61 @@ class KalshiConnector(PredictionMarketConnector):
             market_id = market.get('ticker', f"kalshi_{market.get('id', 'unknown')}")
             question = market.get('title', market.get('subtitle', 'Kalshi Market'))
             
-            # Determine category
+            # Determine category from question text + Kalshi category field
             question_lower = question.lower()
-            if any(word in question_lower for word in ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto']):
-                category = MarketCategory.CRYPTO
-            elif any(word in question_lower for word in ['election', 'president', 'politics', 'congress']):
-                category = MarketCategory.POLITICS
-            elif any(word in question_lower for word in ['fed', 'inflation', 'economy', 'gdp', 'rate']):
-                category = MarketCategory.ECONOMICS
-            else:
-                category = MarketCategory.OTHER
+            kalshi_cat = market.get('category', '').lower()
+            
+            # Direct Kalshi category mapping (covers most markets)
+            _KALSHI_CAT_MAP = {
+                'economics': MarketCategory.ECONOMICS,
+                'financials': MarketCategory.FINANCE,
+                'finance': MarketCategory.FINANCE,
+                'politics': MarketCategory.POLITICS,
+                'crypto': MarketCategory.CRYPTO,
+                'climate': MarketCategory.WEATHER,
+                'weather': MarketCategory.WEATHER,
+                'sports': MarketCategory.SPORTS,
+                'entertainment': MarketCategory.ENTERTAINMENT,
+                'science': MarketCategory.SCIENCE,
+                'tech': MarketCategory.SCIENCE,
+                'technology': MarketCategory.SCIENCE,
+                'culture': MarketCategory.ENTERTAINMENT,
+                'world': MarketCategory.MACRO,
+                'geopolitics': MarketCategory.MACRO,
+                'energy': MarketCategory.MACRO,
+                'health': MarketCategory.SCIENCE,
+                'elections': MarketCategory.POLITICS,
+                'fed': MarketCategory.ECONOMICS,
+                'market': MarketCategory.FINANCE,
+            }
+            
+            # Try direct mapping first
+            category = _KALSHI_CAT_MAP.get(kalshi_cat)
+            
+            # Fallback to keyword matching only if direct map didn't match
+            if category is None:
+                event_ticker = market.get('event_ticker', '').lower()
+                combined = f"{question_lower} {kalshi_cat} {event_ticker}"
+                if any(w in combined for w in ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana', 'sol', 'defi', 'blockchain', 'token', 'coin']):
+                    category = MarketCategory.CRYPTO
+                elif any(w in combined for w in ['election', 'president', 'politics', 'congress', 'senate', 'governor', 'vote', 'democrat', 'republican', 'biden', 'trump', 'nominee', 'primary', 'ballot', 'legislation', 'impeach', 'scotus', 'supreme court']):
+                    category = MarketCategory.POLITICS
+                elif any(w in combined for w in ['fed', 'inflation', 'economy', 'gdp', 'rate', 'cpi', 'ppi', 'jobs', 'unemployment', 'fomc', 'treasury', 'recession', 'tariff', 'trade war', 'deficit', 'debt ceiling']):
+                    category = MarketCategory.ECONOMICS
+                elif any(w in combined for w in ['stock', 'sp500', 's&p', 'nasdaq', 'dow', 'ipo', 'earnings', 'market cap', 'shares', 'equity', 'bond', 'yield']):
+                    category = MarketCategory.FINANCE
+                elif any(w in combined for w in ['nfl', 'nba', 'mlb', 'nhl', 'soccer', 'football', 'basketball', 'baseball', 'hockey', 'super bowl', 'world series', 'champion', 'playoff', 'tournament', 'sports', 'ufc', 'boxing', 'tennis', 'golf', 'olympics', 'medal']):
+                    category = MarketCategory.SPORTS
+                elif any(w in combined for w in ['temperature', 'hurricane', 'tornado', 'weather', 'climate', 'storm', 'flood', 'drought', 'wildfire', 'snowfall', 'rainfall', 'heat wave', 'cold snap']):
+                    category = MarketCategory.WEATHER
+                elif any(w in combined for w in ['movie', 'oscar', 'grammy', 'emmy', 'box office', 'tv show', 'streaming', 'entertainment', 'celebrity', 'album', 'netflix', 'disney', 'spotify', 'tiktok', 'youtube']):
+                    category = MarketCategory.ENTERTAINMENT
+                elif any(w in combined for w in ['science', 'nasa', 'space', 'ai', 'artificial intelligence', 'research', 'vaccine', 'fda', 'drug', 'disease', 'pandemic', 'virus', 'mars', 'moon']):
+                    category = MarketCategory.SCIENCE
+                elif any(w in combined for w in ['macro', 'geopolitical', 'war', 'china', 'russia', 'eu', 'nato', 'oil', 'opec', 'energy', 'gas price', 'commodit']):
+                    category = MarketCategory.MACRO
+                else:
+                    category = MarketCategory.OTHER
             
             # Extract prices (Kalshi API v2 field mappings)
             # Kalshi returns prices in cents (0-100), convert to probability (0-1)
@@ -709,7 +755,8 @@ class KalshiConnector(PredictionMarketConnector):
             )
             
         except Exception as e:
-            logger.warning(f"Failed to convert Kalshi market: {e}")
+            title = market.get('title', market.get('ticker', '?'))[:60]
+            logger.warning(f"Failed to convert Kalshi market '{title}': {e}")
             return None
     
     def _convert_kalshi_market(self, kalshi_market) -> Optional[PredictionMarket]:
@@ -725,12 +772,24 @@ class KalshiConnector(PredictionMarketConnector):
             
             # Determine category based on market content
             question_lower = question.lower()
-            if any(word in question_lower for word in ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto']):
+            if any(w in question_lower for w in ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana', 'defi', 'blockchain', 'token', 'coin']):
                 category = MarketCategory.CRYPTO
-            elif any(word in question_lower for word in ['election', 'president', 'politics', 'congress']):
+            elif any(w in question_lower for w in ['election', 'president', 'politics', 'congress', 'senate', 'governor', 'vote', 'democrat', 'republican', 'trump', 'biden']):
                 category = MarketCategory.POLITICS
-            elif any(word in question_lower for word in ['fed', 'inflation', 'economy', 'gdp']):
+            elif any(w in question_lower for w in ['fed', 'inflation', 'economy', 'gdp', 'rate', 'cpi', 'jobs', 'unemployment', 'fomc', 'recession', 'tariff']):
                 category = MarketCategory.ECONOMICS
+            elif any(w in question_lower for w in ['stock', 'sp500', 's&p', 'nasdaq', 'dow', 'ipo', 'earnings', 'bond', 'yield']):
+                category = MarketCategory.FINANCE
+            elif any(w in question_lower for w in ['nfl', 'nba', 'mlb', 'nhl', 'super bowl', 'champion', 'playoff', 'sports', 'ufc', 'tennis', 'golf']):
+                category = MarketCategory.SPORTS
+            elif any(w in question_lower for w in ['temperature', 'hurricane', 'weather', 'storm', 'flood', 'drought', 'wildfire']):
+                category = MarketCategory.WEATHER
+            elif any(w in question_lower for w in ['movie', 'oscar', 'grammy', 'emmy', 'entertainment', 'celebrity', 'netflix']):
+                category = MarketCategory.ENTERTAINMENT
+            elif any(w in question_lower for w in ['science', 'nasa', 'space', 'ai', 'vaccine', 'fda', 'pandemic']):
+                category = MarketCategory.SCIENCE
+            elif any(w in question_lower for w in ['macro', 'war', 'china', 'russia', 'oil', 'opec', 'energy', 'gas price']):
+                category = MarketCategory.MACRO
             else:
                 category = MarketCategory.OTHER
             
@@ -972,12 +1031,10 @@ class PredictionMarketAggregator:
         while self._running:
             try:
                 await self._fetch_all_markets()
-                await asyncio.sleep(0)  # Yield to event loop
-                self._detect_odds_drift()
-                await asyncio.sleep(0)  # Yield to event loop
-                self._find_arbitrage_opportunities()
-                await asyncio.sleep(0)  # Yield to event loop
-                self._calculate_decay_metrics()
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._detect_odds_drift)
+                await loop.run_in_executor(None, self._find_arbitrage_opportunities)
+                await loop.run_in_executor(None, self._calculate_decay_metrics)
                 await asyncio.sleep(60)  # Update every minute
             except asyncio.CancelledError:
                 break
@@ -1004,7 +1061,210 @@ class PredictionMarketAggregator:
         logger.info(f"After fetch: _all_markets has {len(self._all_markets)} items")
         if not self._all_markets:
             logger.warning("No markets fetched from any platform")
+        else:
+            # Run heavy DB sync in a thread to avoid blocking the event loop
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._sync_to_consensus_store)
     
+    # Category mapping from MarketCategory → consensus store categories
+    _CATEGORY_TO_PRED = {
+        "crypto": "crypto",
+        "politics": "politics",
+        "economics": "economics",
+        "sports": "sports",
+        "weather": "weather",
+        "entertainment": "entertainment",
+        "science": "science",
+        "finance": "finance",
+        "macro": "macro",
+        "other": "other",
+    }
+
+    def _sync_to_consensus_store(self) -> None:
+        """Sync fetched markets into PredictionConsensusStore as instruments."""
+        try:
+            from merid.prediction.consensus import (
+                PredictionInstrument,
+                get_prediction_consensus_store,
+                _make_pred_symbol,
+            )
+            store = get_prediction_consensus_store()
+            synced = 0
+            for market in self._all_markets.values():
+                try:
+                    ticker = market.market_id
+                    venue = market.platform.value  # e.g. "kalshi"
+                    symbol = _make_pred_symbol(venue, ticker, "YES")
+                    cat = self._CATEGORY_TO_PRED.get(market.category.value, "other")
+
+                    inst = PredictionInstrument(
+                        symbol=symbol,
+                        venue=venue,
+                        event_id=ticker.rsplit("-", 1)[0] if "-" in ticker else ticker,
+                        ticker=ticker,
+                        outcome="YES",
+                        category=cat,
+                        title=market.question,
+                        expiry=market.resolution_date,
+                        market_implied_prob=market.yes_price,
+                        volume=market.volume_24h,
+                        open_interest=market.total_volume,
+                        status="active",
+                        last_refreshed=market.last_updated,
+                    )
+                    store.upsert_instrument(inst)
+                    synced += 1
+                except Exception as exc:
+                    logger.debug("Failed to sync market %s: %s", market.market_id, exc)
+
+            if synced:
+                logger.info("Synced %d markets to PredictionConsensusStore", synced)
+                self._generate_agent_opinions()
+        except Exception as exc:
+            logger.warning("Could not sync to PredictionConsensusStore: %s", exc)
+
+    # ── Agent opinion generation ─────────────────────────────────────
+    # Three lightweight heuristic agents generate opinions on active
+    # prediction markets.  Each agent applies a different lens:
+    #   calibration – trusts market price, adds small noise
+    #   contrarian  – fades extreme prices toward 50%
+    #   momentum    – extrapolates recent price direction
+    # Only high-volume markets in priority categories get opinions to
+    # keep noise low during early pipeline bring-up.
+
+    _OPINION_CATEGORIES = {"sports", "crypto", "economics", "macro", "finance"}
+    _OPINION_AGENTS = [
+        {
+            "id": "calibration-v1",
+            "name": "Calibration Agent",
+            "style": "calibration",
+            "sources": ["market_price", "historical_calibration"],
+        },
+        {
+            "id": "contrarian-v1",
+            "name": "Contrarian Agent",
+            "style": "contrarian",
+            "sources": ["market_price", "mean_reversion"],
+        },
+        {
+            "id": "momentum-v1",
+            "name": "Momentum Agent",
+            "style": "momentum",
+            "sources": ["market_price", "price_trend"],
+        },
+    ]
+
+    def _generate_agent_opinions(self) -> None:
+        """Generate agent opinions for active prediction markets."""
+        try:
+            import random
+            from merid.prediction.consensus import (
+                add_prediction_opinion,
+                get_prediction_consensus_store,
+                _make_pred_symbol,
+            )
+
+            store = get_prediction_consensus_store()
+            opinions_added = 0
+            deltas = []
+
+            for market in self._all_markets.values():
+                cat = self._CATEGORY_TO_PRED.get(market.category.value, "other")
+                if cat not in self._OPINION_CATEGORIES:
+                    continue
+                # Only opine on markets with meaningful liquidity
+                if market.volume_24h < 10:
+                    continue
+
+                market_prob = market.yes_price
+                if market_prob <= 0 or market_prob >= 1:
+                    continue
+
+                ticker = market.market_id
+                venue = market.platform.value
+                symbol = _make_pred_symbol(venue, ticker, "YES")
+
+                for agent_def in self._OPINION_AGENTS:
+                    prob = self._compute_agent_prob(
+                        agent_def["style"], market_prob, market
+                    )
+                    # Confidence based on volume and spread
+                    confidence = min(0.9, 0.4 + (market.volume_24h / 10000))
+
+                    op = add_prediction_opinion(
+                        agent_id=agent_def["id"],
+                        agent_name=agent_def["name"],
+                        symbol=symbol,
+                        probability=prob,
+                        confidence=round(confidence, 3),
+                        reasoning=self._agent_reasoning(agent_def["style"], market_prob, prob),
+                        signal_sources=agent_def["sources"],
+                        horizon="event",
+                    )
+                    opinions_added += 1
+
+                    edge = prob - market_prob
+                    if abs(edge) >= 0.03:
+                        deltas.append(
+                            f"{agent_def['id']}:{symbol} edge={edge:+.3f}"
+                        )
+
+            if opinions_added:
+                logger.info(
+                    "Generated %d agent opinions across %d agents",
+                    opinions_added,
+                    len(self._OPINION_AGENTS),
+                )
+            if deltas:
+                logger.info(
+                    "Opinion→consensus deltas: %d edges ≥3%% (max %s)",
+                    len(deltas),
+                    max(deltas, key=lambda d: abs(float(d.split("=")[1]))),
+                )
+                logger.debug("Edge details: %s", "; ".join(deltas))
+        except Exception as exc:
+            logger.warning("Agent opinion generation failed: %s", exc)
+
+    @staticmethod
+    def _compute_agent_prob(
+        style: str, market_prob: float, market: "PredictionMarket"
+    ) -> float:
+        """Compute agent probability based on style heuristic."""
+        import random
+
+        rng = random.Random(hash((style, market.market_id)))
+
+        if style == "calibration":
+            # Trust market, add small calibration noise ±3%
+            noise = rng.gauss(0, 0.03)
+            return max(0.01, min(0.99, market_prob + noise))
+
+        elif style == "contrarian":
+            # Fade extremes toward 50% — stronger fade at extremes
+            fade_strength = 0.15
+            return max(0.01, min(0.99, market_prob + fade_strength * (0.5 - market_prob)))
+
+        elif style == "momentum":
+            # Extrapolate price direction (push further from 50%)
+            momentum = 0.08 * (market_prob - 0.5)
+            return max(0.01, min(0.99, market_prob + momentum))
+
+        return market_prob
+
+    @staticmethod
+    def _agent_reasoning(style: str, market_prob: float, agent_prob: float) -> str:
+        """Generate brief reasoning string for an agent opinion."""
+        edge = agent_prob - market_prob
+        direction = "overpriced" if edge < 0 else "underpriced"
+
+        if style == "calibration":
+            return f"Market at {market_prob:.0%}; calibration model suggests {agent_prob:.0%} ({direction} by {abs(edge):.1%})"
+        elif style == "contrarian":
+            return f"Market at {market_prob:.0%} looks extreme; mean-reversion target {agent_prob:.0%}"
+        elif style == "momentum":
+            return f"Momentum signal: market at {market_prob:.0%}, trend continuation to {agent_prob:.0%}"
+        return f"Agent estimate: {agent_prob:.0%} vs market {market_prob:.0%}"
+
     def _detect_odds_drift(self) -> None:
         """Detect significant odds movements."""
         for market_id, market in self._all_markets.items():

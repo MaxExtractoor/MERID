@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { 
   Bot, 
   TrendingUp, 
@@ -11,6 +11,9 @@ import {
   ChevronDown,
   Filter
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface AgentMetrics {
   agent_id: string;
@@ -30,10 +33,12 @@ interface AgentMetrics {
   calmar_ratio: number;
   prediction_accuracy: number;
   consensus_weight: number;
+  average_latency_ms?: number;
+  p95_latency_ms?: number;
   last_updated: number;
 }
 
-type SortKey = 'sharpe_ratio' | 'total_pnl' | 'win_rate' | 'max_drawdown' | 'consensus_weight' | 'prediction_accuracy';
+type SortKey = 'sharpe_ratio' | 'total_pnl' | 'win_rate' | 'max_drawdown' | 'consensus_weight' | 'prediction_accuracy' | 'p95_latency_ms';
 
 interface AgentPerformanceTableProps {
   agents?: AgentMetrics[];
@@ -58,39 +63,20 @@ export default function AgentPerformanceTable({
   onAgentSelect,
   compact = false,
 }: AgentPerformanceTableProps) {
-  const [agents, setAgents] = useState<AgentMetrics[]>(propAgents ?? []);
-  const [loading, setLoading] = useState(!propAgents);
   const [sortKey, setSortKey] = useState<SortKey>('sharpe_ratio');
   const [sortDesc, setSortDesc] = useState(true);
   const [roleFilter, setRoleFilter] = useState<string>('all');
 
-  useEffect(() => {
-    if (propAgents) {
-      setAgents(propAgents);
-    } else {
-      fetchAgents();
-    }
-  }, [propAgents]);
+  const { data: rawData, loading: fetchLoading, error: fetchError, refetch } = useApiData<{ agents: AgentMetrics[] }>(
+    API_ENDPOINTS.RISK_AGENTS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM, enabled: !propAgents },
+  );
+  const agents = propAgents ?? rawData?.agents ?? [];
+  const loading = !propAgents && fetchLoading;
 
-  useEffect(() => {
-    // Poll for updates
-    const interval = setInterval(fetchAgents, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchAgents = async () => {
-    try {
-      const res = await fetch('/api/v1/risk-metrics/agents');
-      if (res.ok) {
-        const data = await res.json();
-        setAgents(data.agents || []);
-      }
-    } catch (err) {
-      console.error('Failed to fetch agent metrics:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  if (fetchError && !rawData && !propAgents) {
+    return <ErrorBar label="Agent performance" error={fetchError} onRetry={refetch} />;
+  }
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -122,6 +108,17 @@ export default function AgentPerformanceTable({
     return `${sign}$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
   const formatSharpe = (value: number) => (value ?? 0).toFixed(2);
+  const formatLatency = (ms?: number) => {
+    if (ms == null || ms === 0) return '—';
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  };
+  const getLatencyColor = (ms?: number) => {
+    if (ms == null || ms === 0) return 'text-gray-500';
+    if (ms < 1000) return 'text-green-400';
+    if (ms < 3000) return 'text-yellow-400';
+    return 'text-red-400';
+  };
 
   const getSharpeColor = (sharpe: number) => {
     if (sharpe < 0) return 'text-red-400';
@@ -178,6 +175,8 @@ export default function AgentPerformanceTable({
           <div className="flex items-center gap-2">
             <Filter className="w-4 h-4 text-gray-400" />
             <select
+              id="agent-role-filter"
+              name="roleFilter"
               value={roleFilter}
               onChange={(e) => setRoleFilter(e.target.value)}
               className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-300"
@@ -190,11 +189,11 @@ export default function AgentPerformanceTable({
             </select>
           </div>
           
-          <button
-            onClick={fetchAgents}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-1.5 hover:bg-slate-700/50 rounded transition-colors"
             title="Refresh"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4 text-gray-400" />
           </button>
         </div>
@@ -213,13 +212,14 @@ export default function AgentPerformanceTable({
               <SortHeader label="Win Rate" sortKey="win_rate" />
               <SortHeader label="Accuracy" sortKey="prediction_accuracy" />
               <SortHeader label="Weight" sortKey="consensus_weight" />
+              <SortHeader label="P95 Lat" sortKey="p95_latency_ms" />
               {!compact && <th className="p-3">Status</th>}
             </tr>
           </thead>
           <tbody>
             {sortedAgents.length === 0 ? (
               <tr>
-                <td colSpan={compact ? 8 : 9} className="p-8 text-center text-gray-500">
+                <td colSpan={compact ? 9 : 10} className="p-8 text-center text-gray-500">
                   <Bot className="w-8 h-8 mx-auto mb-2 opacity-50" />
                   <p>No agents tracked yet</p>
                   <p className="text-sm">Agents will appear here as they trade</p>
@@ -272,6 +272,9 @@ export default function AgentPerformanceTable({
                       />
                       <span className="text-sm text-gray-400">{(agent.consensus_weight ?? 0).toFixed(2)}x</span>
                     </div>
+                  </td>
+                  <td className={`p-3 font-mono text-sm ${getLatencyColor(agent.p95_latency_ms)}`}>
+                    {formatLatency(agent.p95_latency_ms)}
                   </td>
                   {!compact && (
                     <td className="p-3">

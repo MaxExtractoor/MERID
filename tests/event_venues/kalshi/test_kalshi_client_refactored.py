@@ -277,7 +277,7 @@ async def test_place_order_limit(client):
     )
     await client.connect()
     
-    route = respx.post("https://demo-api.kalshi.co/trade-api/v2/orders").mock(
+    route = respx.post("https://demo-api.kalshi.co/trade-api/v2/portfolio/orders").mock(
         return_value=Response(200, json={
             "order": {
                 "order_id": "ord_123",
@@ -317,7 +317,7 @@ async def test_place_order_market(client):
     )
     await client.connect()
     
-    respx.post("https://demo-api.kalshi.co/trade-api/v2/orders").mock(
+    respx.post("https://demo-api.kalshi.co/trade-api/v2/portfolio/orders").mock(
         return_value=Response(200, json={
             "order": {
                 "order_id": "ord_456",
@@ -352,7 +352,7 @@ async def test_place_order_error(client):
     )
     await client.connect()
     
-    respx.post("https://demo-api.kalshi.co/trade-api/v2/orders").mock(
+    respx.post("https://demo-api.kalshi.co/trade-api/v2/portfolio/orders").mock(
         return_value=Response(400, json={"error": "Insufficient funds"})
     )
     

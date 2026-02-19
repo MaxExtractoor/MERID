@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -57,7 +57,7 @@ def record_breach(
 ) -> None:
     """Record a risk breach event."""
     _breach_log.append({
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now(timezone.utc).isoformat(),
         "rule": rule,
         "instrument": instrument,
         "value": round(value, 4),
@@ -210,8 +210,6 @@ async def get_radar(
 
     try:
         from core.market_heatmap import build_radar_snapshot
-        from core.market_data_dxfeed import get_dxfeed_adapter
-        from trading.paper_trading import get_paper_engine
 
         adapter = get_dxfeed_adapter()
         engine = get_paper_engine()
@@ -308,8 +306,8 @@ async def get_breach_log(
                 "action": evt.get("type", "unknown"),
                 "severity": "CRITICAL" if "kill" in evt.get("type", "") else "WARNING",
             })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     # Sort by timestamp descending, take limit
     combined.sort(key=lambda x: x.get("ts", ""), reverse=True)

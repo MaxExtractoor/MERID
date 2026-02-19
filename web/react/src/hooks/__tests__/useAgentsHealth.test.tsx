@@ -13,6 +13,7 @@ describe('useAgentsHealth', () => {
   const mockOn = jest.fn();
   const mockOff = jest.fn();
   const mockEmit = jest.fn();
+  const apiBase = { isStub: false, stubMessage: '' };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -32,6 +33,7 @@ describe('useAgentsHealth', () => {
       refetch: jest.fn(),
       lastUpdated: null,
       rawResponse: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -72,6 +74,7 @@ describe('useAgentsHealth', () => {
       refetch: jest.fn(),
       lastUpdated: new Date(),
       rawResponse: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -108,6 +111,7 @@ describe('useAgentsHealth', () => {
       refetch: jest.fn(),
       lastUpdated: new Date(),
       rawResponse: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -128,8 +132,8 @@ describe('useAgentsHealth', () => {
 
     await waitFor(() => {
       expect(result.current.rows[0].cpuPercent).toBe(45.0);
-      expect(result.current.rows[0].memoryMb).toBe(600);
     });
+    expect(result.current.rows[0].memoryMb).toBe(600);
   });
 
   it('handles WebSocket status change to offline', async () => {
@@ -159,6 +163,7 @@ describe('useAgentsHealth', () => {
       refetch: jest.fn(),
       lastUpdated: new Date(),
       rawResponse: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -175,9 +180,11 @@ describe('useAgentsHealth', () => {
 
     await waitFor(() => {
       expect(result.current.rows[0].status).toBe('OFFLINE');
-      expect(result.current.meta.offline).toBe(1);
-      expect(result.current.meta.online).toBe(0);
     });
+    await waitFor(() => {
+      expect(result.current.meta.offline).toBe(1);
+    });
+    expect(result.current.meta.online).toBe(0);
   });
 
   it('handles new agent connected via WebSocket', async () => {
@@ -188,6 +195,7 @@ describe('useAgentsHealth', () => {
       refetch: jest.fn(),
       lastUpdated: new Date(),
       rawResponse: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -212,9 +220,9 @@ describe('useAgentsHealth', () => {
 
     await waitFor(() => {
       expect(result.current.rows).toHaveLength(1);
-      expect(result.current.rows[0].id).toBe('agent-002');
-      expect(result.current.meta.total).toBe(1);
     });
+    expect(result.current.rows[0].id).toBe('agent-002');
+    expect(result.current.meta.total).toBe(1);
   });
 
   it('exposes loading state from API', () => {
@@ -225,6 +233,7 @@ describe('useAgentsHealth', () => {
       refetch: jest.fn(),
       lastUpdated: null,
       rawResponse: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useAgentsHealth());
@@ -240,6 +249,7 @@ describe('useAgentsHealth', () => {
       refetch: jest.fn(),
       lastUpdated: null,
       rawResponse: null,
+      ...apiBase,
     });
 
     const { result } = renderHook(() => useAgentsHealth());

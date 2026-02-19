@@ -1,27 +1,20 @@
 /**
- * Tests for Overview view - Dashboard landing page
- * Focus: Deterministic testing of dashboard metrics and data display
+ * Tests for Overview view — Kalshi reboot panel, mode guard, grid controls.
  */
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import Overview from '../Overview';
 
 // Mock hooks
 jest.mock('../../hooks/useApiData', () => ({
   __esModule: true,
-  default: jest.fn(() => ({
-    data: {
-      portfolio_value: 100000,
-      daily_pnl: 2500,
-      daily_pnl_pct: 2.5,
-      total_positions: 5,
-      active_agents: 3,
-    },
-    loading: false,
-    error: null,
-  })),
+  useApiData: jest.fn(() => ({ data: null, loading: false, error: null, refetch: jest.fn() })),
 }));
+
+// Grab the mocked function after jest.mock hoisting
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { useApiData: mockUseApiData } = require('../../hooks/useApiData') as { useApiData: jest.Mock };
 
 jest.mock('../../hooks/useMeridSocket', () => ({
   useMeridSocket: jest.fn(() => ({
@@ -30,215 +23,170 @@ jest.mock('../../hooks/useMeridSocket', () => ({
   })),
 }));
 
+jest.mock('../../hooks/useDashboard', () => ({
+  SystemHealthCard: () => <div data-testid="system-health-card" />,
+  KalshiHealthCard: () => <div data-testid="kalshi-health-card" />,
+  AgentStatusCard: () => <div data-testid="agent-status-card" />,
+  RiskProtectionCard: () => <div data-testid="risk-protection-card" />,
+}));
+
+jest.mock('../../components/ExecutionGateStrip', () => ({
+  __esModule: true,
+  default: () => <div data-testid="execution-gate-strip" />,
+}));
+
+jest.mock('../../components/CollapsibleConsole', () => ({
+  __esModule: true,
+  default: () => <div data-testid="collapsible-console" />,
+}));
+
+jest.mock('../../components/AgentActivityPanel', () => ({
+  __esModule: true,
+  default: () => <div data-testid="agent-activity-panel" />,
+}));
+
+function renderOverview() {
+  return render(
+    <BrowserRouter>
+      <Overview />
+    </BrowserRouter>
+  );
+}
+
 describe('Overview', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    // Reset only fetch and confirm — do NOT use clearAllMocks which can wipe mockImplementation
+    window.confirm = jest.fn().mockReturnValue(true);
+    (global.fetch as jest.Mock).mockReset();
+    (global.fetch as jest.Mock).mockResolvedValue({ ok: true, json: async () => ({ message: 'ok' }) });
+    // Restore default mockUseApiData implementation
+    mockUseApiData.mockImplementation(() => ({
+      data: null, loading: false, error: null, refetch: jest.fn(),
+    }));
   });
 
   describe('Rendering', () => {
-    it('renders overview dashboard', () => {
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/Overview/i)).toBeInTheDocument();
+    it('renders the Reboot Sequence panel', () => {
+      renderOverview();
+      expect(screen.getByText('Reboot Sequence')).toBeInTheDocument();
     });
 
-    it('displays portfolio metrics', () => {
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/100,000/)).toBeInTheDocument();
-      expect(screen.getByText(/2,500/)).toBeInTheDocument();
+    it('renders Kill Switch status card', () => {
+      renderOverview();
+      expect(screen.getByText('Kill Switch')).toBeInTheDocument();
     });
 
-    it('shows loading state', () => {
-      const useApiData = require('../../hooks/useApiData').default;
-      useApiData.mockReturnValue({
-        data: null,
-        loading: true,
-        error: null,
-      });
-
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/Loading/i)).toBeInTheDocument();
+    it('renders Agent Grid status card', () => {
+      renderOverview();
+      expect(screen.getByText('Agent Grid')).toBeInTheDocument();
     });
 
-    it('shows error state', () => {
-      const useApiData = require('../../hooks/useApiData').default;
-      useApiData.mockReturnValue({
-        data: null,
-        loading: false,
-        error: 'Failed to load dashboard data',
-      });
+    it('renders Catalog status card', () => {
+      renderOverview();
+      expect(screen.getByText('Catalog')).toBeInTheDocument();
+    });
 
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/Failed to load/i)).toBeInTheDocument();
+    it('renders sub-component cards', () => {
+      renderOverview();
+      expect(screen.getByTestId('execution-gate-strip')).toBeInTheDocument();
+      expect(screen.getByTestId('system-health-card')).toBeInTheDocument();
+      expect(screen.getByTestId('kalshi-health-card')).toBeInTheDocument();
+      expect(screen.getByTestId('agent-status-card')).toBeInTheDocument();
+      expect(screen.getByTestId('risk-protection-card')).toBeInTheDocument();
     });
   });
 
-  describe('Metrics Display', () => {
-    it('displays portfolio value', () => {
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/Portfolio Value/i)).toBeInTheDocument();
-      expect(screen.getByText(/100,000/)).toBeInTheDocument();
+  describe('Kill Switch display', () => {
+    it('shows CLEAR when kill switch data is null (default/inactive)', () => {
+      renderOverview();
+      expect(screen.getByText('CLEAR')).toBeInTheDocument();
     });
 
-    it('displays daily P&L', () => {
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/Daily P&L/i)).toBeInTheDocument();
-      expect(screen.getByText(/2,500/)).toBeInTheDocument();
-    });
-
-    it('displays position count', () => {
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/Positions/i)).toBeInTheDocument();
-      expect(screen.getByText(/5/)).toBeInTheDocument();
-    });
-
-    it('displays active agents', () => {
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/Active Agents/i)).toBeInTheDocument();
-      expect(screen.getByText(/3/)).toBeInTheDocument();
+    it('shows Trading permitted when kill switch is clear', () => {
+      renderOverview();
+      expect(screen.getByText('Trading permitted')).toBeInTheDocument();
     });
   });
 
-  describe('Real-time Updates', () => {
-    it('updates metrics on WebSocket message', async () => {
-      const { useMeridSocket } = require('../../hooks/useMeridSocket');
-      useMeridSocket.mockReturnValue({
-        connected: true,
-        lastMessage: {
-          type: 'portfolio_update',
-          data: {
-            portfolio_value: 105000,
-            daily_pnl: 5000,
-          },
-        },
-      });
+  describe('Grid status display', () => {
+    it('shows STOPPED when grid data is null (default)', () => {
+      renderOverview();
+      expect(screen.getByText('STOPPED')).toBeInTheDocument();
+    });
 
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
+    it('shows 0 agents when grid data is null', () => {
+      renderOverview();
+      expect(screen.getByText('0 agents')).toBeInTheDocument();
+    });
+  });
+
+  describe('Mode toggle and Start Grid (Fix 3)', () => {
+    it('renders Paper and Live mode toggle buttons', () => {
+      renderOverview();
+      expect(screen.getByRole('button', { name: /^Paper$/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^Live$/i })).toBeInTheDocument();
+    });
+
+    it('shows Start Grid button when grid is stopped', () => {
+      renderOverview();
+      expect(screen.getByRole('button', { name: /Start Grid/i })).toBeInTheDocument();
+    });
+
+    it('starts grid with mode=paper in URL when paper selected', async () => {
+      renderOverview();
+      fireEvent.click(screen.getByRole('button', { name: /Start Grid/i }));
       await waitFor(() => {
-        expect(screen.getByText(/105,000/)).toBeInTheDocument();
+        const urls = (global.fetch as jest.Mock).mock.calls.map((c: unknown[]) => c[0] as string);
+        expect(urls.some(u => u.includes('mode=paper'))).toBe(true);
+      });
+    });
+
+    it('shows confirm dialog before starting in live mode', () => {
+      renderOverview();
+      fireEvent.click(screen.getByRole('button', { name: /^Live$/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Start Grid/i }));
+      expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('LIVE mode'));
+    });
+
+    it('does NOT start grid when live confirmation is rejected', async () => {
+      (window.confirm as jest.Mock).mockReturnValue(false);
+      renderOverview();
+      fireEvent.click(screen.getByRole('button', { name: /^Live$/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Start Grid/i }));
+      await waitFor(() => {
+        const urls = (global.fetch as jest.Mock).mock.calls.map((c: unknown[]) => c[0] as string);
+        expect(urls.some(u => u.includes('kalshi-grid/start'))).toBe(false);
+      });
+    });
+
+    it('shows LIVE warning when live mode is selected', () => {
+      renderOverview();
+      fireEvent.click(screen.getByRole('button', { name: /^Live$/i }));
+      expect(screen.getByText(/LIVE mode.*real money/i)).toBeInTheDocument();
+    });
+  });
+
+  describe('Catalog controls', () => {
+    it('renders Refresh Catalog button', () => {
+      renderOverview();
+      expect(screen.getByRole('button', { name: /Refresh Catalog/i })).toBeInTheDocument();
+    });
+
+    it('calls catalog refresh endpoint on click', async () => {
+      renderOverview();
+      fireEvent.click(screen.getByRole('button', { name: /Refresh Catalog/i }));
+      await waitFor(() => {
+        const urls = (global.fetch as jest.Mock).mock.calls.map((c: unknown[]) => c[0] as string);
+        expect(urls.some(u => u.includes('catalog'))).toBe(true);
       });
     });
   });
 
-  describe('Edge Cases', () => {
-    it('handles zero values', () => {
-      const useApiData = require('../../hooks/useApiData').default;
-      useApiData.mockReturnValue({
-        data: {
-          portfolio_value: 0,
-          daily_pnl: 0,
-          daily_pnl_pct: 0,
-          total_positions: 0,
-          active_agents: 0,
-        },
-        loading: false,
-        error: null,
-      });
-
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getAllByText(/0/).length).toBeGreaterThan(0);
-    });
-
-    it('handles negative P&L', () => {
-      const useApiData = require('../../hooks/useApiData').default;
-      useApiData.mockReturnValue({
-        data: {
-          portfolio_value: 95000,
-          daily_pnl: -5000,
-          daily_pnl_pct: -5.0,
-          total_positions: 3,
-          active_agents: 2,
-        },
-        loading: false,
-        error: null,
-      });
-
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/-5,000/)).toBeInTheDocument();
-    });
-
-    it('handles missing data fields', () => {
-      const useApiData = require('../../hooks/useApiData').default;
-      useApiData.mockReturnValue({
-        data: {},
-        loading: false,
-        error: null,
-      });
-
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      expect(screen.getByText(/Overview/i)).toBeInTheDocument();
-    });
-  });
-
-  describe('Accessibility', () => {
-    it('has accessible metric cards', () => {
-      render(
-        <BrowserRouter>
-          <Overview />
-        </BrowserRouter>
-      );
-      
-      const headings = screen.getAllByRole('heading');
-      expect(headings.length).toBeGreaterThan(0);
+  describe('Kalshi Balance', () => {
+    it('renders balance section skeleton when balance data is null', () => {
+      renderOverview();
+      // When balance is null, KalshiBalanceHero renders skeleton divs — no crash
+      expect(screen.getByText('Reboot Sequence')).toBeInTheDocument();
     });
   });
 });

@@ -93,7 +93,7 @@ export default function KafkaBridgePanel({
         </div>
         
         <div className="flex items-center gap-2">
-          <button
+          <button type="button"
             onClick={() => setPaused(!paused)}
             className={`p-2 rounded-lg transition-colors ${
               paused ? 'bg-amber-500/20 text-amber-400' : 'hover:bg-slate-800 text-slate-400'
@@ -103,19 +103,19 @@ export default function KafkaBridgePanel({
             {paused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
           </button>
           
-          <button
+          <button type="button"
             onClick={clear}
             className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 transition-colors"
             title="Clear events"
-          >
+           aria-label="Delete">
             <Trash2 className="w-4 h-4" />
           </button>
           
-          <button
+          <button type="button"
             onClick={exportEvents}
             className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 transition-colors"
             title="Export events"
-          >
+           aria-label="Download">
             <Download className="w-4 h-4" />
           </button>
         </div>
@@ -125,7 +125,9 @@ export default function KafkaBridgePanel({
       <div className="flex flex-wrap items-center gap-4 p-4 border-b border-slate-800 bg-slate-800/30">
         <div className="flex items-center gap-2">
           <Filter className="w-4 h-4 text-slate-400" />
-          <select
+          <select aria-label="Filter Type"
+            id="kafka-event-filter"
+            name="eventFilter"
             value={filterType}
             onChange={(e) => setFilterType(e.target.value)}
             className="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
@@ -140,7 +142,7 @@ export default function KafkaBridgePanel({
         
         <div className="flex flex-wrap gap-2">
           {['trades.executed', 'agent.opinions', 'prices.ticks', 'risk.alerts'].map(topic => (
-            <button
+            <button type="button"
               key={topic}
               onClick={() => handleTopicToggle(topic)}
               className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${

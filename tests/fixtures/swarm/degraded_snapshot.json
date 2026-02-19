@@ -1,0 +1,16 @@
+{
+  "swarm_nodes": [
+    {"name": "swarm-node-a", "online": true, "synced": true, "health_pct": 100.0},
+    {"name": "swarm-node-b", "online": false, "synced": false, "health_pct": 72.5}
+  ],
+  "agent_pods": [
+    {"name": "risk-agent", "online": true, "synced": true, "health_pct": 100.0}
+  ],
+  "strategy_clusters": [
+    {"name": "kalshi-strategy", "online": true, "synced": false, "health_pct": 91.0}
+  ],
+  "data_sources": [
+    {"name": "partial-backend", "source_type": "verified_backend", "verified": false, "mode": "paper"},
+    {"name": "unknown-stream", "source_type": "untrusted_feed", "verified": true, "mode": "demo"}
+  ]
+}

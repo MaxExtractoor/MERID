@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { TrendingUp, ArrowRight, RefreshCw, AlertCircle, Zap, DollarSign } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface ArbitrageOpportunity {
   id: string;
@@ -21,51 +23,26 @@ interface ArbitragePanelProps {
 }
 
 export default function ArbitragePanel({ className = '' }: ArbitragePanelProps) {
-  const [opportunities, setOpportunities] = useState<ArbitrageOpportunity[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'high' | 'medium'>('all');
 
-  useEffect(() => {
-    fetchOpportunities();
-    const interval = setInterval(fetchOpportunities, 10000); // Refresh every 10s
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchOpportunities = async () => {
-    try {
-      const response = await fetch('/api/v1/arbitrage/opportunities');
-      if (response.ok) {
-        const data = await response.json();
-        setOpportunities(data.opportunities || []);
-        setError(null);
-      } else {
-        throw new Error('Failed to fetch arbitrage opportunities');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setOpportunities([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: rawData, loading, error, refetch } = useApiData<{ opportunities: ArbitrageOpportunity[] }>(
+    API_ENDPOINTS.ARBITRAGE_OPPORTUNITIES,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM },
+  );
+  const opportunities = rawData?.opportunities ?? [];
 
   const executeArbitrage = async (opportunityId: string) => {
     try {
-      const response = await fetch('/api/v1/arbitrage/execute', {
+      const response = await fetch(API_ENDPOINTS.ARBITRAGE_EXECUTE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ opportunity_id: opportunityId }),
       });
-      
       if (response.ok) {
-        // Update opportunity status
-        setOpportunities(opportunities.map(opp => 
-          opp.id === opportunityId ? { ...opp, status: 'executing' as const } : opp
-        ));
+        refetch();
       }
-    } catch (err) {
-      console.error('Failed to execute arbitrage:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     }
   };
 
@@ -117,11 +94,11 @@ export default function ArbitragePanel({ className = '' }: ArbitragePanelProps) 
               <p className="text-sm text-gray-400">Cross-venue price discrepancies</p>
             </div>
           </div>
-          <button
-            onClick={fetchOpportunities}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
             title="Refresh opportunities"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4 text-gray-400" />
           </button>
         </div>
@@ -129,7 +106,7 @@ export default function ArbitragePanel({ className = '' }: ArbitragePanelProps) 
         {error && (
           <div className="mb-4 p-3 bg-yellow-900/20 border border-yellow-600/50 rounded-lg flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-yellow-500" />
-            <span className="text-sm text-yellow-500">Data unavailable: {error}</span>
+            <span className="text-sm text-yellow-500">Data unavailable: {error?.message ?? 'Unknown error'}</span>
           </div>
         )}
 
@@ -152,7 +129,7 @@ export default function ArbitragePanel({ className = '' }: ArbitragePanelProps) 
         {/* Filters */}
         <div className="flex gap-2 mt-4">
           {(['all', 'high', 'medium'] as const).map(f => (
-            <button
+            <button type="button"
               key={f}
               onClick={() => setFilter(f)}
               className={`px-3 py-1 text-sm rounded transition-colors ${
@@ -239,7 +216,7 @@ export default function ArbitragePanel({ className = '' }: ArbitragePanelProps) 
                 </div>
 
                 {opp.status === 'active' ? (
-                  <button
+                  <button type="button"
                     onClick={() => executeArbitrage(opp.id)}
                     className="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded transition-colors flex items-center gap-1"
                   >

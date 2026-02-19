@@ -683,8 +683,17 @@ class RiskControlCoordinator:
         ))
         logger.info("Staleness monitor wired to risk coordinator")
 
-    def register_circuit_breaker(self, name: str, breaker: Any) -> None:
-        """Register an external circuit breaker for monitoring."""
+    def register_circuit_breaker(self, name_or_breaker: Any, breaker: Any = None) -> None:
+        """Register an external circuit breaker for monitoring.
+
+        Accepts either (name, breaker) or just (breaker,) where breaker.name is used.
+        """
+        if breaker is None:
+            # Single-arg form: register_circuit_breaker(breaker)
+            breaker = name_or_breaker
+            name = getattr(breaker, "name", str(id(breaker)))
+        else:
+            name = name_or_breaker
         self._circuit_breakers[name] = breaker
         logger.info(f"Circuit breaker registered: {name}")
 

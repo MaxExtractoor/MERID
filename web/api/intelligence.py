@@ -24,6 +24,9 @@ import httpx
 import re
 import os
 
+import logging
+logger = logging.getLogger("intelligence")
+
 router = APIRouter(prefix="/api/v1/intelligence", tags=["intelligence"])
 
 # Global caches
@@ -41,7 +44,6 @@ MESSARI_API_KEY = os.getenv("MESSARI_API_KEY", "")
 async def fetch_coingecko_news():
     """Fetch news from CoinGecko."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
@@ -52,7 +54,7 @@ async def fetch_coingecko_news():
         
         if response.status_code == 200:
             data = response.json()
-            print(f"[Intelligence] CoinGecko returned {len(data.get('data', []))} news items")
+            logger.info(f"[Intelligence] CoinGecko returned {len(data.get('data', []))} news items")
             return [
                 {
                     'title': item.get('title', 'No title'),
@@ -67,18 +69,17 @@ async def fetch_coingecko_news():
                 for item in data.get('data', [])[:20]
             ]
         else:
-            print(f"[Intelligence] CoinGecko returned status {response.status_code}")
+            logger.info(f"[Intelligence] CoinGecko returned status {response.status_code}")
     except Exception as e:
         import traceback
-        print(f"[Intelligence] Error fetching CoinGecko news: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching CoinGecko news: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return []
 
 
 async def fetch_cryptopanic_news():
     """Fetch news from CryptoPanic (free tier)."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
@@ -108,16 +109,14 @@ async def fetch_cryptopanic_news():
                 for item in data.get('results', [])[:20]
             ]
     except Exception as e:
-        import traceback
-        print(f"[Intelligence] Error fetching CryptoPanic news: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching CryptoPanic news: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return []
 
 
 async def fetch_rss_feed(url: str, source_name: str):
     """Generic RSS feed fetcher."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
@@ -153,7 +152,7 @@ async def fetch_rss_feed(url: str, source_name: str):
                 })
             return items
     except Exception as e:
-        print(f"[Intelligence] Error fetching {source_name} RSS: {e}")
+        logger.error(f"[Intelligence] Error fetching {source_name} RSS: {e}")
     return []
 
 
@@ -203,7 +202,7 @@ async def fetch_messari_news():
                     for item in data.get('data', [])[:15]
                 ]
     except Exception as e:
-        print(f"[Intelligence] Error fetching Messari news: {e}")
+        logger.error(f"[Intelligence] Error fetching Messari news: {e}")
     return []
 
 
@@ -211,7 +210,6 @@ async def fetch_defi_pulse_data():
     """Fetch DeFi protocol TVL data."""
     global _defi_cache, _last_defi_update
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=30.0, verify=False) as client:
@@ -243,19 +241,17 @@ async def fetch_defi_pulse_data():
                 'timestamp': datetime.now().isoformat()
             }
             _last_defi_update = datetime.now()
-            print(f"[Intelligence] Fetched {len(protocols)} DeFi protocols")
+            logger.info(f"[Intelligence] Fetched {len(protocols)} DeFi protocols")
             return _defi_cache
     except Exception as e:
-        import traceback
-        print(f"[Intelligence] Error fetching DeFi data: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching DeFi data: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return _defi_cache
 
 
 async def fetch_fear_greed_index():
     """Fetch Crypto Fear & Greed Index."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
@@ -271,16 +267,14 @@ async def fetch_fear_greed_index():
                 'history': data.get('data', [])[:30]
             }
     except Exception as e:
-        import traceback
-        print(f"[Intelligence] Error fetching Fear & Greed: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching Fear & Greed: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return {'current': {}, 'history': []}
 
 
 async def fetch_global_market_data():
     """Fetch global crypto market data from CoinGecko."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
@@ -293,14 +287,13 @@ async def fetch_global_market_data():
             data = response.json()
             return data.get('data', {})
     except Exception as e:
-        print(f"[Intelligence] Error fetching global market data: {e}")
+        logger.error(f"[Intelligence] Error fetching global market data: {e}")
     return {}
 
 
 async def fetch_trending_coins():
     """Fetch trending coins from CoinGecko."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
@@ -313,9 +306,8 @@ async def fetch_trending_coins():
             data = response.json()
             return data.get('coins', [])
     except Exception as e:
-        import traceback
-        print(f"[Intelligence] Error fetching trending coins: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching trending coins: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return []
 
 
@@ -385,8 +377,7 @@ async def aggregate_news():
     """Aggregate news from all institutional-grade sources."""
     global _news_cache, _last_news_update
     
-    print("[Intelligence] Aggregating news from 8 institutional sources...")
-    
+    logger.info("[Intelligence] Aggregating news from 8 institutional sources...")
     # Fetch from all sources in parallel
     results = await asyncio.gather(
         fetch_coingecko_news(),
@@ -421,18 +412,15 @@ async def aggregate_news():
     
     # Sort by timestamp (newest first)
     if not unique_news:
-        print("[Intelligence] No news available from remote sources")
+        logger.info("[Intelligence] No news available from remote sources")
     else:
-        print(f"[Intelligence] Sources: {source_counts}")
-    
+        logger.info(f"[Intelligence] Sources: {source_counts}")
     unique_news.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
     
     _news_cache = unique_news[:100]  # Keep top 100 for institutional coverage
     _last_news_update = datetime.now()
     
-    print(f"[Intelligence] Aggregated {len(_news_cache)} unique news items from {len(source_counts)} sources")
-
-
+    logger.info(f"[Intelligence] Aggregated {len(_news_cache)} unique news items from {len(source_counts)} sources")
 @router.get("/news")
 async def get_news(
     category: Optional[str] = Query(None, description="Filter by category: regulation, technology, market, defi, nft, adoption, security, general"),

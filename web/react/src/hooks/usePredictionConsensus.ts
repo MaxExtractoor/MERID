@@ -92,7 +92,7 @@ export function usePredictionConsensus(
       { pollingInterval },
     );
 
-  const symbols = data?.symbols ?? [];
+  const symbols = useMemo(() => data?.symbols ?? [], [data?.symbols]);
 
   const bySymbol = useMemo(() => {
     const map: Record<string, PredictionSymbolSummary> = {};

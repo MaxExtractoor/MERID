@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
-import { API_BASE_URL } from '../config/constants';
+import { useCallback } from 'react';
+import { useApiData } from './useApiData';
+import { API_ENDPOINTS, API_BASE_URL } from '../config/constants';
 
 export interface OperatorSummary {
   mode: {
@@ -46,6 +47,8 @@ interface UseOperatorSummaryResult {
   error: string | null;
   refetch: () => Promise<void>;
   lastUpdated: Date | null;
+  isStub: boolean;
+  stubMessage: string;
   pauseSwarm: () => Promise<boolean>;
   resumeSwarm: () => Promise<boolean>;
   switchMode: (mode: string, reason: string) => Promise<boolean>;
@@ -53,86 +56,104 @@ interface UseOperatorSummaryResult {
 }
 
 export function useOperatorSummary(pollingMs = 5000): UseOperatorSummaryResult {
-  const [data, setData] = useState<OperatorSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-
-  const fetchSummary = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/operator/summary`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      setData(json);
-      setError(null);
-      setLastUpdated(new Date());
-    } catch (e: any) {
-      setError(e.message || 'Failed to fetch operator summary');
-    } finally {
-      setLoading(false);
+  // Always fetch operator summary — kill switch, risk state, and agent grid
+  // status are critical regardless of kalshiOnly mode.
+  const {
+    data,
+    loading,
+    error,
+    refetch,
+    lastUpdated,
+    isStub,
+    stubMessage,
+  } = useApiData<OperatorSummary>(
+    API_ENDPOINTS.OPERATOR_SUMMARY,
+    {
+      pollingInterval: pollingMs,
     }
-  }, []);
+  );
 
-  useEffect(() => {
-    fetchSummary();
-    const id = setInterval(fetchSummary, pollingMs);
-    return () => clearInterval(id);
-  }, [fetchSummary, pollingMs]);
+  const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
+    const token = localStorage.getItem('merid-access');
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(headers ?? {}),
+    };
+  }, []);
 
   const pauseSwarm = useCallback(async (): Promise<boolean> => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/dev-swarm/pause`, { method: 'POST' });
+      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.DEV_SWARM_PAUSE}`, {
+        method: 'POST',
+        headers: authHeaders(),
+      });
       if (!res.ok) return false;
       const json = await res.json();
-      await fetchSummary();
+      await refetch();
       return json.changed;
     } catch {
       return false;
     }
-  }, [fetchSummary]);
+  }, [authHeaders, refetch]);
 
   const resumeSwarm = useCallback(async (): Promise<boolean> => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/dev-swarm/resume`, { method: 'POST' });
+      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.DEV_SWARM_RESUME}`, {
+        method: 'POST',
+        headers: authHeaders(),
+      });
       if (!res.ok) return false;
       const json = await res.json();
-      await fetchSummary();
+      await refetch();
       return json.changed;
     } catch {
       return false;
     }
-  }, [fetchSummary]);
+  }, [authHeaders, refetch]);
 
   const switchMode = useCallback(async (mode: string, reason: string): Promise<boolean> => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/v1/trading-mode/mode`, {
+      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.TRADING_MODE_SET}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ mode, reason }),
       });
       if (!res.ok) return false;
-      await fetchSummary();
+      await refetch();
       return true;
     } catch {
       return false;
     }
-  }, [fetchSummary]);
+  }, [authHeaders, refetch]);
 
   const toggleKillSwitch = useCallback(async (activate: boolean, reason = 'operator'): Promise<boolean> => {
     try {
-      const endpoint = activate ? '/api/v1/loop/guard/kill' : '/api/v1/loop/guard/unkill';
+      const endpoint = activate ? API_ENDPOINTS.GUARD_KILL : API_ENDPOINTS.GUARD_UNKILL;
       const res = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ reason }),
       });
       if (!res.ok) return false;
-      await fetchSummary();
+      await refetch();
       return true;
     } catch {
       return false;
     }
-  }, [fetchSummary]);
+  }, [authHeaders, refetch]);
 
-  return { data, loading, error, refetch: fetchSummary, lastUpdated, pauseSwarm, resumeSwarm, switchMode, toggleKillSwitch };
+  return {
+    data,
+    loading,
+    error: error?.message ?? null,
+    refetch,
+    lastUpdated,
+    isStub,
+    stubMessage,
+    pauseSwarm,
+    resumeSwarm,
+    switchMode,
+    toggleKillSwitch,
+  };
 }

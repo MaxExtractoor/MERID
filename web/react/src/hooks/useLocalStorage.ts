@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 
 interface UseLocalStorageOptions<T> {
   serializer?: {
@@ -13,17 +13,19 @@ export function useLocalStorage<T>(
   initialValue: T,
   options?: UseLocalStorageOptions<T>
 ): [T, (value: T | ((prev: T) => T)) => void, () => void] {
-  const serializer = options?.serializer ?? {
-    read: (value: string) => {
-      try {
-        return JSON.parse(value);
-      } catch {
-        // Re-throw so readValue catches it and returns initialValue
-        throw new Error('Failed to parse stored value');
-      }
-    },
-    write: (value: T) => JSON.stringify(value),
-  };
+  const serializer = useMemo(() => {
+    return options?.serializer ?? {
+      read: (value: string) => {
+        try {
+          return JSON.parse(value);
+        } catch {
+          // Re-throw so readValue catches it and returns initialValue
+          throw new Error('Failed to parse stored value');
+        }
+      },
+      write: (value: T) => JSON.stringify(value),
+    };
+  }, [options?.serializer]);
 
   // Get from local storage then parse stored json or return initialValue
   const readValue = useCallback((): T => {

@@ -216,7 +216,7 @@ export function validatePassword(password: string, options?: PasswordOptions): V
       return { valid: false, error: "Password must contain at least one number" };
     }
 
-    if (!/(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?])/.test(password)) {
+    if (!/(?=.*[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?])/.test(password)) {
       return { valid: false, error: "Password must contain at least one special character" };
     }
   }

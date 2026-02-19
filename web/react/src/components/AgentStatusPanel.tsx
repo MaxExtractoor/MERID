@@ -8,7 +8,8 @@
  * - Live metrics from WebSocket stream
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useMemo } from 'react';
+import type { RawAgentHeartbeat } from '../types/api';
 import { 
   Bot, 
   Activity,
@@ -19,6 +20,8 @@ import {
   Shield,
   Clock
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface AgentStatus {
@@ -70,59 +73,40 @@ export default function AgentStatusPanel({
   showMetrics = true,
   onAgentSelect,
 }: AgentStatusPanelProps) {
-  const [agents, setAgents] = useState<AgentStatus[]>([]);
-  const [loading, setLoading] = useState(true);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
 
-  // Fetch agent metrics
-  const fetchAgents = useCallback(async () => {
-    try {
-      const res = await fetch(API_ENDPOINTS.RISK_AGENTS);
-      if (res.ok) {
-        const data = await res.json();
-        
-        // Convert to AgentStatus with heartbeat-based status
-        const now = Date.now() / 1000;
-        const agentStatuses: AgentStatus[] = (data.agents || []).map((a: Record<string, unknown>) => {
-          const timeSinceUpdate = now - (a.last_updated || 0);
-          let status: 'online' | 'degraded' | 'offline' = 'online';
-          
-          if (timeSinceUpdate > 300) {
-            status = 'offline';
-          } else if (timeSinceUpdate > 60) {
-            status = 'degraded';
-          }
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ agents: RawAgentHeartbeat[] }>(
+    API_ENDPOINTS.RISK_AGENTS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
 
-          return {
-            agent_id: a.agent_id,
-            role: a.role || 'analyst',
-            status,
-            last_heartbeat: a.last_updated || 0,
-            sharpe_ratio: a.sharpe_ratio || 0,
-            max_drawdown: a.max_drawdown || 0,
-            current_drawdown: a.current_drawdown || 0,
-            total_pnl: a.total_pnl || 0,
-            total_trades: a.total_trades || 0,
-            win_rate: a.win_rate || 0,
-            consensus_weight: a.consensus_weight || 1,
-            prediction_accuracy: a.prediction_accuracy || 0.5,
-          };
-        });
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Agent status" error={fetchError} onRetry={refetch} />;
+  }
 
-        setAgents(agentStatuses);
-      }
-    } catch {
-      // Operation failed — UI state unchanged
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchAgents();
-    const interval = setInterval(fetchAgents, DEFAULTS.POLLING_INTERVALS.STANDARD);
-    return () => clearInterval(interval);
-  }, [fetchAgents]);
+  const agents: AgentStatus[] = useMemo(() => {
+    const now = Date.now() / 1000;
+    return (rawData?.agents ?? []).map((a: RawAgentHeartbeat) => {
+      const timeSinceUpdate = now - (a.last_updated || 0);
+      let status: 'online' | 'degraded' | 'offline' = 'online';
+      if (timeSinceUpdate > 300) status = 'offline';
+      else if (timeSinceUpdate > 60) status = 'degraded';
+      return {
+        agent_id: a.agent_id || '',
+        role: a.role || 'analyst',
+        status,
+        last_heartbeat: a.last_updated || 0,
+        sharpe_ratio: a.sharpe_ratio || 0,
+        max_drawdown: a.max_drawdown || 0,
+        current_drawdown: a.current_drawdown || 0,
+        total_pnl: a.total_pnl || 0,
+        total_trades: a.total_trades || 0,
+        win_rate: a.win_rate || 0,
+        consensus_weight: a.consensus_weight || 1,
+        prediction_accuracy: a.prediction_accuracy || 0.5,
+      };
+    });
+  }, [rawData]);
 
   const handleAgentClick = (agentId: string) => {
     setSelectedAgent(selectedAgent === agentId ? null : agentId);
@@ -234,7 +218,7 @@ export default function AgentStatusPanel({
           </div>
 
           <button type="button"
-            onClick={fetchAgents}
+            onClick={() => refetch()}
             className="p-1.5 hover:bg-slate-700/50 rounded transition-colors"
             title="Refresh agent status"
             aria-label="Refresh agent status"

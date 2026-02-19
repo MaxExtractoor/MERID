@@ -14,6 +14,8 @@ import type {
   Stance,
 } from "../hooks/useConsensusSummary";
 import { AlertTriangle, ArrowUpDown } from "lucide-react";
+import { ExecutionGateChip } from './ExecutionGateChip';
+import { useExecutionGate } from '../hooks/useExecutionGate';
 
 interface ConsensusTableProps {
   summary: UseConsensusSummaryResult;
@@ -75,6 +77,7 @@ export default function ConsensusTable({ summary, onSymbolClick }: ConsensusTabl
   const [sortKey, setSortKey] = useState<SortKey>("confidence");
   const [sortDesc, setSortDesc] = useState(true);
   const stubbed = isStub(summary.rawResponse);
+  const { blocked } = useExecutionGate();
 
   const sorted = useMemo(() => {
     const items = [...summary.symbols];
@@ -139,6 +142,12 @@ export default function ConsensusTable({ summary, onSymbolClick }: ConsensusTabl
 
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-800/50 overflow-hidden" data-testid="consensus-table">
+      {blocked && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-red-950/40 border-b border-red-500/20 text-[11px] text-red-300">
+          <ExecutionGateChip variant="inline" />
+          <span className="text-slate-500">Plans are generated but cannot execute while gate is blocked.</span>
+        </div>
+      )}
       <table className="w-full text-sm">
         <thead className="bg-slate-800">
           <tr>

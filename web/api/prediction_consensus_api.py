@@ -20,6 +20,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from utils.logger import get_logger
@@ -41,6 +42,16 @@ def _get_store():
         return None
 
 
+def _get_debate_store():
+    """Get the DebateStore, or None if unavailable."""
+    try:
+        from merid.prediction.debate import get_debate_store
+        return get_debate_store()
+    except Exception as exc:
+        logger.debug("DebateStore unavailable: %s", exc)
+        return None
+
+
 def _stub(data: Dict[str, Any], *, message: str = "Simulated prediction data") -> Dict[str, Any]:
     data["_stub"] = True
     data["_implementation_status"] = "NOT_IMPLEMENTED"
@@ -59,6 +70,7 @@ class PredictionOpinionRequest(BaseModel):
     reasoning: str = ""
     signal_sources: List[str] = []
     horizon: str = "event"
+    explanation: Optional[Dict[str, Any]] = None
 
 
 class PredictionPlanRequest(BaseModel):
@@ -80,6 +92,31 @@ class ResolveRequest(BaseModel):
     pnl_usd: float = 0.0
 
 
+class CreateTeamRequest(BaseModel):
+    name: str
+    member_ids: List[str]
+    strategy_mix: str = ""
+
+
+class RunDebateRequest(BaseModel):
+    symbol: str
+    ticker: str
+    market_prob: float
+    category: str = ""
+    proposer_strategy: str = "mean_reversion"
+    arbiter_strategy: str = "arbiter"
+    proposer_agent_id: str = "proposer-01"
+    challenger_agent_id: str = "challenger-01"
+    arbiter_agent_id: str = "debate-coordinator-01"
+    team_id: str = ""
+
+
+class BacktestRequest(BaseModel):
+    markets: List[Dict[str, Any]]
+    proposer_strategy: str = "mean_reversion"
+    arbiter_strategy: str = "arbiter"
+
+
 # ── Endpoints ────────────────────────────────────────────────────────
 
 @router.get("/consensus/summary")
@@ -88,7 +125,7 @@ async def prediction_consensus_summary(category: Optional[str] = None):
     store = _get_store()
     if store:
         try:
-            summaries = store.get_consensus_summary(category=category)
+            summaries = await run_in_threadpool(store.get_consensus_summary, category)
             return {"symbols": summaries, "count": len(summaries)}
         except Exception as exc:
             logger.warning("consensus/summary failed, falling back to stub: %s", exc)
@@ -141,13 +178,20 @@ async def prediction_consensus_summary(category: Optional[str] = None):
 
 
 @router.get("/consensus/opinions")
-async def prediction_opinions(symbol: Optional[str] = None, limit: int = 50):
+async def prediction_opinions(
+    symbol: Optional[str] = None,
+    limit: int = 50,
+    include_explanation: bool = Query(False, description="Include explanation metadata in response"),
+):
     """List recent prediction opinions, optionally filtered by symbol."""
     store = _get_store()
     if store:
         try:
             opinions = store.list_opinions(symbol=symbol, limit=limit)
-            return {"opinions": [o.to_dict() for o in opinions], "count": len(opinions)}
+            return {
+                "opinions": [o.to_dict(include_explanation=include_explanation) for o in opinions],
+                "count": len(opinions),
+            }
         except Exception as exc:
             logger.warning("consensus/opinions failed: %s", exc)
 
@@ -261,6 +305,7 @@ async def submit_prediction_opinion(req: PredictionOpinionRequest):
         reasoning=req.reasoning,
         signal_sources=req.signal_sources,
         horizon=req.horizon,
+        explanation=req.explanation,
     )
     store.add_opinion(op)
     return {"status": "ok", "opinion": op.to_dict()}
@@ -322,10 +367,27 @@ async def resolve_prediction_market(req: ResolveRequest):
                 "pnl_usd": req.pnl_usd,
             },
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("operation_suppressed", error=str(exc))
 
     return {"status": "ok", "resolved": rm.to_dict()}
+
+
+@router.get("/consensus/explainability")
+async def prediction_explainability(window_s: float = 3600.0):
+    """Explainability metrics for recent prediction opinions."""
+    store = _get_store()
+    if store:
+        try:
+            metrics = store.get_explainability_metrics(window_s=window_s)
+            return metrics
+        except Exception as exc:
+            logger.warning("consensus/explainability failed: %s", exc)
+
+    return {"coverage": {"total": 0, "with_explanation": 0, "pct": 0.0},
+            "rationale_distribution": {}, "strategy_variety": {},
+            "stability": {"instruments_checked": 0, "flips": 0, "flip_rate": 0.0},
+            "window_s": window_s}
 
 
 @router.get("/consensus/plan-check")
@@ -342,3 +404,222 @@ async def check_plan_executable(plan_id: str):
 
     result = store.check_plan_executable(plan)
     return {"plan_id": plan_id, **result}
+
+
+# ── Debate, Team & Reward endpoints ─────────────────────────────────
+
+@router.post("/consensus/debates")
+async def run_debate(req: RunDebateRequest):
+    """Run a structured proposer→challenger→arbiter debate on an instrument."""
+    from merid.agents.coordination import DebateCoordinatorAgent
+
+    coordinator = DebateCoordinatorAgent()
+    instrument = {
+        "symbol": req.symbol,
+        "ticker": req.ticker,
+        "market_prob": req.market_prob,
+        "category": req.category,
+    }
+    context = {
+        "proposer_strategy": req.proposer_strategy,
+        "arbiter_strategy": req.arbiter_strategy,
+        "proposer_agent_id": req.proposer_agent_id,
+        "challenger_agent_id": req.challenger_agent_id,
+        "arbiter_agent_id": req.arbiter_agent_id,
+        "team_id": req.team_id,
+    }
+    result = coordinator.run_debate(instrument, context)
+    if not result:
+        raise HTTPException(422, "Debate produced no result (strategy declined to opine)")
+    return {"status": "ok", "debate": result}
+
+
+@router.get("/consensus/debates")
+async def list_debates(
+    symbol: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+):
+    """List debate sessions, optionally filtered by symbol or status."""
+    ds = _get_debate_store()
+    if not ds:
+        return _stub({"debates": [], "count": 0})
+    try:
+        debates = ds.list_debates(symbol=symbol, status=status, limit=limit)
+        return {"debates": [d.to_dict() for d in debates], "count": len(debates)}
+    except Exception as exc:
+        logger.warning("consensus/debates failed: %s", exc)
+        return {"debates": [], "count": 0}
+
+
+@router.get("/consensus/debates/{debate_id}")
+async def get_debate_detail(debate_id: str):
+    """Get a debate session with its arguments."""
+    ds = _get_debate_store()
+    if not ds:
+        raise HTTPException(503, "DebateStore unavailable")
+    debate = ds.get_debate(debate_id)
+    if not debate:
+        raise HTTPException(404, f"Debate {debate_id} not found")
+    args = ds.list_arguments(debate_id)
+    return {
+        "debate": debate.to_dict(),
+        "arguments": [a.to_dict() for a in args],
+    }
+
+
+@router.post("/consensus/debates/{debate_id}/resolve")
+async def resolve_debate(debate_id: str, outcome: int = Query(..., ge=0, le=1)):
+    """Resolve a debate with the actual outcome and compute debate lift."""
+    ds = _get_debate_store()
+    if not ds:
+        raise HTTPException(503, "DebateStore unavailable")
+    debate = ds.resolve_debate(debate_id, outcome)
+    if not debate:
+        raise HTTPException(404, f"Debate {debate_id} not found")
+    return {"status": "ok", "debate": debate.to_dict()}
+
+
+@router.get("/consensus/debate-metrics")
+async def debate_metrics(window_s: float = 3600.0):
+    """Debate health metrics: lift, disagreement width, argument counts."""
+    ds = _get_debate_store()
+    if not ds:
+        return _stub({"active_debates": 0, "total_debates": 0, "avg_debate_lift": 0.0})
+    try:
+        return ds.get_debate_metrics(window_s=window_s)
+    except Exception as exc:
+        logger.warning("consensus/debate-metrics failed: %s", exc)
+        return {"active_debates": 0, "total_debates": 0, "avg_debate_lift": 0.0}
+
+
+@router.post("/consensus/teams")
+async def create_team(req: CreateTeamRequest):
+    """Create a named agent team."""
+    ds = _get_debate_store()
+    if not ds:
+        raise HTTPException(503, "DebateStore unavailable")
+    from merid.prediction.debate import AgentTeam
+    team = AgentTeam(name=req.name, member_ids=req.member_ids, strategy_mix=req.strategy_mix)
+    ds.create_team(team)
+    return {"status": "ok", "team": team.to_dict()}
+
+
+@router.get("/consensus/teams")
+async def list_teams(limit: int = 50):
+    """List agent teams."""
+    ds = _get_debate_store()
+    if not ds:
+        return _stub({"teams": [], "count": 0})
+    try:
+        teams = ds.list_teams(limit=limit)
+        return {"teams": [t.to_dict() for t in teams], "count": len(teams)}
+    except Exception as exc:
+        logger.warning("consensus/teams failed: %s", exc)
+        return {"teams": [], "count": 0}
+
+
+@router.get("/consensus/leaderboard")
+async def leaderboard(limit: int = 20, decay_lambda: Optional[float] = None):
+    """Agent and team leaderboards based on reward points (with optional time-decay)."""
+    ds = _get_debate_store()
+    if not ds:
+        return _stub({"agents": [], "teams": [], "debate_impact": []})
+    try:
+        return ds.compute_leaderboard(limit=limit, decay_lambda=decay_lambda)
+    except Exception as exc:
+        logger.warning("consensus/leaderboard failed: %s", exc)
+        return {"agents": [], "teams": [], "debate_impact": []}
+
+
+@router.get("/consensus/badges/{agent_id}")
+async def agent_badges(agent_id: str):
+    """Compute badges earned by an agent."""
+    ds = _get_debate_store()
+    if not ds:
+        raise HTTPException(503, "DebateStore unavailable")
+    try:
+        badges = ds.compute_badges(agent_id)
+        return {"agent_id": agent_id, "badges": badges}
+    except Exception as exc:
+        logger.warning("consensus/badges failed: %s", exc)
+        return {"agent_id": agent_id, "badges": []}
+
+
+@router.get("/consensus/rewards/{agent_id}")
+async def agent_rewards(agent_id: str, limit: int = 100):
+    """Get reward history and total points for an agent."""
+    ds = _get_debate_store()
+    if not ds:
+        raise HTTPException(503, "DebateStore unavailable")
+    try:
+        rewards = ds.get_agent_rewards(agent_id, limit=limit)
+        total = ds.get_agent_total_points(agent_id)
+        return {
+            "agent_id": agent_id,
+            "total_points": round(total, 2),
+            "rewards": [r.to_dict() for r in rewards],
+            "count": len(rewards),
+        }
+    except Exception as exc:
+        logger.warning("consensus/rewards failed: %s", exc)
+        return {"agent_id": agent_id, "total_points": 0, "rewards": [], "count": 0}
+
+
+# ── Sprint 8: Debate Tuning endpoints ─────────────────────────────────
+
+@router.post("/consensus/backtest")
+async def run_backtest(req: BacktestRequest):
+    """Run a debate backtest on resolved markets."""
+    from merid.prediction.debate import DebateBacktester
+    bt = DebateBacktester()
+    try:
+        report = await run_in_threadpool(
+            bt.run_backtest, req.markets,
+            proposer_strategy=req.proposer_strategy,
+            arbiter_strategy=req.arbiter_strategy,
+        )
+        return {"status": "ok", "report": report}
+    except Exception as exc:
+        logger.warning("consensus/backtest failed: %s", exc)
+        raise HTTPException(500, f"Backtest failed: {exc}")
+
+
+@router.get("/consensus/parameter-sweep")
+async def parameter_sweep():
+    """Run reward parameter sensitivity sweep with default grid."""
+    from merid.prediction.debate import RewardParameterSweep
+    sweep = RewardParameterSweep()
+    try:
+        result = await run_in_threadpool(sweep.sweep)
+        return {"status": "ok", "sweep": result}
+    except Exception as exc:
+        logger.warning("consensus/parameter-sweep failed: %s", exc)
+        raise HTTPException(500, f"Parameter sweep failed: {exc}")
+
+
+@router.get("/consensus/calibration/{agent_id}")
+async def agent_calibration(agent_id: str, n_bins: int = 10):
+    """Compute calibration score for an agent (single source of truth)."""
+    ds = _get_debate_store()
+    if not ds:
+        raise HTTPException(503, "DebateStore unavailable")
+    try:
+        result = ds.compute_calibration_score(agent_id, n_bins=n_bins)
+        return result
+    except Exception as exc:
+        logger.warning("consensus/calibration failed: %s", exc)
+        return {"agent_id": agent_id, "calibration_score": None, "total_predictions": 0, "bins": []}
+
+
+@router.get("/consensus/teams/{team_id}/diversity")
+async def team_diversity(team_id: str):
+    """Compute strategy diversity score for a team."""
+    ds = _get_debate_store()
+    if not ds:
+        raise HTTPException(503, "DebateStore unavailable")
+    try:
+        return ds.compute_team_diversity_score(team_id)
+    except Exception as exc:
+        logger.warning("consensus/teams/diversity failed: %s", exc)
+        return {"team_id": team_id, "diversity_score": 0.0, "strategies": []}

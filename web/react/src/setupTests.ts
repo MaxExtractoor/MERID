@@ -4,6 +4,7 @@ import '@testing-library/jest-dom';
 jest.mock('./config/constants', () => ({
   API_BASE_URL: 'http://127.0.0.1:8000',
   WS_URL: 'ws://127.0.0.1:8000',
+  WS_PORTFOLIO_URL: 'ws://127.0.0.1:8000/ws/risk',
   API_ENDPOINTS: {
     PORTFOLIO_SUMMARY: '/api/v1/portfolio/summary',
     POSITIONS: '/api/v1/positions',
@@ -16,6 +17,32 @@ jest.mock('./config/constants', () => ({
     RISK_SUMMARY: '/api/v1/risk/summary',
     PREDICTIONS: '/api/v1/predictions',
     RESEARCH: '/api/v1/research',
+    KALSHI_MARKETS: '/api/v1/kalshi/markets',
+    KALSHI_MARKET_DETAIL: (ticker: string) => `/api/v1/kalshi/markets/${ticker}`,
+    KALSHI_CATALOG: '/api/v1/kalshi/catalog',
+    KALSHI_CATALOG_REFRESH: '/api/v1/kalshi/catalog/refresh',
+    KALSHI_POSITIONS: '/api/v1/kalshi/positions',
+    KALSHI_ORDERS: '/api/v1/kalshi/orders',
+    KALSHI_FILLS: '/api/v1/kalshi/fills',
+    KALSHI_BALANCE: '/api/v1/kalshi/balance',
+    KALSHI_PNL: '/api/v1/kalshi/pnl',
+    KALSHI_RISK: '/api/v1/kalshi/risk',
+    KALSHI_WS: '/api/v1/kalshi/ws',
+    KALSHI_HEALTH: '/api/v1/kalshi/health',
+    KALSHI_KILL_SWITCH: '/api/v1/kalshi/kill-switch',
+    KALSHI_SIZING_METRICS: '/api/v1/kalshi/sizing-metrics',
+    KALSHI_PNL_HISTORY: '/api/v1/kalshi/pnl-history',
+    KALSHI_LIQUIDITY_ALERTS: '/api/v1/kalshi/liquidity-alerts',
+    KALSHI_LIQUIDITY_HEALTH: (marketId: string) => `/api/v1/kalshi/liquidity-health/${marketId}`,
+    KALSHI_EDGE: '/api/v1/kalshi/edge',
+    KALSHI_RISK_EVENTS: '/api/v1/kalshi/risk/events',
+    KALSHI_RISK_DOWNSIZE: '/api/v1/kalshi/risk/downsize',
+    KALSHI_FAVORITES: '/api/v1/kalshi/favorites',
+    KALSHI_FAVORITES_TOGGLE: '/api/v1/kalshi/favorites/toggle',
+    KALSHI_VOLUME_ALERTS: '/api/v1/kalshi/volume-alerts',
+    KALSHI_EXPORT: '/api/v1/kalshi/export',
+    TRADE_MODE: '/api/v1/trade-mode',
+    PAPER_TRADING_SUBMIT: '/api/v1/paper-trading/orders/submit',
   },
   STATUS_TYPES: {
     ONLINE: 'online',
@@ -48,6 +75,22 @@ jest.mock('./config/constants', () => ({
       POSITIONS: 5000,
       ORDERS: 3000,
       FILLS: 2000,
+      STANDARD: 10000,
+      SLOW: 30000,
+      FAST_REFRESH: 15000,
+      MEDIUM: 15000,
+      BACKGROUND: 60000,
+      RISK: 30000,
+      RISK_ALERTS: 30000,
+      AGENTS: 15000,
+      SYSTEM_HEALTH: 60000,
+      API_STATUS: 60000,
+      LOGS: 10000,
+      LOG_STATS: 60000,
+      BACKTESTS: 30000,
+      STALENESS: 15000,
+      INFREQUENT: 120000,
+      RARE: 300000,
     },
   },
   WS_EVENTS: {
@@ -63,10 +106,9 @@ jest.mock('./config/constants', () => ({
 Object.defineProperty(global, 'IntersectionObserver', {
   writable: true,
   value: class IntersectionObserver {
-    constructor() {}
-    observe() {}
-    unobserve() {}
-    disconnect() {}
+    observe() { return undefined; }
+    unobserve() { return undefined; }
+    disconnect() { return undefined; }
     root = null;
     rootMargin = '';
     thresholds = [];
@@ -78,10 +120,9 @@ Object.defineProperty(global, 'IntersectionObserver', {
 Object.defineProperty(global, 'ResizeObserver', {
   writable: true,
   value: class ResizeObserver {
-    constructor() {}
-    observe() {}
-    unobserve() {}
-    disconnect() {}
+    observe() { return undefined; }
+    unobserve() { return undefined; }
+    disconnect() { return undefined; }
   },
 });
 
@@ -90,12 +131,20 @@ Object.defineProperty(global, 'WebSocket', {
   writable: true,
   value: class WebSocket {
     constructor(_url: string) {
+      this.url = _url;
       setTimeout(() => {
         if (this.onopen) this.onopen(new Event('open'));
       }, 0);
     }
-    send() {}
-    close() {}
+    send(data: string) {
+      this.bufferedAmount = typeof data === 'string' ? data.length : 0;
+    }
+    close() {
+      this.readyState = this.CLOSED;
+      if (this.onclose) {
+        this.onclose(new Event('close') as CloseEvent);
+      }
+    }
     onopen: ((event: Event) => void) | null = null;
     onclose: ((event: CloseEvent) => void) | null = null;
     onmessage: ((event: MessageEvent) => void) | null = null;

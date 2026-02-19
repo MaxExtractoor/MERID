@@ -311,7 +311,6 @@ async def simulate_governance_decisions(model_id: str, days: int = Query(default
         simulated_decisions = []
         for performance in model_performance:
             # Register temporary policy if needed
-            from core.merid_governance import get_merid_governance
             governance = get_merid_governance()
             
             if model_id not in governance.policies:

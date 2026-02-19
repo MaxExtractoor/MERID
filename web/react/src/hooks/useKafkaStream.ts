@@ -13,6 +13,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { logUiError } from '../utils/logger';
 
 // ============================================
 // TYPES
@@ -25,7 +26,7 @@ export interface StreamEvent {
   source: string;
   topic?: string;
   partition_key?: string;
-  payload: Record<string, any>;
+  payload: Record<string, unknown>;
   schema_version?: string;
   correlation_id?: string;
 }
@@ -55,7 +56,7 @@ export interface UseKafkaStreamOptions {
   /** Deduplicate by event_id */
   deduplicate?: boolean;
   /** Custom message parser */
-  parseMessage?: (data: any) => StreamEvent | null;
+  parseMessage?: (data: unknown) => StreamEvent | null;
 }
 
 export interface UseKafkaStreamResult<T = StreamEvent> {
@@ -78,7 +79,7 @@ export interface UseKafkaStreamResult<T = StreamEvent> {
   /** Manually disconnect */
   disconnect: () => void;
   /** Send a message to the server */
-  send: (message: any) => void;
+  send: (message: unknown) => void;
   /** Clear all events */
   clear: () => void;
   /** Reconnect attempt count */
@@ -137,7 +138,7 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
   }, [endpoint]);
 
   // Parse incoming message
-  const handleMessage = useCallback((data: any): T | null => {
+  const handleMessage = useCallback((data: unknown): T | null => {
     let event: T | null = null;
 
     if (parseMessage) {
@@ -146,16 +147,18 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
       // Default parsing
       if (typeof data === 'string') {
         try {
-          event = JSON.parse(data);
+          event = JSON.parse(data) as T;
         } catch {
           return null;
         }
+      } else if (typeof data === 'object' && data !== null) {
+        event = data as T;
       } else {
-        event = data;
+        return null;
       }
     }
 
-    if (!event) {
+    if (!event || typeof event !== 'object') {
       return null;
     }
 
@@ -200,7 +203,10 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
 
     // Add to keyed collections if keyBy provided
     if (keyBy) {
-      const key = (event as any)[keyBy] || (event.payload as any)?.[keyBy];
+      const eventRecord = event as unknown as Record<string, unknown>;
+      const payloadRecord = (event as StreamEvent).payload as Record<string, unknown> | undefined;
+      const keyValue = eventRecord[keyBy] ?? payloadRecord?.[keyBy];
+      const key = typeof keyValue === 'string' ? keyValue : keyValue != null ? String(keyValue) : null;
       if (key) {
         setEventsByKey(prev => {
           const keyEvents = prev[key] || [];
@@ -242,16 +248,18 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
     
     // Only log on first attempt or after successful connection
     if (currentRetryRef.current === 0) {
-      console.log(`[useKafkaStream] Connecting to ${endpoint}`);
+      console.debug(`[useKafkaStream] Connecting to ${endpoint}`);
     }
 
     setStatus('connecting');
 
     try {
       const ws = new WebSocket(url);
+      let opened = false;
 
       ws.onopen = () => {
-        console.log(`[useKafkaStream] Connected to ${endpoint}`);
+        opened = true;
+        console.debug(`[useKafkaStream] Connected to ${endpoint}`);
         setConnected(true);
         setStatus('connected');
         setError(null);
@@ -267,7 +275,7 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
           // Check for feature_unavailable message from server
           if (data.type === 'feature_unavailable') {
             const reason = data.reason || 'Feature not available';
-            console.log(`[useKafkaStream] ${endpoint} unavailable: ${reason}`);
+            console.debug(`[useKafkaStream] ${endpoint} unavailable: ${reason}`);
             isUnavailableRef.current = true;
             setStatus('unavailable');
             setUnavailableReason(reason);
@@ -296,7 +304,7 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
         setError(new Error('WebSocket error'));
       };
 
-      ws.onclose = (event) => {
+      ws.onclose = () => {
         wsRef.current = null;
         setConnected(false);
 
@@ -307,20 +315,24 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
 
         // Check if we've exceeded max retries
         if (maxReconnectAttempts > 0 && currentRetryRef.current >= maxReconnectAttempts) {
-          console.log(`[useKafkaStream] ${endpoint} - max retries (${maxReconnectAttempts}) exceeded, stopping`);
+          console.debug(`[useKafkaStream] ${endpoint} - max retries (${maxReconnectAttempts}) exceeded, stopping`);
           setStatus('max_retries_exceeded');
           return;
         }
 
         // Schedule reconnect with exponential backoff
         if (mountedRef.current) {
+          // If WS never opened, connection itself failed — give up faster
+          if (!opened) {
+            currentRetryRef.current += 2;
+          }
           currentRetryRef.current++;
           setReconnectCount(currentRetryRef.current);
           const delay = calculateBackoffDelay(currentRetryRef.current);
           
           // Only log first few reconnects
           if (currentRetryRef.current <= 3) {
-            console.log(`[useKafkaStream] Reconnecting to ${endpoint} in ${delay}ms (attempt ${currentRetryRef.current}/${maxReconnectAttempts})`);
+            console.debug(`[useKafkaStream] Reconnecting to ${endpoint} in ${delay}ms (attempt ${currentRetryRef.current}/${maxReconnectAttempts})`);
           }
 
           setStatus('disconnected');
@@ -332,7 +344,7 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
     } catch (err) {
       if (!hasLoggedErrorRef.current) {
         hasLoggedErrorRef.current = true;
-        console.error(`[useKafkaStream] Failed to connect to ${endpoint}:`, err);
+        logUiError('useKafkaStream', `Failed to connect to ${endpoint}`, err);
       }
       setError(err as Error);
       setStatus('disconnected');
@@ -347,7 +359,9 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
     }
 
     if (wsRef.current) {
-      wsRef.current.close();
+      if (wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
       wsRef.current = null;
     }
 
@@ -355,7 +369,7 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
   }, []);
 
   // Send message
-  const send = useCallback((message: any) => {
+  const send = useCallback((message: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       const payload = typeof message === 'string' ? message : JSON.stringify(message);
       wsRef.current.send(payload);
@@ -392,7 +406,6 @@ export function useKafkaStream<T extends StreamEvent = StreamEvent>(
       connectCalledRef.current = false;
       disconnectRef.current();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoConnect, endpoint]);
 
   return {
@@ -432,8 +445,8 @@ export function usePriceStream(options?: Omit<UseKafkaStreamOptions, 'keyBy'>) {
   });
 }
 
-function parseConsensusStreamMessage(data: any): StreamEvent | null {
-  let message = data;
+function parseConsensusStreamMessage(data: unknown): StreamEvent | null {
+  let message: unknown = data;
 
   if (typeof data === 'string') {
     try {
@@ -443,24 +456,44 @@ function parseConsensusStreamMessage(data: any): StreamEvent | null {
     }
   }
 
-  if (!message) {
+  if (!message || typeof message !== 'object') {
     return null;
   }
 
-  if (message.event_type) {
-    return message as StreamEvent;
+  const messageRecord = message as Record<string, unknown>;
+  const eventType = typeof messageRecord.event_type === 'string' ? messageRecord.event_type : null;
+  if (eventType) {
+    const payloadRecord = (messageRecord.payload && typeof messageRecord.payload === 'object')
+      ? (messageRecord.payload as Record<string, unknown>)
+      : messageRecord;
+    const timestamp = typeof messageRecord.timestamp === 'number'
+      ? messageRecord.timestamp
+      : Date.now() / 1000;
+    return {
+      event_id: String(messageRecord.event_id || messageRecord.id || `${eventType}_${timestamp}`),
+      event_type: eventType,
+      timestamp,
+      source: typeof messageRecord.source === 'string' ? messageRecord.source : 'consensus',
+      payload: payloadRecord,
+    } as StreamEvent;
   }
 
-  if (message.type && message.data) {
-    const payload = message.data;
-    const timestamp = message.ts ?? payload.timestamp ?? Date.now() / 1000;
+  const type = typeof messageRecord.type === 'string' ? messageRecord.type : null;
+  const payload = messageRecord.data;
+  if (type && payload && typeof payload === 'object') {
+    const payloadRecord = payload as Record<string, unknown>;
+    const timestamp = typeof messageRecord.ts === 'number'
+      ? messageRecord.ts
+      : typeof payloadRecord.timestamp === 'number'
+        ? payloadRecord.timestamp
+        : Date.now() / 1000;
 
     return {
-      event_id: payload.opinion_id || payload.plan_id || payload.round_id || `${message.type}_${timestamp}`,
-      event_type: message.type,
+      event_id: String(payloadRecord.opinion_id || payloadRecord.plan_id || payloadRecord.round_id || `${type}_${timestamp}`),
+      event_type: type,
       timestamp,
       source: 'consensus',
-      payload,
+      payload: payloadRecord,
     } as StreamEvent;
   }
 

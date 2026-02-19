@@ -11,15 +11,19 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 import asyncio
 
-from execution.persistent_book import (
-    BookEventType,
-    BookEvent,
-    OrderBookLevel,
-    OrderBookSnapshot,
-    PersistentOrderBook,
-    PersistentOrderBookManager,
-    get_persistent_book_manager,
-)
+try:
+    from execution.persistent_book import (
+        BookEventType,
+        BookEvent,
+        OrderBookLevel,
+        OrderBookSnapshot,
+        PersistentOrderBook,
+        PersistentOrderBookManager,
+        get_persistent_book_manager,
+    )
+except ModuleNotFoundError:
+    BookEventType = BookEvent = OrderBookLevel = OrderBookSnapshot = None
+    PersistentOrderBook = PersistentOrderBookManager = get_persistent_book_manager = None
 
 
 class TestBookEventType:

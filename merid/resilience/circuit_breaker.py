@@ -20,11 +20,31 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, List, Optional, TypeVar
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.resilience.circuit_breaker")
+
+
+# ── State change listeners ────────────────────────────────────────────
+# Callbacks invoked on every state transition: (name, old_state, new_state, context)
+StateChangeCallback = Callable[[str, str, str, dict], None]
+_state_listeners: List[StateChangeCallback] = []
+
+
+def on_state_change(callback: StateChangeCallback) -> None:
+    """Register a callback for circuit breaker state transitions."""
+    _state_listeners.append(callback)
+
+
+def _notify_listeners(name: str, old_state: str, new_state: str, context: dict) -> None:
+    """Notify all registered listeners of a state change."""
+    for cb in _state_listeners:
+        try:
+            cb(name, old_state, new_state, context)
+        except Exception:
+            pass  # Listeners must not break the breaker
 
 T = TypeVar("T")
 
@@ -114,10 +134,11 @@ class CircuitBreaker:
         async with self._lock:
             if self._state == CircuitState.OPEN:
                 if time.time() - self._last_failure_time >= self.recovery_timeout:
-                    # Transition to half-open
+                    old = self._state.value
                     self._state = CircuitState.HALF_OPEN
                     self._half_open_calls = 0
                     logger.info(f"Circuit '{self.name}' transitioning to HALF_OPEN")
+                    _notify_listeners(self.name, old, "half_open", {"reason": "recovery_timeout"})
                 else:
                     raise CircuitOpenError(self.name, self._time_until_retry())
             
@@ -132,13 +153,13 @@ class CircuitBreaker:
         async with self._lock:
             if self._state == CircuitState.HALF_OPEN:
                 self._success_count += 1
-                # One success in half-open = close circuit
+                old = self._state.value
                 self._state = CircuitState.CLOSED
                 self._failure_count = 0
                 self._success_count = 0
                 logger.info(f"Circuit '{self.name}' CLOSED (recovered)")
+                _notify_listeners(self.name, old, "closed", {"reason": "recovered"})
             elif self._state == CircuitState.CLOSED:
-                # Reset failure count on success
                 self._failure_count = 0
     
     async def record_failure(self, error: Optional[Exception] = None) -> None:
@@ -148,18 +169,29 @@ class CircuitBreaker:
             self._last_failure_time = time.time()
             
             if self._state == CircuitState.HALF_OPEN:
-                # Failure in half-open = reopen circuit
+                old = self._state.value
                 self._state = CircuitState.OPEN
                 self._half_open_calls = 0
                 logger.warning(
                     f"Circuit '{self.name}' re-OPENED (half-open failure): {error}"
                 )
+                _notify_listeners(self.name, old, "open", {
+                    "reason": "half_open_failure",
+                    "error": str(error) if error else None,
+                })
             elif self._state == CircuitState.CLOSED:
                 if self._failure_count >= self.failure_threshold:
+                    old = self._state.value
                     self._state = CircuitState.OPEN
                     logger.warning(
                         f"Circuit '{self.name}' OPENED after {self._failure_count} failures"
                     )
+                    _notify_listeners(self.name, old, "open", {
+                        "reason": "threshold_exceeded",
+                        "failure_count": self._failure_count,
+                        "threshold": self.failure_threshold,
+                        "error": str(error) if error else None,
+                    })
     
     async def __aenter__(self) -> "CircuitBreaker":
         """Async context manager entry - check if call is allowed."""

@@ -36,6 +36,21 @@ def _get_paper_stats() -> Dict[str, Any]:
     return engine.get_portfolio_stats(user_id)
 
 
+def _normalize_label(value: Any, default: str) -> str:
+    """Normalize enum/string values into uppercase labels."""
+    if value is None:
+        return default
+
+    raw_value = value
+    if hasattr(raw_value, "value"):
+        raw_value = raw_value.value
+    elif hasattr(raw_value, "name"):
+        raw_value = raw_value.name
+
+    text = str(raw_value).strip()
+    return text.upper() if text else default
+
+
 @router.get("/portfolio/summary")
 async def get_portfolio_summary() -> Dict[str, Any]:
     """
@@ -71,24 +86,46 @@ async def get_portfolio_summary() -> Dict[str, Any]:
 @router.get("/prices/live")
 async def get_live_prices(symbols: str) -> Dict[str, Any]:
     """
-    Get live prices for multiple symbols from the real price feed.
+    Get live prices for multiple symbols.
+    Tries CCXT LivePriceFeed first, falls back to CoinGecko live_data cache.
     Query param: symbols (comma-separated, e.g., "BTC,ETH,SOL")
     """
     try:
-        from data.live_price_feed import get_live_price_feed
-        feed = get_live_price_feed()
-        all_prices = feed.get_latest_prices()
+        # --- Source 1: CCXT LivePriceFeed ---
+        all_prices: Dict[str, Dict[str, Any]] = {}
+        try:
+            from data.live_price_feed import get_live_price_feed
+            feed = get_live_price_feed()
+            all_prices = feed.get_latest_prices()
+        except Exception as exc:
+            logger.debug(f"Live price feed error (ignored): {exc}")
+
+        # --- Source 2: CoinGecko live_data cache (fallback) ---
+        if not all_prices:
+            try:
+                from web.api.live_data import _price_cache as cg_cache, fetch_live_prices as _fetch_cg
+                if not cg_cache:
+                    await _fetch_cg()
+                for sym, data in cg_cache.items():
+                    short = sym.replace("/USDT", "").replace("/USD", "")
+                    all_prices[short] = {
+                        "price": data.get("price", 0),
+                        "change_24h": data.get("change_24h", 0),
+                        "volume_24h": data.get("volume_24h", 0),
+                        "source": "coingecko",
+                        "timestamp": data.get("timestamp"),
+                    }
+            except Exception as cg_err:
+                logger.warning(f"CoinGecko fallback failed: {cg_err}")
 
         symbol_list = [s.strip().upper() for s in symbols.split(",")]
         prices = []
 
         for symbol in symbol_list:
-            # Try exact match, then strip -USD suffix
             key = symbol
             if key not in all_prices:
                 key = symbol.replace("-USD", "").replace("/USD", "")
             if key not in all_prices:
-                # Try with /USD suffix (Kraken format)
                 for k in all_prices:
                     if k.upper().startswith(symbol.replace("-USD", "")):
                         key = k
@@ -135,11 +172,11 @@ async def get_recent_orders(limit: int = 10) -> Dict[str, Any]:
         for order in reversed(portfolio.trade_history[-limit:]):
             ts = getattr(order, "filled_at", None) or getattr(order, "created_at", time.time())
             time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S") if isinstance(ts, (int, float)) else str(ts)
-            side = getattr(order, "side", "BUY").upper()
+            side = _normalize_label(getattr(order, "side", None), "BUY")
             asset = getattr(order, "asset", "?")
             size = getattr(order, "size_usd", getattr(order, "quantity", 0))
             price = getattr(order, "fill_price", getattr(order, "price", 0))
-            status = getattr(order, "status", "FILLED").upper()
+            status = _normalize_label(getattr(order, "status", None), "FILLED")
             orders.append({
                 "time": time_str,
                 "action": f"{side} {asset}",

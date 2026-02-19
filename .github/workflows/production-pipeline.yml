@@ -4,6 +4,9 @@ on: workflow_dispatch  # Legacy — no K8s/Docker infra yet
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: merid
+  MERID_SWARM_INTEGRITY_ENFORCE: "1"
+  MERID_SWARM_HEALTH_SNAPSHOT: tests/fixtures/swarm/healthy_snapshot.json
+  MERID_SWARM_SAFEGUARD_CONFIG: .merid_safeguard.yml
 
 jobs:
   # Stage 1: Build & Unit Tests
@@ -35,6 +38,13 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov pytest-xdist prometheus-client
       
+      - name: Swarm integrity preflight gate
+        run: |
+          python scripts/enforce_swarm_integrity.py \
+            --config .merid_safeguard.yml \
+            --snapshot tests/fixtures/swarm/healthy_snapshot.json \
+            --strict
+
       - name: Lint and type-check
         run: |
           python -m flake8 core/ tests/ --max-line-length=120 --ignore=E501,W503 --extend-exclude=venv/

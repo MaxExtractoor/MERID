@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { CircuitBreakerState } from '../types/risk';
+import { API_BASE_URL, API_ENDPOINTS } from '../config/constants';
+import { logUiError } from '../utils/logger';
 
 export interface CircuitBreakerStatus {
   state: CircuitBreakerState;
@@ -59,9 +61,20 @@ export function useRiskProtections(pollingInterval = POLL_INTERVAL): UseRiskProt
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
+    const token = localStorage.getItem('merid-access');
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(headers ?? {}),
+    };
+  }, []);
+
   const fetchProtections = useCallback(async () => {
     try {
-      const response = await fetch('/api/risk/protections');
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_PROTECTIONS}`, {
+        headers: authHeaders(),
+      });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
@@ -71,11 +84,11 @@ export function useRiskProtections(pollingInterval = POLL_INTERVAL): UseRiskProt
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch risk protections';
       setError(message);
-      console.error('Risk protections fetch error:', err);
+      logUiError('useRiskProtections', 'Risk protections fetch error', err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [authHeaders]);
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -84,9 +97,9 @@ export function useRiskProtections(pollingInterval = POLL_INTERVAL): UseRiskProt
 
   const resetCircuit = useCallback(async (): Promise<boolean> => {
     try {
-      const response = await fetch('/api/risk/circuit-breaker/reset', {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_CIRCUIT_BREAKER_RESET}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
       });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -94,16 +107,16 @@ export function useRiskProtections(pollingInterval = POLL_INTERVAL): UseRiskProt
       await fetchProtections(); // Refresh data
       return true;
     } catch (err) {
-      console.error('Circuit reset failed:', err);
+      logUiError('useRiskProtections', 'Circuit reset failed', err);
       return false;
     }
-  }, [fetchProtections]);
+  }, [authHeaders, fetchProtections]);
 
   const toggleKillSwitch = useCallback(async (action: 'enable' | 'disable'): Promise<boolean> => {
     try {
-      const response = await fetch(`/api/risk/kill-switch/${action}`, {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_KILL_SWITCH(action)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
       });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -111,10 +124,10 @@ export function useRiskProtections(pollingInterval = POLL_INTERVAL): UseRiskProt
       await fetchProtections(); // Refresh data
       return true;
     } catch (err) {
-      console.error('Kill switch toggle failed:', err);
+      logUiError('useRiskProtections', 'Kill switch toggle failed', err);
       return false;
     }
-  }, [fetchProtections]);
+  }, [authHeaders, fetchProtections]);
 
   useEffect(() => {
     fetchProtections();

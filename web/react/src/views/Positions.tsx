@@ -1,76 +1,48 @@
-import { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, Package, AlertTriangle } from 'lucide-react';
-
-interface Position {
-  symbol: string;
-  quantity: number;
-  avgPrice: number;
-  currentPrice: number;
-  marketValue: number;
-  unrealizedPnl: number;
-  unrealizedPnlPct: number;
-  side: 'long' | 'short';
-  venue: string;
-}
+import { useMemo } from 'react';
+import { TrendingUp, TrendingDown, Package, RefreshCw } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import type { KalshiPosition, KalshiRiskSummary } from '../types/kalshi';
 
 export default function Positions() {
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: rawData, loading, refetch } = useApiData<{ positions: KalshiPosition[] }>(
+    API_ENDPOINTS.KALSHI_POSITIONS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.POSITIONS },
+  );
+  const { data: risk } = useApiData<KalshiRiskSummary>(
+    API_ENDPOINTS.KALSHI_RISK,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
 
-  useEffect(() => {
-    const fetchPositions = async () => {
-      try {
-        const res = await fetch('/api/v1/trading/portfolio/summary');
-        if (res.ok) {
-          const data = await res.json();
-          if (data.positions && data.positions.length > 0) {
-            setPositions(data.positions.map((p: any) => ({
-              symbol: p.asset || p.symbol || 'Unknown',
-              quantity: p.size || p.quantity || 0,
-              avgPrice: p.avg_price || p.avgPrice || 0,
-              currentPrice: p.current_price || p.currentPrice || 0,
-              marketValue: p.size_usd || p.marketValue || Math.abs(p.size || 0) * (p.current_price || 0),
-              unrealizedPnl: p.pnl || p.unrealizedPnl || 0,
-              unrealizedPnlPct: p.pnl_pct || p.unrealizedPnlPct || 0,
-              side: (p.side || 'long').toLowerCase() as 'long' | 'short',
-              venue: p.venue || 'Paper',
-            })));
-            setLoading(false);
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn('Failed to fetch positions from API, showing empty state');
-      }
-      setPositions([]);
-      setLoading(false);
-    };
+  const positions = useMemo(() => rawData?.positions ?? [], [rawData]);
 
-    fetchPositions();
-    const interval = setInterval(fetchPositions, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  const totalNotional = useMemo(
+    () => positions.reduce((sum, p) => sum + p.avg_price * p.size, 0),
+    [positions],
+  );
+  const totalUnrealizedPnl = useMemo(
+    () => positions.reduce((sum, p) => sum + p.unrealized_pnl, 0),
+    [positions],
+  );
 
-  const totalValue = positions.reduce((sum, p) => sum + p.marketValue, 0);
-  const totalPnl = positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
-  const totalPnlPct = totalValue > 0 ? (totalPnl / (totalValue - totalPnl)) * 100 : 0;
+  const drawdownPct = risk?.drawdown_pct ?? 0;
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Positions</h1>
-          <p className="text-slate-400">Active portfolio positions across all venues</p>
+          <h1 className="text-2xl font-bold text-white">Kalshi Positions</h1>
+          <p className="text-slate-400">Live positions from your Kalshi account</p>
         </div>
-        <div className="flex gap-3">
-          <button className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition-colors">
-            Export CSV
-          </button>
-          <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition-colors">
-            Rebalance
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium text-slate-300 transition-colors"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Refresh
+        </button>
       </div>
 
       {/* Summary Cards */}
@@ -78,82 +50,94 @@ export default function Positions() {
         <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800">
           <div className="flex items-center gap-2 mb-2">
             <Package className="w-4 h-4 text-blue-400" />
-            <span className="text-sm text-slate-400">Total Market Value</span>
+            <span className="text-sm text-slate-400">Total Notional</span>
           </div>
-          <div className="text-2xl font-semibold">${totalValue.toLocaleString()}</div>
-          <div className="text-sm text-slate-400 mt-1">{positions.length} positions</div>
+          <div className="text-2xl font-semibold text-white">
+            ${totalNotional.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div className="text-sm text-slate-400 mt-1">{positions.length} open position{positions.length !== 1 ? 's' : ''}</div>
         </div>
-        
+
         <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800">
           <div className="flex items-center gap-2 mb-2">
-            {totalPnl >= 0 ? <TrendingUp className="w-4 h-4 text-emerald-400" /> : <TrendingDown className="w-4 h-4 text-rose-400" />}
+            {totalUnrealizedPnl >= 0
+              ? <TrendingUp className="w-4 h-4 text-emerald-400" />
+              : <TrendingDown className="w-4 h-4 text-rose-400" />}
             <span className="text-sm text-slate-400">Unrealized P&L</span>
           </div>
-          <div className={`text-2xl font-semibold ${totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {totalPnl >= 0 ? '+' : ''}${totalPnl.toLocaleString()}
+          <div className={`text-2xl font-semibold ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {totalUnrealizedPnl >= 0 ? '+' : ''}${totalUnrealizedPnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
-          <div className={`text-sm mt-1 ${totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {totalPnlPct >= 0 ? '+' : ''}{totalPnlPct.toFixed(2)}%
-          </div>
+          <div className="text-sm text-slate-400 mt-1">across all markets</div>
         </div>
-        
+
         <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800">
           <div className="flex items-center gap-2 mb-2">
-            <AlertTriangle className="w-4 h-4 text-amber-400" />
-            <span className="text-sm text-slate-400">Risk Exposure</span>
+            <TrendingDown className="w-4 h-4 text-amber-400" />
+            <span className="text-sm text-slate-400">Drawdown</span>
           </div>
-          <div className="text-2xl font-semibold text-slate-200">25.0%</div>
-          <div className="text-sm text-slate-400 mt-1">of buying power</div>
+          <div className={`text-2xl font-semibold ${drawdownPct > 10 ? 'text-rose-400' : drawdownPct > 5 ? 'text-amber-400' : 'text-slate-200'}`}>
+            {drawdownPct.toFixed(1)}%
+          </div>
+          <div className="text-sm text-slate-400 mt-1">from peak equity</div>
         </div>
       </div>
 
-      {/* Positions Grid */}
+      {/* Positions Table */}
       {loading ? (
         <div className="bg-slate-900/70 rounded-xl p-8 border border-slate-800 text-center">
-          <div className="animate-spin w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
-          <p className="text-slate-400">Loading positions...</p>
+          <div className="animate-spin w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full mx-auto mb-4" />
+          <p className="text-slate-400">Loading Kalshi positions...</p>
+        </div>
+      ) : positions.length === 0 ? (
+        <div className="bg-slate-900/70 rounded-xl p-12 border border-slate-800 text-center">
+          <Package className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+          <p className="text-slate-400 font-medium">No open positions</p>
+          <p className="text-slate-500 text-sm mt-1">Positions will appear here once you have active Kalshi contracts</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {positions.map((position) => (
-            <div key={position.symbol} className="bg-slate-900/70 rounded-xl p-4 border border-slate-800 hover:border-slate-700 transition-colors">
-              <div className="flex items-center justify-between mb-3">
-                <div>
-                  <h3 className="font-semibold text-lg">{position.symbol}</h3>
-                  <span className="text-xs text-slate-500 px-2 py-0.5 bg-slate-800 rounded">{position.venue}</span>
-                </div>
-                <div className={`px-3 py-1 rounded-full text-sm font-medium ${position.unrealizedPnl >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
-                  {position.unrealizedPnl >= 0 ? '+' : ''}{position.unrealizedPnlPct.toFixed(2)}%
-                </div>
-              </div>
-              
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <div className="text-slate-500">Quantity</div>
-                  <div className="font-medium">{position.quantity}</div>
-                </div>
-                <div>
-                  <div className="text-slate-500">Market Value</div>
-                  <div className="font-medium">${position.marketValue.toLocaleString()}</div>
-                </div>
-                <div>
-                  <div className="text-slate-500">Avg Price</div>
-                  <div className="font-medium">${position.avgPrice.toFixed(2)}</div>
-                </div>
-                <div>
-                  <div className="text-slate-500">Current Price</div>
-                  <div className="font-medium">${position.currentPrice.toFixed(2)}</div>
-                </div>
-              </div>
-              
-              <div className="mt-4 pt-3 border-t border-slate-800 flex justify-between items-center">
-                <span className="text-sm text-slate-500">Unrealized P&L</span>
-                <span className={`font-semibold ${position.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {position.unrealizedPnl >= 0 ? '+' : ''}${position.unrealizedPnl.toFixed(2)}
-                </span>
-              </div>
-            </div>
-          ))}
+        <div className="bg-slate-900/70 rounded-xl border border-slate-800 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-slate-500 text-xs uppercase tracking-wider">
+                <th className="text-left px-4 py-3">Ticker</th>
+                <th className="text-left px-4 py-3">Outcome</th>
+                <th className="text-right px-4 py-3">Contracts</th>
+                <th className="text-right px-4 py-3">Avg Price</th>
+                <th className="text-right px-4 py-3">Notional</th>
+                <th className="text-right px-4 py-3">Unrealized P&L</th>
+                <th className="text-right px-4 py-3">Realized P&L</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/50">
+              {positions.map((p) => {
+                const notional = p.avg_price * p.size;
+                const pnlPos = p.unrealized_pnl >= 0;
+                const rpnlPos = p.realized_pnl >= 0;
+                return (
+                  <tr key={`${p.ticker}-${p.outcome}`} className="hover:bg-slate-800/30 transition-colors">
+                    <td className="px-4 py-3 font-mono text-orange-300 font-medium">{p.ticker}</td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${p.outcome === 'yes' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+                        {p.outcome.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right text-slate-200">{p.size}</td>
+                    <td className="px-4 py-3 text-right text-slate-200">{Math.round(p.avg_price * 100)}¢</td>
+                    <td className="px-4 py-3 text-right text-slate-200">
+                      ${notional.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+                    <td className={`px-4 py-3 text-right font-semibold ${pnlPos ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {pnlPos ? '+' : ''}${p.unrealized_pnl.toFixed(2)}
+                    </td>
+                    <td className={`px-4 py-3 text-right ${rpnlPos ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {rpnlPos ? '+' : ''}${p.realized_pnl.toFixed(2)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

@@ -1,96 +1,59 @@
-import { useState, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { Search, RefreshCw } from 'lucide-react';
-
-interface Order {
-  id: string;
-  symbol: string;
-  side: 'buy' | 'sell';
-  type: 'market' | 'limit' | 'stop';
-  quantity: number;
-  price: number | null;
-  status: 'open' | 'filled' | 'cancelled' | 'rejected';
-  timestamp: string;
-  venue: string;
-}
+import { useApiData } from '../hooks/useApiData';
+import ExecutionGateStrip from '../components/ExecutionGateStrip';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import type { KalshiOrder } from '../types/kalshi';
 
 export default function Orders() {
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
 
-  useEffect(() => {
-    const fetchOrders = async () => {
-      try {
-        const res = await fetch('/api/v1/trading/orders/open');
-        if (res.ok) {
-          const data = await res.json();
-          if (data.orders) {
-            setOrders(data.orders.map((o: any) => ({
-              id: o.id || o.order_id || '',
-              symbol: o.symbol || o.asset || '',
-              side: (o.side || 'buy').toLowerCase() as 'buy' | 'sell',
-              type: (o.type || o.order_type || 'market').toLowerCase() as 'market' | 'limit' | 'stop',
-              quantity: o.size || o.quantity || 0,
-              price: o.price || null,
-              status: (o.status || 'open').toLowerCase() as 'open' | 'filled' | 'cancelled' | 'rejected',
-              timestamp: o.createdAt || o.timestamp || '',
-              venue: o.venue || 'Paper',
-            })));
-            setLoading(false);
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn('Failed to fetch orders from API, showing empty state');
-      }
-      setOrders([]);
-      setLoading(false);
-    };
+  const { data: rawData, loading, refetch } = useApiData<{ orders: KalshiOrder[] }>(
+    API_ENDPOINTS.KALSHI_ORDERS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.ORDERS },
+  );
 
-    fetchOrders();
-    const interval = setInterval(fetchOrders, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  const orders = useMemo(() => rawData?.orders ?? [], [rawData]);
 
-  const filteredOrders = orders.filter(order => {
-    if (filter !== 'all' && order.status !== filter) return false;
-    if (searchTerm && !order.symbol.toLowerCase().includes(searchTerm.toLowerCase())) return false;
+  const filteredOrders = useMemo(() => orders.filter(o => {
+    if (filter !== 'all' && o.status !== filter) return false;
+    if (searchTerm && !o.ticker.toLowerCase().includes(searchTerm.toLowerCase())) return false;
     return true;
-  });
+  }), [orders, filter, searchTerm]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'filled': return 'text-emerald-400 bg-emerald-500/10';
-      case 'open': return 'text-blue-400 bg-blue-500/10';
-      case 'cancelled': return 'text-slate-400 bg-slate-500/10';
+      case 'executed': case 'filled': return 'text-emerald-400 bg-emerald-500/10';
+      case 'resting': case 'open': return 'text-blue-400 bg-blue-500/10';
+      case 'canceled': case 'cancelled': return 'text-slate-400 bg-slate-500/10';
       case 'rejected': return 'text-rose-400 bg-rose-500/10';
-      default: return 'text-slate-400';
+      default: return 'text-slate-400 bg-slate-500/10';
     }
   };
 
   return (
     <div className="space-y-6">
+      {/* Execution Gate — always visible */}
+      <ExecutionGateStrip />
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Orders</h1>
-          <p className="text-slate-400">View and manage all trading orders</p>
+          <h1 className="text-2xl font-bold text-white">Kalshi Orders</h1>
+          <p className="text-slate-400">Resting and recent orders on your Kalshi account</p>
         </div>
-        <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition-colors">
-          New Order
-        </button>
       </div>
 
       {/* Filters */}
       <div className="flex flex-wrap gap-4 items-center bg-slate-900/70 rounded-xl p-4 border border-slate-800">
         <div className="relative">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
+          <input aria-label="Search ticker"
             id="order-search"
             name="orderSearch"
             type="text"
-            placeholder="Search symbol..."
+            placeholder="Search ticker..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="pl-9 pr-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm focus:outline-none focus:border-blue-500 w-48"
@@ -98,6 +61,8 @@ export default function Orders() {
         </div>
         
         <select
+          id="order-status-filter"
+          name="orderStatusFilter"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           aria-label="Filter orders by status"
@@ -110,7 +75,7 @@ export default function Orders() {
           <option value="rejected">Rejected</option>
         </select>
 
-        <button className="p-2 hover:bg-slate-800 rounded-lg transition-colors" title="Refresh">
+        <button type="button" onClick={() => refetch()} className="p-2 hover:bg-slate-800 rounded-lg transition-colors" title="Refresh" aria-label="Refresh">
           <RefreshCw className="w-4 h-4 text-slate-400" />
         </button>
       </div>
@@ -119,44 +84,46 @@ export default function Orders() {
       <div className="bg-slate-900/70 rounded-xl border border-slate-800 overflow-hidden">
         {loading ? (
           <div className="p-8 text-center">
-            <div className="animate-spin w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
+            <div className="animate-spin w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full mx-auto mb-4" />
             <p className="text-slate-400">Loading orders...</p>
           </div>
         ) : (
-          <table className="w-full">
+          <table className="w-full text-sm">
             <thead className="bg-slate-800/50">
-              <tr>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">ID</th>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Symbol</th>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Side</th>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Type</th>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Quantity</th>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Price</th>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Status</th>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Venue</th>
-                <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Time</th>
+              <tr className="text-slate-500 text-xs uppercase tracking-wider">
+                <th className="text-left px-4 py-3">Order ID</th>
+                <th className="text-left px-4 py-3">Ticker</th>
+                <th className="text-left px-4 py-3">Side</th>
+                <th className="text-right px-4 py-3">Size</th>
+                <th className="text-right px-4 py-3">Filled</th>
+                <th className="text-right px-4 py-3">Price</th>
+                <th className="text-left px-4 py-3">Status</th>
+                <th className="text-left px-4 py-3">Time</th>
               </tr>
             </thead>
-            <tbody>
-              {filteredOrders.map((order) => (
-                <tr key={order.id} className="border-t border-slate-800 hover:bg-slate-800/30">
-                  <td className="px-4 py-3 text-sm font-mono text-slate-500">{order.id}</td>
-                  <td className="px-4 py-3 text-sm font-medium">{order.symbol}</td>
-                  <td className="px-4 py-3 text-sm">
-                    <span className={order.side === 'buy' ? 'text-emerald-400' : 'text-rose-400'}>
-                      {order.side.toUpperCase()}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-sm text-slate-300 capitalize">{order.type}</td>
-                  <td className="px-4 py-3 text-sm">{order.quantity}</td>
-                  <td className="px-4 py-3 text-sm">${order.price?.toFixed(2) || 'Market'}</td>
+            <tbody className="divide-y divide-slate-800/50">
+              {filteredOrders.map((o) => (
+                <tr key={o.order_id} className="hover:bg-slate-800/30 transition-colors">
+                  <td className="px-4 py-3 font-mono text-slate-500 text-xs">{o.order_id.slice(0, 8)}…</td>
+                  <td className="px-4 py-3 font-mono text-orange-300 font-medium">{o.ticker}</td>
                   <td className="px-4 py-3">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(order.status)}`}>
-                      {order.status}
+                    <span className={o.side === 'yes' ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
+                      {o.side.toUpperCase()}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-sm text-slate-400">{order.venue}</td>
-                  <td className="px-4 py-3 text-sm text-slate-400">{order.timestamp}</td>
+                  <td className="px-4 py-3 text-right text-slate-200">{o.size}</td>
+                  <td className="px-4 py-3 text-right text-slate-400">{o.filled}</td>
+                  <td className="px-4 py-3 text-right text-slate-200">
+                    {o.price !== null ? `${Math.round(o.price * 100)}¢` : 'Market'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${getStatusColor(o.status)}`}>
+                      {o.status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-slate-400">
+                    {o.created_at ? new Date(o.created_at).toLocaleTimeString() : '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -164,8 +131,8 @@ export default function Orders() {
         )}
         
         {!loading && filteredOrders.length === 0 && (
-          <div className="p-8 text-center text-slate-400">
-            No orders found matching your criteria.
+          <div className="p-8 text-center text-slate-400 text-sm">
+            No Kalshi orders found.
           </div>
         )}
       </div>

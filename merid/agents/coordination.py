@@ -312,6 +312,235 @@ class GovernanceVerdict:
         }
 
 
+# ======================================================================
+# DebateCoordinatorAgent
+# ======================================================================
+
+class DebateCoordinatorAgent(CanonicalAgent):
+    """Orchestrates structured multi-agent debates on prediction instruments.
+
+    Protocol per instrument:
+      1. Proposer agent submits an opinion with explanation.
+      2. Challenger agent generates a counter-opinion and counter-explanation.
+      3. Arbiter agent synthesizes a revised team opinion from both arguments.
+      4. Pre-debate and post-debate probabilities are recorded for debate lift.
+
+    Integrates with DebateStore for persistence and metrics.
+    """
+
+    def __init__(
+        self,
+        agent_id: str = "debate-coordinator-01",
+        max_rounds: int = 3,
+        min_disagreement: float = 0.03,
+    ):
+        super().__init__(agent_id, AgentCategory.COORDINATION)
+        self.max_rounds = max_rounds
+        self.min_disagreement = min_disagreement
+        self._debate_history: List[Dict[str, Any]] = []
+
+    async def _execute(self, context: Dict[str, Any]) -> AgentOutput:
+        """Run debate sessions for instruments provided in context.
+
+        Context:
+            instruments: List[dict] with symbol, ticker, market_prob, category
+            proposer_strategy: str (strategy name for proposer)
+            challenger_strategy: str (strategy name for challenger, default "challenger")
+            proposer_agent_id: str
+            challenger_agent_id: str
+        """
+        instruments = context.get("instruments", [])
+        results = []
+
+        for inst in instruments:
+            result = self.run_debate(inst, context)
+            if result:
+                results.append(result)
+                self._debate_history.append(result)
+
+        return AgentOutput(
+            agent_id=self.agent_id,
+            category=self.category.value,
+            output_type="debate_results",
+            payload={
+                "debates": results,
+                "count": len(results),
+            },
+            confidence=0.8 if results else 0.3,
+        )
+
+    def run_debate(
+        self,
+        instrument: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Run a single debate session for an instrument.
+
+        Returns a dict with debate session details, arguments, and post-debate opinion.
+        """
+        from merid.prediction.opinion_strategy import get_strategy
+        from merid.prediction.debate import (
+            DebateSession, DebateArgument, DebateStore, get_debate_store,
+        )
+
+        symbol = instrument.get("symbol", "")
+        ticker = instrument.get("ticker", "")
+        market_prob = instrument.get("market_prob", 0.5)
+        category = instrument.get("category", "")
+
+        proposer_strategy_name = context.get("proposer_strategy", "mean_reversion")
+        arbiter_strategy_name = context.get("arbiter_strategy", "arbiter")
+        proposer_agent_id = context.get("proposer_agent_id", "proposer-01")
+        challenger_agent_id = context.get("challenger_agent_id", "challenger-01")
+        arbiter_agent_id = context.get("arbiter_agent_id", self.agent_id)
+        team_id = context.get("team_id", "")
+
+        try:
+            proposer_strategy = get_strategy(proposer_strategy_name)
+            challenger_strategy = get_strategy("challenger")
+            arbiter_strategy = get_strategy(arbiter_strategy_name)
+        except Exception as exc:
+            logger.warning(f"Debate strategy init failed: {exc}")
+            return None
+
+        # Step 1: Proposer generates opinion
+        proposer_estimate = proposer_strategy.estimate(
+            agent_id=proposer_agent_id,
+            ticker=ticker,
+            market_prob=market_prob,
+            category=category,
+            context=context,
+        )
+        if proposer_estimate is None:
+            return None
+
+        # Step 2: Challenger generates counter-opinion
+        challenge_context = {
+            **context,
+            "proposer_prob": proposer_estimate.agent_prob,
+            "proposer_rationale": proposer_estimate.reasoning_tag,
+        }
+        challenger_estimate = challenger_strategy.estimate(
+            agent_id=challenger_agent_id,
+            ticker=ticker,
+            market_prob=market_prob,
+            category=category,
+            context=challenge_context,
+        )
+
+        # Quality gate: suppress arbiter if disagreement is too low
+        challenger_prob = challenger_estimate.agent_prob if challenger_estimate else market_prob
+        disagreement_width = abs(proposer_estimate.agent_prob - challenger_prob)
+        debate_suppressed = disagreement_width < self.min_disagreement
+
+        arbiter_estimate = None
+        if not debate_suppressed:
+            # Step 3: Arbiter synthesizes
+            arbiter_context = {
+                **context,
+                "proposer_prob": proposer_estimate.agent_prob,
+                "proposer_confidence": proposer_estimate.confidence,
+                "challenger_prob": challenger_prob,
+                "challenger_confidence": challenger_estimate.confidence if challenger_estimate else 0.3,
+            }
+            arbiter_estimate = arbiter_strategy.estimate(
+                agent_id=arbiter_agent_id,
+                ticker=ticker,
+                market_prob=market_prob,
+                category=category,
+                context=arbiter_context,
+            )
+        else:
+            logger.info(f"Debate suppressed for {symbol}: disagreement_width={disagreement_width:.4f} < min={self.min_disagreement}")
+
+        post_debate_prob = arbiter_estimate.agent_prob if arbiter_estimate else proposer_estimate.agent_prob
+
+        # Persist to DebateStore
+        debate_id = ""
+        try:
+            store = get_debate_store()
+            session = DebateSession(
+                symbol=symbol,
+                team_id=team_id,
+                pre_debate_prob=market_prob,
+                post_debate_prob=post_debate_prob,
+                rounds=3,
+            )
+            store.create_debate(session)
+            debate_id = session.id
+
+            # Record arguments
+            prop_arg = DebateArgument(
+                debate_id=session.id,
+                agent_id=proposer_agent_id,
+                role="proposer",
+                probability=proposer_estimate.agent_prob,
+                confidence=proposer_estimate.confidence,
+                rationale=proposer_estimate.reasoning_tag,
+                explanation=proposer_estimate.explanation.to_dict() if proposer_estimate.explanation else None,
+            )
+            store.add_argument(prop_arg)
+
+            if challenger_estimate:
+                chal_arg = DebateArgument(
+                    debate_id=session.id,
+                    agent_id=challenger_agent_id,
+                    role="challenger",
+                    probability=challenger_estimate.agent_prob,
+                    confidence=challenger_estimate.confidence,
+                    rationale=challenger_estimate.reasoning_tag,
+                    explanation=challenger_estimate.explanation.to_dict() if challenger_estimate.explanation else None,
+                )
+                store.add_argument(chal_arg)
+
+            if arbiter_estimate:
+                arb_arg = DebateArgument(
+                    debate_id=session.id,
+                    agent_id=arbiter_agent_id,
+                    role="arbiter",
+                    probability=arbiter_estimate.agent_prob,
+                    confidence=arbiter_estimate.confidence,
+                    rationale=arbiter_estimate.reasoning_tag,
+                    explanation=arbiter_estimate.explanation.to_dict() if arbiter_estimate.explanation else None,
+                )
+                store.add_argument(arb_arg)
+
+        except Exception as exc:
+            logger.warning(f"Debate persistence failed for {symbol}: {exc}")
+
+        return {
+            "debate_id": debate_id,
+            "symbol": symbol,
+            "market_prob": round(market_prob, 4),
+            "proposer": {
+                "agent_id": proposer_agent_id,
+                "strategy": proposer_strategy_name,
+                "prob": proposer_estimate.agent_prob,
+                "confidence": proposer_estimate.confidence,
+                "rationale": proposer_estimate.reasoning_tag,
+            },
+            "challenger": {
+                "agent_id": challenger_agent_id,
+                "prob": challenger_estimate.agent_prob if challenger_estimate else None,
+                "confidence": challenger_estimate.confidence if challenger_estimate else None,
+                "rationale": challenger_estimate.reasoning_tag if challenger_estimate else None,
+            },
+            "arbiter": {
+                "agent_id": arbiter_agent_id,
+                "strategy": arbiter_strategy_name,
+                "prob": arbiter_estimate.agent_prob if arbiter_estimate else None,
+                "confidence": arbiter_estimate.confidence if arbiter_estimate else None,
+            },
+            "post_debate_prob": round(post_debate_prob, 4),
+            "disagreement_width": round(disagreement_width, 4),
+            "debate_suppressed": debate_suppressed,
+        }
+
+
+# ======================================================================
+# GovernanceAgent
+# ======================================================================
+
 class GovernanceAgent(CanonicalAgent):
     """Enforces non-negotiable constraints (compliance, forbidden venues, ethical rules).
 

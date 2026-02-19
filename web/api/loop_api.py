@@ -91,8 +91,8 @@ def get_tick_log_summary() -> Dict[str, Any]:
         # Include operator session data
         try:
             result["session"] = _session().summary()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("operation_suppressed", error=str(exc))
         return result
     except Exception as e:
         logger.warning(f"tick_log_summary_error: {e}")

@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Activity, FileText, Brain, RefreshCw } from 'lucide-react';
-import { API_BASE_URL } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS} from '../config/constants';
+import { logUiError } from '../utils/logger';
 import { formatDateTime } from '../utils/formatters';
 
 type Tab = 'orders' | 'decisions' | 'audit';
 
-interface Order {
+interface ActivityOrder {
   id: string;
   symbol: string;
   side: string;
@@ -33,7 +34,7 @@ interface AuditEntry {
 
 export function OperatorActivityStream() {
   const [tab, setTab] = useState<Tab>('orders');
-  const [orders, setOrders] = useState<Order[]>([]);
+  const [orders, setOrders] = useState<ActivityOrder[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -41,27 +42,35 @@ export function OperatorActivityStream() {
   const fetchTab = useCallback(async (t: Tab) => {
     setLoading(true);
     try {
+      const token = localStorage.getItem('merid-access');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      };
+
+      const fetchOperator = (endpoint: string) => fetch(`${API_BASE_URL}${endpoint}`, { headers });
+
       if (t === 'orders') {
-        const res = await fetch(`${API_BASE_URL}/api/v1/orders?limit=20`);
+        const res = await fetchOperator(`${API_ENDPOINTS.OPERATOR_ORDERS}?limit=20`);
         if (res.ok) {
           const data = await res.json();
           setOrders(data.orders || data || []);
         }
       } else if (t === 'decisions') {
-        const res = await fetch(`${API_BASE_URL}/api/v1/system/decisions/recent?limit=10`);
+        const res = await fetchOperator(`${API_ENDPOINTS.SYSTEM_DECISIONS}?limit=10`);
         if (res.ok) {
           const data = await res.json();
           setDecisions(data.decisions || []);
         }
       } else if (t === 'audit') {
-        const res = await fetch(`${API_BASE_URL}/api/operator/audit-trail?limit=20`);
+        const res = await fetchOperator(`${API_ENDPOINTS.OPERATOR_AUDIT_TRAIL}?limit=20`);
         if (res.ok) {
           const data = await res.json();
           setAuditEntries(data.entries || []);
         }
       }
-    } catch (e) {
-      console.error(`Failed to fetch ${t}:`, e);
+    } catch (err) {
+      logUiError('OperatorActivityStream', 'Fetch failed', err);
     } finally {
       setLoading(false);
     }
@@ -69,7 +78,7 @@ export function OperatorActivityStream() {
 
   useEffect(() => {
     fetchTab(tab);
-    const id = setInterval(() => fetchTab(tab), 10000);
+    const id = setInterval(() => fetchTab(tab), DEFAULTS.POLLING_INTERVALS.MEDIUM);
     return () => clearInterval(id);
   }, [tab, fetchTab]);
 
@@ -85,7 +94,7 @@ export function OperatorActivityStream() {
       <div className="flex items-center justify-between">
         <div className="flex gap-1">
           {tabs.map(({ key, label, icon: Icon }) => (
-            <button
+            <button type="button"
               key={key}
               onClick={() => setTab(key)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
@@ -99,7 +108,7 @@ export function OperatorActivityStream() {
             </button>
           ))}
         </div>
-        <button
+        <button type="button"
           onClick={() => fetchTab(tab)}
           className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
           title="Refresh"

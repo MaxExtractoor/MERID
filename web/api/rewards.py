@@ -398,3 +398,253 @@ async def submit_bug_report(req: BugReportRequest) -> Dict[str, Any]:
         "severity": report.reported_severity.value,
         "status": "submitted",
     }
+
+
+# ── Sprint 9: Reward Engine Endpoints ────────────────────────────────
+
+def _get_reward_engine():
+    """Get the RewardEngine singleton, or None if unavailable."""
+    try:
+        from merid.rewards.engine import get_reward_engine
+        return get_reward_engine()
+    except Exception as exc:
+        logger.debug("RewardEngine unavailable: %s", exc)
+        return None
+
+
+def _get_quest_store():
+    """Get the QuestStore singleton, or None if unavailable."""
+    try:
+        from merid.rewards.quests import QuestStore
+        if not hasattr(_get_quest_store, "_inst"):
+            _get_quest_store._inst = QuestStore()
+        return _get_quest_store._inst
+    except Exception:
+        return None
+
+
+class SubmitRewardEventRequest(BaseModel):
+    category: str = Field(..., description="Event category: forecast, debate, cognitive, code_quality, dev_forecast, dev_debate")
+    agent_id: str = Field(..., description="Agent or user ID")
+    team_id: str = Field("", description="Optional team ID")
+    venue: str = Field("", description="Venue where event occurred")
+    # Forecast fields
+    symbol: Optional[str] = None
+    probability: Optional[float] = None
+    brier_score: Optional[float] = None
+    prior_brier: Optional[float] = None
+    has_explanation: bool = False
+    explanation_rationale: str = ""
+    # Debate fields
+    debate_id: Optional[str] = None
+    role: Optional[str] = None
+    debate_lift: Optional[float] = None
+    disagreement_width: float = 0.0
+    # Cognitive fields
+    action: Optional[str] = None
+    hypothesis_id: Optional[str] = None
+    was_contradicted: bool = False
+    # Code quality fields
+    target: Optional[str] = None
+    tests_added: int = 0
+    alerts_reduced: int = 0
+    impact_before: Optional[float] = None
+    impact_after: Optional[float] = None
+    # Dev forecast fields
+    change_id: Optional[str] = None
+    predicted_metric: Optional[str] = None
+    # Dev debate fields
+    design_lift: Optional[float] = None
+
+
+@router.post("/engine/events")
+async def submit_reward_event(req: SubmitRewardEventRequest) -> Dict[str, Any]:
+    """Submit a reward event to the engine for processing."""
+    engine = _get_reward_engine()
+    if not engine:
+        raise HTTPException(status_code=503, detail="Reward engine not available")
+
+    from merid.rewards.events import (
+        ForecastEvent, DebateEvent, CognitiveEvent,
+        CodeQualityEvent, DevForecastEvent, DevDebateEvent,
+    )
+
+    event_map = {
+        "forecast": lambda: ForecastEvent(
+            agent_id=req.agent_id, team_id=req.team_id, venue=req.venue,
+            symbol=req.symbol or "", probability=req.probability or 0.5,
+            brier_score=req.brier_score, prior_brier=req.prior_brier,
+            has_explanation=req.has_explanation,
+            explanation_rationale=req.explanation_rationale,
+        ),
+        "debate": lambda: DebateEvent(
+            agent_id=req.agent_id, team_id=req.team_id, venue=req.venue,
+            debate_id=req.debate_id or "", role=req.role or "",
+            debate_lift=req.debate_lift, disagreement_width=req.disagreement_width,
+            has_explanation=req.has_explanation,
+            explanation_rationale=req.explanation_rationale,
+        ),
+        "cognitive": lambda: CognitiveEvent(
+            agent_id=req.agent_id, team_id=req.team_id, venue=req.venue,
+            action=req.action or "created", hypothesis_id=req.hypothesis_id or "",
+            was_contradicted=req.was_contradicted,
+        ),
+        "code_quality": lambda: CodeQualityEvent(
+            agent_id=req.agent_id, team_id=req.team_id, venue=req.venue,
+            action=req.action or "", target=req.target or "",
+            tests_added=req.tests_added, alerts_reduced=req.alerts_reduced,
+            impact_before=req.impact_before, impact_after=req.impact_after,
+        ),
+        "dev_forecast": lambda: DevForecastEvent(
+            agent_id=req.agent_id, team_id=req.team_id, venue=req.venue,
+            change_id=req.change_id or "",
+            predicted_metric=req.predicted_metric or "",
+            brier_score=req.brier_score, prior_brier=req.prior_brier,
+        ),
+        "dev_debate": lambda: DevDebateEvent(
+            agent_id=req.agent_id, team_id=req.team_id, venue=req.venue,
+            debate_id=req.debate_id or "", change_id=req.change_id or "",
+            role=req.role or "", design_lift=req.design_lift,
+            disagreement_width=req.disagreement_width,
+        ),
+    }
+
+    factory = event_map.get(req.category)
+    if not factory:
+        raise HTTPException(status_code=400, detail=f"Unknown category: {req.category}")
+
+    event = factory()
+    outcome = engine.process_event(event)
+    return outcome.to_dict()
+
+
+@router.get("/engine/leaderboard")
+async def reward_engine_leaderboard(
+    limit: int = Query(20, ge=1, le=100),
+    decay_lambda: Optional[float] = Query(None, ge=0.0),
+    venue: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Reward engine leaderboard with optional decay and venue filter."""
+    engine = _get_reward_engine()
+    if not engine:
+        return {"items": [], "error": "Reward engine not available"}
+    lb = engine.get_leaderboard(limit=limit, decay_lambda=decay_lambda, venue=venue)
+    return {"items": lb, "count": len(lb)}
+
+
+@router.get("/engine/agent/{agent_id}")
+async def reward_engine_agent(agent_id: str) -> Dict[str, Any]:
+    """Get reward history and reputation for an agent."""
+    engine = _get_reward_engine()
+    if not engine:
+        raise HTTPException(status_code=503, detail="Reward engine not available")
+
+    total = engine.get_agent_total_points(agent_id)
+    history = engine.get_agent_history(agent_id, limit=50)
+
+    # Compute reputation snapshot
+    from merid.rewards.levels import ReputationTracker
+    tracker = ReputationTracker(decay_lambda=engine.decay_lambda)
+    snap = tracker.compute_snapshot(agent_id, history)
+
+    return {
+        "agent_id": agent_id,
+        "total_points": total,
+        "reputation": snap.to_dict(),
+        "recent_outcomes": history[:10],
+    }
+
+
+@router.get("/engine/distribution")
+async def reward_engine_distribution(
+    window_hours: float = Query(24.0, ge=1.0, le=720.0),
+) -> Dict[str, Any]:
+    """Reward distribution by category and mechanism."""
+    engine = _get_reward_engine()
+    if not engine:
+        return {"error": "Reward engine not available"}
+    return engine.get_reward_distribution(window_s=window_hours * 3600.0)
+
+
+@router.get("/engine/gaming")
+async def reward_engine_gaming(
+    window_hours: float = Query(24.0, ge=1.0, le=720.0),
+) -> Dict[str, Any]:
+    """Gaming detection indicators."""
+    engine = _get_reward_engine()
+    if not engine:
+        return {"error": "Reward engine not available"}
+    return engine.get_gaming_indicators(window_s=window_hours * 3600.0)
+
+
+@router.get("/engine/metrics")
+async def reward_engine_metrics() -> Dict[str, Any]:
+    """Overall reward engine health metrics."""
+    engine = _get_reward_engine()
+    if not engine:
+        return {"error": "Reward engine not available"}
+    return engine.get_engine_metrics()
+
+
+@router.get("/engine/mechanisms")
+async def reward_engine_mechanisms() -> Dict[str, Any]:
+    """List all registered reward mechanisms."""
+    try:
+        from merid.rewards.mechanisms import get_mechanism_registry
+        reg = get_mechanism_registry()
+        return reg.to_dict()
+    except Exception:
+        return {"mechanisms": [], "count": 0}
+
+
+# ── Sprint 9: Antifragile Quest Endpoints ─────────────────────────────
+
+@router.get("/engine/quests")
+async def list_engine_quests(
+    status: Optional[str] = Query(None),
+    tag: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """List quests from the reward engine quest store."""
+    store = _get_quest_store()
+    if not store:
+        return {"quests": []}
+    quests = store.list_quests(status=status, tag=tag)
+    return {"quests": [q.to_dict() for q in quests], "count": len(quests)}
+
+
+@router.get("/engine/quests/metrics")
+async def engine_quest_metrics() -> Dict[str, Any]:
+    """Quest system metrics."""
+    store = _get_quest_store()
+    if not store:
+        return {"error": "Quest store not available"}
+    return store.get_quest_metrics()
+
+
+@router.get("/engine/quests/{quest_id}")
+async def get_engine_quest(quest_id: str) -> Dict[str, Any]:
+    """Get a specific quest by ID."""
+    store = _get_quest_store()
+    if not store:
+        raise HTTPException(status_code=503, detail="Quest store not available")
+    quest = store.get_quest(quest_id)
+    if not quest:
+        raise HTTPException(status_code=404, detail=f"Quest '{quest_id}' not found")
+    return quest.to_dict()
+
+
+class JoinQuestRequest(BaseModel):
+    agent_id: str = Field(..., description="Agent ID to join the quest")
+
+
+@router.post("/engine/quests/{quest_id}/join")
+async def join_engine_quest(quest_id: str, req: JoinQuestRequest) -> Dict[str, Any]:
+    """Join an active quest."""
+    store = _get_quest_store()
+    if not store:
+        raise HTTPException(status_code=503, detail="Quest store not available")
+    success = store.join_quest(quest_id, req.agent_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Cannot join quest (not active or not found)")
+    quest = store.get_quest(quest_id)
+    return {"joined": True, "quest": quest.to_dict() if quest else None}

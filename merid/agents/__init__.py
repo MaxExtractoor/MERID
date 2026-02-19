@@ -16,6 +16,11 @@ from merid.agents.base import (
     CanonicalAgentRegistry,
     get_canonical_registry,
 )
+from merid.agents.sports_odds import (
+    OddsAwareSportsAgent,
+    SportsOddsStrategy,
+    get_sports_odds_agent,
+)
 
 __all__ = [
     "AgentCategory",
@@ -24,4 +29,7 @@ __all__ = [
     "CanonicalAgent",
     "CanonicalAgentRegistry",
     "get_canonical_registry",
+    "OddsAwareSportsAgent",
+    "SportsOddsStrategy",
+    "get_sports_odds_agent",
 ]

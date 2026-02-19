@@ -196,9 +196,35 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(health_mon.start())
     except Exception as e:
         logger.error(f"Failed to start health monitor: {e}")
-    
+
+    await asyncio.sleep(0)
+
+    # ── Kalshi subsystems ────────────────────────────────────────────────
+    # Start Kalshi WS bridge (live market data feed)
+    try:
+        logger.info("Starting Kalshi WS bridge...")
+        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
+        ws_bridge = get_ws_bridge()
+        asyncio.create_task(ws_bridge.start())
+        logger.info("✅ Kalshi WS bridge started")
+    except Exception as e:
+        logger.warning(f"Kalshi WS bridge not started (non-fatal): {e}")
+
+    await asyncio.sleep(0)
+
+    # Start OrchestratorAgentManager (news monitor, twitter, telegram, Kalshi grid)
+    try:
+        logger.info("Starting orchestrator agent manager...")
+        from web.startup_agents import get_orchestrator_manager
+        orch_mgr = get_orchestrator_manager()
+        await orch_mgr.start_all()
+        app.state.orchestrator_manager = orch_mgr
+        logger.info("✅ Orchestrator agent manager started")
+    except Exception as e:
+        logger.warning(f"Orchestrator agent manager not started (non-fatal): {e}")
+
     await asyncio.sleep(0)  # Final yield before completing startup
-    
+
     logger.info("=" * 60)
     logger.info("MERID SYSTEM LIVE - All components operational")
     logger.info("=" * 60)
@@ -271,7 +297,18 @@ async def lifespan(app: FastAPI):
         orchestrator = get_agent_orchestrator()
         orchestrator.stop()
     except: pass
-    
+
+    try:
+        from web.startup_agents import get_orchestrator_manager
+        orch_mgr = get_orchestrator_manager()
+        await orch_mgr.stop_all()
+    except: pass
+
+    try:
+        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
+        await get_ws_bridge().stop()
+    except: pass
+
     logger.info("All components stopped - shutdown complete")
 
 

@@ -1,5 +1,17 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { ShieldAlert, ShieldCheck, Pause, Play, Clock, AlertTriangle } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS} from '../config/constants';
+
+function authHeaders(headers?: HeadersInit): HeadersInit {
+  const token = localStorage.getItem('merid-access');
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(headers ?? {}),
+  };
+}
 
 interface HaltStatus {
   can_trade: boolean;
@@ -28,40 +40,37 @@ interface StalenessInfo {
 }
 
 export default function TradingHaltBanner() {
-  const [haltStatus, setHaltStatus] = useState<HaltStatus | null>(null);
-  const [staleness, setStaleness] = useState<StalenessInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const fetchStatus = useCallback(async () => {
-    try {
-      const [haltRes, staleRes] = await Promise.all([
-        fetch('/api/v1/risk/halt-status'),
-        fetch('/api/v1/risk/staleness'),
-      ]);
-      if (haltRes.ok) setHaltStatus(await haltRes.json());
-      if (staleRes.ok) setStaleness(await staleRes.json());
-    } catch {
-      // Fallback: show unknown state
-    }
-  }, []);
+  const { data: haltStatus, error: haltError, refetch: refetchHalt } = useApiData<HaltStatus>(
+    API_ENDPOINTS.RISK_HALT_STATUS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+  );
+  const { data: staleness } = useApiData<StalenessInfo>(
+    API_ENDPOINTS.RISK_STALENESS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+  );
 
-  useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 3000);
-    return () => clearInterval(interval);
-  }, [fetchStatus]);
+  if (haltError && !haltStatus) {
+    return <ErrorBar label="Halt status unavailable" error={haltError} onRetry={refetchHalt} />;
+  }
 
   const handleHalt = async () => {
     if (!confirm('Are you sure you want to HALT all trading?')) return;
     setLoading(true);
+    setActionError(null);
     try {
-      await fetch('/api/v1/risk/halt', {
+      const haltRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_HALT}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ reason: 'operator_manual_halt' }),
       });
-      await fetchStatus();
+      if (!haltRes.ok) throw new Error(`HTTP ${haltRes.status}`);
+      refetchHalt();
+    } catch (err) {
+      setActionError(`Halt failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
@@ -70,13 +79,17 @@ export default function TradingHaltBanner() {
   const handleResume = async () => {
     if (!confirm('Are you sure you want to RESUME trading?')) return;
     setLoading(true);
+    setActionError(null);
     try {
-      await fetch('/api/v1/risk/resume', {
+      const resumeRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_RESUME}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ operator: 'operator' }),
       });
-      await fetchStatus();
+      if (!resumeRes.ok) throw new Error(`HTTP ${resumeRes.status}`);
+      refetchHalt();
+    } catch (err) {
+      setActionError(`Resume failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
@@ -88,6 +101,13 @@ export default function TradingHaltBanner() {
 
   return (
     <div className="space-y-1">
+      {actionError && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span className="truncate">{actionError}</span>
+          <button type="button" onClick={() => setActionError(null)} className="ml-auto shrink-0 text-slate-400 hover:text-white" aria-label="Dismiss error">&times;</button>
+        </div>
+      )}
       {/* Main halt banner */}
       <div
         className={`flex items-center justify-between px-4 py-2 rounded-lg border ${
@@ -125,7 +145,7 @@ export default function TradingHaltBanner() {
 
           {/* History toggle */}
           {(haltStatus?.history_count ?? 0) > 0 && (
-            <button
+            <button type="button"
               onClick={() => setShowHistory(!showHistory)}
               className="text-xs text-slate-400 hover:text-slate-200 px-2 py-0.5 rounded border border-slate-600 hover:border-slate-400"
             >
@@ -136,20 +156,20 @@ export default function TradingHaltBanner() {
 
           {/* Halt / Resume button */}
           {isHalted ? (
-            <button
+            <button type="button"
               onClick={handleResume}
               disabled={loading}
               className="flex items-center gap-1 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white px-3 py-1 rounded disabled:opacity-50"
-            >
+             title="Resume">
               <Play className="w-3 h-3" />
               Resume
             </button>
           ) : (
-            <button
+            <button type="button"
               onClick={handleHalt}
               disabled={loading}
               className="flex items-center gap-1 text-xs font-medium bg-red-700 hover:bg-red-600 text-white px-3 py-1 rounded disabled:opacity-50"
-            >
+             title="Halt">
               <Pause className="w-3 h-3" />
               Halt
             </button>

@@ -1,3 +1,4 @@
+import React from 'react';
 import { STATUS_TYPES } from "../config/constants";
 
 interface StatusIndicatorProps {
@@ -9,7 +10,7 @@ interface StatusIndicatorProps {
   className?: string;
 }
 
-export default function StatusIndicator({
+function StatusIndicator({
   status,
   size = "md",
   showText = true,
@@ -110,3 +111,7 @@ export default function StatusIndicator({
     </div>
   );
 }
+
+const MemoizedStatusIndicator = React.memo(StatusIndicator);
+MemoizedStatusIndicator.displayName = 'StatusIndicator';
+export default MemoizedStatusIndicator;

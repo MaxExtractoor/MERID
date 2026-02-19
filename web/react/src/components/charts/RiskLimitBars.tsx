@@ -5,9 +5,9 @@
  * Polls /api/operator/risk-utilization.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import { Shield, AlertTriangle, AlertOctagon } from 'lucide-react';
-import { API_BASE_URL } from '../../config/constants';
+import { useApiData } from '../../hooks/useApiData';
 
 interface RiskLimit {
   name: string;
@@ -34,28 +34,11 @@ function StatusIcon({ status }: { status: string }) {
 }
 
 export function RiskLimitBars({ className = '' }: RiskLimitBarsProps) {
-  const [limits, setLimits] = useState<RiskLimit[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/operator/risk-utilization`);
-      if (res.ok) {
-        const json = await res.json();
-        setLimits(json.limits || []);
-      }
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-    const id = setInterval(fetchData, 10000);
-    return () => clearInterval(id);
-  }, [fetchData]);
+  const { data: rawData, loading } = useApiData<{ limits: RiskLimit[] }>(
+    '/api/operator/risk-utilization',
+    { pollingInterval: 10000 },
+  );
+  const limits = rawData?.limits ?? [];
 
   return (
     <div className={`bg-slate-900/70 rounded-xl border border-slate-800 p-4 ${className}`}>

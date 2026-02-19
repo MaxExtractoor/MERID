@@ -5,7 +5,7 @@
  * Polls /api/metrics/latency. Targets: p95 < 200-300ms per Deephaven guidance.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import React from 'react';
 import {
   ResponsiveContainer,
   BarChart,
@@ -17,7 +17,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { Timer } from 'lucide-react';
-import { API_BASE_URL } from '../../config/constants';
+import { useApiData } from '../../hooks/useApiData';
 
 interface LatencyStats {
   aggregate: { p50: number; p95: number; p99: number; count: number };
@@ -30,28 +30,10 @@ interface LatencyChartProps {
 }
 
 export function LatencyChart({ className = '', height = 200 }: LatencyChartProps) {
-  const [data, setData] = useState<LatencyStats | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/metrics/latency?window=300`);
-      if (res.ok) {
-        const json = await res.json();
-        setData(json);
-      }
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-    const id = setInterval(fetchData, 15000);
-    return () => clearInterval(id);
-  }, [fetchData]);
+  const { data, loading } = useApiData<LatencyStats>(
+    '/api/metrics/latency?window=300',
+    { pollingInterval: 15000 },
+  );
 
   // Transform by_endpoint into chart data
   const chartData = data?.by_endpoint

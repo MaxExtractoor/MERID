@@ -1,7 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import {
   MessageSquare, RefreshCw, Send
 } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import ErrorBar from './ErrorBar';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface TelegramMessage {
   id: string;
@@ -22,46 +25,17 @@ const TYPE_COLORS: Record<string, string> = {
 };
 
 export default function TelegramLogViewer() {
-  const [messages, setMessages] = useState<TelegramMessage[]>([]);
-  const [loading, setLoading] = useState(true);
   const [typeFilter, setTypeFilter] = useState<string>('all');
 
-  const fetchMessages = useCallback(async () => {
-    try {
-      const res = await fetch('/api/v1/notifications/telegram/log');
-      if (res.ok) {
-        const data = await res.json();
-        if (data.messages) { setMessages(data.messages); return; }
-      }
-    } catch { /* fallback */ }
+  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ messages: TelegramMessage[] }>(
+    API_ENDPOINTS.NOTIFICATIONS_TELEGRAM_LOG,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM },
+  );
 
-    const now = Date.now();
-    setMessages([
-      { id: 'tg-1', timestamp: new Date(now - 5000).toISOString(), direction: 'outbound', type: 'alert',
-        text: '🚨 RISK BREACH: Daily loss limit 92% utilized on crypto domain. Soft limit triggered.', chatId: '-100xxx', delivered: true },
-      { id: 'tg-2', timestamp: new Date(now - 30000).toISOString(), direction: 'outbound', type: 'trade',
-        text: '✅ FILL: BTC/USDT arb executed. Buy Binance 104850.20, Sell Coinbase 104892.50. PnL +$42.30', chatId: '-100xxx', delivered: true },
-      { id: 'tg-3', timestamp: new Date(now - 60000).toISOString(), direction: 'outbound', type: 'status',
-        text: '📊 Hourly Status: 3 domains active, 6 venues connected, 47 arb opportunities scanned, $156.80 realized PnL', chatId: '-100xxx', delivered: true },
-      { id: 'tg-4', timestamp: new Date(now - 120000).toISOString(), direction: 'inbound', type: 'command',
-        text: '/status', chatId: '-100xxx', delivered: true },
-      { id: 'tg-5', timestamp: new Date(now - 180000).toISOString(), direction: 'outbound', type: 'system',
-        text: '🔄 Orchestrator cycle #1247 completed. Duration: 2.3s. All 5 phases nominal.', chatId: '-100xxx', delivered: true },
-      { id: 'tg-6', timestamp: new Date(now - 300000).toISOString(), direction: 'outbound', type: 'alert',
-        text: '⚠️ Venue Kraken latency spike: 450ms (threshold 200ms). Circuit breaker monitoring.', chatId: '-100xxx', delivered: true },
-      { id: 'tg-7', timestamp: new Date(now - 600000).toISOString(), direction: 'outbound', type: 'trade',
-        text: '📈 PAPER FILL: AAPL buy 10 @ $185.20 via Alpaca. Momentum signal.', chatId: '-100xxx', delivered: true },
-      { id: 'tg-8', timestamp: new Date(now - 900000).toISOString(), direction: 'outbound', type: 'status',
-        text: '🟢 System startup complete. All services healthy. Mode: SIM/PAPER.', chatId: '-100xxx', delivered: false },
-    ]);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchMessages();
-    const interval = setInterval(fetchMessages, 10000);
-    return () => clearInterval(interval);
-  }, [fetchMessages]);
+  if (fetchError && !rawData) {
+    return <ErrorBar label="Telegram log" error={fetchError} onRetry={refetch} />;
+  }
+  const messages = rawData?.messages ?? [];
 
   const filtered = typeFilter === 'all' ? messages : messages.filter(m => m.type === typeFilter);
 
@@ -92,7 +66,7 @@ export default function TelegramLogViewer() {
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
             {['all', 'alert', 'trade', 'status', 'system', 'command'].map(f => (
-              <button
+              <button type="button"
                 key={f}
                 onClick={() => setTypeFilter(f)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
@@ -103,7 +77,7 @@ export default function TelegramLogViewer() {
               </button>
             ))}
           </div>
-          <button onClick={fetchMessages} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh">
+          <button type="button" onClick={() => refetch()} className="p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white" title="Refresh" aria-label="Refresh">
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>

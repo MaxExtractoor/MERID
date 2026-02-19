@@ -338,6 +338,16 @@ class DriftDetector:
             }
         return {"size_multiplier": 1.0, "agent_weight_multiplier": 1.0, "throttle": False}
 
+    # ── Reset ──────────────────────────────────────────────────────────
+
+    def reset(self) -> None:
+        """Clear all outcomes, drift history, and CQI history.  Fresh start."""
+        self._outcomes.clear()
+        self._drift_history.clear()
+        self._cqi_history.clear()
+        self._feature_baselines.clear()
+        logger.info("DriftDetector reset: all outcomes and CQI history cleared")
+
     # ── Accessors ─────────────────────────────────────────────────────
 
     def get_all_cqi(self) -> Dict[str, ConsensusQualityIndex]:

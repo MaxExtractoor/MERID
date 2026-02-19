@@ -1,0 +1,40 @@
+{
+  "preferences": {
+    "theme": "dark",
+    "language": "en",
+    "timezone": "UTC",
+    "dateFormat": "DD/MM/YYYY",
+    "numberFormat": "en-US",
+    "defaultPage": "overview",
+    "notifications": {
+      "email": true,
+      "push": true,
+      "trading": true,
+      "risk": true,
+      "system": true
+    }
+  },
+  "tradingSettings": {
+    "defaultOrderSize": 1000,
+    "maxLeverage": 3,
+    "stopLossPercent": 2,
+    "takeProfitPercent": 5,
+    "maxPositionSize": 100000,
+    "confirmOrders": true,
+    "showAdvancedOptions": true,
+    "autoRefresh": true,
+    "refreshInterval": 5000
+  },
+  "notificationSettings": {
+    "emailAlerts": true,
+    "pushNotifications": true,
+    "tradingAlerts": true,
+    "riskAlerts": true,
+    "systemAlerts": true,
+    "priceAlerts": true,
+    "orderAlerts": true,
+    "dailySummary": true,
+    "weeklyReport": true
+  },
+  "_updated_at": 1771422738690
+}

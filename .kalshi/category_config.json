@@ -1,0 +1,15 @@
+{
+  "crypto": "live",
+  "economics": "live",
+  "financials": "live",
+  "politics": "live",
+  "climate": "live",
+  "sports": "live",
+  "tech": "live",
+  "culture": "live",
+  "science": "live",
+  "fed": "live",
+  "inflation": "live",
+  "rates": "live",
+  "weather": "live"
+}

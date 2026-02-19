@@ -12,6 +12,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { useConsensusStream } from '../hooks/useConsensusStream';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface AgentOpinion {
   opinion_id?: string;
@@ -30,7 +31,7 @@ interface AgentOpinion {
   timestamp?: number | string;
 }
 
-const ROLE_ICONS: Record<string, any> = {
+const ROLE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   bull_analyst: TrendingUp,
   bear_analyst: TrendingDown,
   arbitrage: BarChart3,
@@ -79,20 +80,20 @@ export default function DebateTimeline() {
     fetchOpinions();
 
     // Poll fallback at relaxed interval (stream handles real-time)
-    const interval = setInterval(fetchOpinions, 30000);
+    const interval = setInterval(fetchOpinions, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
 
     return () => clearInterval(interval);
   }, []);
 
   const fetchOpinions = async () => {
     try {
-      const res = await fetch('/api/v1/consensus/opinions?limit=30');
+      const res = await fetch(API_ENDPOINTS.CONSENSUS_OPINIONS + '?limit=30');
       if (res.ok) {
         const data = await res.json();
         setRestOpinions(data.opinions || []);
       }
-    } catch (err) {
-      console.error('Failed to fetch opinions:', err);
+    } catch {
+      // Operation failed — UI state unchanged
     } finally {
       setLoading(false);
     }
@@ -157,7 +158,7 @@ export default function DebateTimeline() {
           <MessageSquare className="w-5 h-5 text-blue-400" />
           Agent Debate
         </h2>
-        <button 
+        <button type="button" 
           onClick={fetchOpinions}
           className="p-1.5 hover:bg-slate-700/50 rounded transition-colors"
           title="Refresh opinions"
@@ -169,7 +170,7 @@ export default function DebateTimeline() {
 
       {/* Role Filters */}
       <div className="flex flex-wrap gap-1">
-        <button
+        <button type="button"
           onClick={() => setFilter('all')}
           className={`px-2 py-1 text-xs rounded transition-colors ${
             filter === 'all' 
@@ -182,7 +183,7 @@ export default function DebateTimeline() {
         {uniqueRoles.map((role) => {
           const Icon = getRoleIcon(role);
           return (
-            <button
+            <button type="button"
               key={role}
               onClick={() => setFilter(role)}
               className={`px-2 py-1 text-xs rounded flex items-center gap-1 transition-colors ${

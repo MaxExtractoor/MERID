@@ -1,18 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useMemo } from 'react';
 import { Bot, Brain, Shield, TrendingUp, AlertTriangle, CheckCircle, Clock } from 'lucide-react';
-import { api } from '../services/api';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 interface AgentActivity {
   agent_id: string;
-  agent_name: string;
-  status: 'active' | 'idle' | 'error';
-  last_action: string;
-  last_action_time: string;
+  agent_name?: string;
+  status: string;
+  last_action?: string;
+  last_action_time?: string;
   tasks_completed: number;
   current_task?: string;
+  asset?: string;
+  active_markets?: number;
+  win_rate?: number;
 }
 
-const AGENT_ICONS: Record<string, any> = {
+const AGENT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   analyst: Brain,
   risk: Shield,
   strategy: TrendingUp,
@@ -27,25 +31,12 @@ const getAgentIcon = (agentName: string) => {
 };
 
 export default function AgentActivityPanel() {
-  const [agents, setAgents] = useState<AgentActivity[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data, loading } = useApiData<{ agents: AgentActivity[]; active_agents: number; total_tasks_1h: number }>(
+    API_ENDPOINTS.OPERATOR_AGENT_ACTIVITY,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+  );
 
-  useEffect(() => {
-    async function fetchAgentActivity() {
-      try {
-        const data = await api.getAgentActivity();
-        setAgents((data as any).agents || []);
-      } catch (e) {
-        console.error('Failed to fetch agent activity:', e);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchAgentActivity();
-    const interval = setInterval(fetchAgentActivity, 15000); // Update every 15s
-    return () => clearInterval(interval);
-  }, []);
+  const agents = useMemo(() => data?.agents ?? [], [data]);
 
   if (loading) {
     return (
@@ -60,8 +51,8 @@ export default function AgentActivityPanel() {
     );
   }
 
-  const activeCount = agents.filter(a => a.status === 'active').length;
-  const totalTasks = agents.reduce((sum, a) => sum + a.tasks_completed, 0);
+  const activeCount = data?.active_agents ?? agents.filter(a => a.status === 'running' || a.status === 'active').length;
+  const totalTasks = data?.total_tasks_1h ?? agents.reduce((sum, a) => sum + a.tasks_completed, 0);
 
   return (
     <div className="bg-slate-900/70 rounded-xl p-6 border border-slate-800">
@@ -74,22 +65,18 @@ export default function AgentActivityPanel() {
         </div>
         <div className="text-right">
           <div className="text-2xl font-bold text-blue-400">{totalTasks}</div>
-          <div className="text-xs text-slate-500">Total Tasks</div>
+          <div className="text-xs text-slate-500">Total Cycles</div>
         </div>
       </div>
 
       <div className="space-y-3">
         {agents.map((agent) => {
-          const Icon = getAgentIcon(agent.agent_name);
-          const statusColor = 
-            agent.status === 'active' ? 'text-emerald-400' :
-            agent.status === 'error' ? 'text-rose-400' :
-            'text-slate-500';
-          
-          const StatusIcon = 
-            agent.status === 'active' ? CheckCircle :
-            agent.status === 'error' ? AlertTriangle :
-            Clock;
+          const displayName = agent.agent_name || agent.agent_id;
+          const Icon = getAgentIcon(displayName);
+          const isActive = agent.status === 'running' || agent.status === 'active';
+          const isError = agent.status === 'error';
+          const statusColor = isActive ? 'text-emerald-400' : isError ? 'text-rose-400' : 'text-slate-500';
+          const StatusIcon = isActive ? CheckCircle : isError ? AlertTriangle : Clock;
 
           return (
             <div
@@ -100,36 +87,45 @@ export default function AgentActivityPanel() {
                 <div className={`p-2 rounded-lg bg-slate-700/50 ${statusColor}`}>
                   <Icon className="w-4 h-4" />
                 </div>
-                
+
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="text-sm font-medium text-slate-200">
-                      {agent.agent_name}
+                    <span className="text-sm font-medium text-slate-200 truncate">
+                      {displayName}
                     </span>
-                    <StatusIcon className={`w-3 h-3 ${statusColor}`} />
+                    <StatusIcon className={`w-3 h-3 ${statusColor} shrink-0`} />
+                    {agent.asset && (
+                      <span className="text-[10px] text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded shrink-0">
+                        {agent.asset.toUpperCase()}
+                      </span>
+                    )}
                   </div>
-                  
-                  {agent.current_task && (
-                    <div className="text-xs text-blue-400 mb-1">
-                      → {agent.current_task}
-                    </div>
-                  )}
-                  
+
                   <div className="text-xs text-slate-500">
-                    {agent.last_action} • {agent.last_action_time}
+                    {agent.active_markets != null
+                      ? `${agent.active_markets} markets`
+                      : agent.current_task || agent.last_action || '—'}
+                    {agent.win_rate != null && agent.win_rate > 0 && (
+                      <span className="ml-2 text-emerald-500">{agent.win_rate.toFixed(1)}% win</span>
+                    )}
                   </div>
                 </div>
-                
+
                 <div className="text-right shrink-0">
                   <div className="text-sm font-semibold text-slate-300">
                     {agent.tasks_completed}
                   </div>
-                  <div className="text-xs text-slate-500">tasks</div>
+                  <div className="text-xs text-slate-500">cycles</div>
                 </div>
               </div>
             </div>
           );
         })}
+        {agents.length === 0 && !loading && (
+          <div className="text-center py-6 text-slate-500 text-sm">
+            No agents running — start the Kalshi grid from Overview
+          </div>
+        )}
       </div>
     </div>
   );

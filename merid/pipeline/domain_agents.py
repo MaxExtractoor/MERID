@@ -123,6 +123,7 @@ class PredictionMarketAgent(DomainAgent):
         confidence: Decimal = Decimal("0.6"),
     ) -> TradeProposal:
         """Create a prediction market trade proposal."""
+        price_usd = (Decimal(price_cents) / Decimal("100")).quantize(Decimal("0.01"))
         return self._make_proposal(
             venue=self.venue,
             instrument_id=f"PM:{market_id}",
@@ -130,8 +131,8 @@ class PredictionMarketAgent(DomainAgent):
             side=OrderSide.BUY if "buy" in side.lower() else OrderSide.SELL,
             order_type=OrderType.LIMIT,
             qty=Decimal(contracts),
-            price=Decimal(price_cents),
-            notional_usd=(Decimal(contracts) * Decimal(price_cents) / Decimal("100")).quantize(Decimal("0.01")),
+            price=price_usd,
+            notional_usd=(Decimal(contracts) * price_usd).quantize(Decimal("0.01")),
             strategy_id=strategy_id,
             rationale=rationale,
             confidence=confidence,

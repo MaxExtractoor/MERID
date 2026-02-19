@@ -306,7 +306,6 @@ async def get_spectator_history(limit: int = 200) -> Dict[str, Any]:
 @router.websocket("/spectator/stream")
 async def spectator_stream(websocket: WebSocket, token: str = Query(None)) -> None:
     """WebSocket endpoint for spectator trading stream with optional authentication."""
-    import os
     
     # Development bypass - allow anonymous connections in dev mode
     dev_mode = os.getenv("MERID_DEV_ALLOW_WS", "false").lower() in ("1", "true", "yes")

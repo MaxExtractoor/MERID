@@ -314,6 +314,48 @@ async def resolve_escalation(escalation_id: str, by: str = "user") -> Dict[str, 
 # POLICIES ENDPOINTS
 # ============================================
 
+@router.get("/telegram/log")
+async def get_telegram_log(limit: int = 50) -> Dict[str, Any]:
+    """Return recent Telegram messages sent by TelegramAgent for the log viewer."""
+    try:
+        from agents.telegram_agent import get_telegram_agent
+        agent = get_telegram_agent()
+        msgs = agent.get_recent_messages(limit=limit)
+        return {
+            "messages": [
+                {
+                    "id": str(m.message_id or i),
+                    "timestamp": m.sent_at.isoformat() if m.sent_at else "",
+                    "direction": "outbound",
+                    "type": _classify_telegram_msg(m.text),
+                    "text": m.text[:500],
+                    "chatId": str(m.chat_id or ""),
+                    "delivered": m.message_id is not None,
+                }
+                for i, m in enumerate(msgs)
+            ],
+            "enabled": agent.enabled,
+            "total": len(msgs),
+        }
+    except Exception as exc:
+        logger.debug(f"Telegram log fetch error: {exc}")
+        return {"messages": [], "enabled": False, "total": 0}
+
+
+def _classify_telegram_msg(text: str) -> str:
+    """Classify a Telegram message into a UI type."""
+    t = text.lower()
+    if any(k in t for k in ("kill switch", "emergency", "halt", "🚨")):
+        return "alert"
+    if any(k in t for k in ("fill", "order", "trade", "filled", "💰")):
+        return "trade"
+    if any(k in t for k in ("status", "portfolio", "balance", "📊")):
+        return "status"
+    if any(k in t for k in ("/", "command", "bot")):
+        return "command"
+    return "system"
+
+
 @router.get("/policies")
 async def get_escalation_policies() -> Dict[str, Any]:
     """Get escalation policies."""

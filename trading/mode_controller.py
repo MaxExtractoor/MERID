@@ -11,21 +11,21 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
-from enum import Enum
 from typing import Any, Dict, List, Optional, Callable
 from collections import deque
 
+from enum import Enum
+
+from trading.trade_mode import TradeMode
 from utils.logger import get_logger
 
 logger = get_logger("trading.mode_controller")
 
 
-class TradingMode(Enum):
-    """Trading execution modes."""
-    PAPER = "paper"           # All trades are simulated
-    LIVE = "live"             # Real execution on exchanges
-    HYBRID = "hybrid"         # Paper trades with live data, manual approval for live
-    AUTONOMOUS = "autonomous" # Full autonomous live trading
+# DEPRECATED: local TradingMode removed in Season 5 mode-unification.
+# Use the canonical ``trading.trade_mode.TradeMode`` (MOCK/PAPER/LIVE).
+# HYBRID and AUTONOMOUS modes are retired (were never wired into the loop).
+TradingMode = TradeMode
 
 
 class TradeAction(Enum):
@@ -121,15 +121,15 @@ class TradingModeController:
     
     @property
     def is_live(self) -> bool:
-        return self._mode in (TradingMode.LIVE, TradingMode.AUTONOMOUS)
+        return self._mode == TradingMode.LIVE
     
     @property
     def is_hybrid(self) -> bool:
-        return self._mode == TradingMode.HYBRID
+        return False  # HYBRID mode retired in Season 5
     
     @property
     def is_autonomous(self) -> bool:
-        return self._mode == TradingMode.AUTONOMOUS
+        return False  # AUTONOMOUS mode retired in Season 5
     
     def set_mode(self, mode: str, changed_by: str = "system", reason: str = "") -> bool:
         """Change trading mode."""
@@ -170,13 +170,8 @@ class TradingModeController:
         if self._mode == TradingMode.PAPER:
             return False, "Paper mode - live execution disabled"
         
-        # Hybrid mode - requires manual approval
-        if self._mode == TradingMode.HYBRID:
-            if self._live_approval_required:
-                return False, "Hybrid mode - manual approval required"
-        
         # Autonomous mode - check limits
-        if self._mode == TradingMode.AUTONOMOUS:
+        if self._mode == TradingMode.LIVE:
             # Reset daily stats if needed
             if time.time() - self._daily_stats["last_reset"] > 86400:
                 self._daily_stats = {

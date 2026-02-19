@@ -65,7 +65,7 @@ export interface UseConsensusStreamResult {
   /** Connection error, if any */
   error: Error | null;
   /** Send a message to the server */
-  send: (message: any) => void;
+  send: (message: unknown) => void;
   /** Clear all buffered events */
   clear: () => void;
 }
@@ -74,7 +74,7 @@ export interface UseConsensusStreamResult {
 // PARSER (shared with useKafkaStream specialisations)
 // ============================================
 
-function parseConsensusMessage(data: any): StreamEvent | null {
+function parseConsensusMessage(data: unknown): StreamEvent | null {
   let message = data;
 
   if (typeof data === 'string') {

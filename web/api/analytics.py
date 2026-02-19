@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -65,35 +65,35 @@ async def get_analytics_dashboard() -> AnalyticsDashboard:
                 name="system_health",
                 value=95.0,
                 unit="percent",
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 status="healthy"
             ),
             AnalyticsMetric(
                 name="agent_response_time",
                 value=120.5,
                 unit="ms",
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 status="healthy"
             ),
             AnalyticsMetric(
                 name="trading_volume",
                 value=1500000.0,
                 unit="USD",
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 status="healthy"
             ),
             AnalyticsMetric(
                 name="error_rate",
                 value=0.02,
                 unit="percent",
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 status="healthy"
             ),
             AnalyticsMetric(
                 name="active_agents",
                 value=2,
                 unit="count",
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 status="healthy"
             )
         ]
@@ -185,7 +185,7 @@ async def get_analytics_dashboard() -> AnalyticsDashboard:
         dashboard_data = AnalyticsDashboard(
             metrics=metrics,
             status="healthy",
-            last_updated=datetime.utcnow().isoformat(),
+            last_updated=datetime.now(timezone.utc).isoformat(),
             system_health=system_health,
             cohort_analysis=cohort_analysis
         )
@@ -214,7 +214,7 @@ async def get_metrics(limit: int = 100) -> List[AnalyticsMetric]:
             name=f"metric_{i}",
             value=float(i * 10),
             unit="units",
-            timestamp=datetime.utcnow() - timedelta(minutes=i),
+            timestamp=datetime.now(timezone.utc) - timedelta(minutes=i),
             status="healthy"
         ))
     return metrics
@@ -225,6 +225,6 @@ async def get_analytics_health() -> Dict[str, str]:
     """Get analytics system health."""
     return {
         "status": "healthy",
-        "last_check": datetime.utcnow().isoformat(),
+        "last_check": datetime.now(timezone.utc).isoformat(),
         "components": "operational"
     }

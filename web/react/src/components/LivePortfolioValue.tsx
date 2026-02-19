@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
-import { TrendingUp, TrendingDown, DollarSign, Activity } from 'lucide-react';
+import { TrendingUp, TrendingDown, DollarSign, Activity, Radio } from 'lucide-react';
 import { useRealtimeData } from '../hooks/useRealtimeData';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS, WS_PORTFOLIO_URL } from '../config/constants';
+import { logUiError } from '../utils/logger';
 
 interface PortfolioUpdate {
   total_value: number;
@@ -11,8 +14,17 @@ interface PortfolioUpdate {
   timestamp: number;
 }
 
+interface RawPortfolioUpdate {
+  total_equity?: number;
+  total_pnl?: number;
+  unrealized_pnl?: number;
+  position_count?: number;
+  exposure?: Record<string, number>;
+  timestamp?: number | string;
+}
+
 export default function LivePortfolioValue() {
-  const [portfolioData, isConnected] = useRealtimeData<PortfolioUpdate>('portfolio_update');
+  const [portfolioData, isConnected] = useRealtimeData<RawPortfolioUpdate>('risk_summary', null, WS_PORTFOLIO_URL);
   const [displayData, setDisplayData] = useState<PortfolioUpdate>({
     total_value: 0,
     change_24h: 0,
@@ -22,13 +34,80 @@ export default function LivePortfolioValue() {
     timestamp: Date.now(),
   });
 
-  // REST fallback: fetch portfolio summary when WS is unavailable
+  // Kalshi-specific live data
+  const { data: kalshiRisk } = useApiData<{
+    daily_pnl_usd: number;
+    daily_realized_pnl_usd: number;
+    total_notional_usd: number;
+    open_market_count: number;
+  }>(API_ENDPOINTS.KALSHI_RISK, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
+
+  const { data: kalshiBalance } = useApiData<{
+    usd: number;
+    available: number;
+    locked: number;
+  }>(API_ENDPOINTS.KALSHI_BALANCE, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
+
+  const { data: gridPortfolio } = useApiData<{
+    equity_usd: number;
+    daily_pnl_usd: number;
+    position_count: number;
+  }>(API_ENDPOINTS.KALSHI_GRID_PORTFOLIO, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
+
+  const { data: modeData } = useApiData<{ mode: string; is_live: boolean }>(
+    API_ENDPOINTS.KALSHI_GRID_MODE,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+
+  const isLive = modeData?.is_live ?? false;
+  const currentMode = modeData?.mode?.toUpperCase() ?? 'PAPER';
+
+  const normalizePortfolioUpdate = (payload: RawPortfolioUpdate): PortfolioUpdate | null => {
+    const totalValue = payload.total_equity ?? 0;
+    const totalPnl = payload.total_pnl ?? 0;
+    const changePercent = totalValue ? (totalPnl / totalValue) * 100 : 0;
+    const timestamp = typeof payload.timestamp === 'string'
+      ? Date.parse(payload.timestamp)
+      : (payload.timestamp ?? Date.now());
+
+    return {
+      total_value: Number.isFinite(totalValue) ? totalValue : 0,
+      change_24h: Number.isFinite(totalPnl) ? totalPnl : 0,
+      change_24h_percent: Number.isFinite(changePercent) ? changePercent : 0,
+      pnl_today: Number.isFinite(totalPnl) ? totalPnl : 0,
+      positions_count: payload.position_count ?? 0,
+      timestamp,
+    };
+  };
+
+  // Sync Kalshi live data into displayData whenever it updates
   useEffect(() => {
+    const equity = gridPortfolio?.equity_usd
+      ?? (kalshiBalance ? (Math.abs(kalshiBalance.usd) > 100000 ? kalshiBalance.usd / 100 : kalshiBalance.usd) : null);
+    const pnl = gridPortfolio?.daily_pnl_usd ?? kalshiRisk?.daily_pnl_usd ?? 0;
+    const positions = gridPortfolio?.position_count ?? kalshiRisk?.open_market_count ?? 0;
+    const pct = equity && equity > 0 ? (pnl / equity) * 100 : 0;
+
+    if (equity != null) {
+      setDisplayData(prev => ({
+        total_value: equity,
+        change_24h: pnl,
+        change_24h_percent: Number.isFinite(pct) ? pct : prev.change_24h_percent,
+        pnl_today: pnl,
+        positions_count: positions,
+        timestamp: Date.now(),
+      }));
+    }
+  }, [gridPortfolio, kalshiRisk, kalshiBalance]);
+
+  // REST fallback for WS gap — only used if Kalshi hooks return nothing
+  useEffect(() => {
+    if (gridPortfolio || kalshiRisk) return; // Kalshi data takes priority
     let cancelled = false;
     const fetchRest = async () => {
       try {
-        let res = await fetch('/api/v1/portfolio/summary');
-        if (!res.ok) res = await fetch('/api/portfolio/summary');
+        let res = await fetch(API_ENDPOINTS.PORTFOLIO_SUMMARY);
+        if (!res.ok) res = await fetch(API_ENDPOINTS.PORTFOLIO_LIVE);
         if (res.ok && !cancelled) {
           const data = await res.json();
           setDisplayData(prev => ({
@@ -40,17 +119,20 @@ export default function LivePortfolioValue() {
             timestamp: Date.now(),
           }));
         }
-      } catch { /* WS is primary */ }
+      } catch (err) { logUiError('LivePortfolioValue', 'REST fallback failed', err); }
     };
     fetchRest();
-    const interval = setInterval(fetchRest, 30000);
+    const interval = setInterval(fetchRest, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
     return () => { cancelled = true; clearInterval(interval); };
-  }, []);
+  }, [gridPortfolio, kalshiRisk]);
 
   // WS updates override REST data
   useEffect(() => {
     if (portfolioData) {
-      setDisplayData(portfolioData);
+      const normalized = normalizePortfolioUpdate(portfolioData);
+      if (normalized) {
+        setDisplayData(normalized);
+      }
     }
   }, [portfolioData]);
 
@@ -61,19 +143,32 @@ export default function LivePortfolioValue() {
   };
 
   return (
-    <div className="bg-gradient-to-br from-blue-900/20 to-purple-900/20 rounded-lg border border-blue-500/30 p-6">
+    <div className={`rounded-lg border p-6 bg-gradient-to-br ${
+      isLive
+        ? 'from-green-900/20 to-emerald-900/20 border-green-500/30'
+        : 'from-blue-900/20 to-purple-900/20 border-blue-500/30'
+    }`}>
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-blue-500/20 rounded-lg">
-            <DollarSign className="w-6 h-6 text-blue-400" />
+          <div className={`p-2 rounded-lg ${isLive ? 'bg-green-500/20' : 'bg-blue-500/20'}`}>
+            <DollarSign className={`w-6 h-6 ${isLive ? 'text-green-400' : 'text-blue-400'}`} />
           </div>
           <div>
-            <h3 className="text-sm text-gray-400">Total Portfolio Value</h3>
+            <h3 className="text-sm text-gray-400">Kalshi Portfolio Value</h3>
             <div className="flex items-center gap-2">
               <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`} />
-              <span className="text-xs text-gray-500">{isConnected ? 'Live' : 'Offline'}</span>
+              <span className="text-xs text-gray-500">{isConnected ? 'WS live' : 'Polling'}</span>
             </div>
           </div>
+        </div>
+        {/* Mode badge */}
+        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border ${
+          isLive
+            ? 'bg-green-500/20 text-green-300 border-green-500/30'
+            : 'bg-slate-700 text-gray-400 border-slate-600'
+        }`}>
+          <Radio className={`w-3 h-3 ${isLive ? 'animate-pulse' : ''}`} />
+          {currentMode}
         </div>
       </div>
 

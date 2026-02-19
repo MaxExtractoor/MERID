@@ -72,6 +72,10 @@ class MarketData:
 
 class VenueAdapter(ABC):
     """Abstract base class for venue adapters."""
+
+    # Subclasses that return hardcoded/mock data should set _is_stub = True.
+    # This prevents accidental live execution through stub adapters.
+    _is_stub: bool = False
     
     def __init__(self, venue_id: str, paper: bool = True):
         self.venue_id = venue_id
@@ -93,7 +97,6 @@ class VenueAdapter(ABC):
         """Get market data for symbol."""
         pass
     
-    @abstractmethod
     async def place_order(
         self,
         symbol: str,
@@ -102,7 +105,24 @@ class VenueAdapter(ABC):
         amount: Decimal,
         price: Optional[Decimal] = None
     ) -> Dict[str, Any]:
-        """Place order."""
+        """Place order. Raises NotImplementedError if this is a stub adapter in live mode."""
+        if self._is_stub and not self.paper:
+            raise NotImplementedError(
+                f"Live trading not implemented for stub adapter '{self.venue_id}'. "
+                f"Wire a real venue API or use paper mode."
+            )
+        return await self._place_order_impl(symbol, side, order_type, amount, price)
+
+    @abstractmethod
+    async def _place_order_impl(
+        self,
+        symbol: str,
+        side: OrderSide,
+        order_type: OrderType,
+        amount: Decimal,
+        price: Optional[Decimal] = None
+    ) -> Dict[str, Any]:
+        """Implement order placement. Called by place_order after stub guard."""
         pass
     
     @abstractmethod

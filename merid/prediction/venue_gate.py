@@ -9,9 +9,9 @@ Ensures:
 from __future__ import annotations
 
 import os
-from enum import Enum
 from typing import Optional
 
+from trading.trade_mode import TradeMode
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.venue_gate")
@@ -25,11 +25,10 @@ _BLOCKED_VENUES = frozenset({
 _ALLOWED_VENUES = frozenset({"kalshi"})
 
 
-class TradingMode(str, Enum):
-    """Prediction market trading modes."""
-    SIM = "sim"        # Simulated fills, no API calls
-    PAPER = "paper"    # API calls for data only, simulated fills
-    LIVE = "live"      # Real orders on Kalshi
+# DEPRECATED: local TradingMode removed in Season 5 mode-unification.
+# Use the canonical ``trading.trade_mode.TradeMode`` (MOCK/PAPER/LIVE).
+# SIM is now MOCK.  Alias kept for backward compatibility within this file.
+TradingMode = TradeMode
 
 
 class VenueGate:
@@ -54,17 +53,35 @@ class VenueGate:
         mode: Optional[TradingMode] = None,
         live_enabled: Optional[bool] = None,
     ):
-        raw_mode = mode or os.getenv("MERID_PM_TRADING_MODE", "sim")
-        if isinstance(raw_mode, str):
-            raw_mode = TradingMode(raw_mode.lower())
+        if mode is None:
+            try:
+                from merid.settings import settings
+                raw_mode_str = settings.MERID_PM_TRADING_MODE
+            except Exception:
+                raw_mode_str = os.getenv("MERID_PM_TRADING_MODE", "mock")
+            val = raw_mode_str.lower()
+            if val == "sim":
+                val = "mock"  # legacy alias
+            raw_mode = TradingMode(val)
+        else:
+            raw_mode = mode
+            if isinstance(raw_mode, str):
+                val = raw_mode.lower()
+                if val == "sim":
+                    val = "mock"
+                raw_mode = TradingMode(val)
         self._mode: TradingMode = raw_mode
 
         if live_enabled is not None:
             self._live_enabled = live_enabled
         else:
-            self._live_enabled = os.getenv(
-                "MERID_PM_LIVE_ENABLED", "false"
-            ).lower() == "true"
+            try:
+                from merid.settings import settings
+                self._live_enabled = settings.MERID_PM_LIVE_ENABLED
+            except Exception:
+                self._live_enabled = os.getenv(
+                    "MERID_PM_LIVE_ENABLED", "false"
+                ).lower() == "true"
 
         logger.info(
             f"VenueGate initialised: mode={self._mode.value}, live_enabled={self._live_enabled}"
@@ -111,9 +128,9 @@ class VenueGate:
 
     def check_can_trade(self) -> None:
         """Raise ModeBlockedError if current mode does not allow order submission."""
-        if self._mode == TradingMode.SIM:
+        if self._mode == TradingMode.MOCK:
             raise self.ModeBlockedError(
-                "Trading mode is SIM — no orders will be sent. "
+                "Trading mode is MOCK — no orders will be sent. "
                 "Switch to PAPER or LIVE to submit orders."
             )
         if self._mode == TradingMode.LIVE and not self._live_enabled:
@@ -133,7 +150,7 @@ class VenueGate:
 
     def should_simulate_fill(self) -> bool:
         """Return True if fills should be simulated (SIM or PAPER mode)."""
-        return self._mode in (TradingMode.SIM, TradingMode.PAPER)
+        return self._mode in (TradingMode.MOCK, TradingMode.PAPER)
 
     def summary(self) -> dict:
         """Return a JSON-serialisable summary for dashboards."""

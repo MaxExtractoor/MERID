@@ -92,8 +92,6 @@ async def register_simulation_assertions_batch(batch: SimulationDataBatch):
         source = get_simulation_assertion_source()
         
         # Get blind spots before
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         current_time = time.time()
@@ -159,8 +157,6 @@ async def get_simulation_assertions():
 async def get_simulation_blind_spots():
     """Get current blind spots and simulation domain status."""
     try:
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         current_time = time.time()
@@ -207,8 +203,6 @@ async def load_demo_simulation_data():
         ]
         
         # Get blind spots before
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         current_time = time.time()

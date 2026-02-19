@@ -20,7 +20,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from schemas.swarm_events import ConsensusDecision, OpinionDirection, StrategyOpinion
-from observability.event_stream import publish_event, get_event_stream
+from observability.event_stream import publish_event, publish_event_async, get_event_stream
 from observability.swarm_telemetry import get_swarm_telemetry
 from utils.logger import get_logger
 
@@ -402,7 +402,7 @@ class EnhancedConsensusCoordinator:
         )
         
         # Publish to event stream
-        await publish_event("consensus_decision", decision.to_dict())
+        await publish_event_async("consensus_decision", decision.to_dict())
         
         # Record in telemetry
         telemetry = get_swarm_telemetry()

@@ -7,6 +7,9 @@ into the runtime.
 
 from typing import Dict, Any, List
 import httpx
+from utils.logger import get_logger
+
+logger = get_logger("tools")
 
 
 def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
@@ -19,7 +22,7 @@ def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
                 "https://api.duckduckgo.com/",
                 params={"q": query, "format": "json", "no_html": 1}
             )
-            if response.status_code == 200:
+            if response.status_code == 200 and response.text.strip():
                 data = response.json()
                 results = []
                 
@@ -47,7 +50,7 @@ def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
     except Exception as e:
         # Only log non-timeout errors
         if "timed out" not in str(e).lower():
-            print(f"[Tools] Web search error: {e}")
+            logger.debug("Web search error (ignored): %s", e)
     
     return {"query": query, "results": []}
 

@@ -50,6 +50,16 @@ async def stop_system():
     try:
         orchestrator.stop()
         
+        # Also pause Kalshi agent grid
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            grid = get_agent_grid()
+            for agent in grid._agents:
+                agent.pause()
+            logger.info("Kalshi agent grid paused via system stop")
+        except Exception as e:
+            logger.warning(f"Failed to pause Kalshi agents: {e}")
+        
         return {
             "status": "stopped",
             "message": "MERID system stopped successfully"

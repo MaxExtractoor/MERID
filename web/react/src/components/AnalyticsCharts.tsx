@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { BarChart3, TrendingUp, Activity, RefreshCw, AlertCircle, PieChart } from 'lucide-react';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
 interface ChartData {
   labels: string[];
@@ -22,34 +24,12 @@ interface AnalyticsChartsProps {
 }
 
 export default function AnalyticsCharts({ className = '' }: AnalyticsChartsProps) {
-  const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedChart, setSelectedChart] = useState<'volume' | 'pnl' | 'agents' | 'distribution'>('volume');
 
-  useEffect(() => {
-    fetchAnalytics();
-    const interval = setInterval(fetchAnalytics, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchAnalytics = async () => {
-    try {
-      const response = await fetch('/api/v1/analytics/overview');
-      if (response.ok) {
-        const data = await response.json();
-        setAnalyticsData(data);
-        setError(null);
-      } else {
-        throw new Error('Failed to fetch analytics');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setAnalyticsData(null);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: analyticsData, loading, error, refetch } = useApiData<AnalyticsData>(
+    API_ENDPOINTS.ANALYTICS_OVERVIEW,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND },
+  );
 
   const renderBarChart = (data: ChartData, color: string) => {
     const maxValue = Math.max(...data.values);
@@ -162,7 +142,7 @@ export default function AnalyticsCharts({ className = '' }: AnalyticsChartsProps
           <AlertCircle className="w-5 h-5 text-yellow-500" />
           <div>
             <p className="text-yellow-500 font-medium">Data unavailable</p>
-            <p className="text-sm text-gray-400">{error}</p>
+            <p className="text-sm text-gray-400">{error?.message ?? 'Unknown error'}</p>
           </div>
         </div>
       )}
@@ -212,7 +192,7 @@ export default function AnalyticsCharts({ className = '' }: AnalyticsChartsProps
           { key: 'agents' as const, label: 'Agent Performance', icon: Activity },
           { key: 'distribution' as const, label: 'Market Distribution', icon: PieChart },
         ].map(({ key, label, icon: Icon }) => (
-          <button
+          <button type="button"
             key={key}
             onClick={() => setSelectedChart(key)}
             className={`flex items-center gap-2 px-4 py-2 font-medium transition-colors ${
@@ -236,11 +216,11 @@ export default function AnalyticsCharts({ className = '' }: AnalyticsChartsProps
             {selectedChart === 'agents' && 'Agent Task Completion'}
             {selectedChart === 'distribution' && 'Market Exposure Distribution'}
           </h3>
-          <button
-            onClick={fetchAnalytics}
+          <button type="button"
+            onClick={() => refetch()}
             className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
             title="Refresh data"
-          >
+           aria-label="Refresh">
             <RefreshCw className="w-4 h-4 text-gray-400" />
           </button>
         </div>

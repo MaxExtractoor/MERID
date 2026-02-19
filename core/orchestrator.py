@@ -97,23 +97,9 @@ class MeridCore:
             result = await agent.process(energy, phase="reasoning")
             return result
         except Exception as exc:  # pragma: no cover - best-effort resilience
-            # Handle structured agent errors specifically
             error_type = "unknown"
             error_details = str(exc)
-            
-            # Check if it's our structured AgentErrorResponse
-            from agents.base_agent import AgentErrorResponse
-            if isinstance(exc, AgentErrorResponse):
-                error_type = exc.error_type.value
-                error_details = exc.message
-                self.logger.error(
-                    "[%s] agent %s error: %s", 
-                    agent.agent_id, 
-                    error_type, 
-                    error_details
-                )
-            else:
-                self.logger.exception("[%s] agent failure: %s", agent.agent_id, exc)
+            self.logger.error("[%s] agent failure: %s", agent.agent_id, exc)
             
             # Publish structured error event
             await event_stream.publish(

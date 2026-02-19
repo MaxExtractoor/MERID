@@ -4,7 +4,7 @@ interface ChartCardProps {
   className?: string;
 }
 
-export default function ChartCard({ title, children, className = '' }: ChartCardProps) {
+function ChartCard({ title, children, className = '' }: ChartCardProps) {
   return (
     <div className={`rounded-xl border border-slate-800 bg-slate-900/70 p-4 shadow-sm dark:bg-slate-950 ${className}`}>
       <h2 className="mb-3 text-sm font-semibold text-slate-300">
@@ -30,3 +30,7 @@ export function ChartCardLight({ title, children, className = '' }: ChartCardPro
     </div>
   );
 }
+
+const MemoizedChartCard = React.memo(ChartCard);
+MemoizedChartCard.displayName = 'ChartCard';
+export default MemoizedChartCard;

@@ -1,7 +1,10 @@
-import { useState, useEffect } from "react";
+import React from "react";
 import { Search, Menu, Sun, Moon, Settings } from "lucide-react";
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 import { useTheme } from '../theme';
 import LiveNotifications from './LiveNotifications';
+import ConnectionStatusIndicator from './ConnectionStatusIndicator';
 
 interface TopBarProps {
   onMenuClick: () => void;
@@ -9,29 +12,17 @@ interface TopBarProps {
 
 export default function TopBar({ onMenuClick }: TopBarProps) {
   const { theme, toggleTheme } = useTheme();
-  const [pnl, setPnl] = useState<{ dailyPnl: number; dailyPnlPct: number } | null>(null);
 
-  useEffect(() => {
-    const fetchPnl = async () => {
-      try {
-        let res = await fetch('/api/v1/portfolio/summary');
-        if (!res.ok) res = await fetch('/api/portfolio/summary');
-        if (res.ok) {
-          const data = await res.json();
-          setPnl({
-            dailyPnl: data.dailyPnl ?? data.pnl_today ?? 0,
-            dailyPnlPct: data.dailyPnlPct ?? data.change_24h_percent ?? 0,
-          });
-        }
-      } catch { /* silent */ }
-    };
-    fetchPnl();
-    const interval = setInterval(fetchPnl, 15000);
-    return () => clearInterval(interval);
-  }, []);
+  const { data: pnlData } = useApiData<{ daily_pnl_usd?: number }>(
+    API_ENDPOINTS.KALSHI_PNL,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const { data: balData } = useApiData<{ available?: number }>(
+    API_ENDPOINTS.KALSHI_BALANCE,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
 
-  const dailyPnl = pnl?.dailyPnl ?? 0;
-  const dailyPnlPct = pnl?.dailyPnlPct ?? 0;
+  const dailyPnl = pnlData?.daily_pnl_usd ?? 0;
   const pnlPositive = dailyPnl >= 0;
 
   return (
@@ -39,11 +30,11 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
       {/* Left side */}
       <div className="flex items-center gap-4">
         {/* Mobile menu button */}
-        <button
+        <button type="button"
           onClick={onMenuClick}
           className="p-2 rounded-lg hover:bg-slate-700/50 transition-all hover:scale-105 md:hidden"
           title="Open menu"
-        >
+         aria-label="Menu">
           <Menu className="w-5 h-5 text-slate-300" />
         </button>
 
@@ -67,18 +58,21 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
             LIVE
           </span>
           
-          {/* P&L Summary - live data */}
+          {/* Kalshi Balance + Daily P&L */}
           <div className={`hidden sm:flex items-center gap-3 px-4 py-2 bg-gradient-to-r rounded-lg shadow-lg ${
             pnlPositive
               ? 'from-emerald-500/10 via-green-500/10 to-teal-500/10 border border-emerald-500/30 shadow-emerald-500/20'
               : 'from-red-500/10 via-red-500/10 to-rose-500/10 border border-red-500/30 shadow-red-500/20'
           }`}>
-            <span className="text-slate-300 text-sm font-medium">Daily P&L:</span>
+            {balData?.available != null && (
+              <span className="text-slate-300 text-sm font-medium">
+                {balData.available.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+              </span>
+            )}
+            {balData?.available != null && <span className="text-slate-600">·</span>}
+            <span className="text-slate-300 text-sm font-medium">P&L:</span>
             <span className={`font-bold text-lg ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
               {pnlPositive ? '+' : ''}{dailyPnl.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
-            </span>
-            <span className={`text-sm font-semibold px-2 py-0.5 rounded ${pnlPositive ? 'text-emerald-400 bg-emerald-500/20' : 'text-red-400 bg-red-500/20'}`}>
-              ({pnlPositive ? '+' : ''}{dailyPnlPct.toFixed(2)}%)
             </span>
           </div>
         </div>
@@ -88,7 +82,7 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
       <div className="hidden md:block flex-1 max-w-md mx-8">
         <div className="relative group">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-blue-400 transition-colors" />
-          <input
+          <input aria-label="Search symbols, commands, or actions..."
             id="global-search"
             name="globalSearch"
             type="text"
@@ -101,7 +95,7 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
       {/* Right side */}
       <div className="flex items-center gap-2">
         {/* Theme toggle */}
-        <button
+        <button type="button"
           onClick={toggleTheme}
           className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105"
           title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
@@ -113,11 +107,14 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
           )}
         </button>
 
+        {/* Connection Status */}
+        <ConnectionStatusIndicator />
+
         {/* Notifications */}
         <LiveNotifications />
 
         {/* Settings */}
-        <button className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105" title="Settings">
+        <button type="button" className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105" title="Settings" aria-label="Settings">
           <Settings className="w-5 h-5 text-slate-300" />
         </button>
 

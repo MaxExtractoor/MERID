@@ -1,8 +1,11 @@
 import React, { useState } from "react";
+import { RefreshCw } from 'lucide-react';
 import { useApiData } from "../hooks/useApiData";
-import { API_ENDPOINTS, LOG_LEVELS } from "../config/constants";
+import { API_BASE_URL, API_ENDPOINTS, LOG_LEVELS, DEFAULTS, AUTH_TOKEN_KEY } from "../config/constants";
 import { formatDateTime } from "../utils/formatters";
 import DataTableEnhanced from "../components/DataTableEnhanced";
+import ErrorAlert from "../components/ErrorAlert";
+import EmptyState from "../components/EmptyState";
 
 interface LogEntry {
   id: string;
@@ -10,7 +13,7 @@ interface LogEntry {
   level: keyof typeof LOG_LEVELS;
   component: string;
   message: string;
-  details?: any;
+  details?: Record<string, unknown>;
   stackTrace?: string;
   userId?: string;
   sessionId?: string;
@@ -33,30 +36,33 @@ export default function Logs() {
   const [showDetails, setShowDetails] = useState(false);
   const [selectedLog, _setSelectedLog] = useState<LogEntry | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [clearStatus, setClearStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [refreshInterval, setRefreshInterval] = useState(5000);
 
   // Fetch logs data
-  const { data: logs, refetch } = useApiData<LogEntry[]>(
+  const { data: logs, loading: logsLoading, error: logsError, refetch } = useApiData<LogEntry[]>(
     API_ENDPOINTS.LOGS,
     { 
-      pollingInterval: autoRefresh ? 5000 : undefined,
-      transform: (data) => {
+      pollingInterval: autoRefresh ? DEFAULTS.POLLING_INTERVALS.LOGS : undefined,
+      transform: (raw) => {
+        const payload = Array.isArray(raw) ? (raw as LogEntry[]) : [];
         // Sort by timestamp descending
-        return data.sort((a: LogEntry, b: LogEntry) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        return [...payload].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
       }
     }
   );
 
   // Fetch log stats
   const { data: stats } = useApiData<LogStats>(
-    "/api/v1/logs/stats",
-    { pollingInterval: 30000 }
+    API_ENDPOINTS.LOGS_STATS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.LOG_STATS }
   );
 
+  const isLoading = logsLoading && !logs && !stats;
+
   const filteredLogs = React.useMemo(() => {
-    if (!logs) return [];
-    
-    return logs.filter(log => {
+    const source = logs ?? [];
+    return source.filter(log => {
       const levelMatch = selectedLevel === "all" || log.level === selectedLevel;
       const componentMatch = selectedComponent === "all" || log.component === selectedComponent;
       return levelMatch && componentMatch;
@@ -64,9 +70,36 @@ export default function Logs() {
   }, [logs, selectedLevel, selectedComponent]);
 
   const components = React.useMemo(() => {
-    if (!logs) return [];
-    return [...new Set(logs.map(log => log.component))].sort();
+    const source = logs ?? [];
+    return [...new Set(source.map(log => log.component))].sort();
   }, [logs]);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <RefreshCw className="w-6 h-6 text-blue-400 animate-spin" />
+        <span className="ml-3 text-slate-400">Loading logs…</span>
+      </div>
+    );
+  }
+
+  if (logsError && !logs) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">System Logs</h1>
+        <ErrorAlert message="Failed to load logs" onRetry={refetch} />
+      </div>
+    );
+  }
+
+  if (logs && logs.length === 0) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">System Logs</h1>
+        <EmptyState title="No logs yet" message="System logs will appear here as activity occurs." />
+      </div>
+    );
+  }
 
   const getLevelColor = (level: string) => {
     switch (level) {
@@ -98,38 +131,49 @@ export default function Logs() {
     }
   };
 
-  const columns = [
+  const columns: Array<{
+    key: keyof LogEntry;
+    label: string;
+    sortable?: boolean;
+    render?: (value: unknown, row: LogEntry) => React.ReactNode;
+  }> = [
     {
       key: "timestamp" as keyof LogEntry,
       label: "Timestamp",
       sortable: true,
-      render: (value: string) => formatDateTime(value),
+      render: (value: unknown) => {
+        const timestamp = typeof value === "string" ? value : "";
+        return timestamp ? formatDateTime(timestamp) : "-";
+      },
     },
     {
       key: "level" as keyof LogEntry,
       label: "Level",
-      render: (value: string) => (
-        <span className={`px-2 py-1 rounded text-xs font-medium ${getLevelBgColor(value)} ${getLevelColor(value)}`}>
-          {getLevelIcon(value)} {value.toUpperCase()}
+      render: (value: unknown) => {
+        const level = typeof value === "string" ? value : "";
+        return (
+        <span className={`px-2 py-1 rounded text-xs font-medium ${getLevelBgColor(level)} ${getLevelColor(level)}`}>
+          {getLevelIcon(level)} {level.toUpperCase()}
         </span>
-      ),
+        );
+      },
     },
     {
       key: "component" as keyof LogEntry,
       label: "Component",
       sortable: true,
-      render: (value: string) => (
+      render: (value: unknown) => (
         <span className="px-2 py-1 rounded text-xs font-medium bg-purple-500/10 border-purple-500/20 text-purple-500">
-          {value}
+          {typeof value === "string" ? value : String(value ?? "")}
         </span>
       ),
     },
     {
       key: "message" as keyof LogEntry,
       label: "Message",
-      render: (value: string, row: LogEntry) => (
+      render: (value: unknown, row: LogEntry) => (
         <div className="max-w-md">
-          <div className="text-white">{value}</div>
+          <div className="text-white">{typeof value === "string" ? value : String(value ?? "")}</div>
           {row.details && (
             <div className="text-xs text-slate-400 mt-1">
               {JSON.stringify(row.details, null, 2)}
@@ -141,8 +185,8 @@ export default function Logs() {
     {
       key: "id" as keyof LogEntry,
       label: "Actions",
-      render: (_value: string, row: LogEntry) => (
-        <button
+      render: (_value: unknown, row: LogEntry) => (
+        <button type="button"
           onClick={() => {
             _setSelectedLog(row);
             setShowDetails(true);
@@ -181,11 +225,12 @@ export default function Logs() {
   };
 
   const handleClearLogs = async () => {
+    setClearStatus(null);
     try {
-      const response = await fetch("/api/v1/logs/clear", {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.LOGS_CLEAR}`, {
         method: "DELETE",
         headers: {
-          "Authorization": `Bearer ${localStorage.getItem("merid-access")}`,
+          "Authorization": `Bearer ${localStorage.getItem(AUTH_TOKEN_KEY)}`,
         },
       });
 
@@ -193,21 +238,34 @@ export default function Logs() {
         throw new Error("Failed to clear logs");
       }
 
+      setClearStatus({ type: 'success', message: 'Logs cleared successfully' });
+      setTimeout(() => setClearStatus(null), DEFAULTS.POLLING_INTERVALS.STANDARD);
       refetch();
     } catch (error) {
-      console.error("Failed to clear logs:", error);
+      setClearStatus({ type: 'error', message: 'Failed to clear logs. Please try again.' });
     }
   };
 
   return (
     <div className="space-y-6">
+      {/* Mutation Feedback */}
+      {clearStatus && (
+        <div className={`rounded-lg px-4 py-3 text-sm ${
+          clearStatus.type === 'success'
+            ? 'bg-emerald-900/20 border border-emerald-500/30 text-emerald-300'
+            : 'bg-red-900/20 border border-red-500/30 text-red-300'
+        }`}>
+          {clearStatus.message}
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-white">Logs</h1>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
-            <label className="text-sm text-slate-400">Auto-refresh:</label>
-            <button
+            <span className="text-sm text-slate-400">Auto-refresh:</span>
+            <button type="button"
               onClick={() => setAutoRefresh(!autoRefresh)}
               className={`px-3 py-1 rounded text-sm font-medium ${
                 autoRefresh 
@@ -221,7 +279,7 @@ export default function Logs() {
           
           <div className="flex items-center gap-2">
             <label htmlFor="log-refresh-interval" className="text-sm text-slate-400">Refresh:</label>
-            <select
+            <select aria-label="Refresh:"
               id="log-refresh-interval"
               name="refreshInterval"
               title="Set refresh interval"
@@ -236,17 +294,17 @@ export default function Logs() {
             </select>
           </div>
 
-          <button
+          <button type="button"
             onClick={handleExportLogs}
             className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium transition-colors"
-          >
+           title="Export CSV">
             Export CSV
           </button>
 
-          <button
+          <button type="button"
             onClick={handleClearLogs}
             className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors"
-          >
+           title="Clear Logs">
             Clear Logs
           </button>
         </div>
@@ -282,7 +340,7 @@ export default function Logs() {
       <div className="flex items-center gap-4">
         <div>
           <label htmlFor="log-level-filter" className="text-sm font-medium text-slate-400">Level:</label>
-          <select
+          <select aria-label="Level:"
             id="log-level-filter"
             name="logLevel"
             title="Filter by log level"
@@ -300,7 +358,7 @@ export default function Logs() {
 
         <div>
           <label htmlFor="log-component-filter" className="text-sm font-medium text-slate-400">Component:</label>
-          <select
+          <select aria-label="Debug"
             id="log-component-filter"
             name="logComponent"
             title="Filter by component"
@@ -350,7 +408,7 @@ export default function Logs() {
           <div className="bg-slate-900 rounded-xl border border-slate-800 p-6 max-w-4xl max-h-[90vh] overflow-y-auto w-full mx-4">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold text-white">Log Details</h2>
-              <button
+              <button type="button"
                 onClick={() => setShowDetails(false)}
                 className="text-slate-400 hover:text-white"
               >
