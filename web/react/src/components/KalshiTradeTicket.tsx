@@ -15,7 +15,8 @@ import {
   DollarSign, AlertTriangle, CheckCircle, Info,
   ArrowRight, Loader2,
 } from 'lucide-react';
-import { API_BASE_URL, API_ENDPOINTS } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useApiData } from '../hooks/useApiData';
 
 interface Outcome {
   id: string;
@@ -60,6 +61,13 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   kellyFraction,
   positionLimitPct,
 }) => {
+  // Execution gate — prevent order submission when trading is halted
+  const { data: gateData } = useApiData<{ blocked: boolean; safe_to_trade: boolean }>(
+    '/api/v1/system/execution-gate',
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+  );
+  const executionBlocked = gateData?.blocked ?? false;
+
   const [side, setSide] = useState<Side>(suggestedSide ?? 'yes');
   const [sizeMode, setSizeMode] = useState<SizeMode>('contracts');
   const [contracts, setContracts] = useState(suggestedSize ?? 1);
@@ -338,11 +346,19 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         </div>
       )}
 
+      {/* Execution gate warning */}
+      {executionBlocked && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span>Trading halted — execution gate is blocked</span>
+        </div>
+      )}
+
       {/* Submit */}
       <button
         type="button"
         onClick={handleSubmit}
-        disabled={submitting || effectiveContracts <= 0}
+        disabled={submitting || effectiveContracts <= 0 || executionBlocked}
         className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-50 ${
           side === 'yes'
             ? 'bg-green-600 hover:bg-green-500 text-white'
