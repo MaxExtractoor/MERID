@@ -237,6 +237,21 @@ async def _kalshi_place_order(
             tool_name="kalshi_place_order",
         )
 
+    # Unified execution gate — block live orders when safety checks fail
+    if not gate.should_simulate_fill():
+        try:
+            from core.execution_gate import check_execution_gate
+            exec_gate = check_execution_gate()
+            if exec_gate.blocked:
+                reasons = "; ".join(r.message for r in exec_gate.reasons)
+                return ToolResult.fail(
+                    ToolErrorCode.POLICY_BLOCKED,
+                    f"Execution gate blocked: {reasons}",
+                    tool_name="kalshi_place_order",
+                )
+        except ImportError:
+            pass  # execution gate module not available — fall through
+
     # Session guard
     session = get_session_guard()
     if not session.is_trading_allowed():
