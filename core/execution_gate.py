@@ -158,6 +158,20 @@ def check_execution_gate() -> ExecutionGateStatus:
     except Exception as exc:
         logger.debug("Reconciliation check failed: %s", exc)
 
+    # ── 2b. Kalshi venue reconciliation ──────────────────────────────
+    try:
+        from merid.reconciliation import has_critical_discrepancies as kalshi_has_critical
+        if kalshi_has_critical():
+            reasons.append(BlockReason(
+                source="reconciliation",
+                severity="critical",
+                message="Kalshi venue reconciliation found critical discrepancies",
+                details="Position or order mismatch between MERID and Kalshi venue",
+                hint=REMEDIATION_HINTS["reconciliation"],
+            ))
+    except Exception as exc:
+        logger.debug("Kalshi venue reconciliation check skipped: %s", exc)
+
     # ── 3. Price feed staleness ─────────────────────────────────────
     # In Kalshi demo mode, crypto price feeds are non-critical.
     try:
@@ -372,6 +386,19 @@ def check_pnl_consistency() -> dict:
         for _uid, portfolio in engine.portfolios.items():
             total_pnl += portfolio.total_pnl
         sources["paper_engine"] = round(total_pnl, 2)
+    except Exception:
+        pass
+
+    try:
+        from merid.prediction.paper_session import get_paper_session
+        session = get_paper_session()
+        if session.is_active:
+            kalshi_pnl = sum(
+                iv.net_pnl_cents / 100.0
+                for iv in session._intervals.values()
+                if iv.total_trades > 0
+            )
+            sources["kalshi_session"] = round(kalshi_pnl, 2)
     except Exception:
         pass
 

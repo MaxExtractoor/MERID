@@ -256,7 +256,76 @@ def run_reconciliation() -> ReconciliationReport:
             report.checks.append(check)
 
     # ----------------------------------------------------------
-    # 7. Cross-source PnL consistency (paper vs risk vs equity)
+    # 7. Kalshi PaperSession agent intervals
+    # ----------------------------------------------------------
+    try:
+        from merid.prediction.paper_session import get_paper_session
+        session = get_paper_session()
+        if session.is_active:
+            for name, interval in session._intervals.items():
+                if interval.total_trades == 0:
+                    continue
+                report.portfolios_checked += 1
+                report.positions_checked += 1
+
+                # 7a. PnL is finite
+                check = CheckResult(
+                    name=f"kalshi/{name}/pnl_finite",
+                    status=CheckStatus.OK,
+                )
+                if not (abs(interval.net_pnl_cents) < 1e12):
+                    check.status = CheckStatus.ERROR
+                    check.detail = f"net_pnl_cents={interval.net_pnl_cents} is not finite"
+                    report.all_ok = False
+                report.checks.append(check)
+
+                # 7b. Winning + losing <= total trades
+                wl_sum = interval.winning_trades + interval.losing_trades
+                check = CheckResult(
+                    name=f"kalshi/{name}/win_loss_sum",
+                    status=CheckStatus.OK,
+                )
+                if wl_sum > interval.total_trades:
+                    check.status = CheckStatus.DELTA
+                    check.expected = f"<= {interval.total_trades}"
+                    check.actual = wl_sum
+                    check.delta = wl_sum - interval.total_trades
+                    check.detail = "winning + losing > total trades"
+                    report.all_ok = False
+                report.checks.append(check)
+
+                # 7c. HWM >= net PnL (high water mark should never be below current)
+                check = CheckResult(
+                    name=f"kalshi/{name}/hwm_consistency",
+                    status=CheckStatus.OK,
+                )
+                if interval.high_water_mark_cents < interval.net_pnl_cents - _ABS_TOLERANCE * 100:
+                    check.status = CheckStatus.DELTA
+                    check.expected = f">= {round(interval.net_pnl_cents, 2)}"
+                    check.actual = round(interval.high_water_mark_cents, 2)
+                    check.detail = "high_water_mark < net_pnl_cents"
+                    report.all_ok = False
+                report.checks.append(check)
+
+                # 7d. Gross wins + gross losses ≈ |gross PnL| (no phantom values)
+                gross_sum = interval.gross_wins_cents + interval.gross_losses_cents
+                check = CheckResult(
+                    name=f"kalshi/{name}/gross_balance",
+                    status=CheckStatus.OK,
+                )
+                if gross_sum > 0 and abs(interval.gross_pnl_cents) > gross_sum * 1.01:
+                    check.status = CheckStatus.DELTA
+                    check.expected = f"|gross_pnl| <= gross_wins + gross_losses"
+                    check.actual = round(interval.gross_pnl_cents, 2)
+                    check.delta = round(abs(interval.gross_pnl_cents) - gross_sum, 2)
+                    check.detail = "gross PnL exceeds sum of win/loss buckets"
+                    report.all_ok = False
+                report.checks.append(check)
+    except Exception as exc:
+        logger.debug("Kalshi paper session reconciliation skipped: %s", exc)
+
+    # ----------------------------------------------------------
+    # 8. Cross-source PnL consistency (paper vs risk vs equity)
     # ----------------------------------------------------------
     try:
         from core.execution_gate import check_pnl_consistency, PNL_CONSISTENCY_THRESHOLD
