@@ -142,6 +142,18 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 "workflow_phase": "strategy",
                 "links_to": ["kalshi-dashboard", "exposure"],
             },
+            {
+                "id": "kalshi-sentiment",
+                "label": "Fear / Greed",
+                "href": "kalshi-sentiment",
+                "icon": "Activity",
+                "color": "text-rose-400",
+                "endpoints": [
+                    "/api/v1/kalshi-grid/sentiment",
+                ],
+                "workflow_phase": "monitoring",
+                "links_to": ["kalshi-dashboard", "kalshi-vol-dashboard"],
+            },
         ],
     },
     # ── §2 Risk & Limits ──────────────────────────────────────
