@@ -434,10 +434,10 @@ export default function KalshiGridView() {
                 Kalshi: {status.venue_health.connected ? 'Connected' : 'Offline'}
               </span>
               <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full ${
-                status.venue_health.circuit.state === 'closed' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'
+                status.venue_health?.circuit?.state === 'closed' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'
               }`}>
                 <Shield className="w-3 h-3" />
-                Breaker: {status.venue_health.circuit.state.toUpperCase()}
+                Breaker: {(status.venue_health?.circuit?.state ?? 'unknown').toUpperCase()}
               </span>
             </>
           )}
@@ -679,10 +679,10 @@ export default function KalshiGridView() {
                 </div>
                 <div>
                   <p className="text-slate-500 mb-1">Circuit Breaker</p>
-                  <p className={`font-semibold ${status.venue_health.circuit.state === 'closed' ? 'text-green-400' : 'text-red-400'}`}>
-                    {status.venue_health.circuit.state.toUpperCase()}
+                  <p className={`font-semibold ${status.venue_health?.circuit?.state === 'closed' ? 'text-green-400' : 'text-red-400'}`}>
+                    {(status.venue_health?.circuit?.state ?? 'unknown').toUpperCase()}
                   </p>
-                  {status.venue_health.circuit.failure_count > 0 && (
+                  {(status.venue_health?.circuit?.failure_count ?? 0) > 0 && (
                     <p className="text-slate-600">{status.venue_health.circuit.failure_count} failures</p>
                   )}
                 </div>
