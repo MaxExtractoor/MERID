@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Play, Pause, RefreshCw, AlertTriangle, Shield, Zap } from 'lucide-react';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { logUiError } from '../utils/logger';
 
 interface QuickAction {
@@ -55,9 +55,13 @@ function QuickActionsPanel({ className = '' }: QuickActionsPanelProps) {
   const handlePauseTrading = useCallback(() => {
     void runAction('pause-trading', async () => {
       if (!confirm('Are you sure you want to halt all trading?')) return;
-      const response = await fetch(API_ENDPOINTS.RISK_HALT, {
+      const token = localStorage.getItem('merid-access');
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_HALT}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ reason: 'operator_manual_halt' }),
       });
       if (response.ok) {
@@ -71,9 +75,13 @@ function QuickActionsPanel({ className = '' }: QuickActionsPanelProps) {
   const handleResumeTrading = useCallback(() => {
     void runAction('resume-trading', async () => {
       if (!confirm('Are you sure you want to resume trading?')) return;
-      const response = await fetch(API_ENDPOINTS.RISK_RESUME, {
+      const token = localStorage.getItem('merid-access');
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_RESUME}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ operator: 'operator' }),
       });
       if (response.ok) {
@@ -87,7 +95,14 @@ function QuickActionsPanel({ className = '' }: QuickActionsPanelProps) {
   const handleEmergencyStop = useCallback(() => {
     void runAction('emergency-stop', async () => {
       if (!confirm('Emergency stop will halt the system. Continue?')) return;
-      const response = await fetch(API_ENDPOINTS.SYSTEM_STOP, { method: 'POST' });
+      const token = localStorage.getItem('merid-access');
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SYSTEM_STOP}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
       if (response.ok) {
         showStatus('success', 'Emergency stop initiated.');
       } else {
@@ -98,7 +113,10 @@ function QuickActionsPanel({ className = '' }: QuickActionsPanelProps) {
 
   const handleRiskCheck = useCallback(() => {
     void runAction('risk-check', async () => {
-      const response = await fetch(API_ENDPOINTS.RISK_SUMMARY);
+      const token = localStorage.getItem('merid-access');
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_SUMMARY}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (response.ok) {
         showStatus('success', 'Risk summary fetched.');
       } else {
@@ -109,7 +127,10 @@ function QuickActionsPanel({ className = '' }: QuickActionsPanelProps) {
 
   const handleForceSync = useCallback(() => {
     void runAction('force-sync', async () => {
-      const response = await fetch(API_ENDPOINTS.LIVE_REFRESH);
+      const token = localStorage.getItem('merid-access');
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.LIVE_REFRESH}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (response.ok) {
         showStatus('success', 'Live data refresh triggered.');
       } else {
