@@ -795,17 +795,27 @@ async def place_order(
     if mode_value not in ("mock", "paper", "live"):
         raise HTTPException(400, f"Invalid mode: {mode!r}, must be one of ['mock', 'paper', 'live']")
 
-    # Kill switch hard gate — block live orders if trading is halted
+    # Unified execution gate — block live orders when any safety check fails
     if mode_value == "live":
         try:
-            from merid.risk.kill_switches import risk_controller
-            if not risk_controller.can_trade():
-                reason = risk_controller.get_kill_reason()
-                raise HTTPException(403, f"Trading halted: {reason}")
+            from core.execution_gate import check_execution_gate
+            gate = check_execution_gate()
+            if gate.blocked:
+                reasons = "; ".join(r.message for r in gate.reasons)
+                raise HTTPException(403, f"Trading halted: {reasons}")
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning(f"Kill switch check failed (proceeding cautiously): {exc}")
+            # Fall back to kill switch only if gate import fails
+            try:
+                from merid.risk.kill_switches import risk_controller
+                if not risk_controller.can_trade():
+                    reason = risk_controller.get_kill_reason()
+                    raise HTTPException(403, f"Trading halted: {reason}")
+            except HTTPException:
+                raise
+            except Exception:
+                logger.warning(f"Execution gate + kill switch check failed (proceeding cautiously): {exc}")
 
     # Risk pre-check (if risk manager available)
     risk = _get_risk()
