@@ -186,15 +186,12 @@ export const CHART_COLORS = {
 export const WS_EVENTS = {
   // Price data
   PRICE_TICK: "price_tick",
-  SUBSCRIBE_PRICES: "subscribe_prices",
-  UNSUBSCRIBE_PRICES: "unsubscribe_prices",
-  
+
   // Order updates
   ORDER_UPDATE: "order_update",
   FILL_UPDATE: "fill_update",
-  
+
   // System updates
-  SYSTEM_STATUS: "system_status",
   AGENT_UPDATE: "agent_update",
 } as const;
 
@@ -216,7 +213,6 @@ export const DEFAULTS = {
     LOGS: 10000,     // 10 seconds
     LOG_STATS: 60000, // 60 seconds
     BACKTESTS: 30000, // 30 seconds
-    RISK_POSITION_LIMITS: 30000, // 30 seconds
     STALENESS: 15000,      // 15 seconds
     SIMULATION: 30000,     // 30 seconds
     FAST_REFRESH: 15000,   // 15 seconds
