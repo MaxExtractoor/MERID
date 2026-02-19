@@ -15,7 +15,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 type InsightType = 'performance' | 'risk' | 'liquidity' | 'opportunity';
 
@@ -86,7 +86,14 @@ const KalshiInsightsPanel: React.FC<InsightsPanelProps> = ({ onNavigate }) => {
   const handleAccept = async (insight: Insight) => {
     if (!insight.action_endpoint) return;
     try {
-      await fetch(insight.action_endpoint, { method: 'POST' });
+      const token = localStorage.getItem('merid-access');
+      await fetch(`${API_BASE_URL}${insight.action_endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
       setAccepted(prev => new Set(prev).add(insight.id));
     } catch {
       // silent — endpoint may not exist yet
