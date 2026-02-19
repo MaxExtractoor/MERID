@@ -66,7 +66,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
     '/api/v1/system/execution-gate',
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
-  const executionBlocked = gateData?.blocked ?? false;
+  const executionBlocked = mode === 'live' && (gateData?.blocked ?? false);
 
   const [side, setSide] = useState<Side>(suggestedSide ?? 'yes');
   const [sizeMode, setSizeMode] = useState<SizeMode>('contracts');
@@ -350,7 +350,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       {executionBlocked && (
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
           <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-          <span>Trading halted — execution gate is blocked</span>
+          <span>Live trading halted — execution gate is blocked</span>
         </div>
       )}
 
