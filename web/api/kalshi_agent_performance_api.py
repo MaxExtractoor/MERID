@@ -102,7 +102,7 @@ async def get_performance_summary() -> Dict[str, Any]:
 
 @router.get("/top")
 async def get_top_agents(
-    metric: str = Query("win_rate", regex="^(win_rate|total_pnl_usd|sharpe_ratio)$"),
+    metric: str = Query("win_rate", pattern="^(win_rate|total_pnl_usd|sharpe_ratio)$"),
     limit: int = Query(10, ge=1, le=50),
 ) -> Dict[str, Any]:
     """Get top performing agents by specified metric.
