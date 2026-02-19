@@ -6,20 +6,11 @@
  * knows which execution context is active.
  */
 
-import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useKalshiMode } from '../context/KalshiModeContext';
 import { Shield, Zap } from 'lucide-react';
 
-interface VenueGateMode {
-  mode: string;
-  is_live: boolean;
-  live_enabled: boolean;
-}
-
 export default function KalshiModeBadge() {
-  const { data, loading } = useApiData<VenueGateMode>(API_ENDPOINTS.KALSHI_GRID_MODE, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
-  });
+  const { data, loading } = useKalshiMode();
 
   if (loading && !data) {
     return (
