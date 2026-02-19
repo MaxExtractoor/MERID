@@ -146,42 +146,6 @@ export const API_ENDPOINTS = {
 
 } as const;
 
-// Chart Colors — centralized hex values for Recharts visualizations
-export const CHART_COLORS = {
-  // Semantic
-  GREEN: '#22c55e',
-  RED: '#ef4444',
-  YELLOW: '#facc15',
-  ORANGE: '#f59e0b',
-  BLUE: '#3b82f6',
-  PURPLE: '#a855f7',
-  CYAN: '#06b6d4',
-  TEAL: '#10b981',
-  LIGHT_RED: '#f87171',
-  LIGHT_GREEN: '#4ade80',
-  LIGHT_BLUE: '#60a5fa',
-  LIGHT_PURPLE: '#a78bfa',
-  AMBER: '#d97706',
-  DEEP_ORANGE: '#f97316',
-
-  // Neutral / UI
-  SLATE_300: '#94a3b8',
-  SLATE_400: '#64748b',
-  SLATE_500: '#475569',
-  SLATE_600: '#334155',
-  SLATE_700: '#1e293b',
-  SLATE_800: '#0f172a',
-  GRAY_500: '#6b7280',
-
-  // Chart-specific
-  AXIS_TICK: '#94a3b8',
-  GRID_STROKE: '#334155',
-  TOOLTIP_BG: '#1e293b',
-  TOOLTIP_BORDER: '#334155',
-  TOOLTIP_LABEL: '#94a3b8',
-  BAR_BASE: '#475569',
-} as const;
-
 // WebSocket Events
 export const WS_EVENTS = {
   // Price data
