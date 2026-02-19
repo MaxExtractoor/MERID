@@ -93,33 +93,18 @@ class OrchestratorAgentManager:
             except Exception as exc:
                 logger.warning(f"Telegram agent failed to initialize (non-fatal): {exc}")
         
-        # Start Kalshi agent grid for prediction domain
+        # Grab reference to Kalshi agent grid (already started by _app_lifespan Phase 0.5).
+        # The grid internally manages its own PortfolioRiskAgent — no need to duplicate.
         try:
             from merid.prediction.agent_grid import get_agent_grid
             self.kalshi_agent_grid = get_agent_grid()
-            await self.kalshi_agent_grid.start()
-            logger.info("✅ Kalshi agent grid started")
+            if not self.kalshi_agent_grid._running:
+                await self.kalshi_agent_grid.start()
+                logger.info("✅ Kalshi agent grid started (fallback)")
+            else:
+                logger.info("✅ Kalshi agent grid already running (started by lifespan)")
         except Exception as exc:
-            logger.warning(f"Kalshi agent grid not started (graceful degradation): {exc}")
-
-        # Start PortfolioRiskAgent — feeds live Kalshi balance/positions into
-        # KalshiRiskManager and PositionSizer so vol & sizing show live data.
-        try:
-            from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
-            from merid.prediction.agent_grid_config import PortfolioRiskConfig
-            trading_agents = (
-                list(self.kalshi_agent_grid._agents)
-                if self.kalshi_agent_grid and hasattr(self.kalshi_agent_grid, "_agents")
-                else []
-            )
-            self.portfolio_risk_agent = PortfolioRiskAgent(
-                config=PortfolioRiskConfig(),
-                trading_agents=trading_agents,
-            )
-            await self.portfolio_risk_agent.start()
-            logger.info("✅ Portfolio risk agent started")
-        except Exception as exc:
-            logger.warning(f"Portfolio risk agent not started (non-fatal): {exc}")
+            logger.warning(f"Kalshi agent grid not available (graceful degradation): {exc}")
         
         # Start price feed monitoring (if configured)
         # price_feed_task = asyncio.create_task(
@@ -162,21 +147,14 @@ class OrchestratorAgentManager:
         if self.news_monitor:
             self.news_monitor.stop_monitoring()
         
-        # Stop Kalshi agent grid
-        if self.kalshi_agent_grid:
+        # Kalshi agent grid stop is handled by _app_lifespan shutdown.
+        # grid.stop() is idempotent, so calling it here is safe but redundant.
+        if self.kalshi_agent_grid and self.kalshi_agent_grid._running:
             try:
                 await self.kalshi_agent_grid.stop()
-                logger.info("✅ Kalshi agent grid stopped")
+                logger.info("✅ Kalshi agent grid stopped (via orchestrator)")
             except Exception as exc:
                 logger.warning(f"Kalshi agent grid stop failed: {exc}")
-
-        # Stop portfolio risk agent
-        if self.portfolio_risk_agent:
-            try:
-                await self.portfolio_risk_agent.stop()
-                logger.info("✅ Portfolio risk agent stopped")
-            except Exception as exc:
-                logger.warning(f"Portfolio risk agent stop failed: {exc}")
 
         # Stop insight pipeline
         if self.insight_pipeline:
