@@ -2149,6 +2149,26 @@ async def _app_lifespan(application: FastAPI):
     logger.info("🚀 MERID STARTUP COMPLETE - System Ready")
     logger.info("=" * 80)
 
+    # ── Startup reconciliation — unblock execution gate immediately ─────
+    try:
+        from merid.reconciliation import reconcile_all_venues, has_critical_discrepancies
+        logger.info("Running startup reconciliation to unblock execution gate...")
+        discrepancies = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: reconcile_all_venues(["kalshi"])
+        )
+        n_crit = sum(1 for d in discrepancies if d.severity == "critical")
+        n_warn = sum(1 for d in discrepancies if d.severity == "warning")
+        logger.info(
+            "✅ Startup reconciliation: %d discrepancies (%d critical, %d warning)",
+            len(discrepancies), n_crit, n_warn,
+        )
+        if has_critical_discrepancies():
+            logger.warning("⚠️  Execution gate BLOCKED (critical reconciliation issues)")
+        else:
+            logger.info("✅ Execution gate CLEAR — trades can proceed")
+    except Exception as exc:
+        logger.warning("Startup reconciliation failed (gate may remain blocked): %s", exc)
+
     # ── Start periodic reconciliation ──────────────────────────────────
     try:
         from trading.reconciliation import start_periodic_reconciliation
@@ -2165,6 +2185,23 @@ async def _app_lifespan(application: FastAPI):
 
     # ── SHUTDOWN ───────────────────────────────────────────────────────
     logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
+
+    # Stop Kalshi agent grid gracefully (flushes pending orders, stops agents)
+    try:
+        from merid.prediction.agent_grid import get_agent_grid
+        grid = get_agent_grid()
+        await grid.stop()
+        logger.info("✅ Kalshi agent grid stopped")
+    except Exception as exc:
+        logger.warning("Kalshi agent grid stop failed: %s", exc)
+
+    # Stop orchestrator agents (news monitor, twitter, telegram)
+    try:
+        orchestrator_manager = get_orchestrator_manager()
+        await orchestrator_manager.stop_all()
+        logger.info("✅ Orchestrator agents stopped")
+    except Exception as exc:
+        logger.warning("Orchestrator agents stop failed: %s", exc)
 
     # Final reconciliation + save paper state
     try:
