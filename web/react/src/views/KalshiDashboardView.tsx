@@ -487,7 +487,7 @@ const KalshiDashboardView: React.FC = () => {
           {balResult.data && (
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800">
               <DollarSign className="w-3.5 h-3.5 text-green-400" />
-              <span className="text-sm font-bold text-green-400">${balResult.data.available.toFixed(2)}</span>
+              <span className="text-sm font-bold text-green-400">${(balResult.data.available ?? 0).toFixed(2)}</span>
               <span className="text-[10px] text-gray-500">avail</span>
             </div>
           )}
