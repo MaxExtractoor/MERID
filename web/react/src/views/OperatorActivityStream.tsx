@@ -159,7 +159,7 @@ export function OperatorActivityStream() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-slate-300">{d.type}</span>
-                  <span className="text-slate-500">conf: {(d.confidence * 100).toFixed(0)}%</span>
+                  <span className="text-slate-500">conf: {((d.confidence ?? 0) * 100).toFixed(0)}%</span>
                 </div>
                 {d.reasoning && (
                   <p className="text-slate-500 truncate">{d.reasoning}</p>

@@ -195,7 +195,9 @@ const KalshiPortfolioView: React.FC = () => {
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-    } catch { /* best effort */ }
+    } catch {
+      setOrderError('Export failed — please try again');
+    }
   }, [authHeaders]);
 
   const fetchData = useCallback(() => {

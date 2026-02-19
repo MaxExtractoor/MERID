@@ -47,7 +47,7 @@ export default function KalshiModeBadge() {
     Icon = Shield;
     tooltip = 'Paper trading mode — orders are simulated, no real money at risk';
   } else {
-    label = kalshiMode.toUpperCase();
+    label = (kalshiMode ?? '').toUpperCase();
     colorClass = 'bg-slate-700/50 text-slate-400 border-slate-600/30';
     Icon = Shield;
     tooltip = `Trading mode: ${kalshiMode}`;

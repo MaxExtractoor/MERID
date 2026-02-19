@@ -77,8 +77,8 @@ export function OperatorStatusBar({ summary, lastUpdated, alertCount = 0 }: Oper
       {/* System Metrics */}
       {summary?.system && (
         <div className="flex items-center gap-3 text-xs text-slate-500">
-          <span>CPU {summary.system.cpu_percent.toFixed(0)}%</span>
-          <span>MEM {summary.system.memory_percent.toFixed(0)}%</span>
+          <span>CPU {(summary.system.cpu_percent ?? 0).toFixed(0)}%</span>
+          <span>MEM {(summary.system.memory_percent ?? 0).toFixed(0)}%</span>
         </div>
       )}
 

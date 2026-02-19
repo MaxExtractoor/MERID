@@ -87,6 +87,7 @@ export default function KillSwitchView() {
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
   );
   const [saving, setSaving] = useState(false);
+  const [catError, setCatError] = useState<string | null>(null);
 
   const blocked = killSwitch?.global_kill ?? false;
   const gateState = blocked ? 'blocked' : (riskState?.errors.near_limit ? 'limited' : 'clear');
@@ -194,7 +195,9 @@ export default function KillSwitchView() {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       }
       refetchCats();
-    } catch { /* best effort */ }
+    } catch {
+      setCatError(`Failed to switch ${cat} to ${next}`);
+    }
     setSaving(false);
   }, [authHeaders, categories, refetchCats]);
 
@@ -328,6 +331,12 @@ export default function KillSwitchView() {
       <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
         <h3 className="text-sm font-semibold text-slate-200 mb-1">Category Trading Permissions</h3>
         <p className="text-xs text-slate-500 mb-4">Click a category to cycle: Live → Read-only → Blocked. Controls which market categories agents can trade.</p>
+        {catError && (
+          <div className="mb-3 px-3 py-2 rounded-lg bg-red-900/40 border border-red-700 text-red-300 text-xs flex items-center justify-between">
+            <span>{catError}</span>
+            <button type="button" onClick={() => setCatError(null)} className="text-red-400 hover:text-red-200 ml-2">✕</button>
+          </div>
+        )}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
           {knownCats.map(cat => {
             const mode = (categories[cat] ?? 'read-only') as CatMode;

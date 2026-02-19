@@ -68,7 +68,7 @@ export default function PnLConsistencyWidget() {
           <span className="whitespace-nowrap">
             <span className="text-slate-500">Paper:</span>{' '}
             <span className={`font-mono font-medium ${(paper.total ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              ${paper.total?.toFixed(2)}
+              ${(paper.total ?? 0).toFixed(2)}
             </span>
           </span>
         )}
@@ -78,7 +78,7 @@ export default function PnLConsistencyWidget() {
           <span className="whitespace-nowrap">
             <span className="text-slate-500">Risk:</span>{' '}
             <span className={`font-mono font-medium ${(risk.daily_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              ${risk.daily_pnl?.toFixed(2)}
+              ${(risk.daily_pnl ?? 0).toFixed(2)}
             </span>
           </span>
         )}
@@ -96,7 +96,7 @@ export default function PnLConsistencyWidget() {
 
       {!consistent && (
         <span className="text-amber-400 font-medium whitespace-nowrap">
-          Δ${max_divergence_usd.toFixed(2)}
+          Δ${(max_divergence_usd ?? 0).toFixed(2)}
         </span>
       )}
       <DataAgeBadge lastUpdated={lastUpdated} className="ml-auto" />

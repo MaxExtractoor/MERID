@@ -427,7 +427,7 @@ export default function Logs() {
                   <div>
                     <span className="text-sm text-slate-400">Level</span>
                     <div className={`px-2 py-1 rounded text-xs font-medium ${getLevelBgColor(selectedLog.level)} ${getLevelColor(selectedLog.level)}`}>
-                      {getLevelIcon(selectedLog.level)} {selectedLog.level.toUpperCase()}
+                      {getLevelIcon(selectedLog.level)} {(selectedLog.level ?? '').toUpperCase()}
                     </div>
                   </div>
                   <div>
