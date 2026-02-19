@@ -1,5 +1,6 @@
 import { CheckCircle, AlertTriangle, DollarSign } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
+import { DEFAULTS } from '../config/constants';
 import { DataAgeBadge } from './DataAgeBadge';
 import { HelpPopover } from './HelpPopover';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -27,7 +28,7 @@ export default function PnLConsistencyWidget() {
   
   const { data, loading, lastUpdated } = useApiData<PnLConsistencyData>(
     kalshiOnly ? '' : '/api/v1/system/pnl-consistency',
-    { pollingInterval: kalshiOnly ? 0 : 10000 },
+    { pollingInterval: kalshiOnly ? 0 : DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
 
   if (loading && !data) return null;

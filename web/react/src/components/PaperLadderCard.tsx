@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useApiData } from '../hooks/useApiData';
-import { API_BASE_URL, API_ENDPOINTS } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import ErrorBar from './ErrorBar';
 import { TrendingUp, ChevronUp, Zap, Target, Trophy, DollarSign } from 'lucide-react';
 
@@ -81,7 +81,7 @@ function ProgressBar({ value, max, color }: { value: number; max: number; color:
 }
 
 export default function PaperLadderCard() {
-  const { data, error, refetch } = useApiData<LadderStatus>(API_ENDPOINTS.PAPER_LADDER_STATUS, { pollingInterval: 10000 });
+  const { data, error, refetch } = useApiData<LadderStatus>(API_ENDPOINTS.PAPER_LADDER_STATUS, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
   const [seeding, setSeeding] = useState(false);
 
   const portfolios = data?.portfolios ? Object.values(data.portfolios) : [];

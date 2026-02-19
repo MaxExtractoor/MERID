@@ -128,7 +128,7 @@ function QuickActionsPanel({ className = '' }: QuickActionsPanelProps) {
   const handleForceSync = useCallback(() => {
     void runAction('force-sync', async () => {
       const token = localStorage.getItem('merid-access');
-      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.LIVE_REFRESH}`, {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SYSTEM_HEALTH}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (response.ok) {
