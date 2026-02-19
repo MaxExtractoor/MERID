@@ -16,8 +16,7 @@ import {
   Settings as SettingsIcon,
 } from 'lucide-react';
 import type { View } from '../types/views';
-import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useKalshiMode } from '../context/KalshiModeContext';
 
 interface SidebarProps {
   current: View;
@@ -94,11 +93,7 @@ function SectionHeader({ label, collapsed }: { label: string; collapsed: boolean
 }
 
 function Sidebar({ current, onChange, className, collapsed = false, onToggleCollapse }: SidebarProps) {
-  const { data: modeData } = useApiData<{ mode: string; is_live: boolean }>(
-    API_ENDPOINTS.KALSHI_GRID_MODE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
-  );
-  const isLive = modeData?.is_live ?? false;
+  const { data: modeData, isLive } = useKalshiMode();
 
   const primarySections = [
     { label: 'Live Trading', items: liveTrading },

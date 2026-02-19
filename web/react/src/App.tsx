@@ -19,6 +19,7 @@ import OperatorDashboard from "./views/OperatorDashboard";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
 import { StubRegistryProvider } from "./components/GlobalStubBanner";
+import { KalshiModeProvider } from "./context/KalshiModeContext";
 import { RealtimeDisconnectedBanner } from "./components/RealtimeDisconnectedBanner";
 import { ExecutionBlockedBanner } from "./components/ExecutionBlockedBanner";
 import { GateChangeToast } from "./components/GateChangeToast";
@@ -49,6 +50,7 @@ export default function App() {
   return (
     <ThemeProvider>
     <StubRegistryProvider>
+    <KalshiModeProvider>
     <ToastProvider>
       <div className="flex h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
         {/* Animated background gradient */}
@@ -119,6 +121,7 @@ export default function App() {
       <FillToastWatcher />
       <GateChangeToast />
     </ToastProvider>
+    </KalshiModeProvider>
     </StubRegistryProvider>
     </ThemeProvider>
   );

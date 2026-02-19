@@ -1,6 +1,7 @@
 import { ShieldAlert, ShieldCheck, AlertTriangle, TrendingUp, Activity, Radio } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useKalshiMode } from '../context/KalshiModeContext';
 
 interface BlockReason {
   source: string;
@@ -41,10 +42,7 @@ export default function ExecutionGateStrip() {
     API_ENDPOINTS.KALSHI_RISK,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
-  const { data: modeData } = useApiData<{ mode: string; is_live: boolean }>(
-    API_ENDPOINTS.KALSHI_GRID_MODE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
-  );
+  const { data: modeData } = useKalshiMode();
 
   if (!gate) return null;
 

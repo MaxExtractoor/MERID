@@ -12,6 +12,7 @@ import KalshiTradeTicket from '../components/KalshiTradeTicket';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import { logUxEvent } from '../utils/uxTelemetry';
+import { useKalshiMode } from '../context/KalshiModeContext';
 import type { SizingMetrics, CatalogMarket } from '../types/kalshi';
 
 interface EdgeSignal {
@@ -208,10 +209,8 @@ const KalshiDashboardView: React.FC = () => {
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const autoRefreshedRef = useRef(false);
 
-  const venueModeResult = useApiData<{ mode: string; is_live: boolean }>(API_ENDPOINTS.KALSHI_GRID_MODE, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
-  });
-  const venueMode: 'paper' | 'live' = (venueModeResult.data?.mode ?? 'paper').toLowerCase().includes('paper') ? 'paper' : 'live';
+  const { data: venueModeData } = useKalshiMode();
+  const venueMode: 'paper' | 'live' = venueModeData?.is_live ? 'live' : 'paper';
 
   const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
     const token = localStorage.getItem('merid-access');
@@ -313,19 +312,19 @@ const KalshiDashboardView: React.FC = () => {
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
   );
   const catResult = useApiData<CatalogSummary>(API_ENDPOINTS.KALSHI_CATALOG, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
   });
   const healthResult = useApiData<HealthStatus>(API_ENDPOINTS.KALSHI_HEALTH, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
   });
   const posResult = useApiData<{ positions: { ticker: string }[] }>(API_ENDPOINTS.KALSHI_POSITIONS, {
     pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
   });
   const edgeResult = useApiData<EdgeResponse>(API_ENDPOINTS.KALSHI_EDGE, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND,
   });
   const sizingResult = useApiData<SizingMetrics>(API_ENDPOINTS.KALSHI_SIZING_METRICS, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND,
   });
   const balResult = useApiData<{ available: number }>(API_ENDPOINTS.KALSHI_BALANCE, {
     pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
@@ -337,14 +336,14 @@ const KalshiDashboardView: React.FC = () => {
     consensus_rate: number;
     engine_running: boolean;
   }>(API_ENDPOINTS.KALSHI_CONSENSUS_SIGNALS, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND,
   });
   const newsResult = useApiData<{
     signals: Array<{ title: string; source: string; importance: number; published_at: string | null; assets: string[]; categories: string[]; url: string }>;
     count: number;
     monitor_running: boolean;
   }>(API_ENDPOINTS.KALSHI_NEWS_SIGNALS, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND,
   });
 
   // Per-market detail + liquidity health + volume history — only fetched when a market is selected

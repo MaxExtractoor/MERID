@@ -47,6 +47,8 @@ export function useApiData<T>(
   const abortControllerRef = useRef<AbortController | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const generationRef = useRef(0);
+  const consecutiveErrorsRef = useRef(0);
+  const backoffTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchData = useCallback(async () => {
     if (!enabled || !endpoint) {
@@ -98,9 +100,11 @@ export function useApiData<T>(
       
       setData(transformedData);
       setLastUpdated(new Date());
+      consecutiveErrorsRef.current = 0;
     } catch (err) {
       if (err instanceof Error && err.name !== "AbortError") {
         if (gen === generationRef.current) {
+          consecutiveErrorsRef.current += 1;
           setError(err);
         }
       }
@@ -115,7 +119,7 @@ export function useApiData<T>(
     await fetchData();
   }, [fetchData]);
 
-  // Set up polling
+  // Set up polling with exponential backoff on error
   useEffect(() => {
     if (!enabled || !endpoint) {
       setLoading(false);
@@ -126,12 +130,24 @@ export function useApiData<T>(
       // Initial fetch
       fetchData();
 
-      // Set up polling
-      pollingIntervalRef.current = setInterval(fetchData, pollingInterval);
+      // Adaptive polling: back off up to 4x base interval after consecutive errors
+      const scheduleNext = () => {
+        const errors = consecutiveErrorsRef.current;
+        const backoffMultiplier = errors === 0 ? 1 : Math.min(Math.pow(2, errors - 1), 8);
+        const interval = pollingInterval * backoffMultiplier;
+        pollingIntervalRef.current = setTimeout(() => {
+          fetchData();
+          scheduleNext();
+        }, interval);
+      };
+      scheduleNext();
 
       return () => {
         if (pollingIntervalRef.current) {
-          clearInterval(pollingIntervalRef.current);
+          clearTimeout(pollingIntervalRef.current);
+        }
+        if (backoffTimerRef.current) {
+          clearTimeout(backoffTimerRef.current);
         }
       };
     } else {
@@ -145,13 +161,17 @@ export function useApiData<T>(
     const generationRefCurrent = generationRef;
     const abortRefCurrent = abortControllerRef;
     const pollingRefCurrent = pollingIntervalRef;
+    const backoffRefCurrent = backoffTimerRef;
     return () => {
       generationRefCurrent.current++;
       if (abortRefCurrent.current) {
         abortRefCurrent.current.abort();
       }
       if (pollingRefCurrent.current) {
-        clearInterval(pollingRefCurrent.current);
+        clearTimeout(pollingRefCurrent.current);
+      }
+      if (backoffRefCurrent.current) {
+        clearTimeout(backoffRefCurrent.current);
       }
     };
   }, []);
