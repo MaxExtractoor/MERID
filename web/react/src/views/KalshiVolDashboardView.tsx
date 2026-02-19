@@ -648,11 +648,11 @@ const KalshiVolDashboardView: React.FC = () => {
               {sizing && (
                 <div className="flex items-center gap-3 text-[10px] pt-1 border-t border-slate-800 flex-wrap">
                   <span className="text-gray-500">Risk-Adj:</span>
-                  <span>Sharpe <span className="font-mono text-blue-400">{sizing.sharpe_ratio.toFixed(2)}</span></span>
-                  <span>Sortino <span className="font-mono text-purple-400">{sizing.sortino_ratio.toFixed(2)}</span></span>
-                  <span>Calmar <span className="font-mono text-teal-400">{sizing.calmar_ratio.toFixed(2)}</span></span>
-                  <span>WR <span className="font-mono text-white">{sizing.win_rate_pct.toFixed(0)}%</span></span>
-                  <span>PF <span className="font-mono text-white">{sizing.profit_factor.toFixed(2)}</span></span>
+                  <span>Sharpe <span className="font-mono text-blue-400">{(sizing.sharpe_ratio ?? 0).toFixed(2)}</span></span>
+                  <span>Sortino <span className="font-mono text-purple-400">{(sizing.sortino_ratio ?? 0).toFixed(2)}</span></span>
+                  <span>Calmar <span className="font-mono text-teal-400">{(sizing.calmar_ratio ?? 0).toFixed(2)}</span></span>
+                  <span>WR <span className="font-mono text-white">{(sizing.win_rate_pct ?? 0).toFixed(0)}%</span></span>
+                  <span>PF <span className="font-mono text-white">{(sizing.profit_factor ?? 0).toFixed(2)}</span></span>
                 </div>
               )}
             </>

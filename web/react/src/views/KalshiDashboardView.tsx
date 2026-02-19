@@ -548,8 +548,8 @@ const KalshiDashboardView: React.FC = () => {
             <Gauge className="w-3.5 h-3.5 text-orange-400" />
             <span className="text-[10px] text-gray-500 uppercase tracking-wider">Kelly</span>
           </div>
-          <p className="text-lg font-bold text-white">{sizingResult.data ? `${(sizingResult.data.kelly_fraction * 100).toFixed(1)}%` : '—'}</p>
-          <p className="text-[10px] text-gray-600">eff: {sizingResult.data ? `${(sizingResult.data.effective_fraction * 100).toFixed(2)}%` : '—'}</p>
+          <p className="text-lg font-bold text-white">{sizingResult.data ? `${((sizingResult.data.kelly_fraction ?? 0) * 100).toFixed(1)}%` : '—'}</p>
+          <p className="text-[10px] text-gray-600">eff: {sizingResult.data ? `${((sizingResult.data.effective_fraction ?? 0) * 100).toFixed(2)}%` : '—'}</p>
         </div>
         {/* Edge signals */}
         <div className="bg-slate-900 rounded-xl p-3 border border-slate-800">
@@ -829,7 +829,7 @@ const KalshiDashboardView: React.FC = () => {
           </div>
           <div className="flex items-center gap-1">
             <span className="text-gray-400">Kelly</span>
-            <span className="font-mono text-white">{(sizingResult.data.kelly_fraction * 100).toFixed(1)}%</span>
+            <span className="font-mono text-white">{((sizingResult.data.kelly_fraction ?? 0) * 100).toFixed(1)}%</span>
             <span className="text-gray-600">({sizingResult.data.kelly_utilization_pct?.toFixed(0) ?? '—'}% util)</span>
           </div>
           <span className="text-slate-700">|</span>
@@ -840,7 +840,7 @@ const KalshiDashboardView: React.FC = () => {
           <span className="text-slate-700">|</span>
           <div className="flex items-center gap-1">
             <span className="text-gray-400">Eff Risk</span>
-            <span className="font-mono text-white">{(sizingResult.data.effective_fraction * 100).toFixed(2)}%</span>
+            <span className="font-mono text-white">{((sizingResult.data.effective_fraction ?? 0) * 100).toFixed(2)}%</span>
           </div>
           <span className="text-slate-700">|</span>
           <div className="flex items-center gap-1">
