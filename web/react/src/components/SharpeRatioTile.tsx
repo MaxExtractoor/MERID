@@ -1,4 +1,3 @@
-import React from 'react';
 import { TrendingUp, TrendingDown, Minus, Award } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import ErrorBar from './ErrorBar';

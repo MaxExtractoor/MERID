@@ -91,6 +91,12 @@ class MarketSnapshot:
     edges: List[EdgeEstimate] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    # Fear/greed sentiment (injected by trading_agent._build_snapshot)
+    sentiment_local: Optional[float] = None    # 0–100, this market
+    sentiment_category: Optional[float] = None # 0–100, category average
+    sentiment_global: Optional[float] = None   # 0–100, all Kalshi markets
+    sentiment_regime: Optional[str] = None     # extreme_fear|fear|greed|extreme_greed
+
 
 class PredictionMarketModel:
     """Core prediction market model for Kalshi.

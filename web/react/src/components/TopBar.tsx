@@ -1,4 +1,3 @@
-import React from "react";
 import { Search, Menu, Sun, Moon, Settings } from "lucide-react";
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';

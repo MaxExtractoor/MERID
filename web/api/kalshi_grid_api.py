@@ -145,13 +145,99 @@ async def grid_status() -> Dict[str, Any]:
 
 @router.get("/health")
 async def grid_health() -> Dict[str, Any]:
-    """Detailed health status of the Kalshi grid and venue."""
-    summary = _get_grid().summary()
+    """Detailed health status of the Kalshi grid and venue.
+
+    Returns the shape expected by the Health & Diagnostics tab:
+      status, issues[], catalog{}, ws{}, rate_limits{}, risk{}
+    """
+    grid = _get_grid()
+    summary = grid.summary()
+    venue_health = summary.get("venue_health", {})
+    metrics = summary.get("metrics", {})
+    portfolio = summary.get("portfolio_risk", {})
+
+    issues: List[str] = []
+
+    # Venue connectivity
+    if not venue_health.get("connected", False):
+        issues.append("Kalshi venue is not connected — orders will fail")
+    circuit = venue_health.get("circuit", {})
+    if circuit.get("state", "closed") != "closed":
+        issues.append(f"Circuit breaker is {circuit.get('state', 'open').upper()} — venue calls blocked")
+    error_rate = venue_health.get("error_rate", 0)
+    if error_rate > 0.10:
+        issues.append(f"High venue error rate: {error_rate * 100:.1f}%")
+
+    # Kill switch
+    if portfolio.get("kill_switch_active", False):
+        issues.append("Portfolio kill switch is ACTIVE — all trading halted")
+
+    # Grid not running
+    if not summary.get("running", False):
+        issues.append("Agent grid is not running")
+
+    # Catalog
+    catalog_info: Dict[str, Any] = {"market_count": 0, "last_refresh": None, "categories": 0}
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        cat = get_market_catalog()
+        cat_s = cat.summary()
+        catalog_info = {
+            "market_count": cat_s.get("market_count", 0),
+            "last_refresh": cat_s.get("last_refresh"),
+            "categories": len(cat_s.get("categories", {})),
+        }
+        if catalog_info["market_count"] == 0:
+            issues.append("Market catalog is empty — agents have no markets to trade")
+    except Exception:
+        issues.append("Market catalog unavailable")
+
+    # WebSocket feed
+    ws_info: Dict[str, Any] = {"running": False, "events_forwarded": 0, "subscribed_tickers": 0}
+    try:
+        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
+        bridge = get_ws_bridge()
+        bridge_s = bridge.summary()
+        ws_info = {
+            "running": bridge_s.get("running", False),
+            "events_forwarded": bridge_s.get("events_forwarded", 0),
+            "subscribed_tickers": bridge_s.get("subscribed_tickers", 0),
+        }
+        if not ws_info["running"]:
+            issues.append("WebSocket feed is not running — real-time data unavailable")
+    except Exception:
+        pass
+
+    # Rate limits (from venue_health if available, else defaults)
+    rate_limits_raw = venue_health.get("rate_limits", {})
+    rate_limits: Dict[str, Any] = {
+        "orders_this_minute": int(rate_limits_raw.get("write_used_1m", 0)),
+        "max_per_minute": int(rate_limits_raw.get("write", 10)),
+        "orders_this_hour": int(rate_limits_raw.get("write_used_1h", 0)),
+        "max_per_hour": int(rate_limits_raw.get("write_1h", 600)),
+    }
+    write_tokens = rate_limits_raw.get("write", 10)
+    if isinstance(write_tokens, (int, float)) and write_tokens < 2:
+        issues.append(f"Rate limit nearly exhausted: {write_tokens:.0f} write tokens remaining")
+
+    # Risk snapshot
+    snapshot = portfolio.get("latest_snapshot") or portfolio
+    risk_info: Dict[str, Any] = {
+        "kill_switch": bool(portfolio.get("kill_switch_active", False)),
+        "daily_pnl": float(snapshot.get("daily_pnl_usd", 0)),
+        "drawdown_pct": float(snapshot.get("margin_utilization_pct", snapshot.get("margin_utilization", 0))),
+    }
+
     return {
-        "status": "online" if summary.get("running") else "offline",
-        "venue": summary.get("venue_health", {}),
+        "status": "healthy" if not issues else ("degraded" if len(issues) < 3 else "critical"),
+        "issues": issues,
+        "catalog": catalog_info,
+        "ws": ws_info,
+        "rate_limits": rate_limits,
+        "risk": risk_info,
+        "venue": venue_health,
         "session": summary.get("session", {}),
-        "metrics": summary.get("metrics", {}),
+        "metrics": metrics,
     }
 
 
@@ -398,3 +484,34 @@ async def get_trading_mode() -> Dict[str, Any]:
     if not gate:
         return {"mode": "unknown", "is_live": False, "live_enabled": False}
     return gate.summary()
+
+
+@router.get("/sentiment")
+async def get_sentiment() -> Dict[str, Any]:
+    """Kalshi fear/greed sentiment index — global, per-category, and per-market scores.
+
+    Returns:
+      global:        SentimentScore (score 0–100, regime, components)
+      by_category:   dict[category → SentimentScore]
+      tracked_markets: int
+      external:      optional alternative.me crypto fear/greed
+      top_markets:   top-10 markets by absolute distance from 50 (most extreme sentiment)
+    """
+    try:
+        from merid.event_venues.kalshi.sentiment import get_sentiment_service
+        svc = get_sentiment_service()
+        base = svc.summary()
+
+        # Add top-10 most extreme markets
+        all_scores = svc.all_market_scores()
+        sorted_markets = sorted(
+            all_scores.items(),
+            key=lambda kv: abs(kv[1]["score"] - 50),
+            reverse=True,
+        )
+        base["top_markets"] = [
+            {"ticker": t, **v} for t, v in sorted_markets[:10]
+        ]
+        return base
+    except Exception as exc:
+        return {"error": str(exc), "global": {"score": 50, "regime": "greed"}, "by_category": {}}

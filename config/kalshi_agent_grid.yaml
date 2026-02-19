@@ -393,7 +393,7 @@ agents:
       cutoff_minutes_before_expiry: 0
 
   # ═══════════════════════════════════════════════════════════════════
-  # Macro & Others
+  # Economics / Macro (CPI, GDP, JOBS, RATES, Fed)
   # ═══════════════════════════════════════════════════════════════════
   - name: MACRO_DIRECTIONAL
     assets: []
@@ -409,6 +409,201 @@ agents:
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Financials (S&P 500, NASDAQ, Dow, indices)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: FINANCIALS_DIRECTIONAL
+    assets: [SPX, NDX, DJI]
+    timeframes: []
+    archetype: directional
+    market_filter:
+      category: financials
+    risk_limits:
+      max_yes_position: 5000
+      max_no_position: 5000
+      max_orders_per_window: 10
+      max_notional_usd: 1000
+    entry_window:
+      minutes_before_expiry: 1440
+      cutoff_minutes_before_expiry: 60
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Politics (elections, congress, executive — low size, high scrutiny)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: POLITICS_DIRECTIONAL
+    assets: [ELECTION]
+    timeframes: []
+    archetype: directional
+    market_filter:
+      category: politics
+    risk_limits:
+      max_yes_position: 1000
+      max_no_position: 1000
+      max_orders_per_window: 5
+      max_notional_usd: 300
+    entry_window:
+      minutes_before_expiry: 10080   # 1 week
+      cutoff_minutes_before_expiry: 1440
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Climate & Weather
+  # ═══════════════════════════════════════════════════════════════════
+  - name: CLIMATE_DIRECTIONAL
+    assets: [WEATHER, CLIMATE]
+    timeframes: []
+    archetype: directional
+    market_filter:
+      category: climate
+    risk_limits:
+      max_yes_position: 2000
+      max_no_position: 2000
+      max_orders_per_window: 5
+      max_notional_usd: 400
+    entry_window:
+      minutes_before_expiry: 1440
+      cutoff_minutes_before_expiry: 60
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Sports (game outcomes, player props)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: SPORTS_DIRECTIONAL
+    assets: []
+    timeframes: []
+    archetype: directional
+    market_filter:
+      category: sports
+    risk_limits:
+      max_yes_position: 2000
+      max_no_position: 2000
+      max_orders_per_window: 10
+      max_notional_usd: 400
+    entry_window:
+      minutes_before_expiry: 1440
+      cutoff_minutes_before_expiry: 30
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Tech (AI, big tech, product launches)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: TECH_DIRECTIONAL
+    assets: []
+    timeframes: []
+    archetype: directional
+    market_filter:
+      category: tech
+    risk_limits:
+      max_yes_position: 2000
+      max_no_position: 2000
+      max_orders_per_window: 5
+      max_notional_usd: 400
+    entry_window:
+      minutes_before_expiry: 10080
+      cutoff_minutes_before_expiry: 1440
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Sentiment: Contrarian (extreme regimes only, ≥10pp model gap)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: SENTIMENT_CONTRARIAN_CRYPTO
+    category: crypto
+    assets: [BTC, ETH, SOL, XRP, DOGE]
+    timeframes: []
+    archetype: contrarian
+    market_filter:
+      category: crypto
+    risk_limits:
+      max_yes_position: 3000
+      max_no_position: 3000
+      max_orders_per_window: 8
+      max_notional_usd: 600
+    entry_window:
+      minutes_before_expiry: 1440
+      cutoff_minutes_before_expiry: 30
+
+  - name: SENTIMENT_CONTRARIAN_MACRO
+    category: economics
+    assets: []
+    timeframes: []
+    archetype: contrarian
+    market_filter:
+      category: economics
+    risk_limits:
+      max_yes_position: 2000
+      max_no_position: 2000
+      max_orders_per_window: 5
+      max_notional_usd: 400
+    entry_window:
+      minutes_before_expiry: 10080
+      cutoff_minutes_before_expiry: 1440
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Sentiment: Regime-Switch (momentum when category sentiment shifts)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: SENTIMENT_REGIME_SWITCH_CRYPTO
+    category: crypto
+    assets: [BTC, ETH, SOL]
+    timeframes: []
+    archetype: regime_switch
+    market_filter:
+      category: crypto
+    risk_limits:
+      max_yes_position: 2500
+      max_no_position: 2500
+      max_orders_per_window: 8
+      max_notional_usd: 500
+    entry_window:
+      minutes_before_expiry: 1440
+      cutoff_minutes_before_expiry: 30
+
+  - name: SENTIMENT_REGIME_SWITCH_FINANCIALS
+    category: financials
+    assets: []
+    timeframes: []
+    archetype: regime_switch
+    market_filter:
+      category: financials
+    risk_limits:
+      max_yes_position: 2000
+      max_no_position: 2000
+      max_orders_per_window: 5
+      max_notional_usd: 400
+    entry_window:
+      minutes_before_expiry: 1440
+      cutoff_minutes_before_expiry: 60
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Sentiment: Vol-Breakout (elevated sentiment + book imbalance)
+  # ═══════════════════════════════════════════════════════════════════
+  - name: SENTIMENT_VOL_BREAKOUT_CRYPTO
+    category: crypto
+    assets: [BTC, ETH]
+    timeframes: [1h, 15m]
+    archetype: vol_breakout
+    market_filter:
+      category: crypto
+    risk_limits:
+      max_yes_position: 2000
+      max_no_position: 2000
+      max_orders_per_window: 10
+      max_notional_usd: 400
+    entry_window:
+      minutes_before_expiry: 240
+      cutoff_minutes_before_expiry: 5
+
+  - name: SENTIMENT_VOL_BREAKOUT_GLOBAL
+    category: all
+    assets: []
+    timeframes: []
+    archetype: vol_breakout
+    market_filter:
+      category: all
+    risk_limits:
+      max_yes_position: 1500
+      max_no_position: 1500
+      max_orders_per_window: 8
+      max_notional_usd: 300
+    entry_window:
+      minutes_before_expiry: 480
+      cutoff_minutes_before_expiry: 10
 
   # ═══════════════════════════════════════════════════════════════════
   # Catch-All (low-risk, covers uncategorised markets)

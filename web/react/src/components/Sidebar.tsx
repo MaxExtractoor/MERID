@@ -12,7 +12,6 @@ import {
   Award,
   Sliders,
   TrendingUp,
-  Activity,
   Settings as SettingsIcon,
 } from 'lucide-react';
 import type { View } from '../types/views';
@@ -41,7 +40,6 @@ const liveTrading = [
 const commandCenter = [
   { name: 'Operator', href: 'operator', icon: Sliders, color: 'text-indigo-400' },
   { name: 'Kill Switch', href: 'kill-switch', icon: ShieldAlert, color: 'text-red-400' },
-  { name: 'Agent Health', href: 'agent-health', icon: Activity, color: 'text-emerald-400' },
 ];
 
 const system = [

@@ -5,7 +5,6 @@
  * severity, and value vs threshold. Polls /api/metrics/breach_log.
  */
 
-import React from 'react';
 import { ShieldAlert, AlertTriangle, AlertOctagon, Info, RefreshCw } from 'lucide-react';
 import { useApiData } from '../../hooks/useApiData';
 

@@ -1,3 +1,5 @@
+import React from 'react';
+
 interface LoadingStateProps {
   message?: string;
   subMessage?: string;

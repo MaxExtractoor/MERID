@@ -29,7 +29,7 @@ class VenueConfig:
     """Top-level venue settings."""
     name: str = "kalshi"
     base_url: str = "https://trading-api.kalshi.com/trade-api/v2"
-    use_demo: bool = True
+    use_demo: bool = False
     max_notional_per_expiry_usd: Decimal = Decimal("5000")
     max_open_markets_per_asset: int = 20
 
@@ -243,7 +243,7 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
     venue = VenueConfig(
         name=v.get("name", "kalshi"),
         base_url=v.get("base_url", VenueConfig.base_url),
-        use_demo=v.get("use_demo", True),
+        use_demo=v.get("use_demo", False),
         max_notional_per_expiry_usd=Decimal(str(v.get("max_notional_per_expiry_usd", 5000))),
         max_open_markets_per_asset=v.get("max_open_markets_per_asset", 20),
     )

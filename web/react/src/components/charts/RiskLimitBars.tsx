@@ -5,7 +5,6 @@
  * Polls /api/operator/risk-utilization.
  */
 
-import React from 'react';
 import { Shield, AlertTriangle, AlertOctagon } from 'lucide-react';
 import { useApiData } from '../../hooks/useApiData';
 

@@ -205,6 +205,17 @@ class KalshiNewsAgent:
                 f"Current odds: <b>{prob_pct}</b> {change_str}",
                 f"MERID swarm: <b>{swarm_pct}</b> ({conf_pct} confidence)",
                 f"Volume: {ins.volume:,} · OI: {ins.open_interest:,}",
+            ]
+            if ins.fear_greed_local is not None:
+                regime_label = (ins.regime or "").replace("_", " ").title()
+                signal_label = (ins.signal or "").replace("_", " ")
+                lines += [
+                    f"",
+                    f"😱 Fear/Greed: <b>{ins.fear_greed_local:.0f}/100</b> · {regime_label}",
+                    f"   Category: {ins.fear_greed_category:.0f} · Global: {ins.fear_greed_global:.0f}",
+                    f"   Signal: <code>{signal_label}</code>",
+                ]
+            lines += [
                 f"",
                 f"{ins.narrative}",
                 f"",
@@ -246,10 +257,17 @@ class KalshiNewsAgent:
                 f"{tags_str}"
             )
         else:
+            fg_str = ""
+            if ins.fear_greed_local is not None:
+                regime_short = {
+                    "extreme_fear": "XFear", "fear": "Fear",
+                    "greed": "Greed", "extreme_greed": "XGreed",
+                }.get(ins.regime or "", "")
+                fg_str = f" | F&G {ins.fear_greed_local:.0f} {regime_short}"
             base = (
                 f"{cat_emoji} {act_emoji} {ins.category.upper()}\n"
                 f"{q}\n"
-                f"Now: {prob_pct} {change_str} | MERID: {ins.swarm_prob*100:.0f}%\n"
+                f"Now: {prob_pct} {change_str} | MERID: {ins.swarm_prob*100:.0f}%{fg_str}\n"
                 f"{ins.market_url}\n"
                 f"{tags_str}"
             )

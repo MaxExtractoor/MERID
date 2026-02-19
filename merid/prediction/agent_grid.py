@@ -77,6 +77,10 @@ class AgentGrid:
         # Paper session tracker
         self._paper_session = get_paper_session()
 
+        # Sentiment service (fear/greed index)
+        from merid.event_venues.kalshi.sentiment import get_sentiment_service
+        self._sentiment = get_sentiment_service()
+
         self._running = False
         self._started_at: Optional[datetime] = None
         self._volume_poll_task: Optional[asyncio.Task] = None
@@ -137,6 +141,10 @@ class AgentGrid:
         except Exception as exc:
             logger.warning(f"ReflectionSystem init skipped (non-fatal): {exc}")
 
+        # Start sentiment service background loop
+        await self._sentiment.start()
+        logger.info("✓ Sentiment service started")
+
         # Start volume monitor polling loop
         self._volume_poll_task = asyncio.create_task(
             self._volume_poll_loop(), name="kalshi-volume-monitor"
@@ -165,6 +173,9 @@ class AgentGrid:
         # Stop social broadcaster
         await self._broadcaster.stop()
 
+        # Stop sentiment service
+        await self._sentiment.stop()
+
         # Flush ReflectionSystem persistence buffer on shutdown
         try:
             from agents.reflection.integration import get_reflection_system
@@ -186,25 +197,81 @@ class AgentGrid:
     # ── Volume monitor loop ────────────────────────────────────────────
 
     async def _volume_poll_loop(self) -> None:
-        """Background task: poll volume monitor every 60 seconds."""
+        """Background task: poll volume monitor every 60 seconds + apply regime gating."""
         try:
             from merid.event_venues.kalshi.volume_monitor import get_volume_monitor
             monitor = get_volume_monitor()
         except Exception as exc:
             logger.warning(f"Volume monitor unavailable: {exc}")
-            return
+            monitor = None
 
         while self._running:
             try:
-                changes = monitor.poll()
-                if changes:
-                    logger.debug(f"Volume monitor: {changes} markets changed")
+                if monitor:
+                    changes = monitor.poll()
+                    if changes:
+                        logger.debug(f"Volume monitor: {changes} markets changed")
             except Exception as exc:
                 logger.warning(f"Volume monitor poll error: {exc}")
+
+            # Regime-based agent gating
+            try:
+                self._apply_regime_gating()
+            except Exception as exc:
+                logger.debug(f"Regime gating error (ignored): {exc}")
+
             try:
                 await asyncio.wait_for(asyncio.sleep(60), timeout=65)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
+
+    def _apply_regime_gating(self) -> None:
+        """Tighten or relax agent activity based on global sentiment regime.
+
+        Rules:
+          extreme_fear / extreme_greed  → pause vol_breakout agents (too noisy)
+          extreme_greed                 → pause regime_switch agents (momentum exhausted)
+          fear / greed (moderate)       → resume all sentiment-driven agents
+        """
+        glob = self._sentiment.global_score()
+        regime = glob.regime
+        score  = glob.score
+
+        for agent in self._agents:
+            archetype = agent.config.archetype
+
+            if archetype == "vol_breakout":
+                # vol_breakout needs elevated sentiment — pause when market is calm
+                if 35 <= score <= 65:
+                    if agent.state.enabled:
+                        agent.pause()
+                        logger.info(f"Regime gate: paused {agent.config.name} (vol_breakout, calm market score={score:.0f})")
+                else:
+                    if not agent.state.enabled:
+                        agent.resume()
+                        logger.info(f"Regime gate: resumed {agent.config.name} (vol_breakout, score={score:.0f})")
+
+            elif archetype == "regime_switch":
+                # regime_switch only useful when sentiment is clearly directional
+                if 40 <= score <= 60:
+                    if agent.state.enabled:
+                        agent.pause()
+                        logger.info(f"Regime gate: paused {agent.config.name} (regime_switch, neutral score={score:.0f})")
+                else:
+                    if not agent.state.enabled:
+                        agent.resume()
+                        logger.info(f"Regime gate: resumed {agent.config.name} (regime_switch, score={score:.0f})")
+
+            elif archetype == "contrarian":
+                # contrarian only active in extreme regimes
+                if regime not in ("extreme_fear", "extreme_greed"):
+                    if agent.state.enabled:
+                        agent.pause()
+                        logger.info(f"Regime gate: paused {agent.config.name} (contrarian, regime={regime})")
+                else:
+                    if not agent.state.enabled:
+                        agent.resume()
+                        logger.info(f"Regime gate: resumed {agent.config.name} (contrarian, regime={regime})")
 
     # ── Agent management ───────────────────────────────────────────────
 
@@ -319,12 +386,19 @@ class AgentGrid:
         except Exception:
             paper_session_data = {"active": False}
 
+        # Sentiment summary
+        try:
+            sentiment_data = self._sentiment.summary()
+        except Exception:
+            sentiment_data = {}
+
         return {
             "running": self._running,
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "venue": self._config.venue.name,
             "use_demo": self._config.venue.use_demo,
             "venue_health": venue_health,
+            "sentiment": sentiment_data,
             "metrics": {
                 "active_markets": len(all_discovered),
                 "covered_markets": len(covered_tickers),

@@ -1,4 +1,3 @@
-import React from 'react';
 import { Clock, AlertTriangle, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import ErrorBar from './ErrorBar';
