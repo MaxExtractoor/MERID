@@ -78,6 +78,7 @@ const KalshiPortfolioView: React.FC = () => {
   const [amendOrderId, setAmendOrderId] = useState<string | null>(null);
   const [amendPrice, setAmendPrice] = useState<string>('');
   const [orderError, setOrderError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
     const token = localStorage.getItem('merid-access');
@@ -179,6 +180,7 @@ const KalshiPortfolioView: React.FC = () => {
   }, [authHeaders, orders.length, ordResult]);
 
   const handleExportFills = useCallback(async () => {
+    setExporting(true);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_EXPORT}`, {
         headers: authHeaders(),
@@ -198,6 +200,7 @@ const KalshiPortfolioView: React.FC = () => {
     } catch {
       setOrderError('Export failed — please try again');
     }
+    setExporting(false);
   }, [authHeaders]);
 
   const fetchData = useCallback(() => {
@@ -670,7 +673,8 @@ const KalshiPortfolioView: React.FC = () => {
                 <button
                   type="button"
                   onClick={handleExportFills}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
+                  disabled={exporting}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors disabled:opacity-50"
                 >
                   <Download className="w-3 h-3" />
                   Export CSV

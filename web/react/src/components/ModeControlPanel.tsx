@@ -39,6 +39,7 @@ const DOMAIN_COLORS: Record<string, string> = {
 export default function ModeControlPanel() {
   const [confirmAction, setConfirmAction] = useState<{ venue: string; mode: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
 
   const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ venues: VenueMode[] }>(
     API_ENDPOINTS.PIPELINE_VENUES,
@@ -59,6 +60,7 @@ export default function ModeControlPanel() {
   };
 
   const doChangeMode = async (venue: string, newMode: string) => {
+    setActionLoading(true);
     setActionError(null);
     try {
       const modeRes = await fetch(`${API_BASE_URL}${API_ENDPOINTS.PIPELINE_VENUE_MODE}`, {
@@ -72,9 +74,11 @@ export default function ModeControlPanel() {
     }
     refetch();
     setConfirmAction(null);
+    setActionLoading(false);
   };
 
   const toggleEnabled = async (venue: string, enabled: boolean) => {
+    setActionLoading(true);
     setActionError(null);
     const endpoint = enabled
       ? API_ENDPOINTS.PIPELINE_VENUE_TOGGLE('enable')
@@ -90,6 +94,7 @@ export default function ModeControlPanel() {
       setActionError(`Toggle failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
     refetch();
+    setActionLoading(false);
   };
 
   const formatTimeAgo = (ts: string) => {
@@ -169,7 +174,8 @@ export default function ModeControlPanel() {
                   <span className="text-xs text-gray-500">{formatTimeAgo(v.lastModeChange)}</span>
                   <button type="button"
                     onClick={() => toggleEnabled(v.venue, !v.enabled)}
-                    className={`p-1 rounded transition-colors ${
+                    disabled={actionLoading}
+                    className={`p-1 rounded transition-colors disabled:opacity-50 ${
                       v.enabled
                         ? 'text-green-400 hover:bg-green-500/20'
                         : 'text-gray-500 hover:bg-gray-500/20'
@@ -190,7 +196,7 @@ export default function ModeControlPanel() {
                     <button type="button"
                       key={mode}
                       onClick={() => v.enabled && changeMode(v.venue, mode)}
-                      disabled={!v.enabled}
+                      disabled={!v.enabled || actionLoading}
                       className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-all ${
                         isActive
                           ? `${cfg.bg} ${cfg.text} ring-1 ${cfg.ring}`

@@ -89,6 +89,7 @@ export default function KalshiTerminalView() {
   const [rightTab, setRightTab] = useState<RightTab>('orders');
   const [posOnly, setPosOnly] = useState(false);
   const [cancellingAll, setCancellingAll] = useState(false);
+  const [cancellingOrder, setCancellingOrder] = useState<string | null>(null);
   const [orderError, setOrderError] = useState<string | null>(null);
 
   // ── Data ──
@@ -186,6 +187,7 @@ export default function KalshiTerminalView() {
 
   // ── Handlers ──
   const handleCancelOrder = useCallback(async (orderId: string) => {
+    setCancellingOrder(orderId);
     setOrderError(null);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDER_CANCEL(orderId)}`, {
@@ -199,6 +201,7 @@ export default function KalshiTerminalView() {
     } catch (err) {
       setOrderError(err instanceof Error ? err.message : `Cancel order ${orderId} failed`);
     }
+    setCancellingOrder(null);
   }, [authHeaders, ordResult]);
 
   const handleCancelAll = useCallback(async () => {
@@ -563,8 +566,9 @@ export default function KalshiTerminalView() {
                               : 'bg-slate-700 text-gray-400'
                           }`}>{o.status}</span>
                           <button type="button" onClick={() => handleCancelOrder(o.order_id)}
-                            className="ml-auto text-gray-600 hover:text-red-400 transition-colors" aria-label="Cancel">
-                            <X className="w-3 h-3" />
+                            disabled={cancellingOrder === o.order_id || cancellingAll}
+                            className="ml-auto text-gray-600 hover:text-red-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" aria-label="Cancel">
+                            <X className={`w-3 h-3 ${cancellingOrder === o.order_id ? 'animate-spin' : ''}`} />
                           </button>
                         </div>
                       );
