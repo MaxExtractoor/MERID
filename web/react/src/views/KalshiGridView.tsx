@@ -688,7 +688,7 @@ export default function KalshiGridView() {
                 </div>
                 <div>
                   <p className="text-slate-500 mb-1">Error Rate</p>
-                  <p className={`font-semibold font-mono ${status.venue_health.error_rate > 0.05 ? 'text-red-400' : 'text-slate-300'}`}>
+                  <p className={`font-semibold font-mono ${(status.venue_health?.error_rate ?? 0) > 0.05 ? 'text-red-400' : 'text-slate-300'}`}>
                     {((status.venue_health?.error_rate ?? 0) * 100).toFixed(2)}%
                   </p>
                 </div>
@@ -787,8 +787,8 @@ export default function KalshiGridView() {
           </div>
           <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
             <span className="text-xs text-gray-400 uppercase tracking-wider">Health Score</span>
-            <p className={`text-xl font-bold mt-1 ${status.venue_health.connected ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {status.venue_health.connected ? '100%' : '0%'}
+            <p className={`text-xl font-bold mt-1 ${status.venue_health?.connected ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {status.venue_health?.connected ? '100%' : '0%'}
             </p>
           </div>
         </div>
