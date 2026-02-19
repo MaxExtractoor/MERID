@@ -32,7 +32,6 @@ export const API_ENDPOINTS = {
   RISK_STALENESS: "/api/v1/risk/staleness",
   RISK_HALT: "/api/v1/risk/halt",
   RISK_RESUME: "/api/v1/risk/resume",
-  LIVE_REFRESH: "/api/v1/live/refresh",
 
   // ── Notifications ─────────────────────────────────────────────
   NOTIFICATIONS: "/api/v1/notifications",
