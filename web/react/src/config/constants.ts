@@ -217,6 +217,7 @@ export const API_ENDPOINTS = {
   KALSHI_GRID_KILL_SWITCH_RESET: "/api/v1/kalshi-grid/kill-switch/reset",
   KALSHI_GRID_HEALTH: "/api/v1/kalshi-grid/health",
   KALSHI_GRID_MODE: "/api/v1/kalshi-grid/mode",
+  KALSHI_GRID_SENTIMENT: "/api/v1/kalshi-grid/sentiment",
   
   // Kalshi Agent Performance
   KALSHI_GRID_PERFORMANCE_AGENTS: "/api/v1/kalshi-grid/performance/agents",
@@ -349,6 +350,7 @@ export const DEFAULTS = {
     BACKGROUND: 60000,     // 60 seconds
     INFREQUENT: 120000,    // 2 minutes
     RARE: 300000,          // 5 minutes
+    SENTIMENT: 30000,      // 30 seconds
   },
   TIMEOUTS: {
     DEBOUNCE: 50,         // 50ms debounce

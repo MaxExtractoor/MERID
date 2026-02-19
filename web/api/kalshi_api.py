@@ -228,7 +228,7 @@ async def list_markets(
     # Fallback: hit Kalshi public API directly
     import os, requests as req
     env = os.environ.get("KALSHI_ENV", "demo")
-    base = "https://demo-api.kalshi.co" if env == "demo" else "https://api.kalshi.com"
+    base = "https://demo-api.kalshi.co" if env == "demo" else "https://trading-api.kalshi.com"
     try:
         params: Dict[str, Any] = {"limit": limit, "status": "open"}
         if search:

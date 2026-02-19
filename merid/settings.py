@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     KALSHI_API_KEY_ID: Optional[str] = Field(default=None, description="Kalshi API key ID")
     KALSHI_PRIVATE_KEY_PATH: Optional[str] = Field(default="change_me", description="Kalshi private key path")
     KALSHI_PRIVATE_KEY_PEM: Optional[str] = Field(default=None, description="Kalshi private key PEM")
-    KALSHI_API_HOST: Optional[str] = Field(default="https://api.kalshi.com/trade-api/v2", description="Kalshi API host")
+    KALSHI_API_HOST: Optional[str] = Field(default="https://trading-api.kalshi.com/trade-api/v2", description="Kalshi API host")
     
     # =============================================================================
     # PREDICTION MARKET SETTINGS (Kalshi-first)

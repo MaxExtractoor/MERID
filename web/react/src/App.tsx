@@ -14,6 +14,7 @@ import KalshiPortfolioView from "./views/KalshiPortfolioView";
 import KalshiVolDashboardView from "./views/KalshiVolDashboardView";
 import KalshiTerminalView from "./views/KalshiTerminalView";
 import KalshiAgentPerformanceView from "./views/KalshiAgentPerformanceView";
+import KalshiSentimentView from "./views/KalshiSentimentView";
 import OperatorDashboard from "./views/OperatorDashboard";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
@@ -106,6 +107,7 @@ export default function App() {
               {view === "kalshi-vol-dashboard" && <KalshiVolDashboardView />}
               {view === "kalshi-terminal" && <KalshiTerminalView />}
               {view === "kalshi-performance" && <KalshiAgentPerformanceView />}
+              {view === "kalshi-sentiment" && <KalshiSentimentView />}
               {view === "positions" && <Positions />}
               {view === "orders" && <Orders />}
               {view === "operator" && <OperatorDashboard />}
