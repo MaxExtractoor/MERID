@@ -284,10 +284,10 @@ Instructions:
                     response = await client.post(_OLLAMA_URL, json=payload)
                     response.raise_for_status()
                     data = response.json()
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:  
-            self.logger.warning(" Ollama unreachable at %s (using stub fallback): %s", _OLLAMA_URL, exc)
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            self.logger.debug(" Ollama unreachable at %s (using stub fallback): %s", _OLLAMA_URL, exc)
             return _build_stub_response(prompt, self.agent_id)
-        except Exception as exc:  
+        except Exception as exc:
             self.logger.error(" Model invocation failed for %s: %s", self.agent_id, exc)
             return _build_stub_response(prompt, self.agent_id)
 
