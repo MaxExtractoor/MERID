@@ -54,7 +54,7 @@ export default function KalshiActivityLog({ ticker, maxItems = 12 }: KalshiActiv
           type: 'signal',
           agent: agent.name,
           side: s.side,
-          detail: `EV ${s.ev_cents > 0 ? '+' : ''}${s.ev_cents}¢ · ${(s.confidence * 100).toFixed(0)}% conf`,
+          detail: `EV ${s.ev_cents > 0 ? '+' : ''}${s.ev_cents}¢ · ${((s.confidence ?? 0) * 100).toFixed(0)}% conf`,
         });
       }
     }
