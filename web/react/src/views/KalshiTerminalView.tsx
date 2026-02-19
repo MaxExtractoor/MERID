@@ -89,6 +89,7 @@ export default function KalshiTerminalView() {
   const [rightTab, setRightTab] = useState<RightTab>('orders');
   const [posOnly, setPosOnly] = useState(false);
   const [cancellingAll, setCancellingAll] = useState(false);
+  const [orderError, setOrderError] = useState<string | null>(null);
 
   // ── Data ──
   const fast = { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH };
@@ -185,31 +186,37 @@ export default function KalshiTerminalView() {
 
   // ── Handlers ──
   const handleCancelOrder = useCallback(async (orderId: string) => {
+    setOrderError(null);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDER_CANCEL(orderId)}`, {
         method: 'DELETE',
         headers: authHeaders(),
       });
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        throw new Error(`Cancel failed: HTTP ${res.status}`);
       }
       ordResult.refetch();
-    } catch { /* ignore */ }
+    } catch (err) {
+      setOrderError(err instanceof Error ? err.message : `Cancel order ${orderId} failed`);
+    }
   }, [authHeaders, ordResult]);
 
   const handleCancelAll = useCallback(async () => {
     if (!window.confirm(`Cancel ALL ${orders.length} open orders?`)) return;
     setCancellingAll(true);
+    setOrderError(null);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDERS_BATCH_CANCEL}`, {
         method: 'DELETE',
         headers: authHeaders(),
       });
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        throw new Error(`Batch cancel failed: HTTP ${res.status}`);
       }
       ordResult.refetch();
-    } catch { /* ignore */ }
+    } catch (err) {
+      setOrderError(err instanceof Error ? err.message : 'Batch cancel failed');
+    }
     setCancellingAll(false);
   }, [authHeaders, orders.length, ordResult]);
 
@@ -231,6 +238,14 @@ export default function KalshiTerminalView() {
       {/* ── EXECUTION GATE + RISK BANNER ── */}
       <div className="shrink-0 space-y-2">
         <ExecutionGateStrip />
+
+        {orderError && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+            <ShieldAlert className="w-4 h-4 shrink-0" />
+            <span>{orderError}</span>
+            <button type="button" onClick={() => setOrderError(null)} className="ml-auto text-red-400 hover:text-red-300" title="Dismiss" aria-label="Dismiss error">×</button>
+          </div>
+        )}
 
         {(ksActive || drawdownHalt) && (
           <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl border bg-red-950/40 border-red-500/50 text-red-400">
