@@ -2,6 +2,8 @@ import { useMemo } from 'react';
 import { TrendingUp, TrendingDown, Package, RefreshCw } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import ExecutionGateStrip from '../components/ExecutionGateStrip';
+import KalshiModeBadge from '../components/KalshiModeBadge';
 import type { KalshiPosition, KalshiRiskSummary } from '../types/kalshi';
 
 export default function Positions() {
@@ -29,10 +31,12 @@ export default function Positions() {
 
   return (
     <div className="space-y-6">
+      <ExecutionGateStrip />
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Kalshi Positions</h1>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2">Kalshi Positions <KalshiModeBadge /></h1>
           <p className="text-slate-400">Live positions from your Kalshi account</p>
         </div>
         <button

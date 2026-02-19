@@ -166,9 +166,9 @@ function CategoryCard({ name, data }: { name: string; data: SentimentScore }) {
 // ── Main View ───────────────────────────────────────────────────────────────
 
 export default function KalshiSentimentView() {
-  const { data, isLoading, refetch } = useApiData<SentimentData>(
+  const { data, loading, refetch } = useApiData<SentimentData>(
     API_ENDPOINTS.KALSHI_GRID_SENTIMENT,
-    { refreshInterval: DEFAULTS.POLLING.SENTIMENT }
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
   );
 
   const categories = useMemo(() => {
@@ -186,7 +186,7 @@ export default function KalshiSentimentView() {
   const globalScore = data?.global?.score ?? 50;
   const globalRegime = data?.global?.regime ?? 'greed';
 
-  if (isLoading && !data) {
+  if (loading && !data) {
     return (
       <div className="flex items-center justify-center h-64 text-slate-500">
         <RefreshCw className="w-5 h-5 animate-spin mr-2" />
@@ -211,7 +211,7 @@ export default function KalshiSentimentView() {
           className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
           aria-label="Refresh sentiment"
         >
-          <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
@@ -338,7 +338,7 @@ export default function KalshiSentimentView() {
       )}
 
       {/* ── Empty State ──────────────────────────────────────── */}
-      {!data?.tracked_markets && !isLoading && (
+      {!data?.tracked_markets && !loading && (
         <div className="flex flex-col items-center justify-center py-16 text-slate-500">
           <Snowflake className="w-10 h-10 mb-3 text-slate-600" />
           <p className="text-sm font-medium">No sentiment data yet</p>
