@@ -1,5 +1,6 @@
 import { Shield, ShieldAlert, ShieldCheck, ShieldOff, Wifi, WifiOff, Zap, ZapOff, Clock, AlertTriangle } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
+import { DEFAULTS } from '../config/constants';
 import { useExecutionGate } from '../hooks/useExecutionGate';
 import { HelpPopover } from './HelpPopover';
 
@@ -60,7 +61,7 @@ function StatusDot({ ok }: { ok: boolean }) {
 export default function ModeSafetyPanel() {
   const { data, loading, error } = useApiData<ModeSafetyData>(
     '/api/v1/system/mode-safety',
-    { pollingInterval: 5000 },
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
   const gate = useExecutionGate();
 
