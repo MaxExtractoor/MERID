@@ -13,6 +13,7 @@ export type View =
   | "kalshi-vol-dashboard"
   | "kalshi-terminal"
   | "kalshi-performance"
+  | "kalshi-sentiment"
   | "positions"
   | "orders"
   | "operator"

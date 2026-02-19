@@ -122,7 +122,7 @@ class KalshiConfig:
     """Configuration for Kalshi client."""
     
     # API endpoints
-    rest_api_url: str = "https://api.kalshi.com/trade-api/v2"
+    rest_api_url: str = "https://trading-api.kalshi.com/trade-api/v2"
     ws_api_url: str = "wss://ws.kalshi.com/v2"
     demo_rest_api_url: str = "https://demo-api.kalshi.co/trade-api/v2"
     demo_ws_api_url: str = "wss://demo-ws.kalshi.co/v2"
