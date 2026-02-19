@@ -41,6 +41,7 @@ export const SIDEBAR_MANIFEST: SidebarSection[] = [
       { name: 'Positions',    href: 'positions',           icon: 'TrendingUp',      color: 'text-cyan-400' },
       { name: 'Orders',       href: 'orders',              icon: 'ClipboardList',   color: 'text-teal-300' },
       { name: 'Vol & Sizing', href: 'kalshi-vol-dashboard', icon: 'Gauge',          color: 'text-purple-400' },
+      { name: 'Fear/Greed',  href: 'kalshi-sentiment',     icon: 'Activity',       color: 'text-rose-400' },
     ],
   },
   {
