@@ -572,7 +572,7 @@ class KalshiVenueClient(EventVenueClient):
                 last_error = e
                 if attempt < KALSHI_MAX_RETRIES:
                     wait_time = KALSHI_BACKOFF_BASE ** attempt
-                    logger.warning(
+                    logger.debug(
                         f"[kalshi] {operation_name} connection error, retrying in {wait_time}s "
                         f"(attempt {attempt + 1}): {e}"
                     )
