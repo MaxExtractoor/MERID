@@ -137,7 +137,7 @@ class CircuitBreaker:
                     old = self._state.value
                     self._state = CircuitState.HALF_OPEN
                     self._half_open_calls = 0
-                    logger.info(f"Circuit '{self.name}' transitioning to HALF_OPEN")
+                    logger.debug(f"Circuit '{self.name}' transitioning to HALF_OPEN")
                     _notify_listeners(self.name, old, "half_open", {"reason": "recovery_timeout"})
                 else:
                     raise CircuitOpenError(self.name, self._time_until_retry())
@@ -172,7 +172,7 @@ class CircuitBreaker:
                 old = self._state.value
                 self._state = CircuitState.OPEN
                 self._half_open_calls = 0
-                logger.warning(
+                logger.debug(
                     f"Circuit '{self.name}' re-OPENED (half-open failure): {error}"
                 )
                 _notify_listeners(self.name, old, "open", {

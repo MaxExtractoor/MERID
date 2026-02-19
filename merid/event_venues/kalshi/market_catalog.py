@@ -235,7 +235,8 @@ class KalshiMarketCatalog:
             self._last_refresh = now
             self._refresh_count += 1
 
-            logger.info(
+            _log = logger.info if enriched else logger.debug
+            _log(
                 f"Catalog refreshed: {len(enriched)} markets, "
                 f"{len(cat_idx)} categories, {len(asset_idx)} assets"
             )
