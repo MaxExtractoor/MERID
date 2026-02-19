@@ -1190,7 +1190,7 @@ const KalshiDashboardView: React.FC = () => {
                       <div className="grid grid-cols-3 gap-2 mt-3">
                         <div className="text-center">
                           <p className="text-[10px] text-gray-500">Model Prob</p>
-                          <p className="text-sm font-bold text-white font-mono">{(sig.model_prob * 100).toFixed(1)}¢</p>
+                          <p className="text-sm font-bold text-white font-mono">{((sig.model_prob ?? 0) * 100).toFixed(1)}¢</p>
                         </div>
                         <div className="text-center">
                           <p className="text-[10px] text-gray-500">EV/contract</p>
@@ -1206,7 +1206,7 @@ const KalshiDashboardView: React.FC = () => {
                             : 'text-gray-500'
                           }`}>
                             {sig.confidence_bucket === 'high' ? '●●●' : sig.confidence_bucket === 'medium' ? '●●○' : '●○○'}
-                            <span className="ml-1 text-[10px]">{(sig.confidence * 100).toFixed(0)}%</span>
+                            <span className="ml-1 text-[10px]">{((sig.confidence ?? 0) * 100).toFixed(0)}%</span>
                           </p>
                         </div>
                       </div>
@@ -1275,10 +1275,10 @@ const KalshiDashboardView: React.FC = () => {
 
                 // Build rationale
                 const parts: string[] = [];
-                parts.push(`${(effective * 100).toFixed(2)}% eff. Kelly`);
+                parts.push(`${((effective ?? 0) * 100).toFixed(2)}% eff. Kelly`);
                 if (ddTier !== 'normal') parts.push(`${ddTier} tier`);
                 if (selectedMarket.asset) parts.push(`${selectedMarket.asset} limit`);
-                parts.push(`${(conf * 100).toFixed(0)}% conf`);
+                parts.push(`${((conf ?? 0) * 100).toFixed(0)}% conf`);
                 const rationale = parts.join(' · ');
 
                 return (
@@ -1322,7 +1322,7 @@ const KalshiDashboardView: React.FC = () => {
                   <div className="bg-slate-800 rounded-lg p-3 space-y-2">
                     <div className="flex items-center justify-between">
                       <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Liquidity Health</h3>
-                      <span className={`text-sm font-bold font-mono ${scoreColor}`}>{(lh.health_score * 100).toFixed(0)}%</span>
+                      <span className={`text-sm font-bold font-mono ${scoreColor}`}>{((lh.health_score ?? 0) * 100).toFixed(0)}%</span>
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-[10px]">
                       <div>
