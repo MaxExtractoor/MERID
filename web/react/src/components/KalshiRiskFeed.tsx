@@ -70,6 +70,7 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, on
   }, []);
 
   const handleDownsize = useCallback(async (asset?: string) => {
+    if (!window.confirm(`Downsize ${asset ?? 'all'} positions by 50%? This will reduce live position sizes.`)) return;
     const key = `downsize-${asset ?? 'all'}`;
     setActionStatus(prev => ({ ...prev, [key]: 'pending' }));
     logUxEvent('risk_action', 'downsize', { asset });
@@ -97,6 +98,7 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, on
   }, [onNavigate]);
 
   const handlePauseAgents = useCallback(async () => {
+    if (!window.confirm('Pause all agents? This will stop new order placement.')) return;
     setActionStatus(prev => ({ ...prev, 'pause-agents': 'pending' }));
     logUxEvent('risk_action', 'pause_agents');
     try {
@@ -115,6 +117,7 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, on
   }, [authHeaders]);
 
   const handleResetKillSwitch = useCallback(async () => {
+    if (!window.confirm('Reset kill switch and re-enable trading? Ensure all issues are resolved first.')) return;
     setActionStatus(prev => ({ ...prev, 'reset-ks': 'pending' }));
     logUxEvent('risk_action', 'reset_kill_switch');
     try {
