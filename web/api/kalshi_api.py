@@ -139,6 +139,22 @@ def _get_position_sizer():
         return None
 
 
+# ── Ticker-prefix enrichment (shared with catalog) ───────────────────────
+
+def _enrich_from_ticker(ticker: str) -> Dict[str, Any]:
+    """Detect category/asset from Kalshi event_ticker prefix.
+
+    Returns dict with keys: category, asset, timeframe.
+    Used by fallback paths when catalog is unavailable.
+    """
+    try:
+        from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog
+        cat, asset = KalshiMarketCatalog._detect_from_ticker(ticker)
+        return {"category": cat, "asset": asset, "timeframe": None}
+    except Exception:
+        return {"category": None, "asset": None, "timeframe": None}
+
+
 # ── Market browsing ──────────────────────────────────────────────────────
 
 @router.get("/markets")
@@ -227,8 +243,7 @@ async def list_markets(
 
     # Fallback: hit Kalshi public API directly
     import os, requests as req
-    env = os.environ.get("KALSHI_ENV", "demo")
-    base = "https://demo-api.kalshi.co" if env == "demo" else "https://trading-api.kalshi.com"
+    base = "https://api.elections.kalshi.com"
     try:
         params: Dict[str, Any] = {"limit": limit, "status": "open"}
         if search:
@@ -273,9 +288,7 @@ async def list_markets(
                 {
                     "ticker": m.get("ticker", ""),
                     "question": m.get("title", m.get("subtitle", "")),
-                    "category": m.get("category", None),
-                    "asset": None,
-                    "timeframe": None,
+                    **_enrich_from_ticker(m.get("event_ticker", m.get("ticker", ""))),
                     "market_type": m.get("market_type", "binary"),
                     "active": m.get("status") == "open",
                     "volume": m.get("volume", 0),
@@ -344,13 +357,14 @@ async def get_market_detail(ticker: str) -> Dict[str, Any]:
             m = rest.get_market(ticker)
             market = m.get("market", m)
             last_price_cents = market.get("last_price", market.get("yes_ask"))
+            enriched = _enrich_from_ticker(market.get("event_ticker", ticker))
             return {
                 "ticker": market.get("ticker", ticker),
                 "question": market.get("title", ""),
                 "description": market.get("subtitle", ""),
-                "category": market.get("category", None),
-                "asset": None,
-                "timeframe": None,
+                "category": enriched["category"],
+                "asset": enriched["asset"],
+                "timeframe": enriched["timeframe"],
                 "market_type": market.get("market_type", "binary"),
                 "active": market.get("status") == "open",
                 "volume": market.get("volume", 0),
@@ -2237,11 +2251,14 @@ async def get_consensus_signals() -> Dict[str, Any]:
         # Sort by confidence descending
         signals.sort(key=lambda s: s["confidence"], reverse=True)
 
-        # Get consensus rate from logger
-        metrics = engine.consensus_logger.get_metrics()
-        total = metrics.get("total_rounds", 0)
-        successful = metrics.get("successful", 0)
-        consensus_rate = round(successful / total, 3) if total > 0 else 0.0
+        # Get consensus rate from logger (safely — not all loggers have get_metrics)
+        try:
+            metrics = engine.consensus_logger.get_metrics()
+            total = metrics.get("total_rounds", 0)
+            successful = metrics.get("successful", 0)
+            consensus_rate = round(successful / total, 3) if total > 0 else 0.0
+        except (AttributeError, TypeError):
+            consensus_rate = 0.0
 
         return {
             "signals": signals,
