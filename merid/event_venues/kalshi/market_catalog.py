@@ -41,7 +41,58 @@ from utils.logger import get_logger
 logger = get_logger("merid.event_venues.kalshi.market_catalog")
 
 
-# ── Asset detection patterns ────────────────────────────────────────────
+# ── Ticker-prefix → category mapping (primary detection) ────────────────
+# Kalshi API v2 returns no 'category' field on markets. The event_ticker
+# prefix is the most reliable signal for categorization.
+
+_TICKER_CATEGORY_MAP: List[tuple] = [
+    # Crypto
+    (re.compile(r"^KX(?:BTC|BITCOIN)", re.I), "crypto", "BTC"),
+    (re.compile(r"^KX(?:ETH|ETHEREUM)", re.I), "crypto", "ETH"),
+    (re.compile(r"^KX(?:SOL|SOLANA)", re.I), "crypto", "SOL"),
+    (re.compile(r"^KX(?:XRP|RIPPLE)", re.I), "crypto", "XRP"),
+    (re.compile(r"^KX(?:DOGE|DOGECOIN)", re.I), "crypto", "DOGE"),
+    (re.compile(r"^KXCRYPTO", re.I), "crypto", None),
+    # Financials / indices
+    (re.compile(r"^KX(?:SPX|SPY|SP500)", re.I), "financials", "SPX"),
+    (re.compile(r"^KX(?:NDX|QQQ|NASDAQ)", re.I), "financials", "NDX"),
+    (re.compile(r"^KX(?:DJI|DJIA|DOW)", re.I), "financials", "DJI"),
+    (re.compile(r"^KX(?:RUSSELL|RUT|IWM)", re.I), "financials", None),
+    (re.compile(r"^KXFINANCIALS", re.I), "financials", None),
+    (re.compile(r"^KXSTOCK", re.I), "financials", None),
+    # Economics / macro
+    (re.compile(r"^KXCPI", re.I), "economics", "CPI"),
+    (re.compile(r"^KXGDP", re.I), "economics", "GDP"),
+    (re.compile(r"^KX(?:JOBS|NFP|NONFARM|PAYROLL|UNEMPLOYMENT)", re.I), "economics", "JOBS"),
+    (re.compile(r"^KX(?:FED|FOMC|RATE)", re.I), "economics", "RATES"),
+    (re.compile(r"^KXECON", re.I), "economics", None),
+    # Politics
+    (re.compile(r"^KX(?:ELECTION|PRES|SENATE|CONGRESS|GOV|POLITICS|SCOTUS|TRUMP|BIDEN)", re.I), "politics", "ELECTION"),
+    # Climate / weather
+    (re.compile(r"^KX(?:WEATHER|TEMP|HURRICANE|TORNADO)", re.I), "climate", "WEATHER"),
+    (re.compile(r"^KX(?:CLIMATE|CARBON|EMISSION)", re.I), "climate", "CLIMATE"),
+    # Sports — broad patterns
+    (re.compile(r"^KX(?:NBA|NBAGAME|NBAPTS|NBASPREAD|NBAPROP)", re.I), "sports", "NBA"),
+    (re.compile(r"^KX(?:NFL|NFLGAME|NFLPTS|NFLSPREAD|NFLPROP)", re.I), "sports", "NFL"),
+    (re.compile(r"^KX(?:MLB|MLBGAME|MLBPROP)", re.I), "sports", "MLB"),
+    (re.compile(r"^KX(?:NHL|NHLGAME|NHLPROP)", re.I), "sports", "NHL"),
+    (re.compile(r"^KX(?:SOCCER|MLS|EPL|UEFA|FIFA)", re.I), "sports", "SOCCER"),
+    (re.compile(r"^KX(?:TENNIS|ATP|WTA)", re.I), "sports", "TENNIS"),
+    (re.compile(r"^KX(?:GOLF|PGA)", re.I), "sports", "GOLF"),
+    (re.compile(r"^KX(?:MMA|UFC|BOXING)", re.I), "sports", "MMA"),
+    (re.compile(r"^KX(?:ESPORT)", re.I), "sports", "ESPORTS"),
+    (re.compile(r"^KXMVESPORT", re.I), "sports", "SPORTS_COMBO"),
+    (re.compile(r"^KXSPORT", re.I), "sports", None),
+    # Tech
+    (re.compile(r"^KXTECH", re.I), "tech", None),
+    (re.compile(r"^KX(?:AI|OPENAI|GOOGLE|APPLE|META|MSFT|NVDA)", re.I), "tech", None),
+    # Culture / entertainment
+    (re.compile(r"^KX(?:CULTURE|ENTERTAINMENT|OSCAR|GRAMMY|EMMY|MOVIE)", re.I), "culture", None),
+    # Science
+    (re.compile(r"^KX(?:SCIENCE|SPACE|NASA|SPACEX)", re.I), "science", None),
+]
+
+# ── Asset detection patterns (text-based, secondary) ──────────────────────
 
 _ASSET_PATTERNS: Dict[str, List[re.Pattern]] = {
     "BTC": [re.compile(r"\bBTC\b|bitcoin", re.I)],
@@ -61,6 +112,11 @@ _ASSET_PATTERNS: Dict[str, List[re.Pattern]] = {
     "WEATHER": [re.compile(r"\bweather\b|temperature|hurricane|tornado", re.I)],
     "CLIMATE": [re.compile(r"\bclimate\b|carbon|emissions", re.I)],
     "ELECTION": [re.compile(r"\belection\b|president|congress|senate|governor", re.I)],
+    # Sports assets (detected from title text)
+    "NBA": [re.compile(r"\bNBA\b", re.I)],
+    "NFL": [re.compile(r"\bNFL\b", re.I)],
+    "MLB": [re.compile(r"\bMLB\b", re.I)],
+    "NHL": [re.compile(r"\bNHL\b", re.I)],
 }
 
 # ── Timeframe detection ─────────────────────────────────────────────────
@@ -254,13 +310,24 @@ class KalshiMarketCatalog:
 
     def _enrich(self, mkt: EventMarket, now: datetime) -> CatalogMarket:
         """Tag a raw EventMarket with asset, timeframe, type, and strikes."""
-        # Combine all text for pattern matching
-        text = f"{mkt.market_id} {mkt.question or ''} {mkt.description or ''} {mkt.category or ''}"
+        # Extract event_ticker / series_ticker from raw_data
+        raw = mkt.raw_data or {}
+        event_ticker = raw.get("event_ticker", "") or ""
+        series_ticker = raw.get("series_ticker", "") or ""
 
-        asset = self._detect_asset(text)
+        # 1. Primary detection: ticker prefix → category + asset
+        ticker_category, ticker_asset = self._detect_from_ticker(event_ticker or mkt.market_id)
+
+        # 2. Secondary detection: text-based patterns
+        text = f"{mkt.market_id} {event_ticker} {mkt.question or ''} {mkt.description or ''} {mkt.category or ''}"
+        text_asset = self._detect_asset(text)
         timeframe = self._detect_timeframe(text, mkt.end_date, now)
         market_type = self._detect_type(text)
         strikes = self._detect_strikes(text)
+
+        # Merge: ticker-prefix wins for category; first non-None wins for asset
+        category = mkt.category or ticker_category
+        asset = ticker_asset or text_asset
 
         minutes_to_expiry = None
         if mkt.end_date and mkt.end_date > now:
@@ -271,9 +338,9 @@ class KalshiMarketCatalog:
             asset=asset,
             timeframe=timeframe,
             market_type=market_type,
-            category=mkt.category,
-            event_ticker=None,  # populated from raw_data if available
-            series_ticker=None,
+            category=category,
+            event_ticker=event_ticker or None,
+            series_ticker=series_ticker or None,
             strike_price=strikes.get("strike"),
             floor_strike=strikes.get("floor"),
             cap_strike=strikes.get("cap"),
@@ -306,6 +373,17 @@ class KalshiMarketCatalog:
                 pass
         
         return res
+
+    @staticmethod
+    def _detect_from_ticker(ticker: str) -> tuple:
+        """Detect category and asset from Kalshi event_ticker prefix.
+
+        Returns (category, asset) — either may be None.
+        """
+        for pat, category, asset in _TICKER_CATEGORY_MAP:
+            if pat.search(ticker):
+                return category, asset
+        return None, None
 
     @staticmethod
     def _detect_asset(text: str) -> Optional[str]:
