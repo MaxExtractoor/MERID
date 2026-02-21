@@ -272,6 +272,5 @@ class TestGapAnalysis:
         gap_path = os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md")
         with open(gap_path, "r", encoding="utf-8") as f:
             content = f.read()
-        # The execution plane row should still show sequential (we haven't
-        # changed the doc yet for Sprint M), but message flow should be 7/8
-        assert "7/8" in content
+        # Message flow is fully wired (8/8 since Sprint M)
+        assert "8/8" in content

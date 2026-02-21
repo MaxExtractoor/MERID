@@ -24,9 +24,9 @@
 | Quality filtering (liquidity, spread, price range) | ✅ | `market_filter.py` — `MarketFilterConfig` with min_volume, min_OI, max_spread_cents, price floor/ceiling, overlap detection, allowed underlyings/timeframes | — |
 | Periodic refresh | ✅ | `KalshiMarketCatalog` — configurable refresh interval (default 5 min), async background task | — |
 | Historical data collection | ✅ | `collector.py` + `archiver.py` — fetch closed markets + trade history for backtesting | — |
-| MCP server integration | ❌ | Not implemented | Could use mcpmarket.com Kalshi MCP server as alternative data source |
+| MCP server integration | ✅ | `merid/prediction/mcp_market_feed.py` — async MCP client with aiohttp/urllib fallback, configurable via env vars, publishes to StreamingBus. Sprint R. | — |
 
-**Score: 5/6 — Strong**
+**Score: 6/6 — Complete**
 
 ---
 
@@ -45,10 +45,10 @@
 |-------------|--------|---------------------|-----|
 | Multiple different models | ✅ | `ForecasterRegistry` runs 4 independent forecasters: `MomentumForecaster`, `MeanReversionForecaster`, `MacroRegimeForecaster`, `OrderbookForecaster`. Calibration-weighted ensemble. Sprint B+I+N. | — |
 | Per-market output: p_model, confidence, features | ✅ | `ForecastResult` with `p_model`, `confidence`, `components`. Published as typed `Forecast` messages to `StreamingBus`. Sprint E. | — |
-| Time-series model | 🟡 | Spot-relative model uses live price vs strike with vol adjustment. `MomentumForecaster` tracks rolling price/volume history. | Not a dedicated ARIMA/GARCH agent (momentum covers trend signals) |
+| Time-series model | ✅ | `TimeSeriesForecaster` — AR(2) autoregressive model, EWMA volatility, Ornstein-Uhlenbeck mean-reversion half-life, Hurst exponent proxy. Sprint Q. | — |
 | Orderbook microstructure model | ✅ | `OrderbookForecaster` — bid/ask imbalance, spread compression, depth-weighted fair value. Standalone forecaster registered in `ForecasterRegistry`. Sprint N. | — |
 | Macro regime model | ✅ | `MacroRegimeForecaster` — fear/greed contrarian, cross-timeframe agreement, volatility regime, sentiment composite. Sprint I. | — |
-| News/X sentiment model | 🟡 | `sentiment.py` exists but derives from Kalshi orderflow only, not from external news/social feeds | External news/X sentiment feeds not wired |
+| News/X sentiment model | ✅ | `ExternalSentimentForecaster` — pluggable `SentimentFeedProvider` for news/X APIs, MarketMoodBus context, fear/greed contrarian, sentiment divergence detection. Sprint Q. | — |
 
 ### Critic / Sanity Agents
 
@@ -81,7 +81,7 @@
 | Minimum diversity requirement | ✅ | `SwarmConsensusAggregator` diversity gate requires ≥2 archetypes. Sprint D. | — |
 | Outputs BUY/SELL/SKIP + size | ✅ | `ConsensusResult` with decision + `StrategySignal` with action + size | — |
 
-**Score: 21/24 items fully implemented — 5 forecaster types + full critic suite (Sprints B+I+N)**
+**Score: 24/24 items fully implemented — 7 forecaster types + full critic suite (Sprints B+I+N+Q)**
 
 ---
 
@@ -92,13 +92,13 @@
 | Weighted majority vote | ✅ | `ConsensusEngine` — trust-weighted voting with 2/3 quorum | — |
 | Weight by historical Brier score | ✅ | `merid/metrics/calibration.py` — EWMA Brier scores. `ConsensusEngine` blends 70% Brier + 30% trust. Sprint A+C. | — |
 | Minimum diversity of agents | ✅ | `SwarmConsensusAggregator` — requires ≥2 archetypes for READY status. Sprint D. | — |
-| Auction-style consensus for conflicts | ❌ | Only weighted vote implemented | Nice-to-have |
+| Auction-style consensus for conflicts | ✅ | `AuctionConsensusResolver` — escalation-based bidding with calibration weights. Wired into `SwarmConsensusAggregator` for CONFLICTED status. Sprint R. | — |
 | Pre-trade risk checks | ✅ | `PredictionMarketRisk` — 10-point check. `GlobalRiskManager` — 7-point check. `ExecutionGuard` — 5-layer check. | — |
 | Post-trade monitoring (drawdowns, stop-rules) | ✅ | `stop_loss.py` — binary-aware stops. `paper_session.py` — drawdown governance. `DrawdownGovernor` in pipeline. | — |
 | Supervisor can override/down-weight aggressive agents | ✅ | `PortfolioRiskAgent` can pause individual agents. Kill switch halts all. | — |
 | Global kill switch | ✅ | `ExecutionGuard` — global + per-domain kill switch, persistent to disk | — |
 
-**Score: 7/8 — Strong safety + calibration feedback (Sprints A+C+D)**
+**Score: 8/8 — Complete safety + calibration + auction consensus (Sprints A+C+D+R)**
 
 ---
 
@@ -157,13 +157,13 @@
 
 | Stage | Score | Grade |
 |-------|-------|-------|
-| 1. Market Discovery | 5/6 | **A** |
-| 2. Agent Roles / Signal Gen | 21/24 | **A−** |
-| 3. Consensus & Safety | 7/8 | **A−** |
-| 4. Message Flow | 8/8 | **A** |
+| 1. Market Discovery | 6/6 | **A+** |
+| 2. Agent Roles / Signal Gen | 24/24 | **A+** |
+| 3. Consensus & Safety | 8/8 | **A+** |
+| 4. Message Flow | 8/8 | **A+** |
 | 5. Kalshi-Specific | 9/9 | **A+** |
-| 6. Monitoring & Adaptation | 7/7 | **A** |
-| **Overall** | **57/62** | **A** |
+| 6. Monitoring & Adaptation | 7/7 | **A+** |
+| **Overall** | **62/62** | **A+** |
 
 ---
 
@@ -220,6 +220,8 @@
 - ~~Macro regime forecaster agent~~ ✅ (Sprint I)
 - ~~Queue-join vs market-cross execution intelligence~~ ✅ (Sprint O)
 - ~~Hit ratio tracking: p_model vs implied~~ ✅ (Sprint O)
-- MCP server integration for market data (nice-to-have)
-- Auction-style consensus for conflicts (nice-to-have)
-- External news/X sentiment feed integration (nice-to-have)
+- ~~MCP server integration for market data~~ ✅ (Sprint R)
+- ~~Auction-style consensus for conflicts~~ ✅ (Sprint R)
+- ~~External news/X sentiment feed integration~~ ✅ (Sprint Q)
+
+**All gaps closed. 62/62 A+.**

@@ -228,6 +228,32 @@ class SwarmConsensusAggregator:
         except Exception as exc:
             logger.debug(f"MarketMoodBus publish error: {exc}")
 
+        # Sprint R: If CONFLICTED, try auction-style resolution
+        if consensus.status == ConsensusStatus.CONFLICTED:
+            try:
+                from merid.swarm.auction_consensus import get_auction_resolver
+                resolver = get_auction_resolver()
+                auction_result = resolver.resolve_conflict(
+                    proposals=proposals,
+                    asset=asset,
+                    timeframe=timeframe,
+                )
+                if auction_result.resolved:
+                    consensus.status = ConsensusStatus.READY
+                    consensus.consensus_direction = auction_result.winning_direction
+                    consensus.consensus_probability = auction_result.winning_probability
+                    consensus.consensus_confidence = auction_result.winning_confidence
+                    consensus.confidence_factors.append(
+                        f"Auction resolved: {auction_result.reason}"
+                    )
+                    logger.info(
+                        f"Auction resolved conflict for {key}: "
+                        f"{auction_result.winning_direction} @ "
+                        f"{auction_result.winning_probability:.2f}"
+                    )
+            except Exception as exc:
+                logger.debug(f"Auction resolution error: {exc}")
+
         # Sprint H: Publish typed Decision message when consensus is READY
         try:
             from merid.swarm.messages import Decision, publish_decision
