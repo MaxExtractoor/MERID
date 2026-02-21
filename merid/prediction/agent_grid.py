@@ -81,9 +81,27 @@ class AgentGrid:
         from merid.event_venues.kalshi.sentiment import get_sentiment_service
         self._sentiment = get_sentiment_service()
 
+        # Market Mood Bus (unified sentiment aggregation)
+        from merid.swarm.market_mood_bus import get_market_mood_bus
+        self._mood_bus = get_market_mood_bus()
+
+        # Insight Pipeline (Kalshi → insights → social)
+        from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline
+        from merid.publishing.kalshi_news_agent import KalshiNewsAgent
+        self._insight_pipeline = get_insight_pipeline()
+        self._news_agent = KalshiNewsAgent()
+        self._insight_pipeline.add_consumer(self._news_agent.handle_insight)
+
+        # Alert Manager with Twitter/Telegram sinks
+        from merid.prediction.alerts import get_alert_manager
+        self._alert_manager = get_alert_manager()
+        self._register_alert_sinks()
+
         self._running = False
         self._started_at: Optional[datetime] = None
         self._volume_poll_task: Optional[asyncio.Task] = None
+        self._reconciliation_task: Optional[asyncio.Task] = None
+        self._outcome_resolver = None
 
         logger.info(
             f"AgentGrid initialized: {len(self._agents)} agents, "
@@ -107,6 +125,16 @@ class AgentGrid:
 
         # Start portfolio risk agent first
         await self._portfolio_risk.start()
+
+        # L6: Register all agents with DeploymentController (starts each in PAPER mode)
+        try:
+            from merid.event_venues.kalshi.deployment import get_deployment_controller
+            _dc = get_deployment_controller()
+            for _a in self._agents:
+                _dc.register_agent(_a.agent_id)
+            logger.info("✓ DeploymentController: %d agents registered (all PAPER)", len(self._agents))
+        except Exception as _dce:
+            logger.warning("DeploymentController registration failed (non-fatal): %s", _dce)
 
         # Start trading agents
         logger.info(f"Starting {len(self._agents)} Kalshi trading agents...")
@@ -145,11 +173,34 @@ class AgentGrid:
         await self._sentiment.start()
         logger.info("✓ Sentiment service started")
 
+        # Start market mood bus (unified sentiment aggregation)
+        await self._mood_bus.start()
+        logger.info("✓ Market Mood Bus started")
+
+        # Start insight pipeline (Kalshi → insights → social)
+        await self._insight_pipeline.start()
+        logger.info("✓ Insight Pipeline started with news agent consumer")
+
         # Start volume monitor polling loop
         self._volume_poll_task = asyncio.create_task(
             self._volume_poll_loop(), name="kalshi-volume-monitor"
         )
         logger.info("✓ Volume monitor polling started")
+
+        # Start reconciliation loop (auto-fix critical discrepancies)
+        self._reconciliation_task = asyncio.create_task(
+            self._reconciliation_loop(), name="kalshi-reconciliation"
+        )
+        logger.info("✓ Reconciliation loop started (auto-fix enabled)")
+
+        # Start outcome resolver (Brier calibration + realized edge resolution)
+        try:
+            from merid.metrics.outcome_resolver import get_outcome_resolver
+            self._outcome_resolver = get_outcome_resolver()
+            await self._outcome_resolver.start(interval_s=300.0)
+            logger.info("✓ Outcome resolver started (Brier + edge resolution every 5m)")
+        except Exception as exc:
+            logger.warning(f"Outcome resolver start failed (non-fatal): {exc}")
 
         logger.info(
             f"✅ AgentGrid fully operational: {len(self._agents)} agents running, "
@@ -178,6 +229,12 @@ class AgentGrid:
         # Stop sentiment service
         await self._sentiment.stop()
 
+        # Stop market mood bus
+        await self._mood_bus.stop()
+
+        # Stop insight pipeline
+        await self._insight_pipeline.stop()
+
         # Flush ReflectionSystem persistence buffer on shutdown
         try:
             from agents.reflection.integration import get_reflection_system
@@ -185,6 +242,14 @@ class AgentGrid:
             logger.info("✓ ReflectionSystem flushed on AgentGrid stop")
         except Exception as exc:
             logger.warning(f"ReflectionSystem shutdown skipped: {exc}")
+
+        # Stop outcome resolver
+        if self._outcome_resolver:
+            try:
+                await self._outcome_resolver.stop()
+                logger.info("✓ Outcome resolver stopped")
+            except Exception as exc:
+                logger.debug(f"Outcome resolver stop error: {exc}")
 
         # Stop volume monitor
         if self._volume_poll_task and not self._volume_poll_task.done():
@@ -194,12 +259,20 @@ class AgentGrid:
             except asyncio.CancelledError:
                 pass
 
+        # Stop reconciliation loop
+        if self._reconciliation_task and not self._reconciliation_task.done():
+            self._reconciliation_task.cancel()
+            try:
+                await self._reconciliation_task
+            except asyncio.CancelledError:
+                pass
+
         logger.info("AgentGrid stopped")
 
     # ── Volume monitor loop ────────────────────────────────────────────
 
     async def _volume_poll_loop(self) -> None:
-        """Background task: poll volume monitor every 60 seconds + apply regime gating."""
+        """Background task: poll volume monitor every 60 seconds + apply regime gating + feed mood bus."""
         try:
             from merid.event_venues.kalshi.volume_monitor import get_volume_monitor
             monitor = get_volume_monitor()
@@ -222,10 +295,61 @@ class AgentGrid:
             except Exception as exc:
                 logger.debug(f"Regime gating error (ignored): {exc}")
 
+            # Feed data into MarketMoodBus
+            try:
+                await self._feed_mood_bus()
+            except Exception as exc:
+                logger.debug(f"Mood bus feed error (ignored): {exc}")
+
             try:
                 await asyncio.wait_for(asyncio.sleep(60), timeout=65)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
+
+    async def _feed_mood_bus(self) -> None:
+        """Feed live Kalshi market data into MarketMoodBus for sentiment aggregation."""
+        try:
+            # Get active markets from catalog
+            markets = await self._catalog.get_active_markets()
+
+            # Group by asset/timeframe and feed data
+            for market in markets[:20]:  # Limit to top 20 markets to avoid rate limits
+                try:
+                    # Extract asset from ticker (e.g., "KXBTC-23DEC01-B71000" -> "BTC")
+                    ticker = market.market_id
+                    asset = None
+                    if "BTC" in ticker.upper():
+                        asset = "BTC"
+                    elif "ETH" in ticker.upper():
+                        asset = "ETH"
+
+                    if not asset:
+                        continue
+
+                    # Infer timeframe (for now use "15m" as default)
+                    timeframe = "15m"
+
+                    # Feed Kalshi data
+                    self._mood_bus.update_kalshi_data(
+                        asset=asset,
+                        timeframe=timeframe,
+                        price=float(market.yes_bid or 0.5),
+                        volume_24h=float(market.volume or 0),
+                        spread_bps=float((market.yes_ask or 0.5) - (market.yes_bid or 0.5)) * 10000,
+                        open_interest=float(market.open_interest or 0),
+                    )
+
+                    # Feed fear/greed from sentiment service
+                    global_sentiment = self._sentiment.global_score()
+                    self._mood_bus.update_fear_greed(asset, global_sentiment.score)
+
+                except Exception as exc:
+                    logger.debug(f"Error feeding market {market.market_id} to mood bus: {exc}")
+
+            logger.debug("MarketMoodBus fed with latest Kalshi data")
+
+        except Exception as exc:
+            logger.warning(f"Failed to feed mood bus: {exc}")
 
     def _apply_regime_gating(self) -> None:
         """Tighten or relax agent activity based on global sentiment regime.
@@ -274,6 +398,39 @@ class AgentGrid:
                     if not agent.state.enabled:
                         agent.resume()
                         logger.info(f"Regime gate: resumed {agent.config.name} (contrarian, regime={regime})")
+
+    async def _reconciliation_loop(self) -> None:
+        """Background task: run reconciliation every 5 minutes and auto-fix critical issues."""
+        while self._running:
+            try:
+                # Run auto-reconciliation with auto-fix enabled
+                from merid.reconciliation import auto_reconcile_and_fix
+
+                result = await asyncio.to_thread(
+                    auto_reconcile_and_fix,
+                    venue_name="kalshi",
+                    user_id="operator",
+                    auto_fix_critical=True,
+                )
+
+                if result.get("auto_fix_success"):
+                    logger.warning(
+                        f"Reconciliation auto-fix: aligned {len(result.get('aligned_positions', []))} positions"
+                    )
+                elif result.get("critical_discrepancies", 0) > 0 and not result.get("auto_fix_attempted"):
+                    logger.warning(
+                        f"Reconciliation: {result['critical_discrepancies']} critical discrepancies found "
+                        "(auto-fix disabled)"
+                    )
+
+            except Exception as exc:
+                logger.warning(f"Reconciliation loop error: {exc}")
+
+            try:
+                # Run every 5 minutes (300 seconds)
+                await asyncio.wait_for(asyncio.sleep(300), timeout=310)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                break
 
     # ── Agent management ───────────────────────────────────────────────
 
@@ -326,12 +483,67 @@ class AgentGrid:
     # ── Status / introspection ─────────────────────────────────────────
 
     @property
+    def is_running(self) -> bool:
+        """True if the grid has been started and not yet stopped."""
+        return self._running
+
+    @property
     def agents(self) -> List[KalshiTradingAgent]:
         return self._agents
 
     @property
     def config(self) -> AgentGridConfig:
         return self._config
+
+    def _register_alert_sinks(self) -> None:
+        """Register Twitter/Telegram sinks for prediction alerts."""
+        def twitter_alert_sink(alert):
+            """Send alert to Twitter."""
+            try:
+                from agents.twitter_agent import get_twitter_agent
+                twitter = get_twitter_agent()
+
+                severity_emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
+                emoji = severity_emoji.get(alert.severity.value, "")
+
+                message = (
+                    f"{emoji} [{alert.category.value.upper()}]\n"
+                    f"{alert.title}\n"
+                    f"{alert.message[:150]}"
+                )
+
+                import asyncio
+                asyncio.create_task(twitter.post_tweet(message))
+            except Exception as exc:
+                logger.debug(f"Twitter alert sink failed: {exc}")
+
+        def telegram_alert_sink(alert):
+            """Send alert to Telegram."""
+            try:
+                from agents.telegram_agent import get_telegram_agent
+                telegram = get_telegram_agent()
+
+                severity_emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
+                emoji = severity_emoji.get(alert.severity.value, "")
+
+                message = (
+                    f"{emoji} <b>[{alert.severity.value.upper()}] {alert.category.value}</b>\n"
+                    f"<b>{alert.title}</b>\n"
+                    f"{alert.message}\n"
+                    f"<i>{alert.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
+                )
+                if alert.market_id:
+                    message += f"\n<code>{alert.market_id}</code>"
+
+                import asyncio
+                asyncio.create_task(telegram.send_message(message, parse_mode="HTML"))
+            except Exception as exc:
+                logger.debug(f"Telegram alert sink failed: {exc}")
+
+        # Register both sinks
+        self._alert_manager.add_sink(twitter_alert_sink)
+        self._alert_manager.add_sink(telegram_alert_sink)
+        logger.info("✓ Alert sinks registered (Twitter + Telegram)")
 
     def summary(self) -> Dict[str, Any]:
         """Full grid status for API consumption."""
@@ -349,7 +561,8 @@ class AgentGrid:
         # Market coverage
         try:
             all_discovered = self._catalog.get_all_markets() if self._catalog else []
-        except Exception:
+        except Exception as _ce:
+            logger.debug("catalog.get_all_markets skipped: %s", _ce)
             all_discovered = []
         covered_tickers: set = set()
         for agent in self._agents:
@@ -368,7 +581,8 @@ class AgentGrid:
                 },
                 "error_rate": sum(len(a.state.errors) for a in self._agents) / max(1, total_orders),
             }
-        except Exception:
+        except Exception as _vhe:
+            logger.debug("venue_health probe skipped: %s", _vhe)
             venue_health = {
                 "connected": False,
                 "circuit": {"state": "open", "failure_count": 0, "last_failure": None},
@@ -380,18 +594,20 @@ class AgentGrid:
         try:
             paper_session_data = {
                 "active": self._paper_session.is_active,
-                "session_id": self._paper_session._session_id,
+                "session_id": self._paper_session.session_id,
                 "session_hours": round(self._paper_session.session_hours, 2),
                 "coverage": self._paper_session.coverage_summary(),
                 "live_promoted": sorted(self._paper_session.live_agents),
             }
-        except Exception:
+        except Exception as _pse:
+            logger.debug("paper_session summary skipped: %s", _pse)
             paper_session_data = {"active": False}
 
         # Sentiment summary
         try:
             sentiment_data = self._sentiment.summary()
-        except Exception:
+        except Exception as _sse:
+            logger.debug("sentiment summary skipped: %s", _sse)
             sentiment_data = {}
 
         return {

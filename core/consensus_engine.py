@@ -190,12 +190,24 @@ class ConsensusEngine:
         
         confidence = data.get("confidence", 0.5)
         
+        # Sprint C: Use Brier-calibrated weight as trust score when available
+        trust = self.trust_scores[event.source]
+        try:
+            from merid.metrics.calibration import get_calibration_store
+            cal = get_calibration_store()
+            bucket = data.get("category", data.get("bucket", "unknown")).lower()
+            brier_weight = cal.get_weight(event.source, bucket)
+            # Blend: 70% Brier calibration, 30% existing trust score
+            trust = 0.7 * brier_weight + 0.3 * trust
+        except Exception:
+            pass
+        
         vote = Vote(
             agent_id=event.source,
             proposal=event.event_type,
             signal=signal.lower(),
             confidence=confidence,
-            trust=self.trust_scores[event.source]
+            trust=trust
         )
         
         # CONSTITUTIONAL: Log vote in consensus transparency system
