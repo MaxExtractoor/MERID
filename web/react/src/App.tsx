@@ -15,6 +15,7 @@ import KalshiAgentPerformanceView from "./views/KalshiAgentPerformanceView";
 import KalshiSentimentView from "./views/KalshiSentimentView";
 import LaneControlDashboard from "./views/LaneControlDashboard";
 import SwarmConsensusMatrix from "./views/SwarmConsensusMatrix";
+import CalibrationDashboardView from "./views/CalibrationDashboardView";
 import OperatorDashboard from "./views/OperatorDashboard";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
@@ -110,6 +111,7 @@ export default function App() {
               {view === "kalshi-sentiment" && <KalshiSentimentView />}
               {view === "lane-control" && <LaneControlDashboard />}
               {view === "swarm-consensus" && <SwarmConsensusMatrix />}
+              {view === "calibration-dashboard" && <CalibrationDashboardView />}
               {view === "operator" && <OperatorDashboard />}
               {view === "kill-switch" && <KillSwitchView />}
               {view === "logs" && <Logs />}

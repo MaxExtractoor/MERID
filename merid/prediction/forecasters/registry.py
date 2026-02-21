@@ -135,6 +135,9 @@ class ForecasterRegistry:
                 # Log forecast to CalibrationStore (Sprint A)
                 self._log_forecast(result, bucket, market_id, ts)
 
+                # Sprint E: Publish typed Forecast message to streaming bus
+                self._publish_forecast_message(result, market_id, asset, category, timeframe)
+
                 # Get calibration weight (Sprint C feedback loop)
                 w = self._get_calibration_weight(result.forecaster_id, bucket)
                 weights[result.forecaster_id] = w
@@ -194,6 +197,38 @@ class ForecasterRegistry:
             )
         except Exception as exc:
             logger.debug(f"CalibrationStore log failed: {exc}")
+
+    def _publish_forecast_message(
+        self,
+        result: ForecastResult,
+        market_id: str,
+        asset: str,
+        category: str,
+        timeframe: str,
+    ) -> None:
+        """Sprint E: Publish typed Forecast message to the streaming bus."""
+        try:
+            import asyncio
+            from merid.swarm.messages import Forecast, publish_forecast
+            msg = Forecast(
+                forecaster_id=result.forecaster_id,
+                model_type=result.model_type,
+                market_id=market_id,
+                asset=asset or "",
+                category=category or "",
+                timeframe=timeframe or "",
+                p_model=result.p_model,
+                confidence=result.confidence,
+                edge_estimate=result.edge_estimate,
+                components=result.components,
+            )
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(publish_forecast(msg))
+            except RuntimeError:
+                pass  # No running event loop — skip publish
+        except Exception as exc:
+            logger.debug(f"Forecast message publish failed: {exc}")
 
     def _get_calibration_weight(self, forecaster_id: str, bucket: str) -> float:
         """Get calibration-based weight for a forecaster (Sprint C)."""

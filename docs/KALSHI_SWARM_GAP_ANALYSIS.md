@@ -67,7 +67,7 @@
 | Per-market edge (vs implied Kalshi probability) | ✅ | `edge_model.py` + `strategy.py` — computes edge = model_prob − implied_prob | — |
 | Kelly fraction | ✅ | `kalshi_risk.py` — fee-aware Kelly. `position_sizer.py` — fractional Kelly with PF gates | — |
 | Exposure vs caps | ✅ | `portfolio_risk_agent.py` — per-asset notional caps. `execution_guard.py` — per-domain daily caps | — |
-| Correlation with existing book | ❌ | Per-asset caps exist but no inter-asset **correlation** computation | Missing: should compute BTC/ETH correlation to avoid concentrated crypto exposure |
+| Correlation with existing book | ✅ | `merid/risk/correlation.py` — Rolling Pearson correlation, cluster caps, exposure reduction. Wired into `PortfolioRiskAgent`. Sprint D. | — |
 | Per-category risk | ✅ | `kalshi_risk.py` — `dynamic_position_sizes()` has `category_cap_pct`. Per-domain limits in pipeline risk manager | — |
 | Daily loss tracking | ✅ | `kalshi_risk.py`, `paper_session.py`, `execution_guard.py` — all track daily loss with kill switch | — |
 | Drawdown monitoring | ✅ | `paper_session.py` — tiered drawdown governance (warning 5%, downsize 8%, halt 12%) | — |
@@ -90,15 +90,15 @@
 | Requirement | Status | MERID Implementation | Gap |
 |-------------|--------|---------------------|-----|
 | Weighted majority vote | ✅ | `ConsensusEngine` — trust-weighted voting with 2/3 quorum | — |
-| Weight by historical Brier score | ❌ | **No Brier score computation anywhere in the codebase.** Trust scores are static defaults. | **Critical gap** — agents are not scored by forecast accuracy |
-| Minimum diversity of agents | ❌ | No diversity check | Missing |
+| Weight by historical Brier score | ✅ | `merid/metrics/calibration.py` — EWMA Brier scores. `ConsensusEngine` blends 70% Brier + 30% trust. Sprint A+C. | — |
+| Minimum diversity of agents | ✅ | `SwarmConsensusAggregator` — requires ≥2 archetypes for READY status. Sprint D. | — |
 | Auction-style consensus for conflicts | ❌ | Only weighted vote implemented | Nice-to-have |
 | Pre-trade risk checks | ✅ | `PredictionMarketRisk` — 10-point check. `GlobalRiskManager` — 7-point check. `ExecutionGuard` — 5-layer check. | — |
 | Post-trade monitoring (drawdowns, stop-rules) | ✅ | `stop_loss.py` — binary-aware stops. `paper_session.py` — drawdown governance. `DrawdownGovernor` in pipeline. | — |
 | Supervisor can override/down-weight aggressive agents | ✅ | `PortfolioRiskAgent` can pause individual agents. Kill switch halts all. | — |
 | Global kill switch | ✅ | `ExecutionGuard` — global + per-domain kill switch, persistent to disk | — |
 
-**Score: 5/8 — Solid safety, weak on calibration feedback**
+**Score: 7/8 — Strong safety + calibration feedback (Sprints A+C+D)**
 
 ---
 
@@ -108,14 +108,14 @@
 |-------|--------|---------------------|-----|
 | **Data plane** — Market/orderbook/trades broadcast to all forecasters | ✅ | `ws.py` + `ws_bridge.py` — real-time Kalshi data. `market_catalog.py` for REST. `order_router.py` WS channel constants for price/trade/orderbook/fill events | — |
 | **Data plane** — Portfolio broadcast to risk and supervisor | ✅ | `portfolio_risk_agent.py` fetches positions/balance. `MeridLoop` reconciliation step. | — |
-| **Decision plane** — Forecasters publish typed `Forecast` messages | ❌ | Agents use `strategy.evaluate()` internally. No shared typed `Forecast` schema on a bus. | **Architectural gap** — agents don't publish independent forecasts to a shared topic |
-| **Decision plane** — Critics publish typed `Critique` messages | ❌ | Critic checks are inline, not published as typed messages | Missing |
+| **Decision plane** — Forecasters publish typed `Forecast` messages | ✅ | `merid/swarm/messages.py` — Forecast schema. `ForecasterRegistry` publishes to `StreamingBus`. Sprint E. | — |
+| **Decision plane** — Critics publish typed `Critique` messages | 🟡 | `merid/swarm/messages.py` — Critique schema defined. Not yet wired to inline critics. | Schema ready, wiring pending |
 | **Decision plane** — Risk publishes typed `RiskView` messages | 🟡 | `RiskContext` exists as a system-wide snapshot but not published per-market as typed messages | Partial |
 | **Decision plane** — Supervisor emits `Decision` | 🟡 | `ConsensusResult` exists but is consumed within the loop, not published on a bus | Partial |
 | **Execution plane** — Execution agent subscribes to Decision | 🟡 | `order_router.py` handles execution but is called directly by the loop, not via pub/sub | Sequential, not event-driven |
-| **Feedback plane** — Fills/PnL/slippage feed back into agent scores | 🟡 | `paper_session.py` tracks per-cell PnL. `performance_comparator.py` compares stages. But **feedback doesn't update consensus weights**. | Missing: no closed-loop weight update |
+| **Feedback plane** — Fills/PnL/slippage feed back into agent scores | ✅ | `CalibrationStore` Brier scores → `ConsensusEngine` trust + `SwarmConsensusAggregator` weights. Sprint C. | — |
 
-**Score: 3/8 — Sequential pipeline, not a true message bus**
+**Score: 5/8 — Typed schemas + partial bus integration (Sprints C+E)**
 
 ---
 
@@ -143,13 +143,13 @@
 |-------------|--------|---------------------|-----|
 | Fill quality tracking | ✅ | `order_manager.py` — fill events with price/size/fee. `metrics.py` — latency histograms | — |
 | Hit ratio tracking | 🟡 | Win/loss tracked in `paper_session.py` and `performance_comparator.py` | Not specifically "did our p_model beat implied prob" |
-| Realized edge tracking | ❌ | No module computes (predicted edge − actual outcome) | **Key gap** for measuring forecast quality |
+| Realized edge tracking | ✅ | `merid/metrics/realized_edge.py` — Per-trade edge tracking. `merid/prediction/edge_recalibrator.py` — auto-adjusts thresholds. Sprints A+G. | — |
 | PnL tracking | ✅ | `paper_session.py` — per-cell, per-cluster, daily/weekly PnL. `performance_comparator.py` — backtest vs paper vs live | — |
 | Agent performance metrics | ✅ | `agent_gauntlet.py` — SLO-based scoring (liveness, latency, signal quality, risk compliance, fill quality, PnL) | — |
-| Feed metrics back into consensus weights | ❌ | **No feedback loop.** Performance metrics exist but don't adjust agent trust scores or consensus weights. | **Critical gap** — static weights means no learning |
+| Feed metrics back into consensus weights | ✅ | `CalibrationStore.get_weight()` → `SwarmConsensusAggregator` + `ConsensusEngine`. Sprint C. | — |
 | Promotion/demotion logic | ✅ | `auto_promoter.py` — paper → shadow → live promotion with rollback gates (PF, expectancy, drawdown, trade count) | — |
 
-**Score: 4/7 — Good monitoring, no feedback loop**
+**Score: 6/7 — Strong monitoring + feedback loop (Sprints A+C+G)**
 
 ---
 
@@ -158,79 +158,40 @@
 | Stage | Score | Grade |
 |-------|-------|-------|
 | 1. Market Discovery | 5/6 | **A** |
-| 2. Agent Roles / Signal Gen | 15/24 | **C+** |
-| 3. Consensus & Safety | 5/8 | **B−** |
-| 4. Message Flow | 3/8 | **D** |
+| 2. Agent Roles / Signal Gen | 17/24 | **B−** |
+| 3. Consensus & Safety | 7/8 | **A−** |
+| 4. Message Flow | 5/8 | **B−** |
 | 5. Kalshi-Specific | 8/9 | **A** |
-| 6. Monitoring & Adaptation | 4/7 | **C+** |
-| **Overall** | **40/62** | **C+** |
+| 6. Monitoring & Adaptation | 6/7 | **A−** |
+| **Overall** | **48/62** | **B+** |
 
 ---
 
 ## Critical Gaps (Priority Order)
 
-### 1. No Brier Score / Forecast Calibration Feedback ❌
+### 1. ~~No Brier Score / Forecast Calibration Feedback~~ ✅ DONE (Sprint A+C)
 
-**Impact:** Without calibration scoring, all agents have equal voice regardless of accuracy. The swarm can't learn.
+**Implemented:** `merid/metrics/calibration.py` — SQLite Brier store with EWMA. Wired into `ConsensusEngine` and `SwarmConsensusAggregator`.
 
-**What's needed:**
-- Track each agent's probability predictions vs actual outcomes
-- Compute rolling Brier score per agent per category
-- Use Brier score as consensus weight multiplier
-- Files to create: `merid/prediction/calibration.py`
+### 2. ~~Homogeneous Agents — No Forecaster Diversity~~ ✅ DONE (Sprint B)
 
-### 2. Homogeneous Agents — No Forecaster Diversity ❌
+**Implemented:** `merid/prediction/forecasters/` — MomentumForecaster + MeanReversionForecaster + ForecasterRegistry. Calibration-weighted ensemble. Minimum diversity gate requires ≥2 archetypes (Sprint D).
 
-**Impact:** All 20 grid cells run the same `KalshiStrategy` + `EdgeModel`. There's no wisdom-of-crowds benefit because there's only one crowd.
+### 3. ~~No Realized Edge Tracking~~ ✅ DONE (Sprint A+G)
 
-**What's needed:**
-- At minimum 3-4 heterogeneous forecaster types:
-  - **Spread/orderbook microstructure** (already partially in `edge_model.py`)
-  - **Macro regime** (new — Fed rate, CPI surprise, VIX-equivalent)
-  - **Volume/momentum** (partially in `sentiment.py` but not a standalone forecaster)
-  - **Mean-reversion/arbitrage** (partially in `strategy.py` arb checks)
-- Each outputs typed `{market, p_model, confidence, model_id}`
-- Consensus layer aggregates across model types
+**Implemented:** `merid/metrics/realized_edge.py` — Per-trade edge tracking. `merid/prediction/edge_recalibrator.py` — auto-adjusts strategy thresholds based on realized vs predicted edge bias.
 
-### 3. No Realized Edge Tracking ❌
+### 4. ~~No Feedback Loop into Consensus Weights~~ ✅ DONE (Sprint C)
 
-**Impact:** Can't measure if your edge estimates are actually profitable after fees.
+**Implemented:** `OutcomeResolver` (every 5m) updates Brier scores → `ConsensusEngine` trust = 70% Brier + 30% existing → `SwarmConsensusAggregator` uses calibration weights.
 
-**What's needed:**
-- For each trade: record `predicted_edge` at entry time
-- At settlement: compute `realized_edge = actual_outcome − implied_prob_at_entry`
-- Track `predicted_edge − realized_edge` as forecast error
-- Use this to recalibrate edge thresholds in `strategy.py`
+### 5. ~~Sequential Pipeline, Not Message Bus~~ 🟡 PARTIAL (Sprint E)
 
-### 4. No Feedback Loop into Consensus Weights ❌
+**Implemented:** `merid/swarm/messages.py` — Typed Forecast/Critique/RiskView/Decision schemas. ForecasterRegistry publishes Forecast messages to StreamingBus. Critic/RiskView wiring still pending.
 
-**Impact:** The system monitors but doesn't adapt. Agent trust scores stay at defaults forever.
+### 6. ~~No Inter-Asset Correlation Tracking~~ ✅ DONE (Sprint D)
 
-**What's needed:**
-- After each settlement batch:
-  - Update per-agent Brier scores
-  - Recompute trust scores proportional to inverse Brier
-  - Promote/demote agents in the consensus weight table
-- Wire into `ConsensusEngine.trust_scores`
-
-### 5. Sequential Pipeline, Not Message Bus 🟡
-
-**Impact:** Agents can't operate independently or asynchronously. Everything goes through the MeridLoop tick.
-
-**What's needed (lower priority):**
-- Define typed message schemas: `Forecast`, `Critique`, `RiskView`, `Decision`
-- Publish to `core/streaming_bus.py` channels
-- Have supervisor agent consume from bus instead of sequential calls
-- This is architectural — lower priority than the calibration gaps
-
-### 6. No Inter-Asset Correlation Tracking ❌
-
-**Impact:** Could take correlated positions in BTC and ETH without recognizing the overlap.
-
-**What's needed:**
-- Compute rolling correlation between assets (BTC/ETH, SOL/BTC, etc.)
-- Reduce combined exposure when correlation is high
-- Wire into `PortfolioRiskAgent` or `kalshi_risk.py`
+**Implemented:** `merid/risk/correlation.py` — Rolling Pearson tracker, asset clusters (BTC_ETH, ALT_BASKET), exposure reduction factors. Wired into `PortfolioRiskAgent._check_limits()`.
 
 ---
 
@@ -246,8 +207,16 @@
 
 ## Recommended Sprint Order
 
-1. **Sprint A** — Brier calibration + realized edge tracking (unlocks learning)
-2. **Sprint B** — 2-3 heterogeneous forecaster agent types (unlocks diversity)
-3. **Sprint C** — Feedback loop: calibration → consensus weights (closes the loop)
-4. **Sprint D** — Inter-asset correlation in risk layer
-5. **Sprint E** — Typed message schemas on event bus (architectural improvement)
+1. ~~**Sprint A** — Brier calibration + realized edge tracking~~ ✅
+2. ~~**Sprint B** — Heterogeneous forecaster agent types~~ ✅
+3. ~~**Sprint C** — Feedback loop: calibration → consensus weights~~ ✅
+4. ~~**Sprint D** — Inter-asset correlation + diversity gate~~ ✅
+5. ~~**Sprint E** — Typed message schemas on event bus~~ ✅ (partial — Forecast wired, others schema-only)
+6. ~~**Sprint F** — UI: CalibrationDashboardView + CorrelationRiskPanel~~ ✅
+7. ~~**Sprint G** — Edge threshold recalibration from realized edge data~~ ✅
+
+### Remaining Work
+- Wire Critique/RiskView/Decision publishers to their respective agents
+- Macro regime forecaster agent
+- Queue-join vs market-cross execution intelligence
+- MCP server integration for market data
