@@ -101,16 +101,15 @@ class AgentOrchestrator:
         """Start all agents and orchestration."""
         self.running = True
         logger.info("Starting agent orchestration...")
-        
-        # Start background tasks
-        # Note: price_feed.start_streaming() is started by main.py lifespan — not duplicated here
+
+        # Note: news_monitor is started by OrchestratorAgentManager — not duplicated here.
+        # Note: price_feed.start_streaming() is started by main.py lifespan — not duplicated here.
         tasks = [
-            asyncio.create_task(self.news_monitor.start_monitoring()),
             asyncio.create_task(self._orchestration_loop())
         ]
-        
+
         logger.info("All agents started successfully")
-        
+
         # Wait for tasks
         await asyncio.gather(*tasks, return_exceptions=True)
     

@@ -536,15 +536,37 @@ Please analyze these opportunities and provide your structured recommendations.
         y_prob = []
         y_true = []
         
+        # Try to fetch real settled outcomes from RewardEngine DB (forecast category only)
+        _settled: dict = {}
+        try:
+            import json as _json
+            from merid.rewards.engine import get_reward_engine
+            _engine = get_reward_engine()
+            with _engine._connect() as _conn:
+                _rows = _conn.execute(
+                    "SELECT payload FROM reward_events WHERE category = 'forecast' "
+                    "ORDER BY created_at DESC LIMIT 1000"
+                ).fetchall()
+            for _row in _rows:
+                try:
+                    _p = _json.loads(_row["payload"])
+                    _sym = _p.get("symbol", "")
+                    _outcome = _p.get("outcome")
+                    if _sym and _outcome is not None:
+                        _settled[_sym] = int(_outcome)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         for opp in opportunities:
-            # Use forecast probability as forecast
             y_prob.append(opp.forecast_probability)
-            
-            # For now, use spread_probability as proxy for actual outcome
-            # In production, this would be real binary outcomes from backtest
-            # TODO: Replace with actual outcome tracking
-            # Higher spread probability indicates higher chance of success
-            y_true.append(1.0 if opp.spread_probability > 0.5 else 0.0)
+            # Use real settled outcome if available; fall back to spread_probability proxy
+            real_outcome = _settled.get(opp.market_id)
+            if real_outcome is not None:
+                y_true.append(float(real_outcome))
+            else:
+                y_true.append(1.0 if opp.spread_probability > 0.5 else 0.0)
         
         # Calculate canonical metrics
         brier_score = compute_brier(y_true, y_prob)
