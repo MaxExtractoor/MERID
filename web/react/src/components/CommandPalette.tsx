@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid } from 'lucide-react';
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid, Target } from 'lucide-react';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -23,6 +23,7 @@ const COMMANDS: CommandItem[] = [
   { id: 'kalshi-grid', label: 'Agent Grid', section: 'Swarm Intelligence', icon: BarChart3, keywords: ['kalshi', 'grid', 'agents', 'paper'] },
   { id: 'swarm-consensus', label: 'Swarm Matrix', section: 'Swarm Intelligence', icon: Grid, keywords: ['swarm', 'consensus', 'matrix', 'agents', 'voting', 'direction'] },
   { id: 'kalshi-performance', label: 'Performance', section: 'Swarm Intelligence', icon: BarChart3, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
+  { id: 'calibration-dashboard', label: 'Calibration', section: 'Swarm Intelligence', icon: Target, keywords: ['calibration', 'brier', 'forecaster', 'weight', 'correlation', 'resolver', 'accuracy'] },
   { id: 'lane-control', label: 'Lane Control', section: 'Swarm Intelligence', icon: GitBranch, keywords: ['lane', 'timeframe', 'cross', 'xtf', 'promoter', 'deployment', 'phase'] },
   // Analytics
   { id: 'kalshi-sentiment', label: 'Fear / Greed', section: 'Analytics', icon: Activity, keywords: ['fear', 'greed', 'sentiment', 'regime', 'index'] },

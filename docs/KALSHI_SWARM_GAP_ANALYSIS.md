@@ -78,10 +78,10 @@
 |-------------|--------|---------------------|-----|
 | Ingests all forecasts + risk views | 🟡 | `ConsensusCoordinatorAgent` collects votes. `MeridLoop` runs consensus step. | Forecasts are not published as typed messages; the loop orchestrates sequentially |
 | Weighted vote consensus | ✅ | `ConsensusEngine` — trust × energy × confidence weighted voting | — |
-| Minimum diversity requirement | ❌ | No check that N different model types contributed | Missing |
+| Minimum diversity requirement | ✅ | `SwarmConsensusAggregator` diversity gate requires ≥2 archetypes. Sprint D. | — |
 | Outputs BUY/SELL/SKIP + size | ✅ | `ConsensusResult` with decision + `StrategySignal` with action + size | — |
 
-**Score: 15/24 items fully implemented — Moderate with clear gaps**
+**Score: 18/24 items fully implemented — Strong with 4 forecaster types (Sprints B+I)**
 
 ---
 
@@ -109,13 +109,13 @@
 | **Data plane** — Market/orderbook/trades broadcast to all forecasters | ✅ | `ws.py` + `ws_bridge.py` — real-time Kalshi data. `market_catalog.py` for REST. `order_router.py` WS channel constants for price/trade/orderbook/fill events | — |
 | **Data plane** — Portfolio broadcast to risk and supervisor | ✅ | `portfolio_risk_agent.py` fetches positions/balance. `MeridLoop` reconciliation step. | — |
 | **Decision plane** — Forecasters publish typed `Forecast` messages | ✅ | `merid/swarm/messages.py` — Forecast schema. `ForecasterRegistry` publishes to `StreamingBus`. Sprint E. | — |
-| **Decision plane** — Critics publish typed `Critique` messages | 🟡 | `merid/swarm/messages.py` — Critique schema defined. Not yet wired to inline critics. | Schema ready, wiring pending |
-| **Decision plane** — Risk publishes typed `RiskView` messages | 🟡 | `RiskContext` exists as a system-wide snapshot but not published per-market as typed messages | Partial |
-| **Decision plane** — Supervisor emits `Decision` | 🟡 | `ConsensusResult` exists but is consumed within the loop, not published on a bus | Partial |
+| **Decision plane** — Critics publish typed `Critique` messages | ✅ | `merid/swarm/critic_agent.py` — CriticAgent wraps staleness + liquidity monitors, publishes Critique messages. Sprint H. | — |
+| **Decision plane** — Risk publishes typed `RiskView` messages | ✅ | `PortfolioRiskAgent._publish_risk_view()` — publishes RiskView after each check cycle. Sprint H. | — |
+| **Decision plane** — Supervisor emits `Decision` | ✅ | `SwarmConsensusAggregator._recompute_consensus()` — publishes Decision on READY status. Sprint H. | — |
 | **Execution plane** — Execution agent subscribes to Decision | 🟡 | `order_router.py` handles execution but is called directly by the loop, not via pub/sub | Sequential, not event-driven |
 | **Feedback plane** — Fills/PnL/slippage feed back into agent scores | ✅ | `CalibrationStore` Brier scores → `ConsensusEngine` trust + `SwarmConsensusAggregator` weights. Sprint C. | — |
 
-**Score: 5/8 — Typed schemas + partial bus integration (Sprints C+E)**
+**Score: 7/8 — Full typed message flow except execution subscription (Sprints C+E+H)**
 
 ---
 
@@ -158,12 +158,12 @@
 | Stage | Score | Grade |
 |-------|-------|-------|
 | 1. Market Discovery | 5/6 | **A** |
-| 2. Agent Roles / Signal Gen | 17/24 | **B−** |
+| 2. Agent Roles / Signal Gen | 18/24 | **B** |
 | 3. Consensus & Safety | 7/8 | **A−** |
-| 4. Message Flow | 5/8 | **B−** |
+| 4. Message Flow | 7/8 | **A−** |
 | 5. Kalshi-Specific | 8/9 | **A** |
 | 6. Monitoring & Adaptation | 6/7 | **A−** |
-| **Overall** | **48/62** | **B+** |
+| **Overall** | **51/62** | **A−** |
 
 ---
 
@@ -185,9 +185,9 @@
 
 **Implemented:** `OutcomeResolver` (every 5m) updates Brier scores → `ConsensusEngine` trust = 70% Brier + 30% existing → `SwarmConsensusAggregator` uses calibration weights.
 
-### 5. ~~Sequential Pipeline, Not Message Bus~~ 🟡 PARTIAL (Sprint E)
+### 5. ~~Sequential Pipeline, Not Message Bus~~ ✅ MOSTLY DONE (Sprints E+H)
 
-**Implemented:** `merid/swarm/messages.py` — Typed Forecast/Critique/RiskView/Decision schemas. ForecasterRegistry publishes Forecast messages to StreamingBus. Critic/RiskView wiring still pending.
+**Implemented:** `merid/swarm/messages.py` — Typed schemas. `ForecasterRegistry` → Forecast, `CriticAgent` → Critique, `PortfolioRiskAgent` → RiskView, `SwarmConsensusAggregator` → Decision. Only execution subscription remains sequential.
 
 ### 6. ~~No Inter-Asset Correlation Tracking~~ ✅ DONE (Sprint D)
 
