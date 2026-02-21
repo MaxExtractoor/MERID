@@ -1,9 +1,9 @@
 name: Nightly Soak Tests
 
 on:
-  schedule:
-    - cron: '0 4 * * *'  # daily at 04:00 UTC
   workflow_dispatch: {}
+# Disabled schedule trigger — soak test scripts need audit_trail_soak.py setup
+# Re-enable cron once soak pipeline is validated
 
 jobs:
   soak-tests:

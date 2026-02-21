@@ -1,14 +1,6 @@
 name: Prompt Evaluation
 
 on:
-  push:
-    paths:
-      - 'prompts/**'
-      - 'core/structured_prompts.py'
-      - 'core/prompt_eval.py'
-  pull_request:
-    paths:
-      - 'prompts/**'
   workflow_dispatch:
     inputs:
       prompts:
@@ -19,6 +11,8 @@ on:
         description: 'LLM providers to test (deepseek,claude,ollama)'
         required: false
         default: 'deepseek'
+# Disabled auto-trigger — requires API keys + promptfoo setup
+# Re-enable push/PR triggers once prompt eval pipeline is wired up
 
 env:
   DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
