@@ -1,104 +1,88 @@
-# MERID v2.0 — Build & Development Guide
+# MERID — Build & Development Guide
 
 ## Prerequisites
 
-- **Python 3.11+** (required)
-- **Node.js 18+** (for React dashboard)
-- **make** (Windows: `choco install make`, or use Python commands directly)
+- **Python 3.11+**
+- **Node.js 18+** (React dashboard)
+- **make** (Windows: `choco install make`)
 
 ---
 
-## Backend Setup
+## Backend
 
 ```bash
-cd C:\Dev\MERID
 pip install -r requirements.txt
-cp .env.example .env   # fill in exchange credentials
+cp .env.example .env              # optional — runs without credentials in paper mode
+make serve                        # FastAPI on http://127.0.0.1:8000
 ```
 
-### Run Tests
-
-```bash
-# Golden path suite (490 tests)
-make golden-path
-
-# Full preflight (tests + readiness + drift + risk context)
-make preflight
-```
-
-### Start the Server
-
-```bash
-make serve              # FastAPI on http://127.0.0.1:8000
-```
-
-API docs available at http://127.0.0.1:8000/docs (Swagger UI).
+API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) (Swagger UI)
 
 ---
 
-## Frontend Setup
+## Frontend
 
 ```bash
 cd web/react
 npm install
-npm run dev             # Vite dev server on http://localhost:5173
+npm run dev                       # Vite dev server on http://localhost:5173
 ```
 
-### Production Build
+Production build:
 
 ```bash
-cd web/react
-npm run build           # Output in web/react/dist/
+npm run build                     # Output in web/react/dist/
 ```
 
 ---
 
-## MeridLoop (Orchestrator)
+## MeridLoop
+
+The MeridLoop orchestrator runs the full agent cycle: market scan → analysis → consensus → sizing → execution → PnL.
 
 ```bash
-# Observe mode (no execution)
-make loop-start
-
-# With execution enabled (paper mode by default)
-make loop-start-execute
-
-# Custom domains/symbols
-python -m merid.loop --domains crypto,prediction --symbols BTC,ETH,SOL
+make loop-start                   # observe mode (no execution)
+make loop-start-execute           # paper execution enabled
 ```
 
 ---
 
-## Makefile Quick Reference
+## Testing
+
+```bash
+make golden-path                  # full test suite
+make preflight                    # tests + readiness + drift audit + risk context
+make risk-context                 # print live RiskContext JSON
+```
+
+---
+
+## Makefile Reference
 
 | Command | Description |
 |---------|-------------|
-| `make serve` | Start FastAPI server (port 8000) |
-| `make loop-start` | Start MeridLoop (observe mode) |
-| `make loop-start-execute` | Start MeridLoop with execution |
-| `make golden-path` | Run 490-test golden path suite |
-| `make preflight` | Tests + readiness + drift + RiskContext |
-| `make risk-context` | Print live RiskContext JSON |
+| `make serve` | FastAPI server (port 8000) |
+| `make loop-start` | MeridLoop — observe mode |
+| `make loop-start-execute` | MeridLoop — paper execution |
+| `make golden-path` | Run test suite |
+| `make preflight` | Tests + readiness + drift + risk context |
+| `make risk-context` | Print risk state JSON |
 | `make readiness` | Run readiness auditor |
-| `make codebase-drift-audit` | Check codebase drift |
-| `make pm-test` | Run prediction market tests |
-| `make pipeline-test` | Run pipeline tests |
+| `make codebase-drift-audit` | Check for code drift |
+| `make pm-test` | Prediction market tests only |
+| `make pipeline-test` | Pipeline tests only |
 
 ---
 
-## Environment Variables
+## Environment
 
-Create `.env` file (see `ENV_SETUP.md` for full reference):
+Create `.env` for Kalshi credentials (see [ENV_SETUP.md](ENV_SETUP.md) for full reference):
 
-```env
-# Exchange credentials (for paper/live trading)
-ALPACA_API_KEY=your-key
-ALPACA_API_SECRET=your-secret
-KALSHI_API_KEY_ID=your-key-id
-KALSHI_PRIVATE_KEY_PATH=/path/to/key.pem
-
-# Capital configuration
-MERID_TOTAL_CAPITAL_USD=50000
-MERID_PM_TRADING_MODE=sim
+```bash
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_USE_DEMO=true
+MERID_PM_TRADING_MODE=paper
 ```
 
 ---
@@ -107,12 +91,8 @@ MERID_PM_TRADING_MODE=sim
 
 | Issue | Fix |
 |-------|-----|
-| `ModuleNotFoundError` | Run `pip install -r requirements.txt` |
-| `make` not found (Windows) | Install via `choco install make` or run Python commands directly |
-| Tests fail with import errors | Check Python 3.11+ and re-install deps |
+| `ModuleNotFoundError` | `pip install -r requirements.txt` |
+| `make` not found (Windows) | `choco install make` |
+| Tests fail | Check Python 3.11+ and reinstall deps |
 | API returns errors | Ensure `make serve` is running |
-| React build fails | Run `npm install` in `web/react/` |
-
----
-
-**MERID v2.0 — Built for Sovereignty**
+| React build fails | `npm install` in `web/react/` |

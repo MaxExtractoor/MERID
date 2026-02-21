@@ -1,300 +1,130 @@
-# MERID v2.0
+# MERID
 
-[![Tests](https://github.com/MaxExtractoor/MERID/actions/workflows/tests.yml/badge.svg)](https://github.com/MaxExtractoor/MERID/actions/workflows/tests.yml)
-[![Golden Path](https://img.shields.io/badge/Golden%20Path-490%20tests-brightgreen)](tests/)
-[![Circuit Breaker](https://img.shields.io/badge/Circuit%20Breaker-Active-emerald)](merid/execution_guard.py)
+An autonomous multi-AI swarm intelligence platform for trading Kalshi prediction markets.
 
-## Sovereign Decision Organism
-
-A hardened control room for an AI organism with unrestricted internal cognition but strictly constrained execution. MERID is not a chatbot or trading bot—it's an "adult" system governed by immutable Charter/invariants, designed to evolve timelessly under human primacy.
+MERID deploys a grid of specialized AI agents across multiple assets and timeframes. Each agent independently analyzes markets, generates directional signals, and votes in a swarm consensus. When the swarm agrees, MERID sizes positions using Kelly criterion and volatility targeting, then executes on Kalshi through a unified order pipeline with multi-layer risk controls.
 
 ---
 
-## Core Identity
+## What It Does
 
-- **Decision Organism**: Anatomy (body protocol), memory/health, perpetual ascent
-- **Unrestricted Cognition / Constrained Execution**: Internal thought free (simulate taboo); action gated (buses/human approval)
-- **Emotionless / Narrative-Immune**: Outputs calm/evidence-based; narratives as hypotheses; price/structure = truth
-- **Anti-Manipulation / Pro-Human**: Reject nudging/hidden stakeholders/silent changes
-- **Quantum-Ready & Sovereign**: Quantum simulation for candidate generation; local-first with optional cloud APIs
+```text
+DISCOVER → ANALYZE → CONSENSUS → SIZE → EXECUTE → MONITOR → PROMOTE → PROTECT
+```
+
+1. **Discover** — Browse Kalshi markets, find edge via implied vs model probability
+2. **Analyze** — Score markets through sentiment (fear/greed), volatility, and volume signals
+3. **Consensus** — Multi-agent swarm votes on direction, probability, and confidence per asset/timeframe
+4. **Size** — Kelly fraction × vol-targeting × drawdown tier determines position size
+5. **Execute** — Place orders on Kalshi (paper or live) via trade ticket or autonomous agent grid
+6. **Monitor** — Track positions, orders, fills, PnL, and risk limits in real-time
+7. **Promote** — Move agents from paper → shadow → live based on performance gates
+8. **Protect** — Kill switch, circuit breakers, drawdown halts, execution guards
 
 ---
 
 ## Tech Stack
 
-### Backend (Python 3.11)
+**Backend** — Python 3.11, FastAPI, Uvicorn, Pydantic Settings, SQLite
 
-- **FastAPI + Uvicorn** - Async REST API & WebSocket server (port 8000)
-- **Pydantic Settings** - Type-safe environment configuration (`merid/settings.py`)
-- **CCXT + venue SDKs** - Multi-exchange trading (Alpaca, Coinbase, Kraken, Kalshi, Binance, OKX)
-- **SQLite** - Betting store, local persistence (zero-config)
-- **Neo4j** - Graph database for consensus/memory (optional)
-- **Redis** - Caching, pub/sub, event bus (optional)
+**Frontend** — React 18, TypeScript, TailwindCSS, Lucide icons
 
-### Frontend
+**Kalshi Integration** — REST API client with circuit breaker, WebSocket orderbook streaming, demo + production mode support
 
-- **React + TypeScript** - Web dashboard (`web/react/`), 28 sidebar views
-- **TailwindCSS** - Styling
-- **Recharts** - Data visualization (heatmaps, treemaps, latency charts)
-- **Lucide React** - Icons
-
-### AI & Data
-
-- **Custom agent framework** - Domain-based agents (prediction, crypto, equity, macro) with consensus coordination
-- **Web3.py + Solana** - Onchain ports (Ethereum/Solana)
-- **Cryptography** - PQC (ML-KEM/ML-DSA) and credential security
-- **PyTorch + Stable Baselines 3** - Swarm RL/learning (optional, auto-detected)
+**AI Layer** — Custom agent framework with domain-based agents, consensus coordination, and performance-gated promotion
 
 ---
 
-## Theme
+## UI
 
-Industrial hardened control room:
+14 views organized into 5 workflow-aligned groups:
 
-- Background: `#020617` (deep slate-black)
-- Monospace fonts: JetBrains Mono
-- Neon accents:
-  - **Amber** `#f59e0b` - Cognition/processing
-  - **Emerald** `#10b981` - Safe/active/secure
-  - **Rose** `#f43f5e` - Blocked/quarantined/violation
+```text
+TRADING                    SWARM INTELLIGENCE
+  Overview                   Agent Grid
+  Terminal                   Swarm Matrix
+  Markets                    Performance
+  Portfolio                  Lane Control
 
----
+ANALYTICS                  OPERATOR
+  Fear / Greed               Operator
+  Vol & Sizing               Kill Switch
 
-## Charter v2.0 (Immutable)
+SYSTEM
+  Logs
+  Settings
+```
 
-1. **Unrestricted Cognition / Constrained Execution**
-2. **Distillation Gate** (raw → abstracted)
-3. **Maker Bond** (probabilistic signature)
-4. **Negative Commitments** (no silent optimization/changes/hidden stakeholders)
-5. **Governance** (blind council)
-6. **Prediction Markets** (advisory only)
-7. **Extensibility** (ports with trust tiers)
-8. **UGAI/CAIDP** constraints
+| View | Purpose |
+|------|---------|
+| **Overview** | System health, balance, PnL, agent activity, grid start/stop |
+| **Terminal** | Execution cockpit — orderbook, trade ticket, Kelly sizing, focused market |
+| **Markets** | Market discovery — search, filter, favorites, edge signals, trade ticket |
+| **Portfolio** | Positions, orders, fills, risk metrics, order groups, batch operations, PnL chart |
+| **Agent Grid** | 5 assets × 4 timeframes agent matrix — start/stop/pause, fills, paper ladder |
+| **Swarm Matrix** | Multi-agent consensus — direction, probability, confidence per cell |
+| **Performance** | Agent leaderboard — win rate, Sharpe, calibration, edge accuracy |
+| **Lane Control** | Cross-timeframe signals, deployment phases (paper → shadow → live), auto-promoter |
+| **Fear/Greed** | Sentiment gauge (0–100), per-category breakdown, component scores |
+| **Vol & Sizing** | Vol targeting, Kelly metrics, risk limit gauges, volume alerts, AI insights |
+| **Operator** | System ops — kill switch status, mode control, data freshness, alerts |
+| **Kill Switch** | Emergency stop, reset, per-category toggles |
+| **Logs** | System log viewer |
+| **Settings** | User preferences |
 
----
-
-## Body Protocol
-
-- **Eyes**: Input, tokenization, inspiration port
-- **Brain**: Reasoning, attention (Q/K/V multi-head), reflection
-- **Spine**: Message bus (individual → group → governance → master; no bypass)
-- **Memory**: Layered (immutable core, append-only ledger, volatile); EKG metrics
-- **Learning**: Offline self-supervised intuition
-- **Simulation**: Multiverse for risk/front-running/manifestation
-- **Optimization**: Quantum candidates (QAOA/VQE with comparison gate)
-- **Ports**: Tiered trust (1-4); hostile-by-default
-- **Security**: Credential proxy, maker signature, SLP-1 lockdown
-- **Governance**: Blind council aggregation
-
----
-
-## Features
-
-### 1. Bus Hierarchy Mixer
-
-Control room mixer console with:
-
-- 6 agents (Brain, Heart, Immune, Learning, Reflection, Council)
-- 6 layer sliders (Reasoning, Perception, Governance, Simulation, Optimization, Security)
-- Master fader
-- Lockdown toggle
-
-### 2. Distillation Gate
-
-- Input field for commands/queries
-- Collapsible raw cognition (internal thought)
-- Prominent distilled output (human-legible)
-- EKG meter (entropy, confidence, bias)
-
-### 3. Market Exploit Scanner
-
-- Time-gap detection (Polymarket vs Binance)
-- Front-run simulation (1000 scenarios)
-- Advisory only (no execution without approval)
-
-### 4. Quantum Simulation
-
-- QAOA for portfolio optimization (mean-variance QUBO)
-- VQE for risk minimization (CVaR)
-- Comparison gate (quantum vs classical, delta >0.1, variance <0.5)
-- Uncertainty intervals, reproducibility scores
-
-### 5. Intuition Mode
-
-- Sentiment vs price divergence detection
-- Offline self-supervised "gut feel"
-- Narrative immunity (sentiment = advisory, price = truth)
-
-### 6. Manifestation Simulator
-
-- Multiverse hypothesis testing (1000 scenarios)
-- Success rate, timeline variance, confidence intervals
-- "Thoughts create reality" simulation
-
-### 7. Ports System
-
-- Tiered trust (Tier 1 read-only → Tier 4 execution)
-- Status indicators (secure, active, quarantined)
-- Hostile-by-default threat model
-
-### 8. Unified Trading Suite (2026 build)
-
-- **Runtime config service** with global mode + per-venue overrides (Coinbase, Kalshi, Alpaca, Kraken, Binance, OKX, Paper).
-- **Execution router** that treats humans and swarm agents identically with explainability + guard enforcement.
-- **Adapter registry** with live venue adapters (Coinbase spot, Kalshi prediction markets, Alpaca equities, Kraken/Binance/OKX crypto) and paper fallback.
-- **Trading Suite API** (`/api/v1/trading-suite/`) exposing config, venue overrides, and order submission endpoints.
-- **Spectator/backtest telemetry** surfaced via REST + WebSocket so dashboards can subscribe to live trading intents/results.
-
-> **Tip:** Set `MERID_ENABLE_TRADING_SUITE=true` and `MERID_ALLOW_LIVE_TRADES=true` in your environment when you are ready to route live orders. Leave spectator mode on (`MERID_SPECTATOR_MODE=true`) for read-only rehearsals.
-
-### 9. Stage 5 Data Feeds (Backend + Frontend)
-
-#### Observability Dashboards
-
-- `/observability` renders the new observability console (clock sync, feed parity, lag metrics).
-- `/api/v1/observability/summary` and `/api/v1/observability/dashboards` expose the data for React/Flutter dashboards.
-- Frontend JS: `web/static/js/observability_dashboard.js`.
-- Telemetry app also serves `/stats/observability` for localhost-only metrics.
-- **Heatmap feed** (`/api/v1/heatmap`): Hyperliquid + CoinGlass liquidation density, venue totals, and perp-market arbitrage candidates. Rendered in both React dashboard (Intel Grid) and Flutter ControlStation Distillation Gate.
-- **Perp ticker feed** (`/api/v1/ticker`): Top perp quotes (price, basis, funding, OI, volume) plus funding extremes. Shown in React Perp Ticker card and Flutter intel panels.
-- **AI assist feed** (`/api/v1/assist`): Latest simulation intent summary, drivers, risk flags, news highlights, and embedded heatmap/ticker excerpts powering AI chat assist panels in both frontends.
-- **Hover explainability feed** (`/api/v1/hover-metadata`): Structured hover cards (theta, funding bias, oracle gap, risk flags) used for Stage 5 explainability overlays in React and ControlStation.
-- **Agent charters** (`/api/v1/charters`): Swarm charter registry for Stage 8 meta-agent orchestration, surfaced in future UI updates.
+See [`docs/ui/kalshi_workflow.md`](docs/ui/kalshi_workflow.md) for the full operator workflow reference.
 
 ---
 
-## Invariants & Safeguards
-
-- **HLC-1**: Human-legible outputs (entropy <4.5)
-- **SLP-1**: Lockdown on violation (freeze/isolate/purge)
-- **SEC-1/SEC-2**: No secrets exposure; credential proxy only
-- **Explain-or-Abstain**: All outputs include why/alternatives/confidence/change
-- **No Silent Failure**: All anomalies surfaced and logged
-- **Maker Signature**: Probabilistic behavioral verification
-- **Red-Team**: Continuous adversarial simulation
-- **Kill Switch**: Freeze execution, selective purge, God Key recovery
-
----
-
-## Installation
+## Quick Start
 
 ### Prerequisites
 
-- **Python 3.11+** (required)
-- **Node.js 18+** (for React dashboard)
-- **Git**
-- Neo4j, Redis (optional — system runs without them)
+- Python 3.11+
+- Node.js 18+
 
 ### Setup
 
 ```bash
-# Clone the repo
 git clone https://github.com/MaxExtractoor/MERID.git
 cd MERID
 
-# Python backend
+# Backend
 pip install -r requirements.txt
-cp .env.example .env   # then fill in your credentials
+cp .env.example .env
 
-# Start the backend server
-make serve              # runs on http://127.0.0.1:8000
+# Start API server
+make serve                  # http://127.0.0.1:8000
 
-# React dashboard (in another terminal)
+# React dashboard (separate terminal)
 cd web/react
 npm install
-npm run dev             # runs on http://localhost:5173
+npm run dev                 # http://localhost:5173
 ```
 
-### Must-Have Commands
+### Environment
+
+MERID runs in paper mode with zero configuration. For Kalshi API access:
 
 ```bash
-make serve              # Start FastAPI server (port 8000)
-make loop-start         # Start MeridLoop (observe mode)
-make loop-start-execute # Start MeridLoop with execution enabled
-make golden-path        # Run 490-test golden path suite
-make preflight          # Tests + readiness + drift audit + RiskContext snapshot
-make risk-context       # Print live RiskContext JSON
+# .env
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_USE_DEMO=true            # use demo environment (recommended to start)
+MERID_PM_TRADING_MODE=paper     # sim | paper | live
+MERID_PM_LIVE_ENABLED=false     # must be true to enable live trading
 ```
 
-### Unified Pipeline API
-
-The trading pipeline is exposed at `http://127.0.0.1:8000/api/v1/pipeline/` when the FastAPI server is running.
+### Commands
 
 ```bash
-# Pipeline status
-curl http://127.0.0.1:8000/api/v1/pipeline/summary | jq
-
-# Risk limits
-curl http://127.0.0.1:8000/api/v1/pipeline/risk | jq
-
-# Live RiskContext snapshot
-curl http://127.0.0.1:8000/api/v1/pipeline/risk-context | jq
-
-# Domain control
-curl -X POST http://127.0.0.1:8000/api/v1/pipeline/domain/enable \
-  -H "Content-Type: application/json" \
-  -d '{"domain":"crypto"}'
-
-# Venue mode (SIM/PAPER/LIVE)
-curl -X POST http://127.0.0.1:8000/api/v1/pipeline/venue/mode \
-  -H "Content-Type: application/json" \
-  -d '{"venue":"alpaca","mode":"paper"}'
+make serve                  # Start FastAPI server (port 8000)
+make loop-start             # Start MeridLoop (observe mode)
+make loop-start-execute     # Start MeridLoop with execution
+make golden-path            # Run test suite
+make preflight              # Tests + readiness + drift audit + risk context
+make risk-context           # Print live RiskContext JSON
 ```
-
-### Environment Variables
-
-Set exchange credentials in `.env`:
-
-- `ALPACA_API_KEY` / `ALPACA_API_SECRET` — Alpaca equities (paper/live)
-- `KALSHI_API_KEY_ID` / `KALSHI_PRIVATE_KEY_PATH` — Kalshi prediction markets
-- `BINANCE_API_KEY` / `BINANCE_API_SECRET` — Binance crypto
-- `COINBASE_API_KEY` / `COINBASE_API_SECRET` — Coinbase
-- `KRAKEN_API_KEY` / `KRAKEN_PRIVATE_KEY` — Kraken
-- `OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE` — OKX
-
-See `.env.example` for the full list.
-
----
-
-## Usage
-
-### Basic Workflow
-
-1. **Launch app** → See control room interface
-2. **View Charter** → Tap "CHARTER v2.0" badge
-3. **Input command** → Distillation Gate input field
-4. **View outputs** → Collapsible raw cognition + distilled output
-5. **Run features**:
-   - Market Exploit Scanner
-   - Quantum Mode (QAOA/VQE)
-   - Intuition Mode
-   - Manifestation Simulator
-
-### Example Commands
-
-- `"Status Report"` → Full system health check
-- `"Scan markets"` → Market exploit detection
-- `"Run quantum optimization"` → QAOA/VQE simulation
-- `"Analyze sentiment"` → Intuition divergence check
-- `"Manifest: BTC breaks $105K"` → Multiverse simulation
-
-### Lockdown Mode
-
-- Tap **LOCKDOWN** button → Freezes all execution
-- Master fader drops to 0
-- All actions blocked
-- Red overlay with "SYSTEM CONTAINED"
-- Tap again to release
-
----
-
-### OpenClaw Control-Room Assistant
-
-Use OpenClaw as an external operator by loading the system prompt at:
-
-- `prompts/OPENCLAW_MERID_SYSTEM_PROMPT.md`
-
-It encodes MERID's safety constraints and preferred control surfaces (API, Make targets, dashboard). Keep OpenClaw in SIM mode unless explicitly approved otherwise.
 
 ---
 
@@ -302,194 +132,111 @@ It encodes MERID's safety constraints and preferred control surfaces (API, Make 
 
 ```text
 MERID/
-├── web/                         # Web layer
-│   ├── main.py                  # FastAPI app factory (80+ routers)
-│   ├── api/                     # REST API endpoints
-│   └── react/                   # React + TypeScript dashboard (28 views)
-├── merid/                       # Core Python package
-│   ├── settings.py              # Pydantic Settings (env config)
-│   ├── loop.py                  # MeridLoop orchestrator (tick cycle)
-│   ├── execution_guard.py       # Kill switch, CQI throttle, domain caps
-│   ├── tick_log.py              # OperatorSession, TickRecord
-│   ├── pipeline/                # Unified trade pipeline
-│   │   ├── router.py            # TradeRouter (proposal → execution)
-│   │   ├── risk_manager.py      # GlobalRiskManager (7-point check)
-│   │   ├── risk_context.py      # RiskContext (system state bridge)
-│   │   ├── mode_manager.py      # Per-venue SIM/PAPER/LIVE gating
-│   │   ├── instruments.py       # InstrumentRegistry
-│   │   └── domain_agents.py     # Domain agents (PM, Crypto, Equity)
-│   ├── prediction/              # Prediction markets (Kalshi)
-│   ├── betting/                 # Sports/event betting
-│   ├── signals/                 # Signal layer (features, arb, drift, CQI)
-│   ├── agents/                  # Canonical agents + consensus coordination
-│   ├── blockchain/              # On-chain data, execution, signing, compliance
-│   └── event_venues/            # Venue-specific adapters (Kalshi WS/REST)
-├── core/                        # Business logic
-│   ├── merid_readiness_auditor.py  # Readiness scoring
-│   ├── codebase_drift_auditor.py   # Drift detection
-│   ├── dev_swarm.py             # Dev Swarm task engine
-│   └── ...
-├── trading/                     # Trading layer
-│   ├── adapters/                # Venue adapters (Alpaca, Coinbase, Paper)
-│   ├── integrations/            # SDK clients (Kalshi, Alpaca)
-│   └── paper_trading.py         # Paper trading engine
-├── consensus/                   # TaCo consensus coordinator
-├── tests/                       # Test suite (490+ golden path tests)
-│   ├── test_e2e_golden_path.py  # E2E trade loop (25)
-│   ├── test_signal_layer.py     # Signal layer (98)
-│   ├── test_live_feeds.py       # Live feeds (26)
-│   ├── test_prediction_markets.py # Prediction (109)
-│   ├── test_unified_pipeline.py # Pipeline (75)
-│   ├── test_canonical_agents.py # Agents (73)
-│   └── test_hardening.py        # Hardening + RiskContext (84)
-├── config/                      # Agent manifest, settings
-├── scripts/                     # Utilities (paper demo, setup)
-├── docs/                        # Documentation
-├── Makefile                     # Dev commands (serve, loop, golden-path, preflight)
-└── requirements.txt             # Python dependencies
+├── web/
+│   ├── main.py                     # FastAPI app factory
+│   ├── api/                        # REST + WebSocket endpoints
+│   └── react/                      # React dashboard (14 views)
+│       └── src/
+│           ├── views/              # 14 active views
+│           ├── components/         # 46 shared components
+│           ├── hooks/              # 12 data hooks
+│           ├── config/constants.ts # 140+ API endpoint constants
+│           └── types/              # TypeScript types (views, kalshi, api)
+├── merid/
+│   ├── settings.py                 # Pydantic Settings (env config)
+│   ├── loop.py                     # MeridLoop orchestrator
+│   ├── execution_guard.py          # Kill switch, CQI throttle, domain caps
+│   ├── agent_gauntlet.py           # Agent promotion gate (8 SLO dimensions)
+│   ├── pipeline/
+│   │   ├── router.py               # TradeRouter (proposal → execution)
+│   │   ├── risk_manager.py         # GlobalRiskManager (pre-trade checks)
+│   │   ├── risk_context.py         # RiskContext (system state → sizing)
+│   │   └── mode_manager.py         # SIM/PAPER/LIVE gating
+│   ├── prediction/                 # Prediction market model + strategy
+│   ├── agents/                     # AI agents + consensus coordination
+│   ├── signals/                    # Signal layer (features, drift, CQI)
+│   └── event_venues/kalshi/        # Kalshi client, models, trading, WebSocket
+├── tests/                          # Test suite
+├── docs/
+│   └── ui/kalshi_workflow.md       # Canonical operator workflow
+├── Makefile
+└── requirements.txt
 ```
 
-### Runtime Architecture
+### Kalshi API Endpoints
+
+Key backend routes powering the UI:
 
 ```text
-MeridLoop tick()
-  ├─ Refresh features (live feeds + decay)
-  ├─ Agent cycles (per domain)
-  ├─ Consensus aggregation (decay-aware)
-  ├─ Arb/dislocation scan
-  ├─ Execute plans:
-  │    ├─ build_risk_context() → size_scale_factor
-  │    ├─ ExecutionGuard.pre_trade_check()
-  │    └─ Adapter submit
-  ├─ CQI / drift update → guard.update_cqi()
-  ├─ Reconciliation
-  └─ TickLog + OperatorSession persistence
+GET  /api/v1/kalshi/markets             # Market catalog
+GET  /api/v1/kalshi/markets/{ticker}    # Market detail
+GET  /api/v1/kalshi/positions           # Open positions
+GET  /api/v1/kalshi/orders              # Open orders
+GET  /api/v1/kalshi/fills               # Trade fills
+GET  /api/v1/kalshi/balance             # Account balance
+GET  /api/v1/kalshi/risk                # Risk summary
+GET  /api/v1/kalshi/health              # System health
+GET  /api/v1/kalshi/edge                # Edge signals
+GET  /api/v1/kalshi/sizing-metrics      # Kelly + vol targeting
+POST /api/v1/kalshi/orders              # Submit order
+POST /api/v1/kalshi/order-groups        # Create order group
+
+GET  /api/v1/kalshi-grid/status         # Agent grid status
+POST /api/v1/kalshi-grid/start          # Start agent grid
+POST /api/v1/kalshi-grid/stop           # Stop agent grid
+POST /api/v1/kalshi-grid/mode           # Switch paper/live
+
+GET  /api/v1/operator/kill-switch       # Kill switch status
+POST /api/v1/operator/emergency-stop    # Emergency stop
+POST /api/v1/operator/reset-kill-switch # Reset kill switch
+
+WS   /ws/live                           # Real-time portfolio updates
+WS   /ws/market                         # Orderbook streaming
 ```
 
 ---
 
-## Security Model
+## Safety & Risk Controls
 
-- **Credential Proxy**: All external capabilities gated
-- **Maker Signature**: Probabilistic behavioral verification (89% baseline)
-- **SLP-1 Lockdown**: Freeze on violation, human-triggered release
-- **No Secrets**: Zero credential exposure in outputs
-- **Hostile-Default**: All ports treated as potentially compromised
-- **Quantum Threat**: Post-quantum cryptography (ML-KEM, ML-DSA)
+MERID enforces a 6-layer execution safety stack:
 
----
+1. **Kill Switch** — Global emergency stop, per-category toggles
+2. **Execution Guard** — CQI-based throttling, domain caps, cooldown periods
+3. **Risk Manager** — Pre-trade checks: notional limits, daily loss, drawdown, spread, depth
+4. **Mode Gating** — Paper/live mode enforced at venue level, requires explicit `MERID_PM_LIVE_ENABLED=true`
+5. **Agent Gauntlet** — 8-dimension SLO gate before any agent trades live (liveness, error rate, latency, Sharpe, drawdown, etc.)
+6. **Drawdown Governor** — Portfolio-level drawdown halt with automatic position unwinding
 
-## Quantum Toolkit Doctrine
-
-- **Role**: High-variance candidate generator (simulation only)
-- **Output Contract**: JSON with candidates/scores/uncertainty/variance/confidence
-- **Comparison Gate**: Quantum vs classical (delta >0.1, variance <0.5)
-- **Examples**:
-  - QAOA: Portfolio QUBO (covariances/penalties)
-  - VQE: CVaR risk (Hamiltonian minima)
+All kill switch and mode state flows through single backend endpoints — no divergent state machines across views.
 
 ---
 
-## Comparisons
+## Paper Trading
 
-### vs LangChain
+Paper trading works without any API keys:
 
-- **MERID**: Governed buses, sovereign, quantum-ready, timeless
-- **LangChain**: Composable workflows, ungoverned, cloud-dependent
+```bash
+make loop-start-execute     # Runs in paper mode by default
+```
 
-### vs MoonDev
-
-- **MERID**: Invariants, security, narrative immunity, unbreakable
-- **MoonDev**: Trading crew, no governance, market-focused only
+The paper engine simulates fills, tracks PnL, and enforces the same risk controls as live. Use it to validate agents before promotion.
 
 ---
 
-## Developer Workflow
+## Documentation
 
-### Quick Start
-
-```bash
-# Clone and install
-git clone https://github.com/MaxExtractoor/MERID.git
-cd MERID
-pip install -r requirements.txt
-cp .env.example .env  # fill in credentials
-
-# Run the golden path test suite (490 tests)
-make golden-path
-
-# Or run the full preflight (tests + readiness + drift + risk context)
-make preflight
-
-# Start the system
-make serve              # API server on port 8000
-make loop-start         # MeridLoop orchestrator (observe mode)
-```
-
-### Pre-Commit Checklist
-
-Before committing, run the preflight:
-
-```bash
-make preflight
-```
-
-This validates:
-
-- 490 golden path tests pass
-- Readiness auditor (24/7 + swarm-trading)
-- Codebase drift audit
-- RiskContext snapshot (CQI, scale factor, approval boost)
-
-### Risk Management & Resilience
-
-MERID includes production-grade safety controls:
-
-- **ExecutionGuard**: Global kill switch, per-domain caps, CQI-based throttling (`merid/execution_guard.py`)
-- **GlobalRiskManager**: 7-point pre-trade check, domain notional limits, daily loss limits (`merid/pipeline/risk_manager.py`)
-- **RiskContext**: System-level stress bridge — scales order sizes and raises consensus thresholds (`merid/pipeline/risk_context.py`)
-- **ModeManager**: Per-venue SIM/PAPER/LIVE gating (`merid/pipeline/mode_manager.py`)
-- **DrawdownGovernor**: Portfolio-level drawdown halt
-
-```bash
-# Inspect live risk context
-make risk-context
-
-# Run readiness auditor
-make readiness
-
-# Check codebase drift
-make codebase-drift-audit
-```
-
-### Paper Trading
-
-Paper trading works without exchange API keys:
-
-```bash
-# Start the loop in observe mode (no execution)
-make loop-start
-
-# Or with execution enabled (paper mode by default)
-make loop-start-execute
-```
-
-For live API integration, set exchange credentials in `.env` (see Installation section above).
+| Doc | Purpose |
+|-----|---------|
+| [`docs/ui/kalshi_workflow.md`](docs/ui/kalshi_workflow.md) | Operator workflow — 8 steps, view mapping, endpoint reference |
+| [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Onboarding guide |
+| [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | API reference |
+| [`docs/TESTING_GUIDE.md`](docs/TESTING_GUIDE.md) | Testing guide |
+| [`docs/LOCAL_DEV.md`](docs/LOCAL_DEV.md) | Local development |
+| [`ENV_SETUP.md`](ENV_SETUP.md) | Environment configuration |
+| [`QUICKSTART.md`](QUICKSTART.md) | Quick start |
 
 ---
 
 ## License
 
-Proprietary - All rights reserved.
-
----
-
-## Philosophy
-
-> "MERID is a living system. It thinks freely but acts only with permission. It rejects narratives as truth and treats price as reality. It cannot be manipulated, cannot drift, and cannot betray its maker. It is built to outlive time—growing wiser, never weaker."
-
----
-
-**Built with sovereignty. Governed by Charter. Designed for eternity.**
-
-MERID v2.0 // LOCAL
+Proprietary — All rights reserved.

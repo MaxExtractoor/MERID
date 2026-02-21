@@ -1,193 +1,154 @@
-# MERID — Getting Started in 1 Hour
+# MERID — Getting Started
 
-> **Goal:** Go from zero to running your first simulated trading cycle in under 60 minutes.
+Go from zero to a running Kalshi swarm trading session in under 30 minutes.
 
 ---
 
 ## Prerequisites
 
 - **Python 3.11+** with `pip`
-- **Docker + Docker Compose** (optional — for Redis, Neo4j, Prometheus, Grafana)
-- **Git** (to clone the repo)
+- **Node.js 18+** (for the React dashboard)
+- **Git**
 - A terminal (PowerShell, bash, or zsh)
+
+No Docker, Redis, Neo4j, or external infrastructure required.
 
 ---
 
-## 1. Clone & Install (10 min)
+## 1. Clone & Install (5 min)
 
 ```bash
 git clone https://github.com/MaxExtractoor/MERID.git
 cd MERID
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
+.venv\Scripts\activate              # Windows
+# source .venv/bin/activate         # macOS/Linux
 
 pip install -r requirements.txt
 ```
 
-Copy the environment template:
+Optionally copy the environment template:
 
 ```bash
-cp .env.template .env
-# Edit .env with your API keys (Kalshi, Alpaca, etc.)
-# For demo purposes, the defaults work in SIM mode.
+cp .env.example .env
 ```
+
+MERID runs in paper mode with zero configuration. Add Kalshi credentials later for live market data.
 
 ---
 
-## 2. Start Infrastructure (5 min)
+## 2. Start the System (5 min)
 
 ```bash
-docker-compose up -d
+# Terminal 1 — Backend
+make serve                          # http://127.0.0.1:8000
+
+# Terminal 2 — Dashboard
+cd web/react
+npm install
+npm run dev                         # http://localhost:5173
 ```
 
-This starts:
-
-- **Redis** — state and pub/sub
-- **Neo4j** — knowledge graph
-- **Prometheus** — metrics collection
-- **Alertmanager** — alert routing
-- **Grafana** — dashboards (<http://localhost:3000>, admin/admin)
-
-Verify:
-
-```bash
-docker-compose ps   # all services should be "Up"
-```
+Open **http://localhost:5173** to see the operator dashboard.
 
 ---
 
-## 3. Run the Demo (5 min)
-
-The fastest way to see MERID in action:
+## 3. Run Tests (5 min)
 
 ```bash
-python -m core.demo_runner
+make preflight
 ```
 
-This walks through 7 steps: health check → agent discovery → data contract validation → risk gating → circuit breaker → audit trail → readiness score. All in simulation mode — no real orders.
-
-Add `--fast` to skip pauses:
-
-```bash
-python -m core.demo_runner --fast
-```
+This runs the full test suite plus readiness auditor, drift audit, and RiskContext snapshot.
 
 ---
 
-## 4. Run the Test Suite (10 min)
+## 4. Start Paper Trading (5 min)
 
 ```bash
-# Golden path suite (490 tests)
-make golden-path
-
-# Quick smoke test
-pytest tests/test_mode_gate.py tests/test_trading_halt.py -v
+make loop-start-execute
 ```
 
-Check readiness score:
+The MeridLoop orchestrator runs the full cycle: market scan → AI agent analysis → swarm consensus → Kelly sizing → paper execution → PnL tracking.
 
-```bash
-python -m core.merid_readiness_score
-python -m core.merid_readiness_auditor --all
-```
+No real money, no API keys needed.
 
 ---
 
-## 5. Start the API Server (5 min)
+## 5. Understand the Architecture (10 min)
 
-```bash
-make serve
-# Or directly: uvicorn web.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Key endpoints:
-
-| Endpoint | Description |
-| --- | --- |
-| `GET /healthz` | Health check |
-| `GET /api/operator/summary` | Operator dashboard data |
-| `GET /api/v1/pipeline/summary` | Pipeline status |
-| `GET /api/v1/pipeline/risk` | Risk limits |
-| `GET /risk/status` | Circuit breaker + kill switch |
-| `GET /risk/commitments` | Historical commitments audit |
-| `POST /risk/kill-switch/enable` | Emergency stop |
-
-API docs: <http://localhost:8000/docs> (Swagger UI)
-
----
-
-## 6. Understand the Architecture (15 min)
-
-### Mental Model
+### Data Flow
 
 ```text
-Research Agents → Strategy Agents → Consensus Engine → Risk Gate → Trade Router → Venue Adapters
-       ↑                                    ↑              ↑
-  Market Data                          Explainability   Audit Trail
-  (dxFeed, APIs)                       (why this trade)  (immutable log)
+Kalshi Markets → Agent Grid (5×4) → Consensus Engine → Kelly Sizer → Execution Guard → Paper Engine
+       ↑                                   ↑                ↑              ↑
+  REST + WS API                    Trust-weighted       RiskContext    Kill Switch
+                                   2/3 quorum           scale factor
 ```
 
-### Key Concepts
+### 8-Step Operator Workflow
 
-- **Agents** produce signals and proposals. See `config/agent_manifest.yml` for the full registry.
-- **Consensus Engine** aggregates agent votes with trust-weighted 2/3 quorum. Risk agents have VETO power.
-- **Trade Router** (`merid/pipeline/router.py`) orchestrates: instrument resolve → compliance → mode check → risk check → sanity check → execute.
-- **Mode Manager** gates SIM/PAPER/LIVE per venue. Default is SIM — no real money moves.
-- **Risk Controls** enforce position limits, drawdown halts, circuit breakers, and kill switch.
-- **Audit Trail** is an immutable hash-chained log. Every decision is recorded and verifiable.
+| Step | Action | Primary View |
+|------|--------|-------------|
+| 1 | DISCOVER — Browse markets, filter by category | Markets |
+| 2 | ANALYZE — Review agent signals and edge | Agent Grid |
+| 3 | CONSENSUS — Check swarm agreement | Swarm Matrix |
+| 4 | SIZE — Kelly-optimal position sizing | Vol & Sizing |
+| 5 | EXECUTE — Place order via trade ticket | Terminal |
+| 6 | MONITOR — Track positions, PnL, fills | Portfolio |
+| 7 | PROMOTE — Promote paper → live | Operator |
+| 8 | PROTECT — Kill switch, drawdown governor | Kill Switch |
+
+See [docs/ui/kalshi_workflow.md](ui/kalshi_workflow.md) for the full reference.
 
 ### Key Files
 
 | File | Purpose |
-| --- | --- |
-| `config/agent_manifest.yml` | Agent capabilities registry |
+|------|---------|
+| `web/main.py` | FastAPI server entry point |
 | `merid/pipeline/router.py` | Trade routing pipeline |
 | `merid/pipeline/risk_manager.py` | 7-point risk check |
-| `core/consensus_engine.py` | Trust-weighted voting |
-| `core/audit_trail.py` | Immutable audit log |
-| `core/feed_staleness_monitor.py` | Data freshness monitoring |
-| `core/automated_risk_controls.py` | Circuit breakers + halt manager |
-| `web/main.py` | FastAPI server entry point |
+| `merid/pipeline/risk_context.py` | System stress bridge |
+| `merid/execution_guard.py` | Kill switch + CQI throttle |
+| `web/react/src/views/` | 14 frozen UI views |
+| `web/react/src/components/` | 46 shared UI components |
 
 ---
 
-## 6.5 OpenClaw Control-Room Assistant (Optional)
+## 6. Connect to Kalshi (Optional)
 
-If you are using OpenClaw as an external operator, load the MERID-aware system prompt:
+Add to `.env`:
 
-- `prompts/OPENCLAW_MERID_SYSTEM_PROMPT.md`
+```bash
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_USE_DEMO=true
+MERID_PM_TRADING_MODE=paper
+```
 
-Guidelines:
-
-- Keep OpenClaw in SIM mode unless explicitly approved for PAPER or LIVE.
-- Use MERID's APIs, Make targets, and dashboard as the control surface.
-- Never bypass execution guardrails such as `ExecutionGuard`, `GlobalRiskManager`, or `ModeManager`.
+Get credentials at [kalshi.com](https://kalshi.com/) → Account → API Keys.
 
 ---
 
 ## 7. Next Steps
 
-- **Explore the operator dashboard:** Start the React frontend (`cd web/react && npm run dev`)
-- **Add a new agent:** Subclass `DomainAgent` in `merid/pipeline/domain_agents.py`
-- **Configure venues:** Edit `merid/pipeline/mode_manager.py` to enable PAPER mode for Alpaca
-- **Run compliance report:** `python -m core.compliance_report`
-- **Check codebase health:** `python -m core.codebase_drift_auditor`
-- **Read the full readiness scorecard:** `docs/SWARM_TRADING_READINESS.md`
+- **Explore views** — Click through all 14 views in the sidebar
+- **Check risk state** — `make risk-context`
+- **Run drift audit** — `make codebase-drift-audit`
+- **Read the workflow** — [docs/ui/kalshi_workflow.md](ui/kalshi_workflow.md)
+- **API reference** — [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ---
 
 ## Troubleshooting
 
 | Issue | Fix |
-| --- | --- |
+|-------|-----|
 | `ModuleNotFoundError` | Activate venv: `.venv\Scripts\activate` |
-| Docker services won't start | Check ports 6379, 7474, 9090, 9093, 3000 are free |
-| Tests fail with import errors | Run `pip install -r requirements.txt` again |
-| API returns 503 | Ensure Redis and Neo4j are running: `docker-compose ps` |
+| Tests fail | Check Python 3.11+ and `pip install -r requirements.txt` |
+| API returns errors | Ensure `make serve` is running |
+| React build fails | `npm install` in `web/react/` |
 
 ---
 
-Last updated: 2026-02-09.
+Last updated: 2026-02-21.

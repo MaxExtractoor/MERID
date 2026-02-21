@@ -1,59 +1,80 @@
-# MERID Environment Configuration
+# MERID — Environment Configuration
 
 ## Quick Setup
 
-1. Copy the environment template:
 ```bash
-cp .env.example .env
+cp .env.example .env        # copy template
+make serve                  # start API server
 ```
 
-2. Fill in the required values for your environment
+MERID runs in paper mode with zero configuration. Add Kalshi credentials below for live market data.
 
-3. Start the system:
+---
+
+## Kalshi Credentials
+
 ```bash
-make serve              # FastAPI on port 8000
-make loop-start         # MeridLoop orchestrator
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_USE_DEMO=true                  # true = demo environment, false = production
 ```
 
-## Key Environment Variables
+Get credentials at [https://kalshi.com/](https://kalshi.com/) → Account → API Keys.
 
-### **Required for Basic Operation**
-- None — MERID runs in SIM mode with zero configuration.
+---
 
-### **Exchange Credentials (for paper/live trading)**
-- `ALPACA_API_KEY`, `ALPACA_API_SECRET` — Alpaca equities
-- `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH` — Kalshi prediction markets
-- `BINANCE_API_KEY`, `BINANCE_API_SECRET` — Binance crypto
-- `COINBASE_API_KEY`, `COINBASE_API_SECRET` — Coinbase
-- `KRAKEN_API_KEY`, `KRAKEN_PRIVATE_KEY` — Kraken
-- `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE` — OKX
+## Trading Mode
 
-### **Market Data APIs (optional, enhances live feeds)**
-- `FINNHUB_API_KEY` — Finnhub market data
-- `POLYGON_API_KEY` — Polygon market data
-- `ALPHA_VANTAGE_API_KEY` — Alpha Vantage
+```bash
+MERID_PM_TRADING_MODE=sim             # sim | paper | live
+MERID_PM_LIVE_ENABLED=false           # must be true to enable live trading
+```
 
-### **Capital & Risk Configuration**
-- `MERID_TOTAL_CAPITAL_USD` — Total capital (default: 50000)
-- `MERID_MAX_PORTFOLIO_NOTIONAL_USD` — Max portfolio notional (default: 50000)
-- `MERID_PM_TRADING_MODE` — Prediction market mode: sim/paper/live (default: sim)
-- `MERID_PM_MAX_DAILY_LOSS` — PM daily loss limit (default: 250)
+| Mode | Behavior |
+|------|----------|
+| `sim` | Simulated fills, no API calls |
+| `paper` | Real market data from Kalshi, simulated execution |
+| `live` | Real orders on Kalshi (requires `MERID_PM_LIVE_ENABLED=true`) |
 
-### **Optional Services**
-- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` — Graph database (optional)
-- `REDIS_URL` — Caching and pub/sub (optional)
+---
 
-## Documentation Links
+## Risk Limits
 
-- **Quick Start**: [QUICKSTART.md](QUICKSTART.md)
-- **Getting Started (1hr)**: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)
-- **Go-Live Checklist**: [docs/GO_LIVE_CHECKLIST.md](docs/GO_LIVE_CHECKLIST.md)
-- **API Reference**: [web/api/](web/api/) (or `/docs` when server is running)
+```bash
+MERID_PM_MAX_NOTIONAL_PER_MARKET=500  # max notional per market ($)
+MERID_PM_MAX_DAILY_LOSS=250           # daily loss limit ($)
+MERID_PM_MAX_TOTAL_NOTIONAL=5000      # total portfolio notional cap ($)
+MERID_TOTAL_CAPITAL_USD=50000         # total capital allocation
+```
 
-## Development Notes
+---
 
-- Use `.env` for local development
+## Optional Services
+
+```bash
+# Graph database (consensus memory — not required)
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=password
+
+# Cache / pub-sub (not required)
+REDIS_URL=redis://localhost:6379
+```
+
+---
+
+## Fresh Start
+
+```bash
+MERID_FRESH_START=1                   # reset all state on next boot (paper mode only)
+```
+
+This clears paper positions, signals, consensus, and drift state. Kill switch state is preserved. Cannot be used in live mode.
+
+---
+
+## Notes
+
 - Never commit `.env` to version control
-- All sensitive values should use your secrets manager
-- See `.env.example` for complete variable list
-- Run `make preflight` before committing
+- `.env.example` has the full variable list with defaults
+- Run `make preflight` before committing to verify system health
