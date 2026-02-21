@@ -7,6 +7,7 @@ Kalshi market, using different methodologies:
 - EdgeModel (existing) — spot-relative + spread + time decay ensemble
 - MomentumForecaster  — volume/OI trends, price momentum
 - MeanReversionForecaster — orderbook imbalance, mean reversion toward fair value
+- MacroRegimeForecaster  — fear/greed, cross-timeframe, volatility regime
 
 All forecasters are managed by ForecasterRegistry which:
 1. Runs each on every market snapshot
@@ -20,6 +21,7 @@ from merid.prediction.forecasters.base import (
 )
 from merid.prediction.forecasters.momentum import MomentumForecaster
 from merid.prediction.forecasters.mean_reversion import MeanReversionForecaster
+from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
 from merid.prediction.forecasters.registry import (
     ForecasterRegistry,
     EnsembleForecast,
@@ -31,6 +33,7 @@ __all__ = [
     "ForecastResult",
     "MomentumForecaster",
     "MeanReversionForecaster",
+    "MacroRegimeForecaster",
     "ForecasterRegistry",
     "EnsembleForecast",
     "get_forecaster_registry",
