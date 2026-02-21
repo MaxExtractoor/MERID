@@ -187,3 +187,11 @@ operations/
 packages/
 policy/
 runbooks/
+voting/
+test/
+
+# Binary tools (download locally, don't track)
+.tools/
+
+# Stale root scripts
+create_shortcut.ps1
