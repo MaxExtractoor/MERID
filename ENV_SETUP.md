@@ -49,20 +49,6 @@ MERID_TOTAL_CAPITAL_USD=50000         # total capital allocation
 
 ---
 
-## Optional Services
-
-```bash
-# Graph database (consensus memory — not required)
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=password
-
-# Cache / pub-sub (not required)
-REDIS_URL=redis://localhost:6379
-```
-
----
-
 ## Fresh Start
 
 ```bash

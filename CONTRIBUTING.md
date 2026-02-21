@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 ## Architecture Rules
 
-The UI is frozen at **14 views** grouped into 5 sidebar sections. See [docs/ui/kalshi_workflow.md](docs/ui/kalshi_workflow.md) for the canonical layout.
+The UI is frozen at **17 views** grouped into 5 sidebar sections. See [docs/ui/kalshi_workflow.md](docs/ui/kalshi_workflow.md) for the canonical layout.
 
 - Do not add new views without updating the frozen view list
 - Do not reintroduce legacy views or components from `_legacy/` directories
@@ -71,7 +71,7 @@ make risk-context             # print live risk state
 
 - [ ] `make preflight` passes
 - [ ] No broken imports (`python -m py_compile <file>`)
-- [ ] No new views outside the frozen 14-view layout
+- [ ] No new views outside the frozen 17-view layout
 - [ ] Documentation updated if behavior changed
 - [ ] No `_legacy/` code reintroduced
 

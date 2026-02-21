@@ -101,3 +101,44 @@ web/react/.cache/
 *.db
 neo4j/data/
 redis-data/
+
+# ── Generated reports & artifacts ─────────────────────────────────────
+coverage.json
+coverage.xml
+coverage_*.xml
+MERID_REPO_TREE.txt
+_merid-directories.txt
+full_collect*.txt
+collect_errors.txt
+env_var_refs.txt
+vite.log
+temp_snapshot.json
+observations_*.json
+master_roadmap_checklist.txt
+
+# ── Temp / debug files ────────────────────────────────────────────────
+err*.txt
+debug_html.txt
+test_output.txt
+test_run*.txt
+tmp_*.py
+tmp_*.txt
+weather_forecasts.csv
+pytest_lag_fix.log
+test_dictconfig.log
+test_merid.log
+dummy.log
+
+# ── Flutter (legacy) ──────────────────────────────────────────────────
+.flutter-plugins-dependencies
+.dart_tool/
+.metadata
+pubspec.lock
+
+# ── Misc IDE / platform ──────────────────────────────────────────────
+*.iml
+*.url
+.hintrc
+.merid_safeguard.yml
+devtools_options.yaml
+.coverage_dir_backup/
