@@ -296,9 +296,19 @@ class SwarmConsensusAggregator:
         elif len(archetypes) == 1:
             disagreement_flags.append("Single archetype bias")
         
+        # Sprint D: Minimum diversity requirement
+        min_archetypes = 2
+        if len(archetypes) < min_archetypes and len(proposals) >= self.min_agents:
+            disagreement_flags.append(
+                f"Insufficient diversity: {len(archetypes)} archetype(s), need {min_archetypes}+"
+            )
+            consensus_confidence *= 0.6  # Penalize low-diversity consensus
+
         # Determine status
         if len(proposals) < self.min_agents:
             status = ConsensusStatus.FORMING
+        elif len(archetypes) < min_archetypes:
+            status = ConsensusStatus.FORMING  # Block consensus without diversity
         elif agreement_ratio < self.consensus_threshold:
             status = ConsensusStatus.CONFLICTED
         else:

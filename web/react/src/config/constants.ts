@@ -255,6 +255,17 @@ export const API_ENDPOINTS = {
   // ── System Config ─────────────────────────────────────────────────────
   CONFIG_RELOAD: "/api/v1/system/config-reload",
 
+  // ── Correlation Risk (Sprint D) ──────────────────────────────────────
+  CORRELATION_MATRIX: "/api/v1/kalshi/correlation/matrix",
+  CORRELATION_FACTOR: "/api/v1/kalshi/correlation/factor",
+  CORRELATION_CLUSTERS: "/api/v1/kalshi/correlation/clusters",
+
+  // ── Forecaster Metrics (Sprint A) ────────────────────────────────────
+  METRICS_FORECASTERS: "/api/v1/kalshi/metrics/forecasters",
+  METRICS_FORECASTER: (id: string) => `/api/v1/kalshi/metrics/forecaster/${id}`,
+  METRICS_MARKET: (marketId: string) => `/api/v1/kalshi/metrics/markets/${marketId}`,
+  METRICS_RESOLVER: "/api/v1/kalshi/metrics/resolver",
+
 } as const;
 
 // WebSocket Events

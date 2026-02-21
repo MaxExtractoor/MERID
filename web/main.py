@@ -140,6 +140,7 @@ from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
 from web.api.kalshi_agent_performance_api import router as kalshi_agent_performance_router
 from web.api.kalshi_deployment import router as kalshi_deployment_router
 from web.api.kalshi_metrics_api import router as kalshi_metrics_api_router
+from web.api.correlation_api import router as correlation_api_router
 from web.api.sentiment_api import router as sentiment_api_router
 from web.api.xtf_api import router as xtf_api_router
 from web.api.auto_promoter_api import router as auto_promoter_api_router
@@ -487,6 +488,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(kalshi_agent_performance_router)
     application.include_router(kalshi_deployment_router)
     application.include_router(kalshi_metrics_api_router)
+    application.include_router(correlation_api_router)
     application.include_router(sentiment_api_router)
     application.include_router(xtf_api_router)
     application.include_router(auto_promoter_api_router)

@@ -13,6 +13,7 @@ import {
   Settings as SettingsIcon,
   Activity,
   GitBranch,
+  Target,
   Grid,
 } from 'lucide-react';
 import type { View } from '../types/views';
@@ -39,6 +40,7 @@ const swarmIntelligence = [
   { name: 'Agent Grid', href: 'kalshi-grid', icon: LayoutGrid, color: 'text-orange-500' },
   { name: 'Swarm Matrix', href: 'swarm-consensus', icon: Grid, color: 'text-cyan-500' },
   { name: 'Performance', href: 'kalshi-performance', icon: Award, color: 'text-emerald-400' },
+  { name: 'Calibration', href: 'calibration-dashboard', icon: Target, color: 'text-rose-400' },
   { name: 'Lane Control', href: 'lane-control', icon: GitBranch, color: 'text-violet-400' },
 ];
 

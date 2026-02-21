@@ -225,13 +225,39 @@ class PortfolioRiskAgent:
                 f"limit ${self._config.max_total_notional_usd}"
             )
 
-        # Per-asset notional
+        # Per-asset notional (with correlation-adjusted caps)
         for asset, notional in snapshot.notional_per_asset.items():
             if notional > self._config.max_notional_per_asset_usd:
                 breaches.append(
                     f"{asset} notional ${notional} > "
                     f"limit ${self._config.max_notional_per_asset_usd}"
                 )
+
+        # Sprint D: Correlation-adjusted combined exposure check
+        try:
+            from merid.risk.correlation import get_correlation_tracker, ASSET_CLUSTERS
+            corr_tracker = get_correlation_tracker()
+            for cluster_name, members in ASSET_CLUSTERS.items():
+                cluster_notional = sum(
+                    snapshot.notional_per_asset.get(m.upper(), Decimal("0"))
+                    for m in members
+                )
+                if cluster_notional <= 0:
+                    continue
+                # Get worst-case reduction factor for this cluster
+                worst_factor = Decimal("1.0")
+                for i, a in enumerate(members):
+                    for b in members[i + 1:]:
+                        f = corr_tracker.exposure_reduction_factor(a, b)
+                        worst_factor = min(worst_factor, Decimal(str(f)))
+                combined_cap = self._config.max_notional_per_asset_usd * Decimal(str(len(members))) * worst_factor
+                if cluster_notional > combined_cap:
+                    breaches.append(
+                        f"Correlated cluster {cluster_name} notional ${cluster_notional} > "
+                        f"correlation-adjusted cap ${combined_cap:.0f} (factor={worst_factor:.2f})"
+                    )
+        except Exception as exc:
+            logger.debug(f"Correlation check skipped: {exc}")
 
         # Open markets
         if snapshot.open_market_count > self._config.max_open_markets:
