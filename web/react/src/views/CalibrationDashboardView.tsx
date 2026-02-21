@@ -25,15 +25,21 @@ interface ResolverStatus {
 const CalibrationDashboardView: React.FC = () => {
   const [forecasters, setForecasters] = useState<ForecasterStats[]>([]);
   const [resolver, setResolver] = useState<ResolverStatus | null>(null);
+  const [recalibration, setRecalibration] = useState<any>(null);
+  const [critiques, setCritiques] = useState<any[]>([]);
+  const [execStats, setExecStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [resolveAllStatus, setResolveAllStatus] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
-      const [fRes, rRes] = await Promise.all([
+      const [fRes, rRes, rcRes, crRes, exRes] = await Promise.all([
         fetch(`${API_BASE_URL}${API_ENDPOINTS.METRICS_FORECASTERS}`),
         fetch(`${API_BASE_URL}${API_ENDPOINTS.METRICS_RESOLVER}`),
+        fetch(`${API_BASE_URL}${API_ENDPOINTS.SWARM_RECALIBRATION}`).catch(() => null),
+        fetch(`${API_BASE_URL}${API_ENDPOINTS.SWARM_CRITIC_HISTORY}`).catch(() => null),
+        fetch(`${API_BASE_URL}${API_ENDPOINTS.SWARM_EXECUTION_STATS}`).catch(() => null),
       ]);
 
       if (fRes.ok) {
@@ -43,6 +49,18 @@ const CalibrationDashboardView: React.FC = () => {
       if (rRes.ok) {
         const rJson = await rRes.json();
         setResolver(rJson.resolver || null);
+      }
+      if (rcRes?.ok) {
+        const rcJson = await rcRes.json();
+        setRecalibration(rcJson.latest || null);
+      }
+      if (crRes?.ok) {
+        const crJson = await crRes.json();
+        setCritiques(crJson.critiques?.slice(-10) || []);
+      }
+      if (exRes?.ok) {
+        const exJson = await exRes.json();
+        setExecStats(exJson.stats || null);
       }
       setError(null);
     } catch (err) {
@@ -254,6 +272,120 @@ const CalibrationDashboardView: React.FC = () => {
         {/* Correlation Risk Panel — 1 col */}
         <div className="col-span-1">
           <CorrelationRiskPanel />
+        </div>
+      </div>
+
+      {/* Edge Recalibration + Critic Feed + Execution Stats */}
+      <div className="grid grid-cols-3 gap-4">
+        {/* Edge Recalibration — 1 col */}
+        <div className="bg-[#1a1a2e] border border-gray-700/50 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3">Edge Recalibration</h3>
+          {recalibration ? (
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between">
+                <span className="text-gray-500">Trades</span>
+                <span className="text-gray-300 font-mono">{recalibration.trade_count}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Predicted Edge</span>
+                <span className="text-gray-300 font-mono">{(recalibration.avg_predicted_edge * 100).toFixed(1)}%</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Realized Edge</span>
+                <span className="text-gray-300 font-mono">{(recalibration.avg_realized_edge * 100).toFixed(1)}%</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Bias</span>
+                <span className={`font-mono font-semibold ${recalibration.edge_bias > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                  {recalibration.edge_bias > 0 ? '+' : ''}{(recalibration.edge_bias * 100).toFixed(2)}%
+                </span>
+              </div>
+              {Object.keys(recalibration.adjustments || {}).length > 0 && (
+                <div className="mt-2 pt-2 border-t border-gray-700/50">
+                  <div className="text-[10px] text-gray-500 uppercase mb-1">Adjustments</div>
+                  {Object.entries(recalibration.adjustments).map(([phase, change]) => (
+                    <div key={phase} className="flex justify-between text-[10px]">
+                      <span className="text-gray-400">{phase}</span>
+                      <span className="text-gray-300 font-mono">{String(change)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500 text-center py-4">
+              No recalibration data yet
+            </div>
+          )}
+        </div>
+
+        {/* Critic Feed — 1 col */}
+        <div className="bg-[#1a1a2e] border border-gray-700/50 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3">
+            Critic Feed
+            {critiques.length > 0 && (
+              <span className="ml-2 text-[10px] text-gray-500 font-normal">({critiques.length})</span>
+            )}
+          </h3>
+          {critiques.length > 0 ? (
+            <div className="space-y-1.5 max-h-48 overflow-y-auto">
+              {critiques.slice().reverse().map((c: any, idx: number) => (
+                <div key={idx} className="flex items-start gap-2 text-[10px] py-1 border-b border-gray-800/30">
+                  <span className={`shrink-0 px-1.5 py-0.5 rounded font-medium ${
+                    c.severity >= 0.8 ? 'bg-red-500/20 text-red-400' :
+                    c.severity >= 0.5 ? 'bg-amber-500/20 text-amber-400' :
+                    'bg-gray-600/20 text-gray-400'
+                  }`}>
+                    {c.critique_type}
+                  </span>
+                  <span className="text-gray-400 truncate flex-1">{c.reason}</span>
+                  <span className="text-gray-600 shrink-0">w={c.weight_adjustment?.toFixed(1)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500 text-center py-4">
+              No critiques — all feeds healthy
+            </div>
+          )}
+        </div>
+
+        {/* Execution Subscriber Stats — 1 col */}
+        <div className="bg-[#1a1a2e] border border-gray-700/50 rounded-lg p-4">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3">Execution Bus</h3>
+          {execStats ? (
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between">
+                <span className="text-gray-500">Decisions Received</span>
+                <span className="text-gray-300 font-mono">{execStats.received}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Routed to Execution</span>
+                <span className="text-emerald-400 font-mono font-semibold">{execStats.routed}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Skipped</span>
+                <span className="text-gray-400 font-mono">{execStats.skipped}</span>
+              </div>
+              {execStats.received > 0 && (
+                <div className="mt-2 pt-2 border-t border-gray-700/50">
+                  <div className="w-full h-2 bg-gray-700/50 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-500 rounded-full"
+                      style={{ width: `${(execStats.routed / execStats.received) * 100}%` }}
+                    />
+                  </div>
+                  <div className="text-[10px] text-gray-500 mt-1 text-center">
+                    {((execStats.routed / execStats.received) * 100).toFixed(0)}% routed
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500 text-center py-4">
+              Execution subscriber idle
+            </div>
+          )}
         </div>
       </div>
 

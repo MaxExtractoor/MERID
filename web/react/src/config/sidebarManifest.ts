@@ -37,6 +37,7 @@ export const SIDEBAR_MANIFEST: SidebarSection[] = [
       { name: 'Markets',      href: 'kalshi-dashboard',    icon: 'Search',          color: 'text-orange-300' },
       { name: 'Agent Grid',   href: 'kalshi-grid',         icon: 'LayoutGrid',      color: 'text-orange-500' },
       { name: 'Performance',  href: 'kalshi-performance',  icon: 'Award',           color: 'text-emerald-400' },
+      { name: 'Calibration', href: 'calibration-dashboard', icon: 'Target',        color: 'text-rose-400' },
       { name: 'Portfolio',    href: 'kalshi-portfolio',    icon: 'Briefcase',       color: 'text-orange-300' },
       { name: 'Positions',    href: 'positions',           icon: 'TrendingUp',      color: 'text-cyan-400' },
       { name: 'Orders',       href: 'orders',              icon: 'ClipboardList',   color: 'text-teal-300' },

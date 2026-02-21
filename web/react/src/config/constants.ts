@@ -260,6 +260,11 @@ export const API_ENDPOINTS = {
   CORRELATION_FACTOR: "/api/v1/kalshi/correlation/factor",
   CORRELATION_CLUSTERS: "/api/v1/kalshi/correlation/clusters",
 
+  // ── Swarm Bus (Sprint M) ─────────────────────────────────────────────
+  SWARM_CRITIC_HISTORY: "/api/v1/kalshi/swarm/critic/history",
+  SWARM_RECALIBRATION: "/api/v1/kalshi/swarm/recalibration",
+  SWARM_EXECUTION_STATS: "/api/v1/kalshi/swarm/execution/stats",
+
   // ── Forecaster Metrics (Sprint A) ────────────────────────────────────
   METRICS_FORECASTERS: "/api/v1/kalshi/metrics/forecasters",
   METRICS_FORECASTER: (id: string) => `/api/v1/kalshi/metrics/forecaster/${id}`,
