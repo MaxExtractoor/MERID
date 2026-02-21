@@ -1,95 +1,83 @@
-# MERID v2.0 — Quick Start Guide
+# MERID — Quick Start
 
-**Get MERID running in 5 minutes.**
+Get MERID running in 5 minutes. No API keys required for paper mode.
 
 ---
 
-## Step 1: Install Dependencies (2 min)
+## 1. Install (2 min)
 
-```powershell
-cd C:\Dev\MERID
+```bash
+cd MERID
 pip install -r requirements.txt
 ```
 
----
+## 2. Start (1 min)
 
-## Step 2: Run the Golden Path (2 min)
+```bash
+# Terminal 1 — Backend
+make serve                      # http://127.0.0.1:8000
 
-```powershell
-make golden-path
+# Terminal 2 — Dashboard
+cd web/react && npm install && npm run dev   # http://localhost:5173
 ```
 
-This runs 490 tests across the full pipeline: E2E trade loop, signal layer, live feeds, prediction markets, unified pipeline, canonical agents, and hardening.
+## 3. Verify (2 min)
 
----
-
-## Step 3: Start the System (1 min)
-
-```powershell
-# Terminal 1: Backend API
-make serve
-
-# Terminal 2: React dashboard
-cd web/react
-npm install
-npm run dev
+```bash
+make preflight                  # Tests + readiness + drift audit + risk context
 ```
-
-- **API**: http://127.0.0.1:8000 (Swagger docs at `/docs`)
-- **Dashboard**: http://localhost:5173
 
 ---
 
-## Quick Test
+## What You'll See
 
-### Test 1: Preflight Check
-```powershell
-make preflight
-```
-Runs golden path + readiness auditor + codebase drift audit + live RiskContext snapshot.
+Open **http://localhost:5173** to see the operator dashboard with 14 views:
 
-### Test 2: Risk Context
-```powershell
-make risk-context
-```
-Prints the current system risk state: CQI, scale factor, approval boost, kill switch status.
+- **Overview** — System health, balance, PnL
+- **Markets** — Browse Kalshi markets, edge signals, trade ticket
+- **Terminal** — Execution cockpit with orderbook and Kelly sizing
+- **Portfolio** — Positions, orders, fills, risk, PnL chart
+- **Agent Grid** — Start/stop the 5×4 agent matrix
+- **Swarm Matrix** — Multi-agent consensus visualization
+- **Operator** — Kill switch, mode control, system alerts
 
-### Test 3: Start the Loop
-```powershell
-make loop-start
-```
-Runs the MeridLoop orchestrator in observe mode: live feeds → agents → consensus → arb → plans → CQI → reconciliation.
-
-### Test 4: Paper Trading
-```powershell
-make loop-start-execute
-```
-Same as above but with execution enabled. Paper mode by default — no real capital at risk.
+API docs at **http://127.0.0.1:8000/docs** (Swagger UI).
 
 ---
 
-## Key Endpoints
+## Start Paper Trading
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/v1/pipeline/summary` | Full pipeline status |
-| `GET /api/v1/pipeline/risk` | Risk limits and exposure |
-| `GET /api/v1/pipeline/risk-context` | Live RiskContext snapshot |
-| `GET /api/v1/prediction-markets/summary` | Prediction markets dashboard |
-| `GET /api/v1/wallet/balances` | Wallet balances (live) |
-| `GET /api/v1/treasury/overview` | Treasury overview (live) |
-| `GET /api/operator/summary` | Operator dashboard data |
+```bash
+make loop-start-execute         # MeridLoop with paper execution
+```
+
+This runs the full agent cycle: market scan → AI analysis → swarm consensus → Kelly sizing → paper execution → PnL tracking. No real money, no API keys needed.
 
 ---
 
-## Key Features
+## Connect to Kalshi
 
-- **MeridLoop**: Persistent orchestrator running full tick cycle (feeds → agents → consensus → risk → execution → CQI)
-- **RiskContext**: System-level stress bridge — scales order sizes and raises approval thresholds
-- **ExecutionGuard**: Kill switch, CQI throttle, per-domain caps
-- **Unified Pipeline**: TradeRouter → GlobalRiskManager → ModeManager → VenueAdapter
-- **Signal Layer**: Decay-aware features, arb scanner, CQI dashboard
-- **28 Dashboard Views**: Operator, Wallet, Treasury, Trading, Positions, Predictions, Betting, Flow Radar, Signal Layer, and more
+Add to `.env` for live market data and trading:
+
+```bash
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_USE_DEMO=true
+MERID_PM_TRADING_MODE=paper
+```
+
+---
+
+## Key Commands
+
+| Command | What it does |
+|---------|-------------|
+| `make serve` | Start API server (port 8000) |
+| `make loop-start` | MeridLoop in observe mode |
+| `make loop-start-execute` | MeridLoop with paper execution |
+| `make golden-path` | Run test suite |
+| `make preflight` | Full system check |
+| `make risk-context` | Print risk state JSON |
 
 ---
 
@@ -97,20 +85,16 @@ Same as above but with execution enabled. Paper mode by default — no real capi
 
 | Issue | Fix |
 |-------|-----|
-| `ModuleNotFoundError` | Run `pip install -r requirements.txt` |
-| `make` not found (Windows) | Install via `choco install make` or run Python commands directly |
-| Tests fail | Check Python 3.11+ and re-install deps |
+| `ModuleNotFoundError` | `pip install -r requirements.txt` |
+| `make` not found (Windows) | `choco install make` |
 | API returns errors | Ensure `make serve` is running |
+| React build fails | `npm install` in `web/react/` |
 
 ---
 
-## Learn More
+## Next
 
-- **Full Documentation**: `README.md`
-- **Go-Live Checklist**: `docs/GO_LIVE_CHECKLIST.md`
-- **Getting Started (1hr)**: `docs/GETTING_STARTED.md`
-- **Readiness Scorecard**: `docs/SWARM_TRADING_READINESS.md`
-
----
-
-MERID v2.0 // LOCAL
+- [README.md](README.md) — Full project overview
+- [docs/ui/kalshi_workflow.md](docs/ui/kalshi_workflow.md) — Operator workflow (8 steps, 14 views)
+- [ENV_SETUP.md](ENV_SETUP.md) — Environment configuration
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — Detailed onboarding

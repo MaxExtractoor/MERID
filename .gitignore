@@ -94,6 +94,7 @@ celerybeat.pid
 web/react/dist/
 web/react/node_modules/
 web/react/.cache/
+*.timestamp-*.mjs
 
 # ── Database ─────────────────────────────────────────────────────────
 *.sqlite3
