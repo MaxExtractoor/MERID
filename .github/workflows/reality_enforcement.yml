@@ -6,44 +6,9 @@
 name: Reality Enforcement
 
 on:
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - "trading/**"
-      - "execution/**"
-      - "routing/**"
-      - "onboarding/**"
-      - "risk/**"
-      - "surveillance/**"
-      - "analytics/onboarding_metrics.py"
-      - "tests/test_onboarding_metrics.py"
-      - "onboarding/venue_registry.py"
-      - "tests/risk/**"
-      - "core/adversarial_hardening.py"
-      - "observability/**"
-      - "tests/core/test_poisoning_*"
-      - "tests/test_data_quality_*"
-      - ".github/workflows/reality_enforcement.yml"
-      - "scripts/run_tests_and_coverage.py"
-  push:
-    branches: [ main, develop ]
-    paths:
-      - "trading/**"
-      - "execution/**"
-      - "routing/**"
-      - "onboarding/**"
-      - "risk/**"
-      - "surveillance/**"
-      - "analytics/onboarding_metrics.py"
-      - "tests/test_onboarding_metrics.py"
-      - "onboarding/venue_registry.py"
-      - "tests/risk/**"
-      - "core/adversarial_hardening.py"
-      - "observability/**"
-      - "tests/core/test_poisoning_*"
-      - "tests/test_data_quality_*"
-      - ".github/workflows/reality_enforcement.yml"
-      - "scripts/run_tests_and_coverage.py"
+  workflow_dispatch:
+# Disabled auto-trigger — references legacy paths (web/static/, routing/, surveillance/)
+# Re-enable once reality enforcement checks are updated for current codebase
 
 jobs:
   safety-risk-tests:

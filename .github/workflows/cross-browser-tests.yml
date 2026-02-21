@@ -1,15 +1,9 @@
 name: Cross-Browser Dashboard Tests
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - 'web/react/**'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'web/react/**'
   workflow_dispatch:
+# Disabled auto-trigger — Playwright not configured in CI yet
+# Re-enable push/PR triggers once browser tests are wired up
 
 env:
   PLAYWRIGHT_BASE_URL: http://localhost:5173
