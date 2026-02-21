@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence
 import httpx
 
 from utils.logger import get_logger
+from trading.trade_mode import get_trade_mode, TradeMode
 
 logger = get_logger("trading.adapters.base")
 
@@ -174,6 +175,14 @@ class TradingVenueAdapterBase(TradingVenueAdapter):
         return self._get_positions_live()
 
     def submit_order(self, request: TradeRequest) -> OrderResult:
+        # ---- Hard mode guard: canonical TradeMode check ----
+        current_mode = get_trade_mode()
+        if current_mode != TradeMode.LIVE:
+            raise RuntimeError(
+                f"{self.venue} live order blocked: global trade mode is "
+                f"{current_mode.value!r}, not 'live'. "
+                f"Use the paper engine for simulated fills."
+            )
         if self.use_mock:
             raise RuntimeError(f"{self.venue} adapter in mock mode - trading disabled")
         if not self.supports_trading:

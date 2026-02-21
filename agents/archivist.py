@@ -19,7 +19,7 @@ class Archivist(BaseAgent):
             history = memory.get_history(limit=10)
             payload_text = energy.get("payload", "")
             similar = [h for h in history if any(kw.lower() in h.get("payload", "").lower() for kw in payload_text.split()[:10])]
-            context = f"Historical similar events ({len(similar)} found): {json.dumps(similar, indent=2)}" if similar else "No strong historical matches."
+            context = f"Historical similar events ({len(similar)} found): {json.dumps(similar, indent=2, default=str)}" if similar else "No strong historical matches."
         except Exception as e:
             self.logger.warning(f"History query failed: {e}")
             context = "Historical context unavailable."

@@ -593,3 +593,16 @@ def get_health_monitor() -> HealthMonitor:
     if _health_monitor is None:
         _health_monitor = HealthMonitor()
     return _health_monitor
+
+
+def get_agent_failure_counts() -> Dict[str, int]:
+    """Return {agent_name: consecutive_failure_count} for all registered health checks.
+
+    Used by the AgentConsecutiveFailureAlert observability rule.
+    """
+    monitor = get_health_monitor()
+    return {
+        name: check.consecutive_failures
+        for name, check in monitor.health_checks.items()
+        if check.consecutive_failures > 0
+    }

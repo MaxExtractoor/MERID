@@ -16,6 +16,7 @@ logger = structlog.get_logger(__name__)
 
 class BitgetAdapter(VenueAdapter):
     """Bitget adapter - optional/data venue for US users."""
+    _is_stub = True
     
     def __init__(
         self,
@@ -78,7 +79,7 @@ class BitgetAdapter(VenueAdapter):
             self.logger.error("market_data_error", error=str(e))
             return None
     
-    async def place_order(
+    async def _place_order_impl(
         self,
         symbol: str,
         side: OrderSide,

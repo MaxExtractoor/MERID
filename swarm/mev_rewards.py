@@ -165,6 +165,8 @@ class MEVRewardSystem:
     - Penalties for harmful behavior
     """
     
+    _action_counter: int = 0
+    
     def __init__(self):
         self._mev_actions: List[MEVAction] = []
         self._reward_pools: Dict[str, RewardPool] = {}
@@ -261,7 +263,8 @@ class MEVRewardSystem:
         slippage_reduction_bps: float = 0.0,
     ) -> MEVAction:
         """Record MEV action."""
-        action_id = f"mev_{int(datetime.utcnow().timestamp())}"
+        MEVRewardSystem._action_counter += 1
+        action_id = f"mev_{int(datetime.utcnow().timestamp())}_{MEVRewardSystem._action_counter}"
         
         # Classify action
         mev_category = self.classify_mev_action(

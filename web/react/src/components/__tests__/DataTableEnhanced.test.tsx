@@ -75,8 +75,8 @@ describe('DataTableEnhanced', () => {
     
     await waitFor(() => {
       expect(screen.getByText('John Doe')).toBeInTheDocument();
-      expect(screen.queryByText('Jane Smith')).not.toBeInTheDocument();
     });
+    expect(screen.queryByText('Jane Smith')).not.toBeInTheDocument();
   });
 
   it('handles pagination', async () => {

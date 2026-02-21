@@ -66,10 +66,10 @@ export function RiskProtectionsPanel({ compact = false, onExpand }: RiskProtecti
           <span className="font-semibold">Risk Protections Unavailable</span>
         </div>
         <p className="text-sm text-slate-400">{error}</p>
-        <button 
+        <button type="button" 
           onClick={refetch}
           className="mt-3 text-sm text-blue-400 hover:text-blue-300"
-        >
+         title="Retry">
           Retry
         </button>
       </div>
@@ -95,7 +95,7 @@ export function RiskProtectionsPanel({ compact = false, onExpand }: RiskProtecti
             : 'bg-emerald-500/20 border border-emerald-500/50 hover:bg-emerald-500/30'
         }`}
         onClick={onExpand}
-      >
+       role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onExpand?.(); } }}>
         <div className="flex items-center gap-2">
           {overall.status === 'critical' ? (
             <AlertOctagon className="w-4 h-4 text-red-400" />
@@ -128,11 +128,11 @@ export function RiskProtectionsPanel({ compact = false, onExpand }: RiskProtecti
           <span className="text-xs text-slate-400">
             Updated: {formatDateTime(data.timestamp)}
           </span>
-          <button 
+          <button type="button" 
             onClick={refetch}
             className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white"
             disabled={loading}
-          >
+           title="refetch" aria-label="Refresh">
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
@@ -213,11 +213,11 @@ export function RiskProtectionsPanel({ compact = false, onExpand }: RiskProtecti
 
           {circuitState === 'OPEN' && (
             <div className="flex items-center gap-3">
-              <button
+              <button type="button"
                 onClick={handleReset}
                 disabled={resetting}
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-lg text-sm font-medium text-white transition-colors"
-              >
+               title="Reset">
                 {resetting ? 'Resetting...' : 'Reset Circuit Breaker'}
               </button>
               {data.circuit_breaker.opened_at && (
@@ -262,7 +262,7 @@ export function RiskProtectionsPanel({ compact = false, onExpand }: RiskProtecti
                 </div>
               </div>
               
-              <button
+              <button type="button"
                 onClick={() => handleToggleKillSwitch(killSwitchEnabled ? 'disable' : 'enable')}
                 disabled={toggling}
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -456,7 +456,7 @@ export function RiskProtectionsCard() {
         'border-slate-800 hover:border-slate-600'
       }`}
       onClick={() => setExpanded(true)}
-    >
+     role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); (() => setExpanded(true))(); } }}>
       <div className="flex items-center gap-2 mb-3">
         <Shield className={`w-5 h-5 ${
           overall.status === 'critical' ? 'text-red-400' :

@@ -345,12 +345,27 @@ class UnifiedDecisionLayer:
                     **context
                 })
                 
+                # Performance-based weight: blend win-rate and inverse Brier score.
+                # Brier score ranges 0 (perfect) to 1 (worst); no-skill baseline = 0.25.
+                # Weight = win_rate * (1 - brier) clamped to [0.1, 2.0], default 1.0.
+                weight = 1.0
+                try:
+                    from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+                    _tracker = get_agent_performance_tracker()
+                    _metrics = _tracker.get_agent_metrics(agent.agent_id)
+                    if _metrics.total_closes >= 5:
+                        _brier = _tracker.compute_brier_score(agent.agent_id)
+                        _brier = _brier if _brier is not None else 0.25
+                        weight = max(0.1, min(2.0, _metrics.win_rate * (1.0 - _brier) * 4.0))
+                except Exception:
+                    pass
+
                 agent_decisions.append({
                     "agent_id": agent.agent_id,
                     "agent_role": agent.role,
                     "recommendation": decision.get("decision", ""),
                     "confidence": decision.get("confidence", 0.5),
-                    "weight": 1.0,  # TODO: Calculate based on performance
+                    "weight": weight,
                     "reasoning": decision.get("reasoning", ""),
                     "evidence": decision.get("evidence", {})
                 })

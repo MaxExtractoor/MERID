@@ -6,8 +6,10 @@ and evidence-based iteration.
 """
 
 import sys
-print(f"=== PHASE0_TRIAL_API.PY LOADED === {sys.modules[__name__]}")
+import logging
+logger = logging.getLogger("phase0_trial_api")
 
+logger.info(f"=== PHASE0_TRIAL_API.PY LOADED === {sys.modules[__name__]}")
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional, Any
@@ -19,12 +21,10 @@ from utils.logger import get_logger
 
 logger = get_logger("phase0_trial_api")
 
-print(f"=== PHASE0_TRIAL_API.PY IMPORTS COMPLETE ===")
-
+logger.info(f"=== PHASE0_TRIAL_API.PY IMPORTS COMPLETE ===")
 router = APIRouter(prefix="/api/v1/phase0/trial", tags=["phase0_trial"])
 
-print(f"=== PHASE0_TRIAL_API.PY ROUTER CREATED ===")
-
+logger.info(f"=== PHASE0_TRIAL_API.PY ROUTER CREATED ===")
 # Pydantic models for API
 class WeeklyDecisionRequest(BaseModel):
     model_id: str

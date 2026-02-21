@@ -1,184 +1,100 @@
-# MERID v2.0 - Quick Start Guide
+# MERID — Quick Start
 
-**Get MERID running in 5 minutes**
-
----
-
-## Step 1: Install Flutter (5 min)
-
-### Windows
-```powershell
-# Download Flutter SDK
-# https://flutter.dev/docs/get-started/install/windows
-
-# Extract to C:\src\flutter
-# Add to PATH
-setx PATH "%PATH%;C:\src\flutter\bin"
-
-# Verify
-flutter doctor
-```
+Get MERID running in 5 minutes. No API keys required for paper mode.
 
 ---
 
-## Step 2: Install Fonts (1 min)
+## 1. Install (2 min)
 
-1. Download **JetBrains Mono**: https://www.jetbrains.com/lp/mono/
-2. Extract and copy to `C:\Dev\MERID\assets\fonts\`:
-   - `JetBrainsMono-Regular.ttf`
-   - `JetBrainsMono-Bold.ttf`
-
----
-
-## Step 3: Install Dependencies (1 min)
-
-```powershell
-cd C:\Dev\MERID
-flutter pub get
-```
-
----
-
-## Step 4: Run MERID (30 sec)
-
-```powershell
-# Development mode
-flutter run
-
-# Or build release APK
-flutter build apk --release
-```
-
-**Output**: `build/app/outputs/flutter-apk/app-release.apk`
-
----
-
-## 🎮 Quick Test
-
-### Test 1: Status Report
-1. Launch app
-2. Enter "Status Report" in Distillation Gate
-3. Press Enter
-4. See raw cognition + distilled output + EKG metrics
-
-### Test 2: Market Exploit
-1. Tap "Market Exploit" button
-2. Tap "Scan for Exploits"
-3. See time-gap detection + front-run simulation
-
-### Test 3: Quantum Mode
-1. Tap "Quantum Mode" button
-2. Tap "Run QAOA"
-3. See quantum vs classical comparison
-
-### Test 4: Lockdown
-1. Tap red "LOCKDOWN" button
-2. See system freeze + red overlay
-3. Tap again to release
-
----
-
-## 📱 Device/Emulator Setup
-
-### Android Studio
-```powershell
-# List devices
-flutter devices
-
-# Run on connected device
-flutter run -d <device-id>
-```
-
-### iOS (macOS only)
 ```bash
-open -a Simulator
-flutter run
-```
-
----
-
-## 🐛 Troubleshooting
-
-### "Flutter not found"
-```powershell
-# Add to PATH
-setx PATH "%PATH%;C:\src\flutter\bin"
-# Restart terminal
-```
-
-### "Fonts not loading"
-```
-1. Check files exist: C:\Dev\MERID\assets\fonts\JetBrainsMono-*.ttf
-2. Run: flutter pub get
-3. Restart app completely
-```
-
-### "Build fails"
-```powershell
-flutter clean
-flutter pub get
-flutter run
-```
-
----
-
-## 📚 Learn More
-
-- **Full Documentation**: `README.md`
-- **Trading System Guide**: `README_TRADING_SYSTEM.md`
-- **Deployment Guide**: `BUILD.md`
-- **Build Summary**: `PROJECT_SUMMARY.md`
-- **Charter v2.0**: Launch app → Tap "CHARTER v2.0" badge
-
----
-
-## 💰 Trading System Quick Start
-
-### Backend Server
-```powershell
-# Install Python dependencies
+cd MERID
 pip install -r requirements.txt
-
-# Start server
-python -m uvicorn web.main:app --host 127.0.0.1 --port 8001 --reload
 ```
 
-### Access Trading Interfaces
-- **Main Dashboard**: http://127.0.0.1:8001/
-- **Perps Trading**: http://127.0.0.1:8001/trading/perps
-- **Prediction Markets**: http://127.0.0.1:8001/trading/markets
-- **Consensus Betting**: http://127.0.0.1:8001/betting
+## 2. Start (1 min)
 
-### Paper Trading (Default)
-- **Safe testing** with virtual $10,000 balance
-- **No real capital** at risk
-- **Toggle badge** in perps interface (blue = paper, red = live)
-- **Full documentation**: See `README_TRADING_SYSTEM.md`
+```bash
+# Terminal 1 — Backend
+make serve                      # http://127.0.0.1:8000
 
----
+# Terminal 2 — Dashboard
+cd web/react && npm install && npm run dev   # http://localhost:5173
+```
 
-## 🎯 Key Features
+## 3. Verify (2 min)
 
-- **Bus Hierarchy**: Mixer console with 6 agents, 6 layers, master fader
-- **Distillation Gate**: Raw cognition → distilled output + EKG
-- **Quantum Sim**: QAOA/VQE optimization with comparison gate
-- **Market Exploit**: Time-gap detection + front-run simulation
-- **Intuition**: Sentiment divergence + gut feel analysis
-- **Manifestation**: 1000-scenario multiverse testing
-- **Lockdown**: Freeze all execution (SLP-1)
+```bash
+make preflight                  # Tests + readiness + drift audit + risk context
+```
 
 ---
 
-## 🔐 Security
+## What You'll See
 
-- **No Backend**: Fully offline/local
-- **No Cloud**: Zero external dependencies
-- **Governance**: All execution gated by human approval
-- **Lockdown**: One-tap system freeze
-- **Hostile-Default**: All ports treated as compromised
+Open **http://localhost:5173** to see the operator dashboard with 17 views:
+
+- **Overview** — System health, balance, PnL
+- **Markets** — Browse Kalshi markets, edge signals, trade ticket
+- **Terminal** — Execution cockpit with orderbook and Kelly sizing
+- **Portfolio** — Positions, orders, fills, risk, PnL chart
+- **Agent Grid** — Start/stop the 5×4 agent matrix
+- **Swarm Matrix** — Multi-agent consensus visualization
+- **Operator** — Kill switch, mode control, system alerts
+
+API docs at **http://127.0.0.1:8000/docs** (Swagger UI).
 
 ---
 
-**You're ready! Launch MERID v2.0 and explore the control room.**
+## Start Paper Trading
 
-MERID v2.0 // LOCAL ⚡
+```bash
+make loop-start-execute         # MeridLoop with paper execution
+```
+
+This runs the full agent cycle: market scan → AI analysis → swarm consensus → Kelly sizing → paper execution → PnL tracking. No real money, no API keys needed.
+
+---
+
+## Connect to Kalshi
+
+Add to `.env` for live market data and trading:
+
+```bash
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_USE_DEMO=true
+MERID_PM_TRADING_MODE=paper
+```
+
+---
+
+## Key Commands
+
+| Command | What it does |
+|---------|-------------|
+| `make serve` | Start API server (port 8000) |
+| `make loop-start` | MeridLoop in observe mode |
+| `make loop-start-execute` | MeridLoop with paper execution |
+| `make golden-path` | Run test suite |
+| `make preflight` | Full system check |
+| `make risk-context` | Print risk state JSON |
+
+---
+
+## Troubleshooting
+
+| Issue | Fix |
+|-------|-----|
+| `ModuleNotFoundError` | `pip install -r requirements.txt` |
+| `make` not found (Windows) | `choco install make` |
+| API returns errors | Ensure `make serve` is running |
+| React build fails | `npm install` in `web/react/` |
+
+---
+
+## Next
+
+- [README.md](README.md) — Full project overview
+- [docs/ui/kalshi_workflow.md](docs/ui/kalshi_workflow.md) — Operator workflow (8 steps, 17 views)
+- [ENV_SETUP.md](ENV_SETUP.md) — Environment configuration
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — Detailed onboarding

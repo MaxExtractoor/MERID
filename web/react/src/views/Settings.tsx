@@ -1,8 +1,12 @@
 import { useState } from "react";
+import { RefreshCw } from 'lucide-react';
 import { useApiData } from "../hooks/useApiData";
+import { API_BASE_URL, API_ENDPOINTS, AUTH_TOKEN_KEY, DEFAULTS } from "../config/constants";
 import { useLocalStorage } from "../hooks/useLocalStorage";
+import ErrorAlert from "../components/ErrorAlert";
 import { validateLeverage } from "../utils/validators";
 import MetricCard from "../components/MetricCard";
+import { useFeatureFlags, setKalshiOnly } from "../config/featureFlags";
 
 interface UserPreferences {
   theme: "light" | "dark" | "auto";
@@ -44,10 +48,18 @@ interface NotificationSettings {
   weeklyReport: boolean;
 }
 
+interface UserProfile {
+  id: string;
+  email: string;
+  accountType: string;
+  createdAt: string;
+}
+
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<"preferences" | "trading" | "notifications" | "risk" | "agents">("preferences");
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const { kalshiOnly } = useFeatureFlags();
 
   // User preferences with local storage
   const [preferences, setPreferences] = useLocalStorage<UserPreferences>("user-preferences", {
@@ -93,7 +105,25 @@ export default function Settings() {
   });
 
   // Fetch current user data
-  const { data: userData } = useApiData<any>("/api/v1/user/profile");
+  const { data: userData, loading: profileLoading, error: profileError, refetch: refetchProfile } = useApiData<UserProfile>(API_ENDPOINTS.USER_PROFILE);
+
+  if (profileLoading && !userData) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <RefreshCw className="w-6 h-6 text-blue-400 animate-spin" />
+        <span className="ml-3 text-slate-400">Loading settings…</span>
+      </div>
+    );
+  }
+
+  if (profileError && !userData) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">Settings</h1>
+        <ErrorAlert message="Failed to load user profile" onRetry={refetchProfile} />
+      </div>
+    );
+  }
 
   const handleSave = async () => {
     setSaving(true);
@@ -101,11 +131,11 @@ export default function Settings() {
 
     try {
       // Save to API
-      const response = await fetch("/api/v1/user/settings", {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.USER_SETTINGS}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("merid-access")}`,
+          Authorization: `Bearer ${localStorage.getItem(AUTH_TOKEN_KEY)}`,
         },
         body: JSON.stringify({
           preferences,
@@ -119,10 +149,10 @@ export default function Settings() {
       }
 
       setSaveMessage("Settings saved successfully!");
-      setTimeout(() => setSaveMessage(null), 3000);
+      setTimeout(() => setSaveMessage(null), DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
     } catch (error) {
       setSaveMessage("Failed to save settings");
-      setTimeout(() => setSaveMessage(null), 3000);
+      setTimeout(() => setSaveMessage(null), DEFAULTS.POLLING_INTERVALS.FAST_REFRESH);
     } finally {
       setSaving(false);
     }
@@ -185,17 +215,17 @@ export default function Settings() {
               {saveMessage}
             </span>
           )}
-          <button
+          <button type="button"
             onClick={handleReset}
             className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium transition-colors"
-          >
+           title="Reset to Defaults">
             Reset to Defaults
           </button>
-          <button
+          <button type="button"
             onClick={handleSave}
             disabled={saving}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
-          >
+           title="Save">
             {saving ? "Saving..." : "Save Changes"}
           </button>
         </div>
@@ -233,7 +263,7 @@ export default function Settings() {
       {/* Tab Navigation */}
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-2">
         <div className="flex gap-2">
-          <button
+          <button type="button"
             onClick={() => setActiveTab("preferences")}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === "preferences"
@@ -243,7 +273,7 @@ export default function Settings() {
           >
             User Preferences
           </button>
-          <button
+          <button type="button"
             onClick={() => setActiveTab("trading")}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === "trading"
@@ -253,7 +283,7 @@ export default function Settings() {
           >
             Trading Settings
           </button>
-          <button
+          <button type="button"
             onClick={() => setActiveTab("notifications")}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === "notifications"
@@ -263,7 +293,7 @@ export default function Settings() {
           >
             Notifications
           </button>
-          <button
+          <button type="button"
             onClick={() => setActiveTab("risk")}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === "risk"
@@ -273,7 +303,7 @@ export default function Settings() {
           >
             Risk Parameters
           </button>
-          <button
+          <button type="button"
             onClick={() => setActiveTab("agents")}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               activeTab === "agents"
@@ -292,14 +322,39 @@ export default function Settings() {
         {activeTab === "preferences" && (
           <div className="space-y-6">
             <h2 className="text-lg font-semibold text-white">User Preferences</h2>
+
+            {/* UI Profile Mode */}
+            <div className="p-4 bg-slate-800/50 rounded-xl border border-orange-500/30">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-orange-400">Kalshi-Only Mode</h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Hide legacy crypto/research panels. Focus the UI on Kalshi live trading only.
+                  </p>
+                </div>
+                <button type="button"
+                  onClick={() => setKalshiOnly(!kalshiOnly)}
+                  className={`relative w-11 h-6 rounded-full transition-colors ${
+                    kalshiOnly ? 'bg-orange-500' : 'bg-slate-600'
+                  }`}
+                  title="Toggle Kalshi-only mode"
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                    kalshiOnly ? 'translate-x-5' : ''
+                  }`} />
+                </button>
+              </div>
+            </div>
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Theme</label>
-                <select
+                <label htmlFor="pref-theme" className="block text-sm font-medium text-slate-400 mb-2">Theme</label>
+                <select aria-label="Theme"
+                  id="pref-theme"
+                  name="theme"
                   title="Select theme"
                   value={preferences.theme}
-                  onChange={(e) => setPreferences({ ...preferences, theme: e.target.value as any })}
+                  onChange={(e) => setPreferences({ ...preferences, theme: e.target.value as UserPreferences['theme'] })}
                   className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
                 >
                   <option value="light">Light</option>
@@ -309,8 +364,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Language</label>
-                <select
+                <label htmlFor="pref-language" className="block text-sm font-medium text-slate-400 mb-2">Language</label>
+                <select aria-label="Language"
+                  id="pref-language"
+                  name="language"
                   title="Select language"
                   value={preferences.language}
                   onChange={(e) => setPreferences({ ...preferences, language: e.target.value })}
@@ -324,8 +381,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Timezone</label>
-                <select
+                <label htmlFor="pref-timezone" className="block text-sm font-medium text-slate-400 mb-2">Timezone</label>
+                <select aria-label="Timezone"
+                  id="pref-timezone"
+                  name="timezone"
                   title="Select timezone"
                   value={preferences.timezone}
                   onChange={(e) => setPreferences({ ...preferences, timezone: e.target.value })}
@@ -340,8 +399,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Date Format</label>
-                <select
+                <label htmlFor="pref-date-format" className="block text-sm font-medium text-slate-400 mb-2">Date Format</label>
+                <select aria-label="Date Format"
+                  id="pref-date-format"
+                  name="dateFormat"
                   title="Select date format"
                   value={preferences.dateFormat}
                   onChange={(e) => setPreferences({ ...preferences, dateFormat: e.target.value })}
@@ -354,8 +415,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Number Format</label>
-                <select
+                <label htmlFor="pref-number-format" className="block text-sm font-medium text-slate-400 mb-2">Number Format</label>
+                <select aria-label="Number Format"
+                  id="pref-number-format"
+                  name="numberFormat"
                   title="Select number format"
                   value={preferences.numberFormat}
                   onChange={(e) => setPreferences({ ...preferences, numberFormat: e.target.value })}
@@ -369,8 +432,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Default Page</label>
-                <select
+                <label htmlFor="pref-default-page" className="block text-sm font-medium text-slate-400 mb-2">Default Page</label>
+                <select aria-label="Default Page"
+                  id="pref-default-page"
+                  name="defaultPage"
                   value={preferences.defaultPage}
                   onChange={(e) => setPreferences({ ...preferences, defaultPage: e.target.value })}
                   className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-blue-500"
@@ -394,7 +459,7 @@ export default function Settings() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label htmlFor="default-order-size" className="block text-sm font-medium text-slate-400 mb-2">Default Order Size</label>
-                <input
+                <input aria-label="Default Order Size"
                   id="default-order-size"
                   name="defaultOrderSize"
                   type="number"
@@ -408,7 +473,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="max-leverage" className="block text-sm font-medium text-slate-400 mb-2">Max Leverage</label>
-                <input
+                <input aria-label="Max Leverage"
                   id="max-leverage"
                   name="maxLeverage"
                   type="number"
@@ -431,7 +496,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="stop-loss" className="block text-sm font-medium text-slate-400 mb-2">Stop Loss (%)</label>
-                <input
+                <input aria-label="Stop Loss (%)"
                   id="stop-loss"
                   name="stopLoss"
                   type="number"
@@ -448,7 +513,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="take-profit" className="block text-sm font-medium text-slate-400 mb-2">Take Profit (%)</label>
-                <input
+                <input aria-label="Take Profit (%)"
                   id="take-profit"
                   name="takeProfit"
                   type="number"
@@ -465,7 +530,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="max-position-size" className="block text-sm font-medium text-slate-400 mb-2">Max Position Size</label>
-                <input
+                <input aria-label="Max Position Size"
                   id="max-position-size"
                   name="maxPositionSize"
                   type="number"
@@ -478,8 +543,10 @@ export default function Settings() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-2">Auto Refresh Interval (ms)</label>
-                <select
+                <label htmlFor="trading-refresh-interval" className="block text-sm font-medium text-slate-400 mb-2">Auto Refresh Interval (ms)</label>
+                <select aria-label="Auto Refresh Interval (ms)"
+                  id="trading-refresh-interval"
+                  name="refreshInterval"
                   title="Select auto refresh interval"
                   value={tradingSettings.refreshInterval}
                   onChange={(e) => setTradingSettings({ ...tradingSettings, refreshInterval: Number(e.target.value) })}
@@ -495,7 +562,9 @@ export default function Settings() {
 
             <div className="space-y-4">
               <label className="flex items-center gap-3">
-                <input
+                <input aria-label="Trading Settings"
+                  id="confirm-orders"
+                  name="confirmOrders"
                   type="checkbox"
                   checked={tradingSettings.confirmOrders}
                   onChange={(e) => setTradingSettings({ ...tradingSettings, confirmOrders: e.target.checked })}
@@ -505,7 +574,9 @@ export default function Settings() {
               </label>
 
               <label className="flex items-center gap-3">
-                <input
+                <input aria-label="Confirm orders before execution"
+                  id="show-advanced-options"
+                  name="showAdvancedOptions"
                   type="checkbox"
                   checked={tradingSettings.showAdvancedOptions}
                   onChange={(e) => setTradingSettings({ ...tradingSettings, showAdvancedOptions: e.target.checked })}
@@ -515,7 +586,9 @@ export default function Settings() {
               </label>
 
               <label className="flex items-center gap-3">
-                <input
+                <input aria-label="Show advanced trading options"
+                  id="auto-refresh"
+                  name="autoRefresh"
                   type="checkbox"
                   checked={tradingSettings.autoRefresh}
                   onChange={(e) => setTradingSettings({ ...tradingSettings, autoRefresh: e.target.checked })}
@@ -537,7 +610,9 @@ export default function Settings() {
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Alert Types"
+                    id="email-alerts"
+                    name="emailAlerts"
                     type="checkbox"
                     checked={notificationSettings.emailAlerts}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, emailAlerts: e.target.checked })}
@@ -547,7 +622,9 @@ export default function Settings() {
                 </label>
 
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Email alerts"
+                    id="push-notifications"
+                    name="pushNotifications"
                     type="checkbox"
                     checked={notificationSettings.pushNotifications}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, pushNotifications: e.target.checked })}
@@ -557,7 +634,9 @@ export default function Settings() {
                 </label>
 
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Push notifications"
+                    id="trading-alerts"
+                    name="tradingAlerts"
                     type="checkbox"
                     checked={notificationSettings.tradingAlerts}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, tradingAlerts: e.target.checked })}
@@ -567,7 +646,9 @@ export default function Settings() {
                 </label>
 
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Trading alerts"
+                    id="risk-alerts"
+                    name="riskAlerts"
                     type="checkbox"
                     checked={notificationSettings.riskAlerts}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, riskAlerts: e.target.checked })}
@@ -577,7 +658,9 @@ export default function Settings() {
                 </label>
 
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Risk alerts"
+                    id="system-alerts"
+                    name="systemAlerts"
                     type="checkbox"
                     checked={notificationSettings.systemAlerts}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, systemAlerts: e.target.checked })}
@@ -587,7 +670,9 @@ export default function Settings() {
                 </label>
 
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="System alerts"
+                    id="price-alerts"
+                    name="priceAlerts"
                     type="checkbox"
                     checked={notificationSettings.priceAlerts}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, priceAlerts: e.target.checked })}
@@ -597,7 +682,9 @@ export default function Settings() {
                 </label>
 
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Price alerts"
+                    id="order-alerts"
+                    name="orderAlerts"
                     type="checkbox"
                     checked={notificationSettings.orderAlerts}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, orderAlerts: e.target.checked })}
@@ -613,7 +700,9 @@ export default function Settings() {
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Reports"
+                    id="daily-summary"
+                    name="dailySummary"
                     type="checkbox"
                     checked={notificationSettings.dailySummary}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, dailySummary: e.target.checked })}
@@ -623,7 +712,9 @@ export default function Settings() {
                 </label>
 
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Daily summary"
+                    id="weekly-report"
+                    name="weeklyReport"
                     type="checkbox"
                     checked={notificationSettings.weeklyReport}
                     onChange={(e) => setNotificationSettings({ ...notificationSettings, weeklyReport: e.target.checked })}
@@ -644,7 +735,7 @@ export default function Settings() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label htmlFor="max-portfolio-risk" className="block text-sm font-medium text-slate-400 mb-2">Max Portfolio Risk (%)</label>
-                <input
+                <input aria-label="Max Portfolio Risk (%)"
                   id="max-portfolio-risk"
                   name="maxPortfolioRisk"
                   type="number"
@@ -658,7 +749,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="max-position-size-risk" className="block text-sm font-medium text-slate-400 mb-2">Max Position Size (%)</label>
-                <input
+                <input aria-label="Max Position Size (%)"
                   id="max-position-size-risk"
                   name="maxPositionSizeRisk"
                   type="number"
@@ -672,7 +763,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="stop-loss-default" className="block text-sm font-medium text-slate-400 mb-2">Stop Loss Default (%)</label>
-                <input
+                <input aria-label="Stop Loss Default (%)"
                   id="stop-loss-default"
                   name="stopLossDefault"
                   type="number"
@@ -687,7 +778,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="max-drawdown" className="block text-sm font-medium text-slate-400 mb-2">Max Drawdown Limit (%)</label>
-                <input
+                <input aria-label="Max Drawdown Limit (%)"
                   id="max-drawdown"
                   name="maxDrawdown"
                   type="number"
@@ -701,7 +792,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="max-correlation" className="block text-sm font-medium text-slate-400 mb-2">Max Correlation</label>
-                <input
+                <input aria-label="Max Correlation"
                   id="max-correlation"
                   name="maxCorrelation"
                   type="number"
@@ -716,7 +807,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="var-confidence" className="block text-sm font-medium text-slate-400 mb-2">VaR Confidence Level (%)</label>
-                <input
+                <input aria-label="VaR Confidence Level (%)"
                   id="var-confidence"
                   name="varConfidence"
                   type="number"
@@ -733,7 +824,9 @@ export default function Settings() {
               <h3 className="text-md font-medium text-white">Risk Controls</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Risk Controls"
+                    id="auto-stop-losses"
+                    name="autoStopLosses"
                     type="checkbox"
                     defaultChecked
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
@@ -741,7 +834,9 @@ export default function Settings() {
                   <span className="text-white">Enable automatic stop losses</span>
                 </label>
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Enable automatic stop losses"
+                    id="position-size-limits"
+                    name="positionSizeLimits"
                     type="checkbox"
                     defaultChecked
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
@@ -749,7 +844,9 @@ export default function Settings() {
                   <span className="text-white">Enable position size limits</span>
                 </label>
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Enable position size limits"
+                    id="correlation-checks"
+                    name="correlationChecks"
                     type="checkbox"
                     defaultChecked
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
@@ -757,7 +854,9 @@ export default function Settings() {
                   <span className="text-white">Enable correlation checks</span>
                 </label>
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Enable correlation checks"
+                    id="pause-high-volatility"
+                    name="pauseHighVolatility"
                     type="checkbox"
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
                   />
@@ -776,7 +875,7 @@ export default function Settings() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label htmlFor="max-concurrent-agents" className="block text-sm font-medium text-slate-400 mb-2">Max Concurrent Agents</label>
-                <input
+                <input aria-label="Max Concurrent Agents"
                   id="max-concurrent-agents"
                   name="maxConcurrentAgents"
                   type="number"
@@ -790,7 +889,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="agent-timeout" className="block text-sm font-medium text-slate-400 mb-2">Agent Timeout (seconds)</label>
-                <input
+                <input aria-label="Agent Timeout (seconds)"
                   id="agent-timeout"
                   name="agentTimeout"
                   type="number"
@@ -804,7 +903,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="min-confidence" className="block text-sm font-medium text-slate-400 mb-2">Min Confidence Threshold</label>
-                <input
+                <input aria-label="Min Confidence Threshold"
                   id="min-confidence"
                   name="minConfidence"
                   type="number"
@@ -819,7 +918,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="consensus-threshold" className="block text-sm font-medium text-slate-400 mb-2">Consensus Threshold</label>
-                <input
+                <input aria-label="Consensus Threshold"
                   id="consensus-threshold"
                   name="consensusThreshold"
                   type="number"
@@ -834,7 +933,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="max-retries" className="block text-sm font-medium text-slate-400 mb-2">Max Retries</label>
-                <input
+                <input aria-label="Max Retries"
                   id="max-retries"
                   name="maxRetries"
                   type="number"
@@ -848,7 +947,7 @@ export default function Settings() {
 
               <div>
                 <label htmlFor="refresh-interval" className="block text-sm font-medium text-slate-400 mb-2">Refresh Interval (seconds)</label>
-                <input
+                <input aria-label="Refresh Interval (seconds)"
                   id="refresh-interval"
                   name="refreshInterval"
                   type="number"
@@ -865,7 +964,9 @@ export default function Settings() {
               <h3 className="text-md font-medium text-white">Agent Features</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Agent Features"
+                    id="swarm-coordination"
+                    name="swarmCoordination"
                     type="checkbox"
                     defaultChecked
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
@@ -873,7 +974,9 @@ export default function Settings() {
                   <span className="text-white">Enable swarm coordination</span>
                 </label>
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Enable swarm coordination"
+                    id="decision-explainability"
+                    name="decisionExplainability"
                     type="checkbox"
                     defaultChecked
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
@@ -881,14 +984,18 @@ export default function Settings() {
                   <span className="text-white">Enable decision explainability</span>
                 </label>
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Enable decision explainability"
+                    id="auto-restart-agents"
+                    name="autoRestartAgents"
                     type="checkbox"
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
                   />
                   <span className="text-white">Auto-restart failed agents</span>
                 </label>
                 <label className="flex items-center gap-3">
-                  <input
+                  <input aria-label="Auto-restart failed agents"
+                    id="log-agent-decisions"
+                    name="logAgentDecisions"
                     type="checkbox"
                     defaultChecked
                     className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"

@@ -3,6 +3,7 @@ MERID Explainability API Endpoints
 Constitutional requirement: Expose all explainability data via API
 """
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 
@@ -16,6 +17,65 @@ from utils.logger import get_logger
 logger = get_logger("web.api.explainability")
 
 router = APIRouter(prefix="/api/v1/explainability", tags=["explainability"])
+
+
+def _iso_from_unix_ts(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _normalize_decision_for_dashboard(decision: Any) -> Dict[str, Any]:
+    """Normalize tracker DecisionReasoning into dashboard ExplainabilityDecision shape."""
+    supporting = list(getattr(decision, "supporting_factors", []) or [])
+    contrary = list(getattr(decision, "contrary_factors", []) or [])
+    total_factors = max(len(supporting) + len(contrary), 1)
+
+    factors: List[Dict[str, Any]] = []
+    for idx, text in enumerate(supporting):
+        factors.append(
+            {
+                "name": f"supporting_{idx + 1}",
+                "weight": round(1.0 / total_factors, 4),
+                "value": 1.0,
+                "impact": "positive",
+                "explanation": text,
+            }
+        )
+    for idx, text in enumerate(contrary):
+        factors.append(
+            {
+                "name": f"contrary_{idx + 1}",
+                "weight": round(1.0 / total_factors, 4),
+                "value": 1.0,
+                "impact": "negative",
+                "explanation": text,
+            }
+        )
+
+    ts = float(getattr(decision, "timestamp", 0.0) or 0.0)
+    timestamp = _iso_from_unix_ts(ts) if ts > 0 else datetime.now(timezone.utc).isoformat()
+
+    return {
+        "id": str(getattr(decision, "decision_id", "")),
+        "agent_name": str(getattr(decision, "agent_id", "unknown")),
+        "decision": str(getattr(decision, "decision", "")),
+        "action_taken": str(getattr(decision, "decision", "")),
+        "timestamp": timestamp,
+        "confidence": float(getattr(decision, "confidence", 0.0) or 0.0),
+        "outcome": "pending",
+        "reasoning": str(getattr(decision, "primary_reason", "")),
+        "factors": factors,
+        "alternatives": [],
+        "data_sources": [
+            {
+                "name": str(source),
+                "type": "signal",
+                "reliability": 1.0,
+                "timestamp": timestamp,
+            }
+            for source in (getattr(decision, "data_sources", []) or [])
+        ],
+        "execution_time_ms": float(getattr(decision, "processing_time_ms", 0.0) or 0.0),
+    }
 
 
 # ============================================================================
@@ -87,6 +147,37 @@ async def get_recent_decisions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/decisions")
+async def get_decisions_for_dashboard(
+    limit: int = Query(100, ge=1, le=500),
+    agent: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Canonical dashboard endpoint used by ExplainabilityPanel.tsx.
+
+    Returns normalized decision records with a stable schema expected by the UI.
+    """
+    try:
+        tracker = get_explainability_tracker()
+        raw_decisions = (
+            tracker.get_agent_decisions(agent, limit)
+            if agent
+            else tracker.get_recent_decisions(limit)
+        )
+
+        # Newest-first for operator dashboard readability.
+        normalized = [
+            _normalize_decision_for_dashboard(d)
+            for d in reversed(raw_decisions)
+        ]
+        return {
+            "total": len(normalized),
+            "decisions": normalized,
+        }
+    except Exception as exc:
+        logger.error(f"Error fetching dashboard decisions: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/stats")
 async def get_explainability_stats() -> Dict[str, Any]:
     """Get explainability system statistics"""
@@ -95,6 +186,68 @@ async def get_explainability_stats() -> Dict[str, Any]:
         return tracker.get_decision_stats()
     except Exception as e:
         logger.error(f"Error fetching explainability stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# PLAIN-LANGUAGE DECISION EXPLANATION (S5-03)
+# ============================================================================
+
+@router.get("/explain/{decision_id}")
+async def explain_decision_plain_language(decision_id: str) -> Dict[str, Any]:
+    """Return a human-readable, plain-language explanation for a decision.
+
+    Converts structured ExplanationRecord into conversational English
+    suitable for operator queries like "why did we take that trade?"
+    """
+    try:
+        from core.explainability import get_explainability_service
+        service = get_explainability_service()
+        result = service.explain_plain_language(decision_id)
+
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No explanation found for decision_id={decision_id}",
+            )
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating plain-language explanation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/explain/correlation/{correlation_id}")
+async def explain_correlated_decisions(correlation_id: str) -> Dict[str, Any]:
+    """Return plain-language explanations for all decisions sharing a correlation_id."""
+    try:
+        service = get_explainability_service()
+        records = service.find_by_correlation_id(correlation_id)
+
+        if not records:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No explanations found for correlation_id={correlation_id}",
+            )
+
+        explanations = []
+        for record in records:
+            if record.decision_id:
+                expl = service.explain_plain_language(record.decision_id)
+                if expl:
+                    explanations.append(expl)
+
+        return {
+            "correlation_id": correlation_id,
+            "total": len(explanations),
+            "explanations": explanations,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating correlated explanations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -298,7 +451,6 @@ async def get_mev_status() -> Dict[str, Any]:
 async def get_mev_heatmap(symbol: str) -> Dict[str, Any]:
     """Get MEV intensity heatmap for a symbol"""
     try:
-        from trading.execution.defense import get_mev_defense
         mev_defender = get_mev_defense()
         return mev_defender.get_mev_summary(symbol)
     except Exception as e:
@@ -312,7 +464,6 @@ async def get_mev_events(
 ) -> Dict[str, Any]:
     """Get recent MEV attack events"""
     try:
-        from trading.execution.defense import get_mev_defense
         mev_defender = get_mev_defense()
         
         front_running = mev_defender.front_running_detector.get_recent_events(limit)

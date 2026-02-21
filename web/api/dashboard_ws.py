@@ -1,3 +1,4 @@
+"""Dashboard WebSocket hub — broadcasts real-time updates to connected clients."""
 from __future__ import annotations
 
 import asyncio

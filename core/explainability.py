@@ -292,6 +292,110 @@ class ExplainabilityService:
     def fetch_recent(self, limit: int = 20) -> List[ExplanationRecord]:
         return self._records[-limit:]
 
+    def find_by_decision_id(self, decision_id: str) -> Optional[ExplanationRecord]:
+        """Look up an explanation by its decision_id."""
+        for record in reversed(self._records):
+            if record.decision_id == decision_id:
+                return record
+        return None
+
+    def find_by_correlation_id(self, correlation_id: str) -> List[ExplanationRecord]:
+        """Find all explanations sharing a correlation_id."""
+        return [r for r in self._records if r.correlation_id == correlation_id]
+
+    def explain_plain_language(self, decision_id: str) -> Optional[Dict[str, Any]]:
+        """Return a human-readable explanation for a decision.
+
+        Converts the structured ExplanationRecord into plain English
+        suitable for operator display or conversational queries like
+        "why did we take that trade?"
+        """
+        record = self.find_by_decision_id(decision_id)
+        if record is None:
+            return None
+
+        lines: List[str] = []
+
+        # 1. Summary sentence
+        lines.append(f"Decision: {record.summary}")
+
+        # 2. Agent and strategy
+        lines.append(
+            f"Agent '{record.context.agent_id}' "
+            f"using strategy '{record.context.strategy or 'default'}' "
+            f"made a {record.explanation_type.value} decision."
+        )
+
+        # 3. Key inputs
+        if record.context.inputs:
+            input_parts = [f"{k}={v}" for k, v in record.context.inputs.items()]
+            lines.append(f"Inputs: {', '.join(input_parts)}.")
+
+        # 4. Rationale
+        if record.rationale:
+            lines.append(f"Reason: {record.rationale.reason}")
+
+            # Features
+            if record.rationale.features:
+                top_features = sorted(
+                    record.rationale.features,
+                    key=lambda f: abs(f.importance or 0),
+                    reverse=True,
+                )[:5]
+                feat_parts = [
+                    f"{f.name}={f.value} (importance: {f.importance})"
+                    for f in top_features
+                ]
+                lines.append(f"Key factors: {'; '.join(feat_parts)}.")
+
+            # Rules
+            if record.rationale.rules_fired:
+                for rule in record.rationale.rules_fired:
+                    status = "PASSED" if rule.passed else "FAILED"
+                    lines.append(
+                        f"Rule '{rule.rule_name}': {status} "
+                        f"(observed {rule.observed_value} vs threshold {rule.threshold}"
+                        f"{', ' + rule.notes if rule.notes else ''})."
+                    )
+
+            # Model evidence
+            if record.rationale.model_evidence:
+                for m in record.rationale.model_evidence:
+                    lines.append(
+                        f"Model '{m.model_id}' v{m.version}: "
+                        f"score={m.score}, confidence={m.confidence}."
+                    )
+
+            # Counterfactuals
+            if record.rationale.counterfactuals:
+                lines.append("Alternatives considered:")
+                for cf in record.rationale.counterfactuals:
+                    lines.append(
+                        f"  - {cf.summary} → rejected: {cf.reason_rejected}"
+                    )
+
+        # 5. Constraints and expected effect
+        if record.context.constraints:
+            lines.append(f"Constraints: {record.context.constraints}")
+        if record.context.expected_effect:
+            lines.append(f"Expected effect: {record.context.expected_effect}")
+
+        # 6. Expert notes
+        if record.expert_notes:
+            lines.append(f"Expert notes: {record.expert_notes}")
+
+        plain_text = "\n".join(lines)
+
+        return {
+            "decision_id": decision_id,
+            "record_id": record.record_id,
+            "plain_text": plain_text,
+            "type": record.explanation_type.value,
+            "domain": record.domain,
+            "agent_id": record.context.agent_id,
+            "timestamp": record.timestamp,
+        }
+
     def _register_default_policy(self) -> None:
         try:
             self._data_controller.register_policy(

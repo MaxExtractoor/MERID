@@ -28,7 +28,62 @@ class KalshiTrader:
     
     def __init__(self, client: Optional[KalshiVenueClient] = None, config: Optional[KalshiConfig] = None):
         self.client = client or KalshiVenueClient(config)
-        
+
+    # G8: Central gate — checked before every order method
+    def _is_live_trading_allowed(self) -> bool:
+        """Return True only when VenueGate permits real order submission."""
+        try:
+            from merid.prediction.venue_gate import get_venue_gate
+            gate = get_venue_gate()
+            return not gate.should_simulate_fill()
+        except Exception as exc:
+            # Fail-closed: if venue_gate unavailable, block live trading for safety
+            logger.warning(f"VenueGate unavailable - blocking live trading: {exc}")
+            return False
+
+    def _pre_order_check(self, ticker: str, count: int, price_cents: int, category: str | None = None) -> tuple[bool, str]:
+        """Run kill-switch + KalshiRiskManager checks before placing any order.
+
+        Returns (allowed, reason).  Fail-closed: any import/runtime error blocks the order.
+        """
+        # 1. Global kill switch
+        try:
+            from merid.risk.kill_switches import risk_controller
+            if not risk_controller.can_trade():
+                reason = risk_controller.get_kill_reason() or "kill_switch_active"
+                logger.warning("Order blocked by kill switch: %s", reason)
+                return False, f"kill_switch:{reason}"
+        except Exception as exc:
+            logger.error("Kill-switch check unavailable — blocking order: %s", exc)
+            return False, f"kill_switch_unavailable:{exc}"
+
+        # 2. Kalshi-specific risk checks (position limits, category caps, drawdown, rate limit)
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            risk = get_kalshi_risk()
+            allowed, reason = risk.check_order(
+                ticker=ticker,
+                category=category,
+                contracts=count,
+                price_cents=price_cents,
+            )
+            if not allowed:
+                logger.warning("Order blocked by KalshiRiskManager: %s", reason)
+                return False, reason
+        except Exception as exc:
+            logger.error("KalshiRiskManager check unavailable — blocking order: %s", exc)
+            return False, f"risk_manager_unavailable:{exc}"
+
+        return True, "OK"
+
+    def _record_order(self, category: str | None, count: int, price_cents: int) -> None:
+        """Record a successful order in KalshiRiskManager for exposure tracking."""
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            get_kalshi_risk().record_order(category, count, price_cents)
+        except Exception as exc:
+            logger.debug("record_order failed (non-fatal): %s", exc)
+
     async def connect(self) -> None:
         """Initialize connections."""
         await self.client.connect()
@@ -38,17 +93,14 @@ class KalshiTrader:
         await self.client.close()
     
     async def buy_yes(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
-        """
-        Buy YES contracts in a market.
-        
-        Args:
-            ticker: Market ticker (e.g., "FED-25DEC-T3.00")
-            count: Number of contracts to buy
-            price: Max price in cents (0-100), None for market order
-            
-        Returns:
-            PlacedOrder or None if failed
-        """
+        """Buy YES contracts in a market."""
+        if not self._is_live_trading_allowed():
+            logger.debug("buy_yes: skipped (paper/sim mode) ticker=%s", ticker)
+            return None
+        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        if not allowed:
+            logger.warning("buy_yes blocked: %s ticker=%s", reason, ticker)
+            return None
         order = VenueOrder(
             market_id=ticker,
             side="buy",
@@ -57,10 +109,21 @@ class KalshiTrader:
             order_type="limit" if price else "market",
             outcome_id="yes"
         )
-        return await self.client.place_order(order)
+        logger.debug(f"buy_yes: {ticker} count={count} price={price}")
+        result = await self.client.place_order(order)
+        if result:
+            self._record_order(None, count, price or 50)
+        return result
     
     async def buy_no(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Buy NO contracts in a market."""
+        if not self._is_live_trading_allowed():
+            logger.debug("buy_no: skipped (paper/sim mode) ticker=%s", ticker)
+            return None
+        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        if not allowed:
+            logger.warning("buy_no blocked: %s ticker=%s", reason, ticker)
+            return None
         order = VenueOrder(
             market_id=ticker,
             side="buy",
@@ -69,10 +132,20 @@ class KalshiTrader:
             order_type="limit" if price else "market",
             outcome_id="no"
         )
-        return await self.client.place_order(order)
+        result = await self.client.place_order(order)
+        if result:
+            self._record_order(None, count, price or 50)
+        return result
     
     async def sell_yes(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Sell YES contracts (or close YES position)."""
+        if not self._is_live_trading_allowed():
+            logger.debug("sell_yes: skipped (paper/sim mode) ticker=%s", ticker)
+            return None
+        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        if not allowed:
+            logger.warning("sell_yes blocked: %s ticker=%s", reason, ticker)
+            return None
         order = VenueOrder(
             market_id=ticker,
             side="sell",
@@ -81,10 +154,20 @@ class KalshiTrader:
             order_type="limit" if price else "market",
             outcome_id="yes"
         )
-        return await self.client.place_order(order)
+        result = await self.client.place_order(order)
+        if result:
+            self._record_order(None, count, price or 50)
+        return result
     
     async def sell_no(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Sell NO contracts (or close NO position)."""
+        if not self._is_live_trading_allowed():
+            logger.debug("sell_no: skipped (paper/sim mode) ticker=%s", ticker)
+            return None
+        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        if not allowed:
+            logger.warning("sell_no blocked: %s ticker=%s", reason, ticker)
+            return None
         order = VenueOrder(
             market_id=ticker,
             side="sell",
@@ -93,7 +176,10 @@ class KalshiTrader:
             order_type="limit" if price else "market",
             outcome_id="no"
         )
-        return await self.client.place_order(order)
+        result = await self.client.place_order(order)
+        if result:
+            self._record_order(None, count, price or 50)
+        return result
     
     async def close_position(self, ticker: str) -> List[PlacedOrder]:
         """
@@ -105,6 +191,9 @@ class KalshiTrader:
         Returns:
             List of placed orders
         """
+        if not self._is_live_trading_allowed():
+            logger.debug("close_position: skipped (paper/sim mode) ticker=%s", ticker)
+            return []
         positions = await self.client.get_positions()
         market_positions = [p for p in positions if p.market_id == ticker]
         
@@ -118,6 +207,12 @@ class KalshiTrader:
             size = abs(pos.size)
             outcome = pos.outcome_id or "yes"
             
+            price_est = 50  # Market order — use mid-price estimate for risk check
+            allowed, reason = self._pre_order_check(ticker, int(size), price_est)
+            if not allowed:
+                logger.warning("close_position order blocked: %s ticker=%s", reason, ticker)
+                continue
+
             order = VenueOrder(
                 market_id=ticker,
                 side=side,
@@ -126,9 +221,10 @@ class KalshiTrader:
                 order_type="market",
                 outcome_id=outcome
             )
-            
+
             placed = await self.client.place_order(order)
             if placed:
+                self._record_order(None, int(size), price_est)
                 orders.append(placed)
         
         return orders

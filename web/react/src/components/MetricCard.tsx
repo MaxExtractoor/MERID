@@ -1,3 +1,4 @@
+import React from 'react';
 import { formatCurrency, formatPercent, formatNumber } from "../utils/formatters";
 import { STATUS_TYPES } from "../config/constants";
 
@@ -11,7 +12,7 @@ interface MetricCardProps {
   className?: string;
 }
 
-export default function MetricCard({
+function MetricCard({
   label,
   value,
   delta,
@@ -170,3 +171,7 @@ export default function MetricCard({
     </div>
   );
 }
+
+const MemoizedMetricCard = React.memo(MetricCard);
+MemoizedMetricCard.displayName = 'MetricCard';
+export default MemoizedMetricCard;

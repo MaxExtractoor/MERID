@@ -84,6 +84,7 @@ class AuditTrail:
         self.entries: List[AuditEntry] = []
         self.sequence = 0
         self.last_hash = "genesis"
+        self._order_index: Dict[str, List[int]] = {}  # order_id → [sequence numbers]
         
         # Load existing entries
         self._load_entries()
@@ -116,6 +117,7 @@ class AuditTrail:
                         self.entries.append(entry)
                         self.sequence = entry.sequence
                         self.last_hash = entry.entry_hash
+                        self._index_entry(entry)
 
                 if self.entries:
                     logger.info(f"Loaded {len(self.entries)} audit entries")
@@ -201,6 +203,7 @@ class AuditTrail:
         
         self.entries.append(entry)
         self.last_hash = entry.entry_hash
+        self._index_entry(entry)
         
         # Persist to storage
         await self._persist_entry(entry)
@@ -260,6 +263,39 @@ class AuditTrail:
         """Get entries by source."""
         entries = [e for e in self.entries if e.source == source][-limit:]
         return [e.to_dict() for e in entries]
+
+    def get_by_order_id(self, order_id: str) -> List[Dict]:
+        """Get all audit entries linked to a specific order ID.
+
+        Searches entry.data for 'order_id', 'orderId', or 'trade_id' fields.
+        """
+        if order_id in self._order_index:
+            return [self.entries[seq - 1].to_dict()
+                    for seq in self._order_index[order_id]
+                    if seq - 1 < len(self.entries)]
+        # Fallback: linear scan for unindexed entries
+        results = []
+        for entry in self.entries:
+            oid = (entry.data.get("order_id")
+                   or entry.data.get("orderId")
+                   or entry.data.get("trade_id")
+                   or "")
+            if str(oid) == str(order_id):
+                results.append(entry.to_dict())
+        return results
+
+    def get_by_event_type(self, event_type: str, limit: int = 50) -> List[Dict]:
+        """Get entries by event type."""
+        entries = [e for e in self.entries if e.event_type == event_type][-limit:]
+        return [e.to_dict() for e in entries]
+
+    def _index_entry(self, entry: AuditEntry) -> None:
+        """Index an entry by order_id if present in data."""
+        for key in ("order_id", "orderId", "trade_id"):
+            oid = entry.data.get(key)
+            if oid:
+                self._order_index.setdefault(str(oid), []).append(entry.sequence)
+                break
 
 
 # Singleton

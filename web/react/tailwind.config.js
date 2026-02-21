@@ -22,6 +22,7 @@ module.exports = {
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
         'shimmer': 'shimmer 2s infinite',
         'glow': 'glow 2s ease-in-out infinite',
+        'slide-in-right': 'slide-in-right 0.25s ease-out',
       },
       keyframes: {
         gradient: {
@@ -35,6 +36,10 @@ module.exports = {
         glow: {
           '0%, 100%': { opacity: '1', boxShadow: '0 0 20px rgba(59, 130, 246, 0.5)' },
           '50%': { opacity: '0.8', boxShadow: '0 0 30px rgba(59, 130, 246, 0.8)' },
+        },
+        'slide-in-right': {
+          '0%': { transform: 'translateX(100%)', opacity: '0' },
+          '100%': { transform: 'translateX(0)', opacity: '1' },
         },
       },
       backgroundImage: {

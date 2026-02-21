@@ -1,51 +1,84 @@
-"""Kalshi prediction market executor for MERID."""
+"""Kalshi prediction market executor for MERID.
+
+Delegates all HTTP, auth (RSA-PSS), retry, and circuit-breaker logic to
+KalshiVenueClient — the single canonical Kalshi client implementation.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import os
+import uuid
 from typing import Any, Dict, List, Optional
 
 from merid.execution.base import Quote, Position, TradeResult, TradeSideLiteral
-from merid.execution.http_base import HTTPExecutor, ExecutionError
+from utils.logger import get_logger
+
+logger = get_logger("merid.execution.executors.kalshi")
 
 
-class KalshiExecutor(HTTPExecutor):
-    """Kalshi prediction market executor with async HTTP support."""
-    
+def _get_venue_client():
+    """Lazy-load KalshiVenueClient with settings-based config."""
+    from merid.settings import settings
+    from merid.event_venues.kalshi.client import KalshiVenueClient
+    from merid.event_venues.kalshi.models import KalshiConfig
+
+    key_path = settings.KALSHI_PRIVATE_KEY_PATH
+    if key_path == "change_me":
+        key_path = None
+
+    config = KalshiConfig(
+        api_key=settings.KALSHI_API_KEY_ID,
+        private_key_path=key_path,
+        private_key_pem=settings.KALSHI_PRIVATE_KEY_PEM,
+        email=settings.KALSHI_EMAIL,
+        password=settings.KALSHI_PASSWORD,
+        use_demo=settings.KALSHI_USE_DEMO,
+    )
+    return KalshiVenueClient(config)
+
+
+class KalshiExecutor:
+    """Kalshi prediction market executor.
+
+    Thin adapter that bridges MERID's TradeExecutor interface to the
+    canonical KalshiVenueClient (RSA-PSS auth, circuit breaker, retry).
+    """
+
     venue = "kalshi"
-    base_url = os.getenv("KALSHI_API_URL", "https://api.elections.kalshi.com")
-    default_timeout = 10.0
-    
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.api_key_id = os.getenv("KALSHI_API_KEY_ID")
-        self.private_key_pem = os.getenv("KALSHI_PRIVATE_KEY_PEM")
-    
-    def _get_auth_headers(self) -> Dict[str, str]:
-        """Kalshi authentication headers."""
-        return {
-            "KALSHI-API-KEY-ID": self.api_key_id or "",
-        }
+
+    def __init__(self) -> None:
+        self._client = None
+
+    def _get_client(self):
+        """Return shared venue client, creating on first call."""
+        if self._client is None:
+            self._client = _get_venue_client()
+        return self._client
+
+    # ------------------------------------------------------------------
+    # TradeExecutor interface
+    # ------------------------------------------------------------------
 
     async def get_quote(self, symbol: str, side: TradeSideLiteral, amount: float) -> Quote:
-        """Get quote for prediction market contract."""
-        ticker = self._symbol_to_ticker(symbol)
-        response = await self._request(
+        """Get best bid/ask for a Kalshi market outcome."""
+        client = self._get_client()
+        result = await client._request_with_resilience(
             "GET",
-            "/trade/v1/price",
-            params={"ticker": ticker, "side": side, "count": str(int(amount))}
+            f"/markets/{symbol}/orderbook",
+            operation_name="get_quote",
         )
-        data = response.json()
-        price = float(data["price"])
+        if not result.success:
+            raise RuntimeError(f"Kalshi quote failed: {result.error}")
+        data = result.data
+        yes_bids = data.get("orderbook", {}).get("yes", [])
+        price = float(yes_bids[0][0]) / 100.0 if yes_bids else 0.5
         return Quote(
             symbol=symbol,
             side=side,
             price=price,
             venue=self.venue,
             size=amount,
-            latency_ms=None,
-            metadata={"ticker": ticker},
+            latency_ms=result.latency_ms,
+            metadata={"raw": data},
         )
 
     async def execute_trade(
@@ -58,37 +91,118 @@ class KalshiExecutor(HTTPExecutor):
         price: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeResult:
-        """Execute trade on Kalshi prediction market."""
-        ticker = self._symbol_to_ticker(symbol)
-        payload = {
-            "ticker": ticker,
-            "side": side,
+        """Submit an order to Kalshi via the canonical venue client."""
+        meta = metadata or {}
+
+        # Kill switch hard gate — fail-CLOSED on any error
+        try:
+            from merid.risk.kill_switches import risk_controller
+            if not risk_controller.can_trade():
+                reason = risk_controller.get_kill_reason() or "kill_switch_active"
+                return TradeResult(
+                    success=False, venue=self.venue, symbol=symbol,
+                    side=side, size=amount, price=price or 0.0,
+                    error=f"Trading halted: {reason}", metadata={},
+                )
+        except Exception as exc:
+            logger.error("Kill-switch unavailable — blocking order (fail-closed): %s", exc)
+            return TradeResult(
+                success=False, venue=self.venue, symbol=symbol,
+                side=side, size=amount, price=price or 0.0,
+                error=f"Risk controller unavailable: {exc}", metadata={},
+            )
+
+        # VenueGate — block real orders in SIM/PAPER/MOCK mode (fail-CLOSED)
+        try:
+            from merid.prediction.venue_gate import get_venue_gate
+            _gate = get_venue_gate()
+            if _gate.should_simulate_fill():
+                return TradeResult(
+                    success=False, venue=self.venue, symbol=symbol,
+                    side=side, size=amount, price=price or 0.0,
+                    error=f"VenueGate blocked: mode={_gate.mode.value} (paper/sim)",
+                    metadata={"simulated": True},
+                )
+        except Exception as _vge:
+            logger.error("VenueGate unavailable — blocking order (fail-closed): %s", _vge)
+            return TradeResult(
+                success=False, venue=self.venue, symbol=symbol,
+                side=side, size=amount, price=price or 0.0,
+                error=f"VenueGate unavailable: {_vge}", metadata={},
+            )
+
+        # KalshiRiskManager — position limits, category caps, drawdown, rate limiting (fail-CLOSED)
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            _risk = get_kalshi_risk()
+            price_cents = int(round(price * 100)) if price and price <= 1.0 else int(price or 50)
+            _allowed, _reason = _risk.check_order(
+                ticker=symbol, category=None,
+                contracts=int(amount), price_cents=price_cents,
+            )
+            if not _allowed:
+                return TradeResult(
+                    success=False, venue=self.venue, symbol=symbol,
+                    side=side, size=amount, price=price or 0.0,
+                    error=f"Risk check blocked: {_reason}", metadata={},
+                )
+        except Exception as _rke:
+            logger.error("KalshiRiskManager unavailable — blocking order (fail-closed): %s", _rke)
+            return TradeResult(
+                success=False, venue=self.venue, symbol=symbol,
+                side=side, size=amount, price=price or 0.0,
+                error=f"KalshiRiskManager unavailable: {_rke}", metadata={},
+            )
+
+        # DeploymentController — block HALTED/PAPER agents
+        _agent_name = meta.get("agent_name", "")
+        if _agent_name:
+            try:
+                from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
+                _dep = get_deployment_controller()._agents.get(_agent_name)
+                if _dep and _dep.mode in (AgentMode.HALTED, AgentMode.PAPER):
+                    return TradeResult(
+                        success=False, venue=self.venue, symbol=symbol,
+                        side=side, size=amount, price=price or 0.0,
+                        error=f"Agent {_agent_name} is {_dep.mode.value} — no live orders",
+                        metadata={},
+                    )
+            except Exception as _dce:
+                logger.error("DeploymentController unavailable — blocking order (fail-closed): %s", _dce)
+                return TradeResult(
+                    success=False, venue=self.venue, symbol=symbol,
+                    side=side, size=amount, price=price or 0.0,
+                    error=f"DeploymentController unavailable: {_dce}", metadata={},
+                )
+
+        client = self._get_client()
+
+        # Kalshi v2 order payload
+        # side here is "buy"/"sell" from MERID; Kalshi uses action + side(yes/no)
+        action = side  # "buy" or "sell"
+        outcome_side = meta.get("outcome", "yes")  # "yes" or "no"
+        client_order_id = meta.get("client_order_id") or f"merid-{uuid.uuid4().hex[:12]}"
+
+        payload: Dict[str, Any] = {
+            "ticker": symbol,
+            "action": action,
+            "side": outcome_side,
+            "type": order_type,
             "count": int(amount),
-            "client_order_id": f"merid_{ticker}_{int(amount)}",
+            "client_order_id": client_order_id,
         }
         if order_type == "limit" and price is not None:
-            payload["price"] = price
+            # Kalshi prices are integers 1-99 (cents per dollar)
+            payload["yes_price"] = int(round(price * 100)) if price <= 1.0 else int(price)
 
-        try:
-            response = await self._request(
-                "POST",
-                "/trade/v1/order",
-                json_data=payload,
-                headers=self._get_auth_headers(),
-                idempotent=True,
-            )
-            data = response.json()
-            return TradeResult(
-                success=True,
-                venue=self.venue,
-                symbol=symbol,
-                side=side,
-                size=amount,
-                price=float(data.get("executed_price", price or 0)),
-                tx_id=data.get("order_id"),
-                metadata={"order_id": data.get("order_id")},
-            )
-        except (ConnectionError, RuntimeError, ValueError, asyncio.TimeoutError, ExecutionError) as e:
+        result = await client._request_with_resilience(
+            "POST",
+            "/portfolio/orders",
+            json_data=payload,
+            operation_name="execute_trade",
+        )
+
+        if not result.success:
             return TradeResult(
                 success=False,
                 venue=self.venue,
@@ -96,43 +210,143 @@ class KalshiExecutor(HTTPExecutor):
                 side=side,
                 size=amount,
                 price=price or 0.0,
-                error=f"Kalshi API error: {e}",
+                error=f"Kalshi order failed: {result.error}",
+                metadata={"latency_ms": result.latency_ms},
             )
+
+        order_data = result.data.get("order", result.data)
+        executed_price_raw = order_data.get("yes_price") or order_data.get("no_price") or 0
+        executed_price = float(executed_price_raw) / 100.0
+
+        return TradeResult(
+            success=True,
+            venue=self.venue,
+            symbol=symbol,
+            side=side,
+            size=amount,
+            price=executed_price,
+            tx_id=order_data.get("order_id"),
+            metadata={
+                "order_id": order_data.get("order_id"),
+                "status": order_data.get("status"),
+                "client_order_id": client_order_id,
+                "latency_ms": result.latency_ms,
+            },
+        )
 
     async def get_positions(self) -> List[Position]:
         """Fetch open positions from Kalshi."""
-        response = await self._request(
+        client = self._get_client()
+        result = await client._request_with_resilience(
             "GET",
-            "/portfolio/v1/positions",
-            headers=self._get_auth_headers(),
+            "/portfolio/positions",
+            operation_name="get_positions",
         )
-        data = response.json()
+        if not result.success:
+            logger.warning(f"[kalshi] get_positions failed: {result.error}")
+            return []
+
         positions = []
-        for pos in data.get("positions", []):
+        for pos in result.data.get("market_positions", []):
+            raw_count = pos.get("position", 0)
+            if raw_count == 0:
+                continue
+            total_cost = float(pos.get("total_traded", 0)) / 100.0
+            entry_price = total_cost / abs(raw_count) if raw_count else 0.0
             positions.append(
                 Position(
-                    symbol=self._ticker_to_symbol(pos["ticker"]),
-                    size=float(pos["count"]),
-                    entry_price=float(pos.get("avg_price", 0)),
-                    pnl=float(pos.get("pnl", 0)),
+                    symbol=pos["ticker"],
+                    size=float(raw_count),
+                    entry_price=entry_price,
+                    pnl=float(pos.get("realized_pnl", 0)) / 100.0,
                     venue=self.venue,
-                    metadata={"ticker": pos["ticker"]},
+                    metadata={
+                        "ticker": pos["ticker"],
+                        "resting_orders_count": pos.get("resting_orders_count", 0),
+                    },
                 )
             )
         return positions
 
-    def _symbol_to_ticker(self, symbol: str) -> str:
-        """Convert symbol to Kalshi ticker."""
-        mapping = {
-            "PRES-2024-DEM": "PRES-2024-DEM",
-            "PRES-2024-REP": "PRES-2024-REP",
-        }
-        return mapping.get(symbol, symbol)
+    # ------------------------------------------------------------------
+    # Extended Kalshi-specific methods
+    # ------------------------------------------------------------------
 
-    def _ticker_to_symbol(self, ticker: str) -> str:
-        """Convert Kalshi ticker to symbol."""
-        mapping = {
-            "PRES-2024-DEM": "PRES-2024-DEM",
-            "PRES-2024-REP": "PRES-2024-REP",
+    async def authenticate(self) -> bool:
+        """Test authentication with Kalshi API."""
+        try:
+            client = self._get_client()
+            result = await client._request_with_resilience(
+                "GET",
+                "/exchange/status",
+                operation_name="authenticate",
+            )
+            return result.success
+        except Exception as exc:
+            logger.warning(f"[kalshi] authenticate check failed: {exc}")
+            return False
+
+    async def get_balance(self) -> Dict[str, Any]:
+        """Fetch account balance from Kalshi (returns cents and dollars)."""
+        client = self._get_client()
+        result = await client._request_with_resilience(
+            "GET",
+            "/portfolio/balance",
+            operation_name="get_balance",
+        )
+        if not result.success:
+            raise RuntimeError(f"Kalshi balance fetch failed: {result.error}")
+        data = result.data
+        balance_cents = data.get("balance", 0)
+        locked_cents = data.get("payout", 0)
+        return {
+            "usd": balance_cents,
+            "usd_dollars": balance_cents / 100.0,
+            "locked": locked_cents,
+            "locked_dollars": locked_cents / 100.0,
+            "available": balance_cents - locked_cents,
+            "available_dollars": (balance_cents - locked_cents) / 100.0,
         }
-        return mapping.get(ticker, ticker)
+
+    async def get_orders(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch orders from Kalshi."""
+        client = self._get_client()
+        params: Dict[str, Any] = {}
+        if status:
+            params["status"] = status
+        result = await client._request_with_resilience(
+            "GET",
+            "/portfolio/orders",
+            params=params,
+            operation_name="get_orders",
+        )
+        if not result.success:
+            logger.warning(f"[kalshi] get_orders failed: {result.error}")
+            return []
+        return result.data.get("orders", [])
+
+    async def get_fills(self) -> List[Dict[str, Any]]:
+        """Fetch recent fills/trades from Kalshi."""
+        client = self._get_client()
+        result = await client._request_with_resilience(
+            "GET",
+            "/portfolio/fills",
+            operation_name="get_fills",
+        )
+        if not result.success:
+            logger.warning(f"[kalshi] get_fills failed: {result.error}")
+            return []
+        return result.data.get("fills", [])
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order."""
+        client = self._get_client()
+        result = await client._request_with_resilience(
+            "DELETE",
+            f"/portfolio/orders/{order_id}",
+            operation_name="cancel_order",
+        )
+        if not result.success:
+            logger.warning(f"[kalshi] cancel_order {order_id} failed: {result.error}")
+            return False
+        return True

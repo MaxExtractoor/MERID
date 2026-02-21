@@ -120,7 +120,11 @@ class ExecutionAgent:
         self.consecutive_failures = 0
         
         logger.info("ExecutionAgent initialized with advanced risk management")
-        self._router = ExecutionRouter()
+        try:
+            from merid.execution.router import ExecutionRouter as _ER
+            self._router = _ER()
+        except Exception:
+            self._router = None
 
     async def place_order_via_router(
         self,
@@ -135,6 +139,9 @@ class ExecutionAgent:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Order:
         """Route order through the unified ExecutionRouter with guard+explainability."""
+        if self._router is None:
+            raise RuntimeError("ExecutionRouter not available — cannot route orders")
+        from merid.execution.router import TraderIdentity
         trader = TraderIdentity(trader_type="agent", trader_id=agent_id or "execution-agent")
         result = await self._router.submit_trade(
             trader=trader,
@@ -175,6 +182,32 @@ class ExecutionAgent:
             Updated order with execution details
         """
         try:
+            # Execution gate — unified safety check
+            try:
+                from core.execution_gate import check_execution_gate
+                gate = check_execution_gate()
+                if gate.blocked:
+                    reasons_str = "; ".join(r.message for r in gate.reasons)
+                    logger.warning(
+                        "execution_blocked | agent=execution order=%s symbol=%s reasons=[%s]",
+                        order.order_id, order.symbol, reasons_str,
+                    )
+                    order.status = OrderStatus.REJECTED
+                    order.rejection_reason = f"Execution gate blocked: {reasons_str}"
+                    return order
+                if gate.is_limited:
+                    is_reduce = getattr(order, 'reduce_only', False) or getattr(order, 'side', '') in ('sell', 'close')
+                    if not is_reduce:
+                        logger.warning(
+                            "execution_limited | agent=execution order=%s symbol=%s — new risk blocked (reduce-only mode)",
+                            order.order_id, order.symbol,
+                        )
+                        order.status = OrderStatus.REJECTED
+                        order.rejection_reason = "Gate limited: only reduce/close orders allowed"
+                        return order
+            except ImportError:
+                pass
+
             # Reset daily counters if needed
             self._check_daily_reset()
             

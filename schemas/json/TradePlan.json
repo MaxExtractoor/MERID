@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://merid.io/schemas/TradePlan.json",
+  "title": "TradePlan",
+  "description": "Consensus trade plan",
+  "type": "object",
+  "required": ["symbol", "direction", "target_size_usd", "confidence"],
+  "properties": {
+    "plan_id": {
+      "type": "string",
+      "description": "Unique plan identifier"
+    },
+    "symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Trading symbol"
+    },
+    "venue": {
+      "type": "string",
+      "description": "Trading venue"
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["long", "short", "flat", "reduce"],
+      "description": "Trade direction"
+    },
+    "target_size_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Target position size in USD"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Confidence level"
+    },
+    "entry_preference": {
+      "type": "string",
+      "enum": ["market", "limit", "twap"],
+      "description": "Preferred entry method"
+    },
+    "urgency": {
+      "type": "string",
+      "enum": ["low", "normal", "high", "urgent"],
+      "description": "Execution urgency"
+    },
+    "max_slippage_bps": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000,
+      "description": "Maximum acceptable slippage in basis points"
+    },
+    "rationale": {
+      "type": "string",
+      "description": "Reasoning for the trade plan"
+    }
+  },
+  "additionalProperties": false
+}

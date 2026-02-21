@@ -1,0 +1,16 @@
+# Grafana Dashboard Provisioning
+# Auto-loads MERID dashboards from JSON files
+
+apiVersion: 1
+
+providers:
+  - name: 'MERID Dashboards'
+    orgId: 1
+    folder: 'MERID'
+    folderUid: 'merid'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

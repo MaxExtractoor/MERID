@@ -1,0 +1,225 @@
+##############################################################################
+# MERID Streaming Infrastructure - Redpanda + Flink
+#
+# Provides Kafka-compatible streaming with Redpanda and real-time
+# feature computation with Apache Flink.
+#
+# Usage:
+#   docker-compose -f docker-compose.streaming.yml up -d
+#
+# Services:
+#   - redpanda: Kafka-compatible broker (port 9092)
+#   - redpanda-console: Web UI for topic management (port 8080)
+#   - flink-jobmanager: Flink coordinator (port 8081)
+#   - flink-taskmanager: Flink worker(s)
+#   - topic-init: Creates MERID topics on startup
+##############################################################################
+
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # REDPANDA - Kafka-compatible streaming broker
+  # ==========================================================================
+  redpanda:
+    image: redpandadata/redpanda:v23.3.5
+    container_name: merid-redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr 0.0.0.0:8082
+      - --advertise-pandaproxy-addr localhost:8082
+      - --schema-registry-addr 0.0.0.0:8081
+      - --advertise-schema-registry-addr localhost:8081
+    ports:
+      - "9092:9092"      # Kafka API
+      - "8081:8081"      # Schema Registry
+      - "8082:8082"      # HTTP Proxy
+      - "9644:9644"      # Admin API
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - merid-streaming
+
+  # ==========================================================================
+  # REDPANDA CONSOLE - Web UI for topic management
+  # ==========================================================================
+  redpanda-console:
+    image: redpandadata/console:v2.3.8
+    container_name: merid-redpanda-console
+    environment:
+      - KAFKA_BROKERS=redpanda:29092
+      - KAFKA_SCHEMAREGISTRY_ENABLED=true
+      - KAFKA_SCHEMAREGISTRY_URLS=http://redpanda:8081
+    ports:
+      - "8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - merid-streaming
+
+  # ==========================================================================
+  # TOPIC INITIALIZATION - Creates MERID topics on startup
+  # ==========================================================================
+  topic-init:
+    image: redpandadata/redpanda:v23.3.5
+    container_name: merid-topic-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command: |
+      -c '
+      echo "Creating MERID Kafka topics..."
+      
+      # Price topics (partitioned by venue for ordering)
+      rpk topic create prices.kraken.BTCUSD --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create prices.kraken.ETHUSD --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create prices.kraken.SOLUSD --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create prices.binance.BTCUSDT --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create prices.binance.ETHUSDT --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create prices.coinbase.BTC-USD --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create prices.coinbase.ETH-USD --brokers redpanda:29092 -p 1 -r 1
+      
+      # Feature topics (output from Flink)
+      rpk topic create features.kraken.BTCUSD --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create features.kraken.ETHUSD --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create features.kraken.SOLUSD --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create features.binance.BTCUSDT --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create features.binance.ETHUSDT --brokers redpanda:29092 -p 1 -r 1
+      
+      # Agent topics
+      rpk topic create agent.opinions --brokers redpanda:29092 -p 3 -r 1
+      rpk topic create agent.decisions --brokers redpanda:29092 -p 3 -r 1
+      rpk topic create agent.heartbeats --brokers redpanda:29092 -p 1 -r 1
+      
+      # Consensus topics
+      rpk topic create consensus.trade-plans --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create consensus.risk-reviews --brokers redpanda:29092 -p 1 -r 1
+      
+      # Execution topics
+      rpk topic create trades.intents --brokers redpanda:29092 -p 3 -r 1
+      rpk topic create trades.executed --brokers redpanda:29092 -p 3 -r 1
+      rpk topic create trades.cancelled --brokers redpanda:29092 -p 1 -r 1
+      
+      # Risk topics
+      rpk topic create risk.alerts --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create risk.metrics --brokers redpanda:29092 -p 1 -r 1
+      
+      # News and sentiment
+      rpk topic create news.items --brokers redpanda:29092 -p 1 -r 1
+      rpk topic create sentiment.social --brokers redpanda:29092 -p 1 -r 1
+      
+      echo "MERID topics created successfully!"
+      rpk topic list --brokers redpanda:29092
+      '
+    networks:
+      - merid-streaming
+
+  # ==========================================================================
+  # FLINK JOB MANAGER - Coordinator for Flink jobs
+  # ==========================================================================
+  flink-jobmanager:
+    image: flink:1.18-java11
+    container_name: merid-flink-jobmanager
+    command: jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        state.savepoints.dir: file:///opt/flink/savepoints
+        execution.checkpointing.interval: 60000
+        execution.checkpointing.mode: EXACTLY_ONCE
+        taskmanager.numberOfTaskSlots: 4
+        parallelism.default: 2
+    ports:
+      - "8083:8081"  # Flink Web UI (8081 taken by schema registry)
+      - "6123:6123"  # RPC
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+      - flink-savepoints:/opt/flink/savepoints
+      - ./flink/jobs:/opt/flink/jobs  # Mount job JARs here
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - merid-streaming
+
+  # ==========================================================================
+  # FLINK TASK MANAGER - Worker for Flink jobs
+  # ==========================================================================
+  flink-taskmanager:
+    image: flink:1.18-java11
+    container_name: merid-flink-taskmanager
+    command: taskmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 2g
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+      - flink-savepoints:/opt/flink/savepoints
+    depends_on:
+      - flink-jobmanager
+    networks:
+      - merid-streaming
+    deploy:
+      replicas: 1  # Scale up for production
+
+  # ==========================================================================
+  # FLINK SQL CLIENT - Interactive SQL for debugging
+  # ==========================================================================
+  flink-sql-client:
+    image: flink:1.18-java11
+    container_name: merid-flink-sql
+    command: bin/sql-client.sh
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+    depends_on:
+      - flink-jobmanager
+      - flink-taskmanager
+    networks:
+      - merid-streaming
+    profiles:
+      - debug  # Only start with: docker-compose --profile debug up
+
+# ==========================================================================
+# NETWORKS
+# ==========================================================================
+networks:
+  merid-streaming:
+    name: merid-streaming
+    driver: bridge
+
+# ==========================================================================
+# VOLUMES
+# ==========================================================================
+volumes:
+  redpanda-data:
+    name: merid-redpanda-data
+  flink-checkpoints:
+    name: merid-flink-checkpoints
+  flink-savepoints:
+    name: merid-flink-savepoints

@@ -606,16 +606,139 @@ class RealityAuditor:
         return recent_assertions[:limit]
     
     def reload_from_persistent_store(self) -> bool:
-        """Attempt to reload assertions from persistent store."""
+        """Reload live config assertions from active subsystems.
+
+        Re-registers fresh RealityAssertions from KalshiRisk, settings,
+        and the execution guard so that operator config changes (risk limits,
+        kill-switch state, domain modes) propagate without a server restart.
+
+        Returns True if at least one assertion was refreshed successfully.
+        """
+        from core.reality_registry import (
+            AssertionDomain, AssertionProvenance, AssertionStatus, UIVisibility,
+        )
+
+        refreshed = 0
+        now = time.time()
+
+        # ── 1. KalshiRisk limits ──────────────────────────────────────
         try:
-            # This would integrate with your persistent store implementation
-            # For now, return success as a placeholder
-            logger.info("Attempting to reload assertions from persistent store")
-            # TODO: Implement actual reload logic
-            return True
-        except Exception as e:
-            logger.error(f"Failed to reload from persistent store: {e}")
-            return False
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            risk = get_kalshi_risk()
+            cfg = risk.config
+            state = risk.state
+
+            provenance = AssertionProvenance(
+                source_id="kalshi_risk",
+                module_id="merid.event_venues.kalshi.kalshi_risk",
+                evidence_hash=str(hash((cfg.max_daily_loss_usd, cfg.max_orders_per_hour))),
+                weight=0.95,
+                timestamp=now,
+            )
+            aid = self.registry.register_assertion(
+                domain=AssertionDomain.EXECUTION,
+                description=(
+                    f"KalshiRisk: daily_loss_limit=${cfg.max_daily_loss_usd:.0f} "
+                    f"orders_per_hour={cfg.max_orders_per_hour} "
+                    f"kill_switch={'ON' if state.kill_switch_active else 'OFF'}"
+                ),
+                confidence=1.0,
+                provenance_score=0.95,
+                regime_compatibility=1.0,
+                decay_rate=0.001,
+                validity_window=300.0,  # 5 minutes
+                sources=[provenance],
+            )
+            logger.info("reload: KalshiRisk assertion registered (%s)", aid)
+            refreshed += 1
+        except Exception as exc:
+            logger.debug("reload: KalshiRisk assertion skipped: %s", exc)
+
+        # ── 2. Execution guard state ──────────────────────────────────
+        try:
+            from merid.execution_guard import get_execution_guard
+            guard = get_execution_guard()
+            kill_active = getattr(guard, 'kill_switch_active', False)
+            provenance = AssertionProvenance(
+                source_id="execution_guard",
+                module_id="merid.execution_guard",
+                evidence_hash=str(hash(kill_active)),
+                weight=1.0,
+                timestamp=now,
+            )
+            aid = self.registry.register_assertion(
+                domain=AssertionDomain.EXECUTION,
+                description=f"ExecutionGuard: kill_switch={'ACTIVE' if kill_active else 'CLEAR'}",
+                confidence=1.0,
+                provenance_score=1.0,
+                regime_compatibility=1.0,
+                decay_rate=0.0005,
+                validity_window=60.0,  # 1 minute — guard state changes fast
+                sources=[provenance],
+            )
+            logger.info("reload: ExecutionGuard assertion registered (%s)", aid)
+            refreshed += 1
+        except Exception as exc:
+            logger.debug("reload: ExecutionGuard assertion skipped: %s", exc)
+
+        # ── 3. Domain mode config from paper_config ───────────────────
+        try:
+            from merid.paper_config import get_paper_config
+            pc = get_paper_config()
+            active_domains = [d for d in pc.domains if pc.domains[d].enabled]
+            provenance = AssertionProvenance(
+                source_id="paper_config",
+                module_id="merid.paper_config",
+                evidence_hash=str(hash(tuple(sorted(active_domains)))),
+                weight=0.9,
+                timestamp=now,
+            )
+            aid = self.registry.register_assertion(
+                domain=AssertionDomain.SYSTEM,
+                description=f"PaperConfig: active_domains={active_domains}",
+                confidence=1.0,
+                provenance_score=0.9,
+                regime_compatibility=1.0,
+                decay_rate=0.0002,
+                validity_window=600.0,  # 10 minutes
+                sources=[provenance],
+            )
+            logger.info("reload: PaperConfig assertion registered (%s)", aid)
+            refreshed += 1
+        except Exception as exc:
+            logger.debug("reload: PaperConfig assertion skipped: %s", exc)
+
+        # ── 4. Agent grid health ──────────────────────────────────────
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            grid = get_agent_grid()
+            running = sum(1 for a in grid.agents if a.state.running)
+            provenance = AssertionProvenance(
+                source_id="agent_grid",
+                module_id="merid.prediction.agent_grid",
+                evidence_hash=str(hash((len(grid.agents), running))),
+                weight=0.85,
+                timestamp=now,
+            )
+            aid = self.registry.register_assertion(
+                domain=AssertionDomain.AGENT,
+                description=f"AgentGrid: total={len(grid.agents)} running={running}",
+                confidence=min(1.0, running / max(1, len(grid.agents))),
+                provenance_score=0.85,
+                regime_compatibility=1.0,
+                decay_rate=0.002,
+                validity_window=120.0,  # 2 minutes
+                sources=[provenance],
+            )
+            logger.info("reload: AgentGrid assertion registered (%s)", aid)
+            refreshed += 1
+        except Exception as exc:
+            logger.debug("reload: AgentGrid assertion skipped: %s", exc)
+
+        logger.info(
+            "reload_from_persistent_store: %d assertions refreshed", refreshed
+        )
+        return refreshed > 0
 
 
 # Singleton instance

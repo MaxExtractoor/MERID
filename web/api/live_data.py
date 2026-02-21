@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import asyncio
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query
 import httpx
 
 from utils.deps import get_ccxt
+
+import logging
+logger = logging.getLogger("live_data")
 
 router = APIRouter(prefix="/api/v1/live", tags=["live"])
 
@@ -20,7 +23,7 @@ router = APIRouter(prefix="/api/v1/live", tags=["live"])
 _price_cache: Dict[str, dict] = {}
 _news_cache: List[dict] = []
 _predictions_cache: List[dict] = []
-_last_update = datetime.now()
+_last_update = datetime.now(timezone.utc)
 _streaming_active = False
 
 
@@ -30,7 +33,6 @@ async def fetch_live_prices():
     
     try:
         from data.asset_universe import get_all_coingecko_ids, ASSET_UNIVERSE
-        import asyncio
         
         # Get all CoinGecko IDs
         coingecko_ids = get_all_coingecko_ids()
@@ -42,7 +44,7 @@ async def fetch_live_prices():
                 url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_param}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_market_cap=true"
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -62,19 +64,19 @@ async def fetch_live_prices():
                         'market_cap': coin_data.get('usd_market_cap', 0),
                         'high_24h': coin_data.get('usd', 0) * 1.02,
                         'low_24h': coin_data.get('usd', 0) * 0.98,
-                        'timestamp': datetime.now().isoformat()
+                        'timestamp': datetime.now(timezone.utc).isoformat()
                     }
             
-            _last_update = datetime.now()
-            print(f"[LiveData] Updated {len(_price_cache)} assets from CoinGecko")
+            _last_update = datetime.now(timezone.utc)
+            logger.info(f"[LiveData] Updated {len(_price_cache)} assets from CoinGecko")
             return
         else:
-            print(f"[LiveData] CoinGecko returned status {response.status_code}")
+            logger.info(f"[LiveData] CoinGecko returned status {response.status_code}")
     except Exception as e:
         import traceback
-        print(f"[LiveData] Error fetching from CoinGecko: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
-        _last_update = datetime.now()
+        logger.error(f"[LiveData] Error fetching from CoinGecko: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
+        _last_update = datetime.now(timezone.utc)
 
 
 async def fetch_crypto_news():
@@ -94,13 +96,13 @@ async def fetch_crypto_news():
                         'description': item.get('description', '')[:200],
                         'url': item.get('url', ''),
                         'source': item.get('author', 'Unknown'),
-                        'timestamp': item.get('updated_at', datetime.now().isoformat())
+                        'timestamp': item.get('updated_at', datetime.now(timezone.utc).isoformat())
                     }
                     for item in data.get('data', [])[:10]
                 ]
-                print(f"[LiveData] Fetched {len(_news_cache)} news items")
+                logger.info(f"[LiveData] Fetched {len(_news_cache)} news items")
     except Exception as e:
-        print(f"[LiveData] Error fetching news: {e}")
+        logger.error(f"[LiveData] Error fetching news: {e}")
         _news_cache = []
 
 
@@ -110,8 +112,8 @@ async def fetch_prediction_markets():
     
     try:
         # Import Kalshi aggregator to get real markets
-        from monitoring.prediction_markets import get_prediction_market_aggregator
-        aggregator = get_prediction_market_aggregator()
+        from monitoring.prediction_markets import get_prediction_aggregator
+        aggregator = get_prediction_aggregator()
         
         # Get markets from Kalshi aggregator
         kalshi_markets = aggregator.get_all_markets()
@@ -126,9 +128,9 @@ async def fetch_prediction_markets():
             }
             for market_id, market in list(kalshi_markets.items())[:10]
         ]
-        print(f"[LiveData] Fetched {len(_predictions_cache)} Kalshi prediction markets")
+        logger.info(f"[LiveData] Fetched {len(_predictions_cache)} Kalshi prediction markets")
     except Exception as e:
-        print(f"Error fetching predictions: {e}")
+        logger.error(f"Error fetching predictions: {e}")
         # Don't use fallback - let frontend handle empty data
         _predictions_cache = []
 
@@ -142,7 +144,7 @@ async def get_live_prices(
 ):
     """Get current live prices for all tracked assets with filtering."""
     # Update if cache is stale (older than 10 seconds)
-    if not _price_cache or (datetime.now() - _last_update).total_seconds() > 10:
+    if not _price_cache or (datetime.now(timezone.utc) - _last_update).total_seconds() > 10:
         await fetch_live_prices()
     
     prices = dict(_price_cache)
@@ -345,7 +347,7 @@ async def get_market_overview():
             'assets_tracked': len(_price_cache),
             'top_gainers': [{'symbol': k, **v} for k, v in gainers],
             'top_losers': [{'symbol': k, **v} for k, v in losers],
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }
     }
 
@@ -363,5 +365,5 @@ async def refresh_all_data():
         'status': 'success',
         'message': 'All data refreshed',
         'assets_updated': len(_price_cache),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat()
     }

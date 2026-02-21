@@ -237,6 +237,26 @@ class ArbitrageAgent:
         
         For now, returns execution plan. Actual execution requires exchange integration.
         """
+        # Execution gate — unified safety check
+        try:
+            from core.execution_gate import check_execution_gate
+            gate = check_execution_gate()
+            if gate.blocked:
+                reasons_str = "; ".join(r.message for r in gate.reasons)
+                logger.warning(
+                    "execution_blocked | agent=arbitrage opp=%s reasons=[%s]",
+                    opportunity.opportunity_id, reasons_str,
+                )
+                return None
+            if gate.is_limited:
+                logger.warning(
+                    "execution_limited | agent=arbitrage opp=%s — arb is new risk, blocked in reduce-only mode",
+                    opportunity.opportunity_id,
+                )
+                return None
+        except ImportError:
+            pass
+
         if not opportunity.is_valid():
             logger.warning("Opportunity %s no longer valid", opportunity.opportunity_id)
             return None

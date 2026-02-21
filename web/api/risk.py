@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import time
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 from trading.guards.trading_guard import TradingGuard, CircuitBreakerState
 from trading.config.runtime_config import get_runtime_config, GlobalTradingMode
@@ -76,7 +79,7 @@ def _record_event(event_type: str, details: Dict[str, Any]) -> None:
     """Record a risk/safety event for history."""
     global _circuit_breaker_history
     _circuit_breaker_history.append({
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "type": event_type,
         "details": details,
     })
@@ -96,7 +99,7 @@ async def get_risk_protections() -> RiskProtectionsResponse:
     runtime = get_runtime_config()
     portfolio = PortfolioAggregator()
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     
     # Circuit breaker status
     state = guard.circuit_state
@@ -187,8 +190,53 @@ async def reset_circuit_breaker() -> Dict[str, Any]:
     return {
         "success": True,
         "message": f"Circuit breaker reset from {old_state.name} to CLOSED",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@router.get("/commitments")
+async def get_historical_commitments() -> Dict[str, Any]:
+    """
+    Surface historical commitments auditor results in the risk view.
+
+    Returns overdue items, gap counts, and readiness status.
+    """
+    try:
+        from core.historical_commitments_auditor import HistoricalCommitmentsAuditor
+        auditor = HistoricalCommitmentsAuditor()
+        report = auditor.generate_report()
+        return {
+            "success": True,
+            "overdue_count": report.get("overdue_count", 0),
+            "total_commitments": report.get("total_commitments", 0),
+            "overdue_items": report.get("overdue_items", []),
+            "gap_summary": report.get("gap_summary", {}),
+            "readiness_pct": report.get("readiness_pct", 0),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except ImportError:
+        return {
+            "success": False,
+            "message": "HistoricalCommitmentsAuditor not available",
+            "overdue_count": 0,
+            "total_commitments": 0,
+            "overdue_items": [],
+            "gap_summary": {},
+            "readiness_pct": 0,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.debug("commitment_readiness build skipped: %s", exc)
+        return {
+            "success": False,
+            "message": str(exc),
+            "overdue_count": 0,
+            "total_commitments": 0,
+            "overdue_items": [],
+            "gap_summary": {},
+            "readiness_pct": 0,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 @router.post("/kill-switch/{action}")
@@ -212,7 +260,7 @@ async def toggle_kill_switch(action: str) -> Dict[str, Any]:
             "success": True,
             "message": "Kill switch ENABLED - trading blocked",
             "trading_enabled": False,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     else:
         guard.config.enable_trading_suite = True
@@ -221,5 +269,5 @@ async def toggle_kill_switch(action: str) -> Dict[str, Any]:
             "success": True,
             "message": "Kill switch DISABLED - trading allowed",
             "trading_enabled": True,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }

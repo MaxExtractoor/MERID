@@ -1,8 +1,12 @@
+"""X (Twitter) bot API — social media posting and sentiment monitoring."""
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 from core.agent_orchestrator import get_agent_orchestrator
 from core.cross_domain_portfolio import get_portfolio_engine
@@ -66,13 +70,83 @@ async def get_x_status(_: None = Depends(_require_service_token)) -> Dict[str, A
     }
 
 
+async def _get_kalshi_portfolio() -> Dict[str, Any]:
+    """Fetch live Kalshi positions and balance for portfolio summary."""
+    try:
+        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        grid = get_agent_grid()
+        tracker = get_agent_performance_tracker()
+        summary = grid.summary()
+        perf = tracker.get_system_summary()
+
+        # Pull portfolio risk snapshot from grid
+        pr = summary.get("portfolio_risk", {})
+        snapshot = pr.get("latest_snapshot") or pr
+
+        positions = []
+        for agent in summary.get("agents", []):
+            for ticker in agent.get("active_tickers", []):
+                positions.append({
+                    "position_id": f"{agent['name']}-{ticker}",
+                    "asset_class": "prediction",
+                    "symbol": ticker,
+                    "quantity": 1,
+                    "entry_price": None,
+                    "current_price": None,
+                    "unrealized_pnl": None,
+                    "agent": agent["name"],
+                })
+
+        return {
+            "portfolio_value": float(snapshot.get("total_notional_usd", 0)),
+            "total_pnl": float(perf.get("system_pnl_usd", 0)),
+            "daily_pnl": float(snapshot.get("daily_pnl_usd", 0)),
+            "allocation": {"prediction_markets": 1.0},
+            "positions": positions[:25],
+            "venue": "kalshi",
+        }
+    except Exception as exc:
+        logger.debug("_get_kalshi_positions skipped: %s", exc)
+        return {"error": str(exc), "venue": "kalshi", "positions": []}
+
+
+async def _get_kalshi_risk() -> Dict[str, Any]:
+    """Fetch live Kalshi risk state from operator endpoint."""
+    try:
+        from merid.risk.kill_switches import risk_controller
+        from merid.prediction.agent_grid import get_agent_grid
+        grid = get_agent_grid()
+        summary = grid.summary()
+        pr = summary.get("portfolio_risk", {})
+        snapshot = pr.get("latest_snapshot") or pr
+
+        return {
+            "kill_switch_active": bool(pr.get("kill_switch_active", False)),
+            "can_trade": risk_controller.can_trade(),
+            "kill_reason": risk_controller.get_kill_reason() if not risk_controller.can_trade() else None,
+            "daily_pnl_usd": float(snapshot.get("daily_pnl_usd", 0)),
+            "total_notional_usd": float(snapshot.get("total_notional_usd", 0)),
+            "margin_utilization": float(snapshot.get("margin_utilization_pct", 0)),
+            "venue": "kalshi",
+        }
+    except Exception as exc:
+        logger.debug("_get_kalshi_risk skipped: %s", exc)
+        return {"error": str(exc), "venue": "kalshi"}
+
+
 @router.get("/x/portfolio")
 async def get_x_portfolio(_: None = Depends(_require_service_token)) -> Dict[str, Any]:
+    # Primary: Kalshi live portfolio
+    kalshi = await _get_kalshi_portfolio()
+    if "error" not in kalshi:
+        return kalshi
+
+    # Fallback: cross-domain portfolio engine
     engine = get_portfolio_engine()
     total_value = engine.get_total_value()
     pnl = engine.get_total_pnl()
     allocation = engine.get_allocation_by_class()
-
     positions = [
         {
             "position_id": pos.position_id,
@@ -83,30 +157,37 @@ async def get_x_portfolio(_: None = Depends(_require_service_token)) -> Dict[str
             "current_price": pos.current_price,
             "unrealized_pnl": pos.unrealized_pnl,
         }
-        for pos in engine._positions.values()  # type: ignore[attr-defined]
+        for pos in getattr(engine, 'positions', getattr(engine, '_positions', {})).values()
     ]
-
     return {
         "portfolio_value": total_value,
         "total_pnl": pnl,
         "allocation": {k.value: v for k, v in allocation.items()},
         "positions": positions[:25],
+        "venue": "fallback",
     }
 
 
 @router.get("/x/risk")
 async def get_x_risk(_: None = Depends(_require_service_token)) -> Dict[str, Any]:
+    # Primary: Kalshi risk state
+    kalshi_risk = await _get_kalshi_risk()
+    if "error" not in kalshi_risk:
+        social_engine = get_social_aware_quant_engine()
+        social_status = social_engine.get_social_risk_status()
+        return {**kalshi_risk, "social_kill_switch": social_status}
+
+    # Fallback: automated risk coordinator
     coordinator = get_risk_coordinator()
     status_payload = coordinator.get_comprehensive_risk_status()
-
     social_engine = get_social_aware_quant_engine()
     social_status = social_engine.get_social_risk_status()
-
     return {
         "portfolio_risk": status_payload["portfolio_risk"],
         "active_stops": status_payload["active_stops"],
         "monitoring_active": status_payload["monitoring_active"],
         "social_kill_switch": social_status,
+        "venue": "fallback",
     }
 
 
@@ -128,7 +209,7 @@ def _collect_incidents() -> List[Dict[str, Any]]:
             }
         )
 
-    for sec_incident in security_system._incidents:  # type: ignore[attr-defined]
+    for sec_incident in getattr(security_system, 'incidents', getattr(security_system, '_incidents', [])):
         if sec_incident.resolved:
             continue
         incidents.append(

@@ -62,7 +62,6 @@ async def get_provenance_status() -> Dict[str, Any]:
 @router.get("/provenance/sources")
 async def get_all_sources() -> Dict[str, Any]:
     """Get all tracked data sources."""
-    from ops.data_provenance import get_provenance_tracker
     
     tracker = get_provenance_tracker()
     return {"sources": tracker.get_all_sources()}
@@ -71,7 +70,6 @@ async def get_all_sources() -> Dict[str, Any]:
 @router.get("/provenance/sources/{source_id}")
 async def get_source(source_id: str) -> Dict[str, Any]:
     """Get a specific data source."""
-    from ops.data_provenance import get_provenance_tracker
     
     tracker = get_provenance_tracker()
     source = tracker.get_source(source_id)
@@ -85,7 +83,6 @@ async def get_source(source_id: str) -> Dict[str, Any]:
 @router.get("/provenance/low-trust")
 async def get_low_trust_sources(threshold: float = 0.5) -> Dict[str, Any]:
     """Get sources below trust threshold."""
-    from ops.data_provenance import get_provenance_tracker
     
     tracker = get_provenance_tracker()
     low_trust = tracker.get_low_trust_sources(threshold)
@@ -99,7 +96,6 @@ async def get_low_trust_sources(threshold: float = 0.5) -> Dict[str, Any]:
 @router.post("/provenance/record")
 async def record_data(request: RecordDataRequest) -> Dict[str, Any]:
     """Record data from a source."""
-    from ops.data_provenance import get_provenance_tracker
     
     tracker = get_provenance_tracker()
     data_point = tracker.record_data(
@@ -118,7 +114,6 @@ async def record_data(request: RecordDataRequest) -> Dict[str, Any]:
 @router.post("/provenance/failure")
 async def record_failure(source_id: str, reason: str) -> Dict[str, Any]:
     """Record a source failure."""
-    from ops.data_provenance import get_provenance_tracker
     
     tracker = get_provenance_tracker()
     tracker.record_failure(source_id, reason)
@@ -142,7 +137,6 @@ async def get_entropy_status() -> Dict[str, Any]:
 @router.get("/entropy/current")
 async def get_current_entropy() -> Dict[str, Any]:
     """Get current entropy window."""
-    from ops.signal_entropy import get_entropy_tracker
     
     tracker = get_entropy_tracker()
     window = tracker.calculate_current_entropy()
@@ -153,7 +147,6 @@ async def get_current_entropy() -> Dict[str, Any]:
 @router.get("/entropy/consensus")
 async def get_direction_consensus() -> Dict[str, Any]:
     """Get signal direction consensus."""
-    from ops.signal_entropy import get_entropy_tracker
     
     tracker = get_entropy_tracker()
     return tracker.get_direction_consensus()
@@ -162,7 +155,6 @@ async def get_direction_consensus() -> Dict[str, Any]:
 @router.get("/entropy/diversity")
 async def get_source_diversity() -> Dict[str, Any]:
     """Get signal source diversity."""
-    from ops.signal_entropy import get_entropy_tracker
     
     tracker = get_entropy_tracker()
     return tracker.get_source_diversity()
@@ -171,7 +163,6 @@ async def get_source_diversity() -> Dict[str, Any]:
 @router.get("/entropy/echo-chamber")
 async def check_echo_chamber() -> Dict[str, Any]:
     """Check for echo chamber condition."""
-    from ops.signal_entropy import get_entropy_tracker
     
     tracker = get_entropy_tracker()
     is_echo, reason = tracker.detect_echo_chamber()
@@ -185,7 +176,6 @@ async def check_echo_chamber() -> Dict[str, Any]:
 @router.get("/entropy/trend")
 async def get_entropy_trend(periods: int = 10) -> Dict[str, Any]:
     """Get entropy trend."""
-    from ops.signal_entropy import get_entropy_tracker
     
     tracker = get_entropy_tracker()
     return tracker.get_entropy_trend(periods)
@@ -194,7 +184,6 @@ async def get_entropy_trend(periods: int = 10) -> Dict[str, Any]:
 @router.get("/entropy/signals")
 async def get_recent_signals(limit: int = 50) -> Dict[str, Any]:
     """Get recent signals."""
-    from ops.signal_entropy import get_entropy_tracker
     
     tracker = get_entropy_tracker()
     return {"signals": tracker.get_recent_signals(limit)}
@@ -203,7 +192,6 @@ async def get_recent_signals(limit: int = 50) -> Dict[str, Any]:
 @router.post("/entropy/record")
 async def record_signal(request: RecordSignalRequest) -> Dict[str, Any]:
     """Record a signal."""
-    from ops.signal_entropy import get_entropy_tracker
     
     tracker = get_entropy_tracker()
     signal = tracker.record_signal(
@@ -259,7 +247,6 @@ async def get_active_conflicts(
 @router.get("/conflicts/alignment")
 async def get_domain_alignment() -> Dict[str, Any]:
     """Get cross-domain alignment status."""
-    from ops.conflict_detector import get_conflict_detector
     
     detector = get_conflict_detector()
     return detector.get_domain_alignment()
@@ -268,7 +255,6 @@ async def get_domain_alignment() -> Dict[str, Any]:
 @router.get("/conflicts/history")
 async def get_conflict_history(limit: int = 50) -> Dict[str, Any]:
     """Get conflict history."""
-    from ops.conflict_detector import get_conflict_detector
     
     detector = get_conflict_detector()
     return {"conflicts": detector.get_conflicts(limit)}
@@ -305,7 +291,6 @@ async def record_domain_signal(request: RecordDomainSignalRequest) -> Dict[str, 
 @router.post("/conflicts/resolve/{conflict_id}")
 async def resolve_conflict(conflict_id: str, resolution: str) -> Dict[str, Any]:
     """Resolve a conflict."""
-    from ops.conflict_detector import get_conflict_detector
     
     detector = get_conflict_detector()
     success = detector.resolve_conflict(conflict_id, resolution)
@@ -323,9 +308,6 @@ async def resolve_conflict(conflict_id: str, resolution: str) -> Dict[str, Any]:
 @router.get("/status")
 async def get_ops_status() -> Dict[str, Any]:
     """Get combined OPS status."""
-    from ops.data_provenance import get_provenance_tracker
-    from ops.signal_entropy import get_entropy_tracker
-    from ops.conflict_detector import get_conflict_detector
     
     provenance = get_provenance_tracker()
     entropy = get_entropy_tracker()

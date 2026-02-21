@@ -1,189 +1,132 @@
-# MERID Change Log
+# MERID Changelog
 
-All notable changes to MERID will be documented in this file.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+---
+
+## [3.1.0] - 2026-02-21
+
+### Kalshi Swarm Gap Closure + UI Audit
+
+All 62 Kalshi swarm workflow gaps closed (A+ across all 6 categories).
+UI sidebar restructured with 5 sources of truth fully synchronized.
+
+### Added
+
+- **TimeSeriesForecaster** — AR(2) autoregressive model, EWMA volatility, OU half-life, Hurst exponent (Sprint Q)
+- **ExternalSentimentForecaster** — Pluggable news/X feed providers, MarketMoodBus, fear/greed contrarian (Sprint Q)
+- **AuctionConsensusResolver** — Multi-round escalation bidding with calibration weights for CONFLICTED consensus (Sprint R)
+- **MCPMarketFeed** — Async MCP server client with aiohttp/urllib fallback, env-configurable (Sprint R)
+- **Positions view** — Deep-link to Portfolio positions tab via `initialTab` prop
+- **Orders view** — Deep-link to Portfolio orders tab via `initialTab` prop
+- **Calibration view** — Forecaster Brier scores, weight matrix, resolver accuracy (existing, now in sidebar)
+
+### Changed
+
+- **UI** — Expanded from 14 to 17 views across 5 sidebar sections
+- **Sidebar** — Restructured to 5 sections: Live Trading (6), Swarm Intelligence (5), Analytics (2), Command Center (2), System (2)
+- **sidebar_config.py** — Added `swarm-consensus`, `lane-control` views with endpoint contracts
+- **sidebarManifest.ts** — Synced with backend sidebar config (was 3 sections, now 5)
+- **Sidebar.tsx** — Added Positions/Orders items with TrendingUp/ClipboardList icons
+- **constants.ts** — Added 11 endpoint constants (portfolio, orchestrator, trade-mode, reconciliation, audit-trail, UI sidebar)
+- **ForecasterRegistry** — Now 6 forecasters (momentum, mean-reversion, macro, orderbook, time-series, sentiment)
+- **Gap analysis** — 62/62 A+ (was 57/62 A)
+
+### Fixed
+
+- **TypeScript lint errors** — `positions`/`orders` not in `View` type union
+- **Sidebar wiring test failures** — 23 failures → 0 (stale legacy expectations, missing types/routes/constants)
+- **Endpoint path mismatch** — `/api/system/health` → `/api/v1/system/health` in sidebar config
+
+---
+
+## [3.0.0] - 2026-02-21
+
+### Kalshi-Focused Platform Release
+
+Complete pivot to Kalshi prediction markets as the single trading venue.
+
+### Added
+
+- **Frozen 14-View UI** — Canonical operator dashboard with 5 sidebar groups: Trading, Swarm Intelligence, Analytics, Operator, System
+- **8-Step Operator Workflow** — DISCOVER → ANALYZE → CONSENSUS → SIZE → EXECUTE → MONITOR → PROMOTE → PROTECT
+- **Kalshi Workflow Doc** — `docs/ui/kalshi_workflow.md` as the single source of truth for UI and workflow
+
+### Changed
+
+- **requirements.txt** — Stripped from 270 lines to ~88. Removed blockchain, ML/RL, multi-exchange, web scraping, social media, prompt management, workflow orchestration, market making, and sniping dependencies
+- **UI Architecture** — Consolidated from 28+ views to 14 frozen views. Positions and Orders absorbed into KalshiPortfolioView
+- **Sidebar** — Reorganized from flat list to 5 workflow-aligned groups
+- **CommandPalette** — Updated to match new 14-view layout
+- **Documentation** — Complete rewrite of README, QUICKSTART, BUILD, ENV_SETUP, CONTRIBUTING, GETTING_STARTED, API_REFERENCE, LOCAL_DEV, TESTING_GUIDE
+
+### Removed
+
+- **Legacy Views** — Wallet, Treasury, Betting, Mining, Institutional, standalone Positions/Orders moved to `_legacy/`
+- **Orphan Components** — SentimentBacktestPanel, ThresholdOptimizerPanel moved to `_legacy/`
+- **Orphan Hooks** — websocketWithBackoff moved to `_legacy/`
+- **Legacy Dependencies** — web3, torch, stable-baselines3, ray, ccxt, py-clob-client, celery, neo4j, redis, tweepy, playwright, langchain, swarms, crewai, and ~180 other unused packages
+- **Duplicate UI** — OrderGroupPanel removed from KalshiDashboardView and KalshiGridView (lives only in Portfolio)
+
+---
+
+## [2.1.0] - 2026-02-11
+
+### Fixed
+
+- **Dev Swarm Core** — Fixed `execute_task` lifecycle and exception handling
+- **Credit Ledger** — Soft warning instead of hard rejection
+- **API Routes** — Health check includes `checks` key; added `POST /config`
+
+### Added
+
+- **DevTaskTemplates** — 19 static template methods
+- **Router Registration** — Metrics, market data, and WS routers wired
+
+---
+
+## [2.0.0] - 2026-02-09
+
+### Added
+
+- **Unified Trade Pipeline** — TradeProposal, TradeRouter, GlobalRiskManager, ModeManager, InstrumentRegistry
+- **MeridLoop Orchestrator** — Persistent tick cycle: feeds → agents → consensus → risk → execution → CQI
+- **RiskContext** — System stress bridge with `size_scale_factor` and `approval_threshold_boost`
+- **ExecutionGuard** — Kill switch, CQI throttle, per-domain caps, venue exposure caps
+- **Signal Layer** — Decay-aware features, arb scanner, drift detector
+- **Canonical Agents** — Domain-based agents with trust-weighted consensus
+- **React Dashboard** — Primary UI with operator views
+- **Golden Path Tests** — 490 tests across 7 test files
+
+### Changed
+
+- **Agent Architecture** — Migrated from metaphor agents to domain-based agents
+- **Risk Controls** — Per-venue ModeManager gating replaces global env var
+- **API** — Migrated to `/api/v1/` prefix structure
+
+---
 
 ## [1.0.0] - 2026-01-26
 
 ### Added
-- **Complete Implementation Audit** - All 8 implementation stages completed successfully
-- **MERID Logging Patterns** - Production-ready QueueListener/QueueHandler backend with dictConfig integration
-- **System Health Controller** - `meridctl status` command for comprehensive health snapshots
-- **Windows Compatibility** - Proper file handle cleanup and permission handling
-- **Environment-Driven Configuration** - `MERID_LOG_PATH` environment variable support
-- **Standardized API** - Clean `start_merid_logging()` / `shutdown_merid_logging()` interface
-- **Production Operations Framework** - 3am operability drills and governance scheduler
-- **Security Pipeline** - SonarQube integration and GitHub Actions SAST workflows
-- **Analytics Foundation** - Database schema, event capture, cohort analysis, identity resolution
-- **Governance Framework** - Continuous governance with evidence trail and blocking enforcement
-- **Reality Enforcement System** - Assertion registry, UI gates, blindness detection
-- **Documentation Suite** - Complete technical documentation and operational runbooks
 
-### Changed
-- **Logging Backend** - Migrated from direct file handlers to QueueListener/QueueHandler pattern
-- **Configuration Management** - Centralized logging configuration with environment support
-- **Testing Infrastructure** - Comprehensive pytest integration with Windows compatibility
-
-### Deprecated
-- **Legacy Logging Patterns** - Old direct file handler patterns replaced with queue-based backend
-
-### Security
-- **SAST Pipeline** - Automated security scanning with SonarQube and GitHub Actions
-- **Audit Logging** - Comprehensive audit trails for all system operations
-- **Identity Resolution** - Secure cross-device identity merging with validation
-
-### Performance
-- **Multiprocessing Logging** - Optimized queue-based logging for high-performance scenarios
-- **Database Optimization** - Indexed queries for cohort analysis and identity resolution
-- **Resource Management** - Proper handler cleanup and resource management
-
----
-
-## [0.9.0] - 2026-01-19
-
-### Added
-- **Initial Implementation** - Core MERID systems and governance framework
-- **Analytics Foundation** - Basic event capture and cohort analysis
-- **Security Integration** - Initial SAST pipeline setup
-
----
-
-## [0.8.0] - 2026-01-12
-
-### Added
-- **Prototype Systems** - Initial MERID prototype implementations
-- **Basic Governance** - Early governance engine and reality enforcement
-
----
-
-## [0.7.0] - 2026-01-05
-
-### Added
-- **Research Phase** - Initial MERID research and design documentation
-
----
-
-## [0.6.0] - 2025-12-29
-
-### Added
-- **Concept Phase** - Initial MERID concept and architecture design
-
----
-
-## [0.5.0] - 2025-12-22
-
-### Added
-- **Planning Phase** - MERID project planning and requirements gathering
-
----
-
-## [0.4.0] - 2025-12-15
-
-### Added
-- **Discovery Phase** - Initial MERID discovery and feasibility analysis
-
----
-
-## [0.3.0] - 2025-12-08
-
-### Added
-- **Exploration Phase** - Early MERID exploration and proof of concepts
-
----
-
-## [0.2.0] - 2025-12-01
-
-### Added
-- **Inception Phase** - MERID project inception and initial research
-
----
-
-## [0.1.0] - 2025-11-24
-
-### Added
-- **Project Kickoff** - MERID project initialization and team formation
-
----
-
-## [Unreleased]
-
-### Added
-- **Future Enhancements** - JSON structured logging, remote sink forwarding, profile-based configurations
-
-### Planned
-- **Enhanced Analytics** - Real-time dashboard updates and advanced visualization
-- **Extended Security** - Penetration testing framework and vulnerability management
-- **Performance Optimization** - Load testing and scalability improvements
-- **Integration Testing** - Cross-system integration validation and compatibility testing
+- Core logging infrastructure, system health controller, Windows compatibility
+- Production operations framework, security pipeline, analytics foundation
 
 ---
 
 ## Version History
 
-- **1.0.0** - Implementation Audit Complete (2026-01-26)
-- **0.9.0** - Initial Implementation (2026-01-19)
-- **0.8.0** - Prototype Systems (2026-01-12)
-- **0.7.0** - Basic Governance (2026-01-05)
-- **0.6.0** - Research Phase (2025-12-29)
-- **0.5.0** - Planning Phase (2025-12-22)
-- **0.4.0** - Concept Phase (2025-12-15)
-- **0.3.0** - Discovery Phase (2025-12-08)
-- **0.2.0** - Exploration Phase (2025-12-01)
-- **0.1.0** - Inception Phase (2025-11-24)
-
----
-
-## Release Notes
-
-### Version 1.0.0 - Implementation Audit Complete
-
-This release marks the completion of MERID's comprehensive implementation audit. All 8 implementation stages have been successfully completed and validated:
-
-1. **Core Analytics Foundation** - Database schema, event capture, cohort analysis
-2. **Advanced Analytics & Identity** - Cross-device resolution, security validation
-3. **Governance Integration** - Weekly dossiers, investor pack integration
-4. **Dashboard & UI Integration** - Analytics dashboard, event tracking
-5. **Testing & Validation** - Comprehensive stress testing and validation
-6. **Documentation & Training** - Complete documentation and operational runbooks
-7. **Production Operations Gates** - Technical readiness, 3am operability
-8. **Continuous Governance Framework** - Automated governance with evidence trail
-
-#### Key Features
-- **Production-Ready Logging** - QueueListener/QueueHandler backend with Windows compatibility
-- **System Health Monitoring** - Comprehensive health snapshots with `meridctl status`
-- **Institutional Readiness** - Complete governance controls and compliance framework
-- **Security Pipeline** - Automated SAST scanning and vulnerability management
-- **Analytics Foundation** - Cohort analysis and identity resolution with security validation
-
-#### Breaking Changes
-- **Logging Backend Migration** - Direct file handlers replaced with queue-based backend
-- **Configuration Changes** - Centralized logging configuration with environment support
-
-#### Migration Guide
-- Update logging calls to use new `merid_logging_config` module
-- Set `MERID_LOG_PATH` environment variable for production deployments
-- Use `meridctl status` for system health monitoring
-
-#### Security Improvements
-- Enhanced SAST pipeline with SonarQube integration
-- Comprehensive audit logging for all system operations
-- Secure identity resolution with validation and rate limiting
-
-#### Performance Improvements
-- Optimized multiprocessing logging with QueueListener/QueueHandler
-- Database indexing for improved query performance
-- Resource management improvements with proper cleanup
-
----
-
-## Support
-
-For support, questions, or contributions, please refer to the MERID documentation or contact the development team.
+| Version | Date | Summary |
+|---------|------|---------|
+| 3.1.0 | 2026-02-21 | 62/62 gap closure, 17-view UI, sidebar sync, 6 forecasters |
+| 3.0.0 | 2026-02-21 | Kalshi-focused platform, frozen 14-view UI, stripped dependencies |
+| 2.1.0 | 2026-02-11 | Dev Swarm fixes, task templates |
+| 2.0.0 | 2026-02-09 | Unified pipeline, MeridLoop, RiskContext, 490 tests |
+| 1.0.0 | 2026-01-26 | Implementation audit complete |
 
 ---
 
 ## License
 
-MERID is licensed under the MIT License. See LICENSE file for details.
+Proprietary — All rights reserved.

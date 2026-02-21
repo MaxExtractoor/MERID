@@ -1,18 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useMemo } from 'react';
 import { Bot, Brain, Shield, TrendingUp, AlertTriangle, CheckCircle, Clock } from 'lucide-react';
-import { api } from '../services/api';
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 interface AgentActivity {
   agent_id: string;
-  agent_name: string;
-  status: 'active' | 'idle' | 'error';
-  last_action: string;
-  last_action_time: string;
+  agent_name?: string;
+  status: string;
+  last_action?: string;
+  last_action_time?: string;
   tasks_completed: number;
   current_task?: string;
+  asset?: string;
+  active_markets?: number;
+  win_rate?: number;
 }
 
-const AGENT_ICONS: Record<string, any> = {
+const AGENT_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   analyst: Brain,
   risk: Shield,
   strategy: TrendingUp,
@@ -27,98 +31,12 @@ const getAgentIcon = (agentName: string) => {
 };
 
 export default function AgentActivityPanel() {
-  const [agents, setAgents] = useState<AgentActivity[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data, loading } = useApiData<{ agents: AgentActivity[]; active_agents: number; total_tasks_1h: number }>(
+    API_ENDPOINTS.OPERATOR_AGENT_ACTIVITY,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+  );
 
-  useEffect(() => {
-    async function fetchAgentActivity() {
-      try {
-        const data = await api.getAgentActivity();
-        setAgents((data as any).agents || []);
-      } catch (e) {
-        console.error('Failed to fetch agent activity:', e);
-        // Use fallback mock data
-        setAgents([
-            {
-              agent_id: 'analyst-gemma-01',
-              agent_name: 'Analyst Gemma',
-              status: 'active',
-              last_action: 'Analyzed BTC market trends',
-              last_action_time: '2m ago',
-              tasks_completed: 142,
-              current_task: 'Processing ETH signals'
-            },
-            {
-              agent_id: 'risk-01',
-              agent_name: 'Risk Monitor',
-              status: 'active',
-              last_action: 'Updated exposure limits',
-              last_action_time: '5m ago',
-              tasks_completed: 89,
-              current_task: 'Monitoring portfolio risk'
-            },
-            {
-              agent_id: 'strategy-agent-01',
-              agent_name: 'Strategy Agent',
-              status: 'idle',
-              last_action: 'Generated trading signals',
-              last_action_time: '15m ago',
-              tasks_completed: 67
-            },
-            {
-              agent_id: 'analyst-llama-01',
-              agent_name: 'Analyst Llama',
-              status: 'active',
-              last_action: 'Sentiment analysis complete',
-              last_action_time: '1m ago',
-              tasks_completed: 156,
-              current_task: 'Analyzing news feeds'
-            },
-            {
-              agent_id: 'skeptic-01',
-              agent_name: 'Skeptic',
-              status: 'active',
-              last_action: 'Validated trade signals',
-              last_action_time: '3m ago',
-              tasks_completed: 98,
-              current_task: 'Reviewing risk parameters'
-            },
-            {
-              agent_id: 'synthesizer-01',
-              agent_name: 'Synthesizer',
-              status: 'idle',
-              last_action: 'Aggregated agent insights',
-              last_action_time: '8m ago',
-              tasks_completed: 45
-            },
-            {
-              agent_id: 'archivist-01',
-              agent_name: 'Archivist',
-              status: 'active',
-              last_action: 'Logged system events',
-              last_action_time: '30s ago',
-              tasks_completed: 234,
-              current_task: 'Archiving trade history'
-            },
-            {
-              agent_id: 'meta-audit-01',
-              agent_name: 'Meta Auditor',
-              status: 'active',
-              last_action: 'Performance audit complete',
-              last_action_time: '10m ago',
-              tasks_completed: 23,
-              current_task: 'Monitoring agent health'
-            }
-          ]);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchAgentActivity();
-    const interval = setInterval(fetchAgentActivity, 15000); // Update every 15s
-    return () => clearInterval(interval);
-  }, []);
+  const agents = useMemo(() => data?.agents ?? [], [data]);
 
   if (loading) {
     return (
@@ -133,8 +51,8 @@ export default function AgentActivityPanel() {
     );
   }
 
-  const activeCount = agents.filter(a => a.status === 'active').length;
-  const totalTasks = agents.reduce((sum, a) => sum + a.tasks_completed, 0);
+  const activeCount = data?.active_agents ?? agents.filter(a => a.status === 'running' || a.status === 'active').length;
+  const totalTasks = data?.total_tasks_1h ?? agents.reduce((sum, a) => sum + a.tasks_completed, 0);
 
   return (
     <div className="bg-slate-900/70 rounded-xl p-6 border border-slate-800">
@@ -147,22 +65,18 @@ export default function AgentActivityPanel() {
         </div>
         <div className="text-right">
           <div className="text-2xl font-bold text-blue-400">{totalTasks}</div>
-          <div className="text-xs text-slate-500">Total Tasks</div>
+          <div className="text-xs text-slate-500">Total Cycles</div>
         </div>
       </div>
 
       <div className="space-y-3">
         {agents.map((agent) => {
-          const Icon = getAgentIcon(agent.agent_name);
-          const statusColor = 
-            agent.status === 'active' ? 'text-emerald-400' :
-            agent.status === 'error' ? 'text-rose-400' :
-            'text-slate-500';
-          
-          const StatusIcon = 
-            agent.status === 'active' ? CheckCircle :
-            agent.status === 'error' ? AlertTriangle :
-            Clock;
+          const displayName = agent.agent_name || agent.agent_id;
+          const Icon = getAgentIcon(displayName);
+          const isActive = agent.status === 'running' || agent.status === 'active';
+          const isError = agent.status === 'error';
+          const statusColor = isActive ? 'text-emerald-400' : isError ? 'text-rose-400' : 'text-slate-500';
+          const StatusIcon = isActive ? CheckCircle : isError ? AlertTriangle : Clock;
 
           return (
             <div
@@ -173,36 +87,45 @@ export default function AgentActivityPanel() {
                 <div className={`p-2 rounded-lg bg-slate-700/50 ${statusColor}`}>
                   <Icon className="w-4 h-4" />
                 </div>
-                
+
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="text-sm font-medium text-slate-200">
-                      {agent.agent_name}
+                    <span className="text-sm font-medium text-slate-200 truncate">
+                      {displayName}
                     </span>
-                    <StatusIcon className={`w-3 h-3 ${statusColor}`} />
+                    <StatusIcon className={`w-3 h-3 ${statusColor} shrink-0`} />
+                    {agent.asset && (
+                      <span className="text-[10px] text-orange-400 bg-orange-400/10 px-1.5 py-0.5 rounded shrink-0">
+                        {agent.asset.toUpperCase()}
+                      </span>
+                    )}
                   </div>
-                  
-                  {agent.current_task && (
-                    <div className="text-xs text-blue-400 mb-1">
-                      → {agent.current_task}
-                    </div>
-                  )}
-                  
+
                   <div className="text-xs text-slate-500">
-                    {agent.last_action} • {agent.last_action_time}
+                    {agent.active_markets != null
+                      ? `${agent.active_markets} markets`
+                      : agent.current_task || agent.last_action || '—'}
+                    {agent.win_rate != null && agent.win_rate > 0 && (
+                      <span className="ml-2 text-emerald-500">{agent.win_rate.toFixed(1)}% win</span>
+                    )}
                   </div>
                 </div>
-                
+
                 <div className="text-right shrink-0">
                   <div className="text-sm font-semibold text-slate-300">
                     {agent.tasks_completed}
                   </div>
-                  <div className="text-xs text-slate-500">tasks</div>
+                  <div className="text-xs text-slate-500">cycles</div>
                 </div>
               </div>
             </div>
           );
         })}
+        {agents.length === 0 && !loading && (
+          <div className="text-center py-6 text-slate-500 text-sm">
+            No agents running — start the Kalshi grid from Overview
+          </div>
+        )}
       </div>
     </div>
   );

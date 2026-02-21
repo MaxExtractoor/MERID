@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { API_BASE_URL } from "../config/constants";
+import { useStubRegistry } from "./useStubRegistry";
 
 interface UseApiDataOptions<T> {
   pollingInterval?: number;
   initialData?: T;
-  transform?: (data: any) => T;
+  transform?: (data: unknown) => T;
   enabled?: boolean;
 }
 
@@ -13,6 +15,12 @@ interface UseApiDataResult<T> {
   error: Error | null;
   refetch: () => Promise<void>;
   lastUpdated: Date | null;
+  /** The raw JSON response before any transform — useful for stub detection. */
+  rawResponse: unknown;
+  /** True when the backend returned fallback/offline data (has _stub flag). */
+  isStub: boolean;
+  /** Reason string from the backend when data is a stub. */
+  stubMessage: string;
 }
 
 export function useApiData<T>(
@@ -30,25 +38,41 @@ export function useApiData<T>(
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<Error | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [rawResponse, setRawResponse] = useState<unknown>(null);
+
+  // Stable refs — prevent identity changes from re-triggering the effect
+  const transformRef = useRef(transform);
+  transformRef.current = transform;
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const generationRef = useRef(0);
+  const consecutiveErrorsRef = useRef(0);
+  const backoffTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchData = useCallback(async () => {
-    if (!enabled) return;
-
-    // Cancel any ongoing request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+    if (!enabled || !endpoint) {
+      setLoading(false);
+      return;
     }
 
-    abortControllerRef.current = new AbortController();
+    // Bump generation so stale responses are discarded (no aggressive abort)
+    const gen = ++generationRef.current;
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setLoading(true);
     setError(null);
 
     try {
-      const response = await fetch(endpoint, {
-        signal: abortControllerRef.current.signal,
+      // Prepend API_BASE_URL unless endpoint is already absolute or empty
+      const url =
+        endpoint && !endpoint.startsWith("http")
+          ? `${API_BASE_URL}${endpoint}`
+          : endpoint;
+
+      const response = await fetch(url, {
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           // Add auth token if available
@@ -58,59 +82,112 @@ export function useApiData<T>(
         },
       });
 
+      // Discard if a newer request has been issued
+      if (gen !== generationRef.current) return;
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
       const rawData = await response.json();
-      const transformedData = transform ? transform(rawData) : rawData;
+
+      // Discard stale after JSON parse
+      if (gen !== generationRef.current) return;
+
+      setRawResponse(rawData);
+      const xform = transformRef.current;
+      const transformedData = xform ? xform(rawData) : rawData;
       
       setData(transformedData);
       setLastUpdated(new Date());
+      consecutiveErrorsRef.current = 0;
     } catch (err) {
       if (err instanceof Error && err.name !== "AbortError") {
-        setError(err);
+        if (gen === generationRef.current) {
+          consecutiveErrorsRef.current += 1;
+          setError(err);
+        }
       }
     } finally {
-      setLoading(false);
+      if (gen === generationRef.current) {
+        setLoading(false);
+      }
     }
-  }, [endpoint, transform, enabled]);
+  }, [endpoint, enabled]);
 
   const refetch = useCallback(async () => {
     await fetchData();
   }, [fetchData]);
 
-  // Set up polling
+  // Set up polling with exponential backoff on error
   useEffect(() => {
-    if (enabled && pollingInterval && pollingInterval > 0) {
+    if (!enabled || !endpoint) {
+      setLoading(false);
+      return;
+    }
+
+    if (pollingInterval && pollingInterval > 0) {
       // Initial fetch
       fetchData();
 
-      // Set up polling
-      pollingIntervalRef.current = setInterval(fetchData, pollingInterval);
+      // Adaptive polling: back off up to 4x base interval after consecutive errors
+      const scheduleNext = () => {
+        const errors = consecutiveErrorsRef.current;
+        const backoffMultiplier = errors === 0 ? 1 : Math.min(Math.pow(2, errors - 1), 8);
+        const interval = pollingInterval * backoffMultiplier;
+        pollingIntervalRef.current = setTimeout(() => {
+          fetchData();
+          scheduleNext();
+        }, interval);
+      };
+      scheduleNext();
 
       return () => {
         if (pollingIntervalRef.current) {
-          clearInterval(pollingIntervalRef.current);
+          clearTimeout(pollingIntervalRef.current);
+        }
+        if (backoffTimerRef.current) {
+          clearTimeout(backoffTimerRef.current);
         }
       };
-    } else if (enabled) {
+    } else {
       // Single fetch if no polling
       fetchData();
     }
-  }, [fetchData, pollingInterval, enabled]);
+  }, [fetchData, pollingInterval, enabled, endpoint]);
 
-  // Cleanup on unmount
+  // Cleanup on unmount — only place we abort
   useEffect(() => {
+    const generationRefCurrent = generationRef;
+    const abortRefCurrent = abortControllerRef;
+    const pollingRefCurrent = pollingIntervalRef;
+    const backoffRefCurrent = backoffTimerRef;
     return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
+      generationRefCurrent.current++;
+      if (abortRefCurrent.current) {
+        abortRefCurrent.current.abort();
       }
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
+      if (pollingRefCurrent.current) {
+        clearTimeout(pollingRefCurrent.current);
+      }
+      if (backoffRefCurrent.current) {
+        clearTimeout(backoffRefCurrent.current);
       }
     };
   }, []);
+
+  const rawObject = rawResponse && typeof rawResponse === 'object'
+    ? (rawResponse as Record<string, unknown>)
+    : null;
+  const isStub = !!rawObject?._stub;
+  const stubMessage = isStub ? String(rawObject?._stub_message ?? 'Offline data') : '';
+
+  // Report stub status to the global banner registry
+  const stubRegistry = useStubRegistry();
+  useEffect(() => {
+    stubRegistry.register(endpoint, isStub);
+    return () => { stubRegistry.register(endpoint, false); };
+  }, [endpoint, isStub, stubRegistry]);
 
   return {
     data,
@@ -118,5 +195,8 @@ export function useApiData<T>(
     error,
     refetch,
     lastUpdated,
+    rawResponse,
+    isStub,
+    stubMessage,
   };
 }

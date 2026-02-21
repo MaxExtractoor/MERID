@@ -409,7 +409,6 @@ async def get_slippage_stats():
 async def get_perp_positions(venue: str = "hyperliquid"):
     """Get open perpetual positions from paper trading."""
     from trading.paper_trading import get_paper_engine
-    from data.live_price_feed import get_live_price_feed
     
     paper_engine = get_paper_engine()
     price_feed = get_live_price_feed()
@@ -482,7 +481,6 @@ async def open_perp_position(
 @router.post("/perps/close/{position_id}")
 async def close_perp_position(position_id: str, user_id: str):
     """Close perpetual position."""
-    from trading.paper_trading import get_paper_engine
     
     paper_engine = get_paper_engine()
     
@@ -544,7 +542,6 @@ async def trade_prediction_market(
     platform: str = "polymarket"
 ):
     """Execute prediction market trade via paper trading."""
-    from trading.paper_trading import get_paper_engine
     import uuid
     
     paper_engine = get_paper_engine()
@@ -579,7 +576,6 @@ async def trade_prediction_market(
 @router.get("/markets/positions")
 async def get_market_positions(platform: str = "polymarket", user_id: str = "default_user"):
     """Get prediction market positions from paper trading."""
-    from trading.paper_trading import get_paper_engine
     
     paper_engine = get_paper_engine()
     
@@ -625,31 +621,87 @@ async def get_execution_status():
 @router.get("/portfolio/summary")
 async def get_portfolio_summary():
     """Get portfolio summary for dashboard."""
+    
+    try:
+        from trading.paper_trading import get_paper_engine
+        paper_engine = get_paper_engine()
+        
+        total_value = 100000.0  # Base capital
+        unrealized_pnl = 0.0
+        positions = []
+        
+        for user_id, portfolio in paper_engine.portfolios.items():
+            for pos_key, position in portfolio.positions.items():
+                try:
+                    pnl = paper_engine._calculate_position_pnl(position)
+                except Exception:
+                    pnl = 0.0
+                unrealized_pnl += pnl
+                positions.append({
+                    "asset": position.asset,
+                    "side": position.side,
+                    "size": position.size_usd,
+                    "pnl": pnl
+                })
+        
+        return {
+            "total_value": total_value + unrealized_pnl,
+            "unrealized_pnl": unrealized_pnl,
+            "positions": positions,
+            "position_count": len(positions)
+        }
+    except Exception as exc:
+        logger.error(f"Portfolio summary failed: {exc}")
+        return {
+            "total_value": 100000.0,
+            "unrealized_pnl": 0.0,
+            "positions": [],
+            "position_count": 0
+        }
+
+
+@router.get("/orders/open")
+async def get_open_orders():
+    """Get open/pending orders across all venues."""
     from trading.paper_trading import get_paper_engine
-    
     paper_engine = get_paper_engine()
-    
-    total_value = 100000.0  # Base capital
-    unrealized_pnl = 0.0
-    positions = []
-    
+    orders = []
+
     for user_id, portfolio in paper_engine.portfolios.items():
-        for pos_key, position in portfolio.positions.items():
-            pnl = paper_engine._calculate_position_pnl(position)
-            unrealized_pnl += pnl
-            positions.append({
-                "asset": position.asset,
-                "side": position.side,
-                "size": position.size_usd,
-                "pnl": pnl
-            })
-    
-    return {
-        "total_value": total_value + unrealized_pnl,
-        "unrealized_pnl": unrealized_pnl,
-        "positions": positions,
-        "position_count": len(positions)
-    }
+        for trade in portfolio.trade_history:
+            # trade_history may contain PaperOrder dataclasses or dicts
+            if isinstance(trade, dict):
+                status = trade.get("status", "filled")
+                status_str = status.value if hasattr(status, "value") else str(status)
+                if status_str in ("open", "pending"):
+                    orders.append({
+                        "id": trade.get("trade_id", ""),
+                        "symbol": trade.get("asset", ""),
+                        "side": trade.get("side", "buy"),
+                        "type": trade.get("order_type", "market"),
+                        "quantity": trade.get("size", 0),
+                        "price": trade.get("price"),
+                        "status": status_str,
+                        "timestamp": trade.get("timestamp", ""),
+                        "venue": trade.get("venue", "Paper"),
+                    })
+            else:
+                status = getattr(trade, "status", "filled")
+                status_str = status.value if hasattr(status, "value") else str(status)
+                if status_str in ("open", "pending"):
+                    orders.append({
+                        "id": getattr(trade, "order_id", ""),
+                        "symbol": getattr(trade, "asset", ""),
+                        "side": getattr(trade, "side", "buy"),
+                        "type": getattr(trade, "order_type", "market"),
+                        "quantity": getattr(trade, "size_usd", 0),
+                        "price": getattr(trade, "price", None),
+                        "status": status_str,
+                        "timestamp": getattr(trade, "created_at", ""),
+                        "venue": getattr(trade, "venue", "Paper"),
+                    })
+
+    return {"orders": orders, "total": len(orders)}
 
 
 @router.get("/backtest/results")
@@ -667,7 +719,6 @@ async def get_backtest_results():
 async def get_paper_trading_status():
     """Get paper trading status for dashboard."""
     from trading.paper_trading import get_paper_engine
-    
     paper_engine = get_paper_engine()
     
     trades_today = 0

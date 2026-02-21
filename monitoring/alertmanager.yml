@@ -19,6 +19,10 @@ route:
       receiver: 'pagerduty-critical'
       continue: true
     - match:
+        severity: critical
+      receiver: 'telegram-critical'
+      continue: true
+    - match:
         severity: warning
       receiver: 'slack-alerts'
       continue: true
@@ -86,6 +90,14 @@ receivers:
         text: 'PagerDuty has been notified. Check PagerDuty for details.'
         send_resolved: true
 
+  - name: 'slack-alerts'
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#merid-alerts'
+        title: '[WARNING] {{ .GroupLabels.alertname }}'
+        text: '{{ .GroupLabels.alertname }} - {{ .Annotations.description }}'
+        send_resolved: true
+
   - name: 'slack-governance'
     slack_configs:
       - api_url: '${SLACK_WEBHOOK_URL}'
@@ -130,6 +142,21 @@ receivers:
           - type: 'button'
             text: 'Database Runbook'
             url: 'https://docs.merid.com/runbooks/DATABASE_ISSUES'
+
+  - name: 'telegram-critical'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: ${TELEGRAM_CHAT_ID}
+        parse_mode: 'HTML'
+        message: |
+          🚨 <b>MERID Alert</b>
+          <b>Alert:</b> {{ .GroupLabels.alertname }}
+          <b>Severity:</b> {{ .GroupLabels.severity }}
+          {{ range .Alerts.Firing }}
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
 
 inhibit_rules:
   # Don't alert on latency if the service is down

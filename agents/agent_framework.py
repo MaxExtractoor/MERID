@@ -5,9 +5,10 @@ Agent registry, messaging, tools, and lifecycle management.
 from __future__ import annotations
 
 import asyncio
+import collections
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -82,6 +83,7 @@ class AgentMetrics:
     decisions_made: int
     success_rate: float
     average_latency_ms: float
+    p95_latency_ms: float
     errors: int
     uptime_seconds: float
 
@@ -105,6 +107,7 @@ class Agent(ABC):
         self._messages_received = 0
         self._decisions_made = 0
         self._errors = 0
+        self._latency_samples: collections.deque = collections.deque(maxlen=200)
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -187,7 +190,9 @@ class Agent(ABC):
                         timeout=1.0
                     )
                     
+                    t0 = time.monotonic()
                     response = await self.process_message(message)
+                    self._latency_samples.append((time.monotonic() - t0) * 1000)
                     
                     if response:
                         await self.send_message(response)
@@ -203,15 +208,29 @@ class Agent(ABC):
                 self.status = AgentStatus.ERROR
                 await asyncio.sleep(5.0)
     
+    def record_latency(self, latency_ms: float) -> None:
+        """Record a latency sample (ms) from an external caller (e.g. orchestrator)."""
+        self._latency_samples.append(latency_ms)
+
     def get_metrics(self) -> AgentMetrics:
         """Get agent metrics."""
+        samples = list(self._latency_samples)
+        if samples:
+            avg_lat = sum(samples) / len(samples)
+            sorted_s = sorted(samples)
+            p95_idx = min(int(len(sorted_s) * 0.95), len(sorted_s) - 1)
+            p95_lat = sorted_s[p95_idx]
+        else:
+            avg_lat = 0.0
+            p95_lat = 0.0
         return AgentMetrics(
             agent_id=self.agent_id,
             messages_sent=self._messages_sent,
             messages_received=self._messages_received,
             decisions_made=self._decisions_made,
             success_rate=1.0 - (self._errors / max(self._decisions_made, 1)),
-            average_latency_ms=0.0,  # TODO: Track latency
+            average_latency_ms=round(avg_lat, 2),
+            p95_latency_ms=round(p95_lat, 2),
             errors=self._errors,
             uptime_seconds=time.time() - self._start_time
         )

@@ -21,6 +21,9 @@ from typing import Dict, List, Optional
 
 from utils.logger import get_logger
 
+import logging
+logger = logging.getLogger("metrics")
+
 logger = get_logger("merid.resilience.metrics")
 
 
@@ -76,7 +79,17 @@ class MetricsCollector:
         families.extend(self._collect_circuit_breaker_metrics())
         families.extend(self._collect_bulkhead_metrics())
         families.extend(self._collect_risk_metrics())
+        families.extend(self._collect_lane_metrics())
         return families
+
+    def _collect_lane_metrics(self) -> List[MetricFamily]:
+        """Collect per-lane trading metrics from LaneMetrics registry."""
+        try:
+            from merid.lanes.lane_metrics import lane_metrics_families
+            return lane_metrics_families()
+        except Exception as _e:
+            logger.debug("lane_metrics_families probe failed: %s", _e)
+            return []
     
     def _collect_circuit_breaker_metrics(self) -> List[MetricFamily]:
         """Collect circuit breaker metrics."""
@@ -225,7 +238,8 @@ class MetricsCollector:
         
         try:
             status = get_risk_status()
-        except Exception:
+        except Exception as _e:
+            logger.debug("get_risk_status probe failed: %s", _e)
             return []
         
         families = []

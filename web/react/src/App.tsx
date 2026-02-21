@@ -1,33 +1,58 @@
 import { useState } from "react";
+import { useFillToast } from "./hooks/useFillToast";
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
 import Overview from "./views/Overview";
-import Trading from "./views/Trading";
-import Agents from "./views/Agents";
-import Predictions from "./views/Predictions";
-import Risk from "./views/Risk";
-import Health from "./views/Health";
-import ApiDashboard from "./views/ApiDashboard";
-import Research from "./views/Research";
 import Logs from "./views/Logs";
 import Settings from "./views/Settings";
-import Wallet from "./views/Wallet";
-import Treasury from "./views/Treasury";
-import Social from "./views/Social";
-import Betting from "./views/Betting";
-import Mining from "./views/Mining";
-import Institutional from "./views/Institutional";
-import Plugins from "./views/Plugins";
+import KillSwitchView from "./views/KillSwitchView";
+import KalshiGridView from "./views/KalshiGridView";
+import KalshiDashboardView from "./views/KalshiDashboardView";
+import KalshiPortfolioView from "./views/KalshiPortfolioView";
+import KalshiVolDashboardView from "./views/KalshiVolDashboardView";
+import KalshiTerminalView from "./views/KalshiTerminalView";
+import KalshiAgentPerformanceView from "./views/KalshiAgentPerformanceView";
+import KalshiSentimentView from "./views/KalshiSentimentView";
+import LaneControlDashboard from "./views/LaneControlDashboard";
+import SwarmConsensusMatrix from "./views/SwarmConsensusMatrix";
+import CalibrationDashboardView from "./views/CalibrationDashboardView";
+import OperatorDashboard from "./views/OperatorDashboard";
+import ErrorBoundary from "./components/ErrorBoundary";
+import CommandPalette from "./components/CommandPalette";
+import { StubRegistryProvider } from "./components/GlobalStubBanner";
+import { KalshiModeProvider } from "./context/KalshiModeContext";
+import { RealtimeDisconnectedBanner } from "./components/RealtimeDisconnectedBanner";
+import { ExecutionBlockedBanner } from "./components/ExecutionBlockedBanner";
+import { GateChangeToast } from "./components/GateChangeToast";
 import { ThemeProvider } from "./theme";
+import ToastProvider from "./components/ToastProvider";
+import type { View } from "./types/views";
 
-type View = "overview" | "trading" | "agents" | "predictions" | "risk" | "health" | "api" | "research" | "logs" | "settings" | "analytics" | "wallet" | "treasury" | "social" | "betting" | "mining" | "institutional" | "plugins";
+function FillToastWatcher() {
+  useFillToast();
+  return null;
+}
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem('merid-sidebar-collapsed') === 'true'; } catch { return false; }
+  });
+
+  const toggleSidebarCollapse = () => {
+    setSidebarCollapsed(prev => {
+      const next = !prev;
+      try { localStorage.setItem('merid-sidebar-collapsed', String(next)); } catch { /* ignore storage errors */ }
+      return next;
+    });
+  };
 
   return (
     <ThemeProvider>
+    <StubRegistryProvider>
+    <KalshiModeProvider>
+    <ToastProvider>
       <div className="flex h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
         {/* Animated background gradient */}
         <div className="fixed inset-0 bg-gradient-to-br from-blue-950/20 via-purple-950/20 to-slate-950/20 animate-gradient pointer-events-none" 
@@ -40,15 +65,19 @@ export default function App() {
             setView(v);
             setSidebarOpen(false);
           }} 
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={toggleSidebarCollapse}
           className="hidden md:flex relative z-10"
         />
 
         {/* Mobile sidebar drawer */}
         {sidebarOpen && (
           <>
-            <div 
+            <button
+              type="button"
               className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 md:hidden"
               onClick={() => setSidebarOpen(false)}
+              aria-label="Close sidebar"
             />
             <Sidebar
               current={view}
@@ -61,32 +90,43 @@ export default function App() {
           </>
         )}
 
+        {/* Command Palette (Ctrl+K) */}
+        <CommandPalette onNavigate={(v) => { setView(v); setSidebarOpen(false); }} />
+
         {/* Main content area */}
         <div className="flex flex-1 flex-col overflow-hidden relative z-10">
           <TopBar onMenuClick={() => setSidebarOpen(true)} />
+          <RealtimeDisconnectedBanner />
+          <ExecutionBlockedBanner />
           
           <main className="flex-1 overflow-auto p-4 lg:p-6">
-            {view === "overview" && <Overview />}
-            {view === "trading" && <Trading />}
-            {view === "agents" && <Agents />}
-            {view === "predictions" && <Predictions />}
-            {view === "risk" && <Risk />}
-            {view === "health" && <Health />}
-            {view === "api" && <ApiDashboard />}
-            {view === "research" && <Research />}
-            {view === "analytics" && <Logs />}
-            {view === "logs" && <Logs />}
-            {view === "settings" && <Settings />}
-            {view === "wallet" && <Wallet />}
-            {view === "treasury" && <Treasury />}
-            {view === "social" && <Social />}
-            {view === "betting" && <Betting />}
-            {view === "mining" && <Mining />}
-            {view === "institutional" && <Institutional />}
-            {view === "plugins" && <Plugins />}
+            <ErrorBoundary viewName={view}>
+              {view === "overview" && <Overview />}
+              {view === "kalshi-dashboard" && <KalshiDashboardView />}
+              {view === "kalshi-grid" && <KalshiGridView />}
+              {view === "kalshi-portfolio" && <KalshiPortfolioView />}
+              {view === "positions" && <KalshiPortfolioView initialTab="positions" />}
+              {view === "orders" && <KalshiPortfolioView initialTab="orders" />}
+              {view === "kalshi-vol-dashboard" && <KalshiVolDashboardView />}
+              {view === "kalshi-terminal" && <KalshiTerminalView />}
+              {view === "kalshi-performance" && <KalshiAgentPerformanceView />}
+              {view === "kalshi-sentiment" && <KalshiSentimentView />}
+              {view === "lane-control" && <LaneControlDashboard />}
+              {view === "swarm-consensus" && <SwarmConsensusMatrix />}
+              {view === "calibration-dashboard" && <CalibrationDashboardView />}
+              {view === "operator" && <OperatorDashboard />}
+              {view === "kill-switch" && <KillSwitchView />}
+              {view === "logs" && <Logs />}
+              {view === "settings" && <Settings />}
+            </ErrorBoundary>
           </main>
         </div>
       </div>
+      <FillToastWatcher />
+      <GateChangeToast />
+    </ToastProvider>
+    </KalshiModeProvider>
+    </StubRegistryProvider>
     </ThemeProvider>
   );
 }

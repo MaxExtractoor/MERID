@@ -92,8 +92,6 @@ async def register_agent_assertions_batch(batch: AgentDataBatch):
         source = get_agent_assertion_source()
         
         # Get blind spots before
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         current_time = time.time()
@@ -159,8 +157,6 @@ async def get_agent_assertions():
 async def get_agent_blind_spots():
     """Get current blind spots and agent domain status."""
     try:
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         current_time = time.time()
@@ -208,8 +204,6 @@ async def load_demo_agent_data():
         ]
         
         # Get blind spots before
-        from core.reality_registry import get_reality_registry
-        from core.reality_auditor import get_reality_auditor
         registry = get_reality_registry()
         auditor = get_reality_auditor()
         

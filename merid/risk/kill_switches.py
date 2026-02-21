@@ -130,12 +130,34 @@ class RiskController:
             logger.info(f"[risk] New trading day, resetting daily P&L from {self._daily_pnl}")
             self._daily_pnl = 0.0
             self._daily_pnl_reset_date = today
-        
+
+        # Inline daily-loss check: fire kill if limit already breached
+        # (catches cases where _global_kill was not yet set by record_pnl)
+        if (
+            not self._global_kill
+            and self._daily_pnl < 0
+            and abs(self._daily_pnl) >= self.daily_loss_limit
+        ):
+            self._trigger_kill(
+                KillSwitchReason.DAILY_LOSS,
+                f"Daily loss ${abs(self._daily_pnl):.2f} exceeds limit ${self.daily_loss_limit:.2f} (detected in can_trade)",
+            )
+
         return not self._global_kill
     
     def get_state(self) -> KillSwitchState:
         """Get current kill switch state."""
         return KillSwitchState.TRIGGERED if self._global_kill else KillSwitchState.ACTIVE
+    
+    def state(self) -> str:
+        """Get current state as string."""
+        return self.get_state().value
+    
+    def get_kill_reason(self) -> Optional[str]:
+        """Get the reason for kill switch activation, if any."""
+        if self._kill_reason:
+            return f"{self._kill_reason.value}: {self._kill_details}" if self._kill_details else self._kill_reason.value
+        return None
     
     def get_status(self) -> dict:
         """
@@ -193,7 +215,34 @@ class RiskController:
             details=details,
         )
         self._events.append(event)
+
+        # Record session event
+        try:
+            from core.session_log import record_event
+            record_event(
+                category="kill_switch",
+                severity="critical",
+                title="Kill switch TRIGGERED",
+                detail=details,
+                hint="Reset via Mode & Safety panel after investigating the trigger cause.",
+                metadata={"reason": reason.value if hasattr(reason, 'value') else str(reason)},
+            )
+        except Exception as _se_exc:
+            logger.debug("[risk] kill_switch session log failed: %s", _se_exc)
         
+        # Telegram alert — kill switch is the most critical event
+        try:
+            import asyncio as _aio
+            from merid.alerts.webhook_client import tg_send
+            _loop = _aio.get_running_loop()
+            _loop.create_task(tg_send(
+                f"\U0001f6a8 [KILL SWITCH] <b>{reason.value.upper()}</b>\n{details}"
+            ))
+        except RuntimeError:
+            logger.debug("[risk] kill_switch Telegram skipped — no running loop")
+        except Exception as _tg_exc:
+            logger.debug("[risk] kill_switch Telegram failed: %s", _tg_exc)
+
         # Notify callbacks
         for callback in self._callbacks:
             try:
@@ -231,6 +280,20 @@ class RiskController:
             details=f"Reset by {operator} (was: {old_reason} - {old_details})",
         )
         self._events.append(event)
+
+        # Record session event
+        try:
+            from core.session_log import record_event
+            record_event(
+                category="kill_switch",
+                severity="info",
+                title="Kill switch RESET",
+                detail=f"Reset by {operator} (was: {old_reason} - {old_details})",
+                hint="Monitor for recurrence. If the trigger was automatic, check risk thresholds.",
+                metadata={"operator": operator},
+            )
+        except Exception as _se_exc:
+            logger.debug("[risk] kill_switch reset session log failed: %s", _se_exc)
         
         logger.warning(f"[risk] Kill switch RESET by {operator}")
         return True
@@ -318,6 +381,21 @@ class RiskController:
     # Callbacks
     # -------------------------------------------------------------------------
     
+    def reset_daily_counters(self) -> None:
+        """Zero transient PnL / error counters for a fresh start.
+
+        Kill-switch state (_global_kill, _kill_reason, etc.) is
+        deliberately **preserved** so a reset cannot silently
+        re-enable trading.
+        """
+        self._daily_pnl = 0.0
+        self._daily_pnl_reset_date = self._today()
+        self._total_position_value = 0.0
+        self._error_count = 0
+        self._error_window_start = time.time()
+        self._events.clear()
+        logger.info("[risk] Daily counters reset (kill-switch state preserved)")
+
     def on_kill(self, callback: Callable[[KillSwitchEvent], None]) -> None:
         """Register callback for kill switch events."""
         self._callbacks.append(callback)

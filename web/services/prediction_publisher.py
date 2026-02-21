@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 from observability.event_stream import get_event_stream
 from monitoring.prediction_markets import get_prediction_aggregator, ResolutionStatus
@@ -92,7 +92,7 @@ class PredictionPublisher:
                                 end_time = None
                         
                         if not end_time:
-                            end_time = datetime.now().isoformat()
+                            end_time = datetime.now(timezone.utc).isoformat()
                         
                         formatted_markets.append({
                             "id": market.market_id,

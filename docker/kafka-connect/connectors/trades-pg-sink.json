@@ -1,0 +1,21 @@
+{
+  "name": "trades-pg-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+    "tasks.max": "2",
+    "topics": "trades.executed",
+    "connection.url": "jdbc:postgresql://trading-db:5432/merid",
+    "connection.user": "${file:/opt/kafka-connect/secrets/pg-credentials.properties:username}",
+    "connection.password": "${file:/opt/kafka-connect/secrets/pg-credentials.properties:password}",
+    "auto.create": "true",
+    "auto.evolve": "true",
+    "insert.mode": "upsert",
+    "pk.mode": "record_key",
+    "pk.fields": "trade_id",
+    "delete.enabled": "false",
+    "table.name.format": "trades_executed",
+    "batch.size": "1000",
+    "max.retries": "10",
+    "retry.backoff.ms": "3000"
+  }
+}

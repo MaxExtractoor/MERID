@@ -86,35 +86,48 @@ async def get_pending_votes() -> Dict[str, Any]:
 @router.get("/history")
 async def get_consensus_history(limit: int = 20) -> Dict[str, Any]:
     """Get recent consensus decisions."""
-    engine = get_consensus_engine()
-    
-    # Get from consensus logger
-    history = engine.consensus_logger.get_recent_decisions(limit=limit)
-    
-    return {
-        "decisions": history,
-        "count": len(history),
-    }
+    try:
+        engine = get_consensus_engine()
+        history = engine.consensus_logger.get_recent_decisions(limit=limit)
+        return {
+            "decisions": history,
+            "count": len(history),
+        }
+    except Exception as e:
+        logger.warning("Consensus history unavailable: %s", e)
+        return {"decisions": [], "count": 0}
 
 
 @router.get("/metrics")
 async def get_consensus_metrics() -> Dict[str, Any]:
     """Get consensus engine performance metrics."""
-    engine = get_consensus_engine()
-    
-    # Get metrics from logger
-    metrics = engine.consensus_logger.get_metrics()
-    
-    return {
-        "total_rounds": metrics.get("total_rounds", 0),
-        "successful_consensus": metrics.get("successful", 0),
-        "vetoed_decisions": metrics.get("vetoed", 0),
-        "rerounds_requested": metrics.get("rerounds", 0),
-        "avg_vote_count": metrics.get("avg_votes", 0),
-        "avg_confidence": metrics.get("avg_confidence", 0),
-        "quorum_rate": metrics.get("quorum_rate", 0),
-        "trust_scores": dict(engine.trust_scores),
-    }
+    try:
+        engine = get_consensus_engine()
+        
+        # Get metrics from logger
+        metrics = engine.consensus_logger.get_metrics()
+        
+        return {
+            "total_rounds": metrics.get("total_rounds", 0),
+            "successful_consensus": metrics.get("successful", 0),
+            "vetoed_decisions": metrics.get("vetoed", 0),
+            "rerounds_requested": metrics.get("rerounds", 0),
+            "avg_vote_count": metrics.get("avg_votes", 0),
+            "avg_confidence": metrics.get("avg_confidence", 0),
+            "quorum_rate": metrics.get("quorum_rate", 0),
+            "trust_scores": dict(engine.trust_scores),
+        }
+    except Exception:
+        return {
+            "total_rounds": 0,
+            "successful_consensus": 0,
+            "vetoed_decisions": 0,
+            "rerounds_requested": 0,
+            "avg_vote_count": 0,
+            "avg_confidence": 0,
+            "quorum_rate": 0,
+            "trust_scores": {},
+        }
 
 
 @router.post("/start")
