@@ -3,20 +3,22 @@
 > Canonical reference for the MERID autonomous multi-AI swarm intelligence
 > trading platform, fully wired to Kalshi prediction markets.
 >
-> **14 active views** · **5 sidebar groups** · **8-step operator workflow**
+> **17 active views** · **5 sidebar groups** · **8-step operator workflow**
 
 ---
 
 ## Sidebar Structure
 
 ```
-TRADING                          SWARM INTELLIGENCE
+LIVE TRADING                     SWARM INTELLIGENCE
   Overview                         Agent Grid
   Terminal                         Swarm Matrix
   Markets                          Performance
-  Portfolio                        Lane Control
+  Portfolio                        Calibration
+  Positions                        Lane Control
+  Orders
 
-ANALYTICS                        OPERATOR
+ANALYTICS                        COMMAND CENTER
   Fear / Greed                     Operator
   Vol & Sizing                     Kill Switch
 
@@ -35,9 +37,12 @@ SYSTEM
 | `kalshi-terminal` | KalshiTerminalView | 613 | Execution cockpit: orderbook, trade ticket, Kelly sizing, focused orders/fills |
 | `kalshi-dashboard` | KalshiDashboardView | ~1440 | Market discovery: search, filter, favorites, edge signals, trade ticket |
 | `kalshi-portfolio` | KalshiPortfolioView | 944 | Portfolio management: positions/orders/fills/risk tabs, cancel/amend, order groups, batch orders, PnL chart |
+| `positions` | KalshiPortfolioView | — | Deep-link to Portfolio positions tab (initialTab="positions") |
+| `orders` | KalshiPortfolioView | — | Deep-link to Portfolio orders tab (initialTab="orders") |
 | `kalshi-grid` | KalshiGridView | ~1128 | Agent grid: 5 assets × 4 timeframes, start/stop/pause, kill switch, fills, paper ladder |
 | `swarm-consensus` | SwarmConsensusMatrix | 478 | Multi-agent consensus matrix: direction, probability, confidence per asset×timeframe |
-| `kalshi-performance` | KalshiAgentPerformanceView | 386 | Agent leaderboard: win rates, Sharpe, calibration, edge accuracy |
+| `kalshi-performance` | KalshiAgentPerformanceView | 386 | Agent leaderboard: win rates, Sharpe, calibration error, edge accuracy |
+| `calibration-dashboard` | CalibrationDashboardView | 460 | Forecaster Brier scores, weight correlation matrix, resolver accuracy |
 | `lane-control` | LaneControlDashboard | 492 | Cross-timeframe signals, deployment phases (paper→shadow→live), auto-promoter |
 | `kalshi-sentiment` | KalshiSentimentView | 675 | Fear/Greed gauge, per-category sentiment, component breakdown |
 | `kalshi-vol-dashboard` | KalshiVolDashboardView | 853 | Vol targeting, sizing metrics, risk limits, equity chart, volume alerts, AI insights |
