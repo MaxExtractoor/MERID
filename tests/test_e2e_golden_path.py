@@ -60,7 +60,7 @@ from merid.signals.decay import DecayEnvelope, SignalSnapshot
 
 # ── Reconciliation imports ────────────────────────────────────────────
 
-from merid.reconciliation import PositionDiscrepancy, reconcile_venue
+from merid.reconciliation import VenuePositionDiscrepancy as PositionDiscrepancy, reconcile_venue
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -435,7 +435,7 @@ class TestReconciliation(unittest.TestCase):
         self.assertIn("delta_qty", d)
 
     @patch("trading.adapters.registry.get_adapter")
-    @patch("merid.reconciliation._get_merid_positions")
+    @patch("merid.reconciliation.venue_reconciler._get_merid_positions")
     def test_reconcile_venue_detects_mismatch(self, mock_merid, mock_adapter_fn):
         mock_adapter = MagicMock()
         mock_adapter.get_positions.return_value = [
@@ -451,7 +451,7 @@ class TestReconciliation(unittest.TestCase):
         self.assertAlmostEqual(discs[0].delta_qty, 2.0)
 
     @patch("trading.adapters.registry.get_adapter")
-    @patch("merid.reconciliation._get_merid_positions")
+    @patch("merid.reconciliation.venue_reconciler._get_merid_positions")
     def test_reconcile_venue_no_mismatch(self, mock_merid, mock_adapter_fn):
         mock_adapter = MagicMock()
         mock_adapter.get_positions.return_value = [
