@@ -1046,7 +1046,7 @@ class MeridLoop:
             odds = await asyncio.get_running_loop().run_in_executor(
                 None, client.fetch_all_odds
             )
-            for snapshot in odds:
+            for event, snapshot in odds:
                 store.store_odds_snapshot(snapshot)
 
             # Rebuild consensus for all events with fresh odds

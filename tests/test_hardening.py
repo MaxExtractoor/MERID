@@ -142,6 +142,7 @@ class TestExecutionGuard(unittest.TestCase):
 
     def setUp(self):
         self.guard = ExecutionGuard()
+        self.guard.deactivate_kill_switch()  # Clear any persisted state from prior tests
 
     def test_allows_normal_trade(self):
         self.guard.update_cqi("crypto", 0.8)
@@ -228,6 +229,7 @@ class TestKillSwitch(unittest.TestCase):
 
     def test_global_kill_blocks_all_domains(self):
         guard = ExecutionGuard()
+        guard.deactivate_kill_switch()
         guard.update_cqi("crypto", 0.9)
         guard.update_cqi("prediction", 0.9)
         guard.activate_kill_switch("emergency")
@@ -238,6 +240,7 @@ class TestKillSwitch(unittest.TestCase):
 
     def test_domain_kill_only_blocks_that_domain(self):
         guard = ExecutionGuard()
+        guard.deactivate_kill_switch()
         guard.update_cqi("crypto", 0.9)
         guard.update_cqi("prediction", 0.9)
         guard.activate_domain_kill_switch("crypto")
@@ -250,6 +253,7 @@ class TestKillSwitch(unittest.TestCase):
 
     def test_deactivate_domain_kill(self):
         guard = ExecutionGuard()
+        guard.deactivate_kill_switch()
         guard.update_cqi("crypto", 0.9)
         guard.activate_domain_kill_switch("crypto")
         guard.deactivate_domain_kill_switch("crypto")
@@ -512,6 +516,7 @@ class TestKalshiDomainE2E(unittest.TestCase):
     def test_prediction_guard_applies_prediction_caps(self):
         """Prediction domain should have tighter caps than crypto."""
         guard = ExecutionGuard()
+        guard.deactivate_kill_switch()
         guard.update_cqi("prediction", 0.8)
 
         v = guard.pre_trade_check("pk1", "KXBTC", "prediction", 2000)
@@ -595,6 +600,7 @@ class TestFlowDomainE2E(unittest.TestCase):
     def test_flow_guard_respects_crypto_caps(self):
         """Meme/flow trades should fall under crypto domain caps."""
         guard = ExecutionGuard()
+        guard.deactivate_kill_switch()
         guard.update_cqi("crypto", 0.8)
 
         v = guard.pre_trade_check("pf1", "BONK", "crypto", 500)
@@ -701,6 +707,7 @@ class TestWalletBalancesEndpoint(unittest.TestCase):
         """Execution guard cap usage should appear as informational transactions."""
         from merid.execution_guard import ExecutionGuard
         guard = ExecutionGuard()
+        guard.deactivate_kill_switch()
         guard.update_cqi("crypto", 0.8)
         v = guard.pre_trade_check("p1", "BTC", "crypto", 500)
         self.assertTrue(v.allowed)
@@ -802,6 +809,7 @@ class TestTreasuryOverview(unittest.TestCase):
         """Execution guard domain caps should appear as treasury balances."""
         from merid.execution_guard import ExecutionGuard
         guard = ExecutionGuard()
+        guard.deactivate_kill_switch()
         # Fresh guard → all caps at max
         for domain, cap in guard._domain_caps.items():
             remaining = cap.remaining_notional()
