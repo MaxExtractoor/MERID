@@ -131,14 +131,15 @@ class TestOrderbookForecaster:
         from merid.prediction.forecasters import OrderbookForecaster
         assert OrderbookForecaster is not None
 
-    def test_registry_has_four_forecasters(self):
+    def test_registry_has_orderbook_forecaster(self):
         from merid.prediction.forecasters.registry import get_forecaster_registry
         import merid.prediction.forecasters.registry as mod
         old = mod._registry
         mod._registry = None
         try:
             reg = get_forecaster_registry()
-            assert len(reg._forecasters) == 4
+            ids = [f.forecaster_id for f in reg._forecasters]
+            assert "orderbook_micro" in ids
         finally:
             mod._registry = old
 
@@ -387,8 +388,8 @@ class TestGapAnalysisNO:
     def test_overall_score(self):
         with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:
             content = f.read()
-        assert "57/62" in content
-        assert "**A**" in content
+        assert "62/62" in content
+        assert "**A+**" in content
 
     def test_orderbook_forecaster_in_doc(self):
         with open(os.path.join("docs", "KALSHI_SWARM_GAP_ANALYSIS.md"), "r", encoding="utf-8") as f:

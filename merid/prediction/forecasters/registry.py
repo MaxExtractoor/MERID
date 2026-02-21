@@ -251,7 +251,11 @@ def get_forecaster_registry() -> ForecasterRegistry:
     if _registry is None:
         from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
         from merid.prediction.forecasters.orderbook import OrderbookForecaster
+        from merid.prediction.forecasters.time_series import TimeSeriesForecaster
+        from merid.prediction.forecasters.sentiment import ExternalSentimentForecaster
         _registry = ForecasterRegistry()  # __init__ auto-registers momentum + mean_reversion
         _registry.register(MacroRegimeForecaster())
         _registry.register(OrderbookForecaster())
+        _registry.register(TimeSeriesForecaster())
+        _registry.register(ExternalSentimentForecaster())
     return _registry
