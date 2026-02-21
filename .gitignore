@@ -139,6 +139,51 @@ pubspec.lock
 *.iml
 *.url
 .hintrc
-.merid_safeguard.yml
 devtools_options.yaml
 .coverage_dir_backup/
+desktop.ini
+
+# ── Claude / AI worktrees ───────────────────────────────────────────
+.claude/
+
+# ── Legacy directories (removed from git 2026-02-21) ────────────────
+# Flutter platforms
+android/
+ios/
+linux/
+macos/
+windows/
+flutter/
+assets/fonts/
+
+# Legacy backends / APIs
+backend/
+merid-api/
+src/
+docker/
+librex/
+
+# Legacy domain modules (no active imports)
+cognitive_core/
+sovereignty/
+collaborative/
+knowledge/
+learning/
+legal/
+onboarding/
+trust/
+marketing_swarm/
+
+# Legacy infra / tooling (no active imports)
+artifacts/
+baselines/
+examples/
+experiments/
+flink/
+hooks/
+infra/
+mocks/
+operations/
+packages/
+policy/
+runbooks/
