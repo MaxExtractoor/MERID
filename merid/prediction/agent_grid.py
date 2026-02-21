@@ -220,6 +220,15 @@ class AgentGrid:
         except Exception as exc:
             logger.warning(f"Critic agent start failed (non-fatal): {exc}")
 
+        # Start execution subscriber (Sprint M — Decision bus → execution routing)
+        try:
+            from merid.swarm.execution_subscriber import get_execution_subscriber
+            self._execution_subscriber = get_execution_subscriber()
+            await self._execution_subscriber.start()
+            logger.info("✓ Execution subscriber started (Decision bus → order routing)")
+        except Exception as exc:
+            logger.warning(f"Execution subscriber start failed (non-fatal): {exc}")
+
         logger.info(
             f"✅ AgentGrid fully operational: {len(self._agents)} agents running, "
             f"mode={'DEMO' if self._config.venue.use_demo else 'LIVE'}"
@@ -268,6 +277,14 @@ class AgentGrid:
                 logger.info("✓ Outcome resolver stopped")
             except Exception as exc:
                 logger.debug(f"Outcome resolver stop error: {exc}")
+
+        # Stop execution subscriber (Sprint M)
+        if hasattr(self, '_execution_subscriber') and self._execution_subscriber:
+            try:
+                await self._execution_subscriber.stop()
+                logger.info("✓ Execution subscriber stopped")
+            except Exception as exc:
+                logger.debug(f"Execution subscriber stop error: {exc}")
 
         # Stop edge recalibrator (Sprint K)
         if hasattr(self, '_edge_recalibrator') and self._edge_recalibrator:
