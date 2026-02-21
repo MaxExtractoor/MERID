@@ -98,6 +98,24 @@ class MarketSnapshot:
     sentiment_regime: Optional[str] = None     # extreme_fear|fear|greed|extreme_greed
 
 
+_active_snapshots: List[MarketSnapshot] = []
+
+
+def record_snapshot(snapshot: MarketSnapshot) -> None:
+    """Record a market snapshot for critic evaluation."""
+    global _active_snapshots
+    # Keep latest per market_id, cap at 200
+    _active_snapshots = [s for s in _active_snapshots if s.market_id != snapshot.market_id]
+    _active_snapshots.append(snapshot)
+    if len(_active_snapshots) > 200:
+        _active_snapshots = _active_snapshots[-200:]
+
+
+def get_active_snapshots() -> List[MarketSnapshot]:
+    """Return current active market snapshots for critic checks."""
+    return list(_active_snapshots)
+
+
 class PredictionMarketModel:
     """Core prediction market model for Kalshi.
 
