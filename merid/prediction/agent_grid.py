@@ -202,6 +202,24 @@ class AgentGrid:
         except Exception as exc:
             logger.warning(f"Outcome resolver start failed (non-fatal): {exc}")
 
+        # Start edge recalibrator (Sprint G/K — auto-adjust edge thresholds every 30m)
+        try:
+            from merid.prediction.edge_recalibrator import get_edge_recalibrator
+            self._edge_recalibrator = get_edge_recalibrator()
+            await self._edge_recalibrator.start()
+            logger.info("✓ Edge recalibrator started (threshold adjustment every 30m)")
+        except Exception as exc:
+            logger.warning(f"Edge recalibrator start failed (non-fatal): {exc}")
+
+        # Start critic agent (Sprint H/K — staleness + liquidity → Critique messages)
+        try:
+            from merid.swarm.critic_agent import get_critic_agent
+            self._critic_agent = get_critic_agent()
+            await self._critic_agent.start()
+            logger.info("✓ Critic agent started (staleness + liquidity sweep every 30s)")
+        except Exception as exc:
+            logger.warning(f"Critic agent start failed (non-fatal): {exc}")
+
         logger.info(
             f"✅ AgentGrid fully operational: {len(self._agents)} agents running, "
             f"mode={'DEMO' if self._config.venue.use_demo else 'LIVE'}"
@@ -250,6 +268,22 @@ class AgentGrid:
                 logger.info("✓ Outcome resolver stopped")
             except Exception as exc:
                 logger.debug(f"Outcome resolver stop error: {exc}")
+
+        # Stop edge recalibrator (Sprint K)
+        if hasattr(self, '_edge_recalibrator') and self._edge_recalibrator:
+            try:
+                await self._edge_recalibrator.stop()
+                logger.info("✓ Edge recalibrator stopped")
+            except Exception as exc:
+                logger.debug(f"Edge recalibrator stop error: {exc}")
+
+        # Stop critic agent (Sprint K)
+        if hasattr(self, '_critic_agent') and self._critic_agent:
+            try:
+                await self._critic_agent.stop()
+                logger.info("✓ Critic agent stopped")
+            except Exception as exc:
+                logger.debug(f"Critic agent stop error: {exc}")
 
         # Stop volume monitor
         if self._volume_poll_task and not self._volume_poll_task.done():

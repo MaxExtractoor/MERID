@@ -115,6 +115,21 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 "links_to": ["kalshi-grid", "kalshi-portfolio"],
             },
             {
+                "id": "calibration-dashboard",
+                "label": "Calibration",
+                "href": "calibration-dashboard",
+                "icon": "Target",
+                "color": "text-rose-400",
+                "endpoints": [
+                    "/api/v1/kalshi/metrics/forecasters",
+                    "/api/v1/kalshi/metrics/resolver",
+                    "/api/v1/kalshi/correlation/matrix",
+                    "/api/v1/kalshi/correlation/clusters",
+                ],
+                "workflow_phase": "monitoring",
+                "links_to": ["kalshi-performance", "kalshi-grid"],
+            },
+            {
                 "id": "kalshi-portfolio",
                 "label": "Portfolio",
                 "href": "kalshi-portfolio",
