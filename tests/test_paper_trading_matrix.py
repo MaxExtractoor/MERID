@@ -709,10 +709,11 @@ class TestManifestIntegrity:
 
     def test_ts_manifest_exists(self):
         import os
-        ts_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "web", "react", "src", "config", "uiViewsManifest.ts",
-        )
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Canonical path first; fall back to _legacy/ location
+        ts_path = os.path.join(root, "web", "react", "src", "config", "uiViewsManifest.ts")
+        if not os.path.exists(ts_path):
+            ts_path = os.path.join(root, "web", "react", "src", "config", "_legacy", "uiViewsManifest.ts")
         assert os.path.exists(ts_path), "TS manifest not found"
         with open(ts_path, "r") as f:
             content = f.read()

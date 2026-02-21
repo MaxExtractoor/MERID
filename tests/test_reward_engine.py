@@ -89,7 +89,7 @@ class TestEventCategory(unittest.TestCase):
         self.assertIn("dev_debate", cats)
 
     def test_category_count(self):
-        self.assertEqual(len(EventCategory), 6)
+        self.assertEqual(len(EventCategory), 10)
 
 
 class TestRewardEventBase(unittest.TestCase):

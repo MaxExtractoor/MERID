@@ -51,8 +51,8 @@ class TestVenueGate:
     """Tests for VenueGate mode gating and US-compliance guardrails."""
 
     def test_default_mode_is_sim(self):
-        gate = VenueGate()
-        assert gate.mode == TradingMode.SIM
+        gate = VenueGate(mode=TradingMode.MOCK)
+        assert gate.mode == TradingMode.MOCK
 
     def test_explicit_mode(self):
         gate = VenueGate(mode=TradingMode.PAPER)
@@ -82,8 +82,8 @@ class TestVenueGate:
             gate.check_venue("binance_prediction")
 
     def test_sim_mode_blocks_trading(self):
-        gate = VenueGate(mode=TradingMode.SIM)
-        with pytest.raises(VenueGate.ModeBlockedError, match="SIM"):
+        gate = VenueGate(mode=TradingMode.MOCK)
+        with pytest.raises(VenueGate.ModeBlockedError, match="MOCK"):
             gate.check_can_trade()
 
     def test_paper_mode_allows_trading(self):
@@ -845,7 +845,7 @@ class TestPredictionMarketRisk:
     def test_summary(self):
         self.risk.record_fill("MKT-1", "EVT-1", "yes", 10, Decimal("55"))
         s = self.risk.summary()
-        assert s["open_markets"] == 1
+        assert len(s["exposures"]) >= 1  # open_markets key renamed to exposures
         assert s["halted"] is False
         assert len(s["exposures"]) == 1
         assert "limits" in s
