@@ -35,14 +35,28 @@ export const SIDEBAR_MANIFEST: SidebarSection[] = [
       { name: 'Overview',     href: 'overview',            icon: 'LayoutDashboard', color: 'text-blue-400' },
       { name: 'Terminal',     href: 'kalshi-terminal',     icon: 'Monitor',         color: 'text-orange-400' },
       { name: 'Markets',      href: 'kalshi-dashboard',    icon: 'Search',          color: 'text-orange-300' },
-      { name: 'Agent Grid',   href: 'kalshi-grid',         icon: 'LayoutGrid',      color: 'text-orange-500' },
-      { name: 'Performance',  href: 'kalshi-performance',  icon: 'Award',           color: 'text-emerald-400' },
-      { name: 'Calibration', href: 'calibration-dashboard', icon: 'Target',        color: 'text-rose-400' },
       { name: 'Portfolio',    href: 'kalshi-portfolio',    icon: 'Briefcase',       color: 'text-orange-300' },
       { name: 'Positions',    href: 'positions',           icon: 'TrendingUp',      color: 'text-cyan-400' },
       { name: 'Orders',       href: 'orders',              icon: 'ClipboardList',   color: 'text-teal-300' },
-      { name: 'Vol & Sizing', href: 'kalshi-vol-dashboard', icon: 'Gauge',          color: 'text-purple-400' },
-      { name: 'Fear/Greed',  href: 'kalshi-sentiment',     icon: 'Activity',       color: 'text-rose-400' },
+    ],
+  },
+  {
+    label: 'Swarm Intelligence',
+    key: 'swarm-intelligence',
+    items: [
+      { name: 'Agent Grid',   href: 'kalshi-grid',         icon: 'LayoutGrid',      color: 'text-orange-500' },
+      { name: 'Swarm Matrix', href: 'swarm-consensus',     icon: 'Grid',            color: 'text-cyan-500' },
+      { name: 'Performance',  href: 'kalshi-performance',  icon: 'Award',           color: 'text-emerald-400' },
+      { name: 'Calibration',  href: 'calibration-dashboard', icon: 'Target',        color: 'text-rose-400' },
+      { name: 'Lane Control', href: 'lane-control',        icon: 'GitBranch',       color: 'text-violet-400' },
+    ],
+  },
+  {
+    label: 'Analytics',
+    key: 'analytics',
+    items: [
+      { name: 'Fear/Greed',   href: 'kalshi-sentiment',     icon: 'Activity',       color: 'text-rose-400' },
+      { name: 'Vol & Sizing',  href: 'kalshi-vol-dashboard', icon: 'Gauge',          color: 'text-purple-400' },
     ],
   },
   {

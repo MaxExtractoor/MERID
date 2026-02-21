@@ -105,6 +105,8 @@ export default function App() {
               {view === "kalshi-dashboard" && <KalshiDashboardView />}
               {view === "kalshi-grid" && <KalshiGridView />}
               {view === "kalshi-portfolio" && <KalshiPortfolioView />}
+              {view === "positions" && <KalshiPortfolioView initialTab="positions" />}
+              {view === "orders" && <KalshiPortfolioView initialTab="orders" />}
               {view === "kalshi-vol-dashboard" && <KalshiVolDashboardView />}
               {view === "kalshi-terminal" && <KalshiTerminalView />}
               {view === "kalshi-performance" && <KalshiAgentPerformanceView />}

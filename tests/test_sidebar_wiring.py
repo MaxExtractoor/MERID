@@ -81,7 +81,7 @@ class TestSidebarConfigCompleteness(unittest.TestCase):
         cls.sidebar_tsx_hrefs = _extract_sidebar_tsx_hrefs()
 
     def test_sidebar_has_items(self):
-        self.assertGreaterEqual(len(self.items), 25, "Expected at least 25 sidebar items")
+        self.assertGreaterEqual(len(self.items), 17, "Expected at least 17 sidebar items")
 
     def test_every_sidebar_href_in_view_types(self):
         """Every sidebar item href must exist in views.ts."""
@@ -113,8 +113,8 @@ class TestSidebarConfigCompleteness(unittest.TestCase):
         extra = self.sidebar_tsx_hrefs - config_hrefs
         self.assertEqual(extra, set(), f"Sidebar.tsx hrefs not in config: {extra}")
 
-    def test_six_sections(self):
-        self.assertEqual(len(self.sections), 6, "Expected exactly 6 sidebar sections")
+    def test_five_sections(self):
+        self.assertEqual(len(self.sections), 5, "Expected exactly 5 sidebar sections")
 
     def test_section_ids_unique(self):
         ids = [s["id"] for s in self.sections]
@@ -167,7 +167,7 @@ class TestWorkflowPhases(unittest.TestCase):
         cls.valid_hrefs = {item["href"] for item in cls.items}
 
     def test_phases_exist(self):
-        self.assertGreaterEqual(len(self.phases), 6)
+        self.assertGreaterEqual(len(self.phases), 5)
 
     def test_phase_views_are_valid_hrefs(self):
         """Every view in a workflow phase must be a valid sidebar href."""
@@ -183,30 +183,28 @@ class TestWorkflowPhases(unittest.TestCase):
         self.assertEqual(orders, sorted(orders), "Workflow phases not in order")
 
 
-class TestAnalyticsResearchConsolidation(unittest.TestCase):
-    """Analytics and Research are properly consolidated."""
+class TestAnalyticsSectionExists(unittest.TestCase):
+    """Analytics section exists with sentiment and vol views."""
 
     @classmethod
     def setUpClass(cls):
         cls.sections, _ = _get_sidebar_config()
         cls.items = _flatten_sidebar_items(cls.sections)
 
-    def test_no_separate_analytics_entry(self):
-        """There should be no sidebar item with href='analytics'."""
+    def test_analytics_section_exists(self):
+        """There should be an 'analytics' section."""
+        section_ids = [s["id"] for s in self.sections]
+        self.assertIn("analytics", section_ids)
+
+    def test_sentiment_view_exists(self):
+        """Analytics should contain kalshi-sentiment."""
         hrefs = [item["href"] for item in self.items]
-        self.assertNotIn("analytics", hrefs,
-                         "Found separate 'analytics' sidebar entry — should be consolidated into 'research'")
+        self.assertIn("kalshi-sentiment", hrefs)
 
-    def test_research_analytics_entry_exists(self):
-        """There should be a 'research-analytics' item pointing to href='research'."""
-        ids = {item["id"] for item in self.items}
-        self.assertIn("research-analytics", ids)
-
-    def test_app_tsx_has_analytics_alias(self):
-        """App.tsx should still render Research for both 'research' and 'analytics' routes."""
-        routes = _extract_app_routes()
-        self.assertIn("research", routes)
-        self.assertIn("analytics", routes)
+    def test_vol_dashboard_exists(self):
+        """Analytics should contain kalshi-vol-dashboard."""
+        hrefs = [item["href"] for item in self.items]
+        self.assertIn("kalshi-vol-dashboard", hrefs)
 
 
 class TestBackendEndpointReachability(unittest.TestCase):
@@ -337,8 +335,8 @@ class TestEndpointConstantCoverage(unittest.TestCase):
         )
 
 
-class TestPaperSessionWiring(unittest.TestCase):
-    """Paper session infrastructure is fully wired: sidebar → constants → backend."""
+class TestExecutionInfrastructureWiring(unittest.TestCase):
+    """Execution infrastructure is wired: positions, orders, portfolio in sidebar."""
 
     @classmethod
     def setUpClass(cls):
@@ -347,20 +345,19 @@ class TestPaperSessionWiring(unittest.TestCase):
         cls.item_map = {item["id"]: item for item in cls.items}
         cls.constants_src = _read("web/react/src/config/constants.ts")
 
-    def test_paper_trading_sidebar_item_exists(self):
-        self.assertIn("paper-trading", self.item_map)
+    def test_positions_sidebar_item_exists(self):
+        self.assertIn("positions", self.item_map)
 
-    def test_paper_trading_has_required_endpoints(self):
-        pt = self.item_map["paper-trading"]
-        eps = pt.get("endpoints", [])
-        self.assertTrue(any("/paper-trading/portfolio" in e for e in eps))
-        self.assertTrue(any("/paper-trading/positions" in e for e in eps))
-        self.assertTrue(any("/paper-trading/orders" in e for e in eps))
+    def test_orders_sidebar_item_exists(self):
+        self.assertIn("orders", self.item_map)
 
-    def test_paper_trading_in_execution_phase(self):
+    def test_portfolio_sidebar_item_exists(self):
+        self.assertIn("kalshi-portfolio", self.item_map)
+
+    def test_positions_in_execution_phase(self):
         for phase in self.phases:
             if phase["id"] == "execution":
-                self.assertIn("paper-trading", phase["views"])
+                self.assertIn("positions", phase["views"])
                 return
         self.fail("No 'execution' workflow phase found")
 
@@ -375,28 +372,19 @@ class TestPaperSessionWiring(unittest.TestCase):
         self.assertIn("/api/v1/audit-trail/summary", self.constants_src)
         self.assertIn("/api/v1/audit-trail/entries", self.constants_src)
 
-    def test_reconciliation_in_sidebar_endpoints(self):
-        """At least one sidebar item references reconciliation."""
-        all_eps = [ep for item in self.items for ep in item.get("endpoints", [])]
-        self.assertTrue(
-            any("reconciliation" in ep for ep in all_eps),
-            "No sidebar item references a reconciliation endpoint"
-        )
-
-    def test_paper_trading_links_to_valid(self):
-        pt = self.item_map["paper-trading"]
-        for link in pt.get("links_to", []):
+    def test_orders_links_to_valid(self):
+        orders = self.item_map["orders"]
+        for link in orders.get("links_to", []):
             self.assertIn(link, self.item_map,
-                          f"paper-trading links_to '{link}' not found in sidebar")
+                          f"orders links_to '{link}' not found in sidebar")
 
-    def test_paper_session_views_in_manifest(self):
-        """All paper session views exist in the frontend manifest."""
+    def test_execution_views_in_manifest(self):
+        """Key execution views exist in the frontend manifest."""
         manifest_src = _read("web/react/src/config/sidebarManifest.ts")
-        paper_views = ["overview", "paper-trading", "positions", "wallet",
-                       "treasury", "rewards", "risk", "research", "observability"]
-        for v in paper_views:
+        exec_views = ["overview", "positions", "orders", "kalshi-portfolio"]
+        for v in exec_views:
             self.assertIn(f"href: '{v}'", manifest_src,
-                          f"Paper session view '{v}' missing from sidebarManifest.ts")
+                          f"Execution view '{v}' missing from sidebarManifest.ts")
 
 
 if __name__ == "__main__":

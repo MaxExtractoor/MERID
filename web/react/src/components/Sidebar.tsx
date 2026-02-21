@@ -15,6 +15,8 @@ import {
   GitBranch,
   Target,
   Grid,
+  TrendingUp,
+  ClipboardList,
 } from 'lucide-react';
 import type { View } from '../types/views';
 import { useKalshiMode } from '../context/KalshiModeContext';
@@ -34,6 +36,8 @@ const tradingCore = [
   { name: 'Terminal', href: 'kalshi-terminal', icon: Monitor, color: 'text-orange-400' },
   { name: 'Markets', href: 'kalshi-dashboard', icon: Search, color: 'text-orange-300' },
   { name: 'Portfolio', href: 'kalshi-portfolio', icon: Briefcase, color: 'text-orange-300' },
+  { name: 'Positions', href: 'positions', icon: TrendingUp, color: 'text-cyan-400' },
+  { name: 'Orders', href: 'orders', icon: ClipboardList, color: 'text-teal-300' },
 ];
 
 const swarmIntelligence = [
