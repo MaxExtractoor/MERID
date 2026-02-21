@@ -1,0 +1,17 @@
+{
+  "swarm_nodes": [
+    {"name": "swarm-node-a", "online": true, "synced": true, "health_pct": 100.0},
+    {"name": "swarm-node-b", "online": true, "synced": true, "health_pct": 100.0}
+  ],
+  "agent_pods": [
+    {"name": "risk-agent", "online": true, "synced": true, "health_pct": 100.0},
+    {"name": "execution-agent", "online": true, "synced": true, "health_pct": 100.0}
+  ],
+  "strategy_clusters": [
+    {"name": "kalshi-strategy", "online": true, "synced": true, "health_pct": 100.0}
+  ],
+  "data_sources": [
+    {"name": "kalshi-live-backend", "source_type": "verified_backend", "verified": true, "mode": "live"},
+    {"name": "kalshi-paper-fixture", "source_type": "deterministic_fixture", "verified": true, "mode": "paper"}
+  ]
+}

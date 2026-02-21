@@ -18,11 +18,14 @@ from __future__ import annotations
 import asyncio
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query
 import httpx
 import re
 import os
+
+import logging
+logger = logging.getLogger("intelligence")
 
 router = APIRouter(prefix="/api/v1/intelligence", tags=["intelligence"])
 
@@ -30,8 +33,8 @@ router = APIRouter(prefix="/api/v1/intelligence", tags=["intelligence"])
 _news_cache: List[dict] = []
 _defi_cache: Dict = {}
 _market_signals_cache: List[dict] = []
-_last_news_update = datetime.now()
-_last_defi_update = datetime.now()
+_last_news_update = datetime.now(timezone.utc)
+_last_defi_update = datetime.now(timezone.utc)
 
 # API Keys from environment
 MESSARI_API_KEY = os.getenv("MESSARI_API_KEY", "")
@@ -41,18 +44,17 @@ MESSARI_API_KEY = os.getenv("MESSARI_API_KEY", "")
 async def fetch_coingecko_news():
     """Fetch news from CoinGecko."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
                 url = "https://api.coingecko.com/api/v3/news"
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
-            print(f"[Intelligence] CoinGecko returned {len(data.get('data', []))} news items")
+            logger.info(f"[Intelligence] CoinGecko returned {len(data.get('data', []))} news items")
             return [
                 {
                     'title': item.get('title', 'No title'),
@@ -60,32 +62,31 @@ async def fetch_coingecko_news():
                     'url': item.get('url', ''),
                     'source': 'CoinGecko',
                     'author': item.get('author', 'Unknown'),
-                    'timestamp': item.get('updated_at', datetime.now().isoformat()),
+                    'timestamp': item.get('updated_at', datetime.now(timezone.utc).isoformat()),
                     'sentiment': analyze_sentiment(item.get('title', '') + ' ' + item.get('description', '')),
                     'category': categorize_news(item.get('title', '') + ' ' + item.get('description', ''))
                 }
                 for item in data.get('data', [])[:20]
             ]
         else:
-            print(f"[Intelligence] CoinGecko returned status {response.status_code}")
+            logger.info(f"[Intelligence] CoinGecko returned status {response.status_code}")
     except Exception as e:
         import traceback
-        print(f"[Intelligence] Error fetching CoinGecko news: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching CoinGecko news: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return []
 
 
 async def fetch_cryptopanic_news():
     """Fetch news from CryptoPanic (free tier)."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
                 url = "https://cryptopanic.com/api/v1/posts/?auth_token=free&public=true"
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -96,7 +97,7 @@ async def fetch_cryptopanic_news():
                     'url': item.get('url', ''),
                     'source': 'CryptoPanic',
                     'author': item.get('source', {}).get('title', 'Unknown'),
-                    'timestamp': item.get('published_at', datetime.now().isoformat()),
+                    'timestamp': item.get('published_at', datetime.now(timezone.utc).isoformat()),
                     'sentiment': analyze_sentiment(item.get('title', '')),
                     'category': categorize_news(item.get('title', '')),
                     'votes': {
@@ -108,22 +109,20 @@ async def fetch_cryptopanic_news():
                 for item in data.get('results', [])[:20]
             ]
     except Exception as e:
-        import traceback
-        print(f"[Intelligence] Error fetching CryptoPanic news: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching CryptoPanic news: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return []
 
 
 async def fetch_rss_feed(url: str, source_name: str):
     """Generic RSS feed fetcher."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             content = response.text
@@ -147,13 +146,13 @@ async def fetch_rss_feed(url: str, source_name: str):
                     'url': link.text if link is not None else '',
                     'source': source_name,
                     'author': source_name,
-                    'timestamp': pub_date.text if pub_date is not None else datetime.now().isoformat(),
+                    'timestamp': pub_date.text if pub_date is not None else datetime.now(timezone.utc).isoformat(),
                     'sentiment': analyze_sentiment(title_text + ' ' + desc_text),
                     'category': categorize_news(title_text + ' ' + desc_text)
                 })
             return items
     except Exception as e:
-        print(f"[Intelligence] Error fetching {source_name} RSS: {e}")
+        logger.error(f"[Intelligence] Error fetching {source_name} RSS: {e}")
     return []
 
 
@@ -195,7 +194,7 @@ async def fetch_messari_news():
                         'url': item.get('url', ''),
                         'source': 'Messari',
                         'author': item.get('author', {}).get('name', 'Messari Research'),
-                        'timestamp': item.get('published_at', datetime.now().isoformat()),
+                        'timestamp': item.get('published_at', datetime.now(timezone.utc).isoformat()),
                         'sentiment': analyze_sentiment(item.get('title', '')),
                         'category': 'research',
                         'tags': item.get('tags', [])
@@ -203,7 +202,7 @@ async def fetch_messari_news():
                     for item in data.get('data', [])[:15]
                 ]
     except Exception as e:
-        print(f"[Intelligence] Error fetching Messari news: {e}")
+        logger.error(f"[Intelligence] Error fetching Messari news: {e}")
     return []
 
 
@@ -211,14 +210,13 @@ async def fetch_defi_pulse_data():
     """Fetch DeFi protocol TVL data."""
     global _defi_cache, _last_defi_update
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=30.0, verify=False) as client:
                 url = 'https://api.llama.fi/protocols'
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -240,29 +238,27 @@ async def fetch_defi_pulse_data():
                     for p in protocols
                 ],
                 'total_tvl': sum(p.get('tvl') or 0 for p in protocols),
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
-            _last_defi_update = datetime.now()
-            print(f"[Intelligence] Fetched {len(protocols)} DeFi protocols")
+            _last_defi_update = datetime.now(timezone.utc)
+            logger.info(f"[Intelligence] Fetched {len(protocols)} DeFi protocols")
             return _defi_cache
     except Exception as e:
-        import traceback
-        print(f"[Intelligence] Error fetching DeFi data: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching DeFi data: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return _defi_cache
 
 
 async def fetch_fear_greed_index():
     """Fetch Crypto Fear & Greed Index."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
                 url = 'https://api.alternative.me/fng/?limit=30'
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -271,51 +267,47 @@ async def fetch_fear_greed_index():
                 'history': data.get('data', [])[:30]
             }
     except Exception as e:
-        import traceback
-        print(f"[Intelligence] Error fetching Fear & Greed: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching Fear & Greed: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return {'current': {}, 'history': []}
 
 
 async def fetch_global_market_data():
     """Fetch global crypto market data from CoinGecko."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
                 url = 'https://api.coingecko.com/api/v3/global'
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
             return data.get('data', {})
     except Exception as e:
-        print(f"[Intelligence] Error fetching global market data: {e}")
+        logger.error(f"[Intelligence] Error fetching global market data: {e}")
     return {}
 
 
 async def fetch_trending_coins():
     """Fetch trending coins from CoinGecko."""
     try:
-        import asyncio
         
         def sync_fetch():
             with httpx.Client(timeout=15.0, verify=False) as client:
                 url = 'https://api.coingecko.com/api/v3/search/trending'
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
             return data.get('coins', [])
     except Exception as e:
-        import traceback
-        print(f"[Intelligence] Error fetching trending coins: {type(e).__name__}: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"[Intelligence] Error fetching trending coins: {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
     return []
 
 
@@ -385,8 +377,7 @@ async def aggregate_news():
     """Aggregate news from all institutional-grade sources."""
     global _news_cache, _last_news_update
     
-    print("[Intelligence] Aggregating news from 8 institutional sources...")
-    
+    logger.info("[Intelligence] Aggregating news from 8 institutional sources...")
     # Fetch from all sources in parallel
     results = await asyncio.gather(
         fetch_coingecko_news(),
@@ -421,18 +412,15 @@ async def aggregate_news():
     
     # Sort by timestamp (newest first)
     if not unique_news:
-        print("[Intelligence] No news available from remote sources")
+        logger.info("[Intelligence] No news available from remote sources")
     else:
-        print(f"[Intelligence] Sources: {source_counts}")
-    
+        logger.info(f"[Intelligence] Sources: {source_counts}")
     unique_news.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
     
     _news_cache = unique_news[:100]  # Keep top 100 for institutional coverage
-    _last_news_update = datetime.now()
+    _last_news_update = datetime.now(timezone.utc)
     
-    print(f"[Intelligence] Aggregated {len(_news_cache)} unique news items from {len(source_counts)} sources")
-
-
+    logger.info(f"[Intelligence] Aggregated {len(_news_cache)} unique news items from {len(source_counts)} sources")
 @router.get("/news")
 async def get_news(
     category: Optional[str] = Query(None, description="Filter by category: regulation, technology, market, defi, nft, adoption, security, general"),
@@ -442,7 +430,7 @@ async def get_news(
 ):
     """Get aggregated news with filtering."""
     # Update if cache is stale (older than 5 minutes)
-    if not _news_cache or (datetime.now() - _last_news_update).total_seconds() > 300:
+    if not _news_cache or (datetime.now(timezone.utc) - _last_news_update).total_seconds() > 300:
         await aggregate_news()
     
     news = list(_news_cache)
@@ -569,7 +557,7 @@ async def refresh_news():
         'status': 'success',
         'message': 'News refreshed',
         'count': len(_news_cache),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat()
     }
 
 
@@ -579,7 +567,7 @@ async def get_defi_data():
     global _defi_cache, _last_defi_update
     
     # Update if cache is stale (older than 10 minutes)
-    if not _defi_cache or (datetime.now() - _last_defi_update).total_seconds() > 600:
+    if not _defi_cache or (datetime.now(timezone.utc) - _last_defi_update).total_seconds() > 600:
         await fetch_defi_pulse_data()
     
     return {
@@ -641,7 +629,7 @@ async def get_intelligence_dashboard():
     
     return {
         'status': 'success',
-        'timestamp': datetime.now().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'news': {
             'count': len(_news_cache),
             'latest': _news_cache[:10],

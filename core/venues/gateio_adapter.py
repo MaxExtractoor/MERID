@@ -15,6 +15,7 @@ logger = structlog.get_logger(__name__)
 
 
 class GateIOAdapter(VenueAdapter):
+    _is_stub = True
     """Gate.io adapter - optional/data venue for US users."""
     
     def __init__(
@@ -90,7 +91,7 @@ class GateIOAdapter(VenueAdapter):
             self.logger.error("rate_limit_check_error", error=str(e))
             return {"status": "error"}
     
-    async def place_order(
+    async def _place_order_impl(
         self,
         symbol: str,
         side: OrderSide,

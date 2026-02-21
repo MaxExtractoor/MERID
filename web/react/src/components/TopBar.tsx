@@ -1,6 +1,10 @@
 import { Search, Menu, Sun, Moon, Settings } from "lucide-react";
+import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 import { useTheme } from '../theme';
+import { useKalshiMode } from '../context/KalshiModeContext';
 import LiveNotifications from './LiveNotifications';
+import ConnectionStatusIndicator from './ConnectionStatusIndicator';
 
 interface TopBarProps {
   onMenuClick: () => void;
@@ -9,16 +13,29 @@ interface TopBarProps {
 export default function TopBar({ onMenuClick }: TopBarProps) {
   const { theme, toggleTheme } = useTheme();
 
+  const { data: pnlData } = useApiData<{ daily_pnl_usd?: number }>(
+    API_ENDPOINTS.KALSHI_PNL,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const { data: balData } = useApiData<{ available?: number }>(
+    API_ENDPOINTS.KALSHI_BALANCE,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+  );
+  const { isLive } = useKalshiMode();
+
+  const dailyPnl = pnlData?.daily_pnl_usd ?? 0;
+  const pnlPositive = dailyPnl >= 0;
+
   return (
     <header className="h-16 bg-gradient-to-r from-slate-900/95 via-slate-800/95 to-slate-900/95 backdrop-blur-md border-b border-slate-700/50 shadow-xl shadow-black/20 flex items-center justify-between px-4 lg:px-6">
       {/* Left side */}
       <div className="flex items-center gap-4">
         {/* Mobile menu button */}
-        <button
+        <button type="button"
           onClick={onMenuClick}
           className="p-2 rounded-lg hover:bg-slate-700/50 transition-all hover:scale-105 md:hidden"
           title="Open menu"
-        >
+         aria-label="Menu">
           <Menu className="w-5 h-5 text-slate-300" />
         </button>
 
@@ -37,16 +54,33 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
 
         {/* Environment badge */}
         <div className="flex items-center gap-3">
-          <span className="px-3 py-1 text-xs font-bold text-emerald-400 bg-gradient-to-r from-emerald-500/20 to-teal-500/20 border border-emerald-400/50 rounded-full shadow-lg shadow-emerald-500/30 animate-pulse-slow">
-            <span className="inline-block w-2 h-2 bg-emerald-400 rounded-full mr-1.5 animate-pulse"></span>
-            LIVE
+          <span className={`px-3 py-1 text-xs font-bold rounded-full shadow-lg animate-pulse-slow ${
+            isLive
+              ? 'text-red-400 bg-gradient-to-r from-red-500/20 to-rose-500/20 border border-red-400/50 shadow-red-500/30'
+              : 'text-amber-400 bg-gradient-to-r from-amber-500/20 to-yellow-500/20 border border-amber-400/50 shadow-amber-500/30'
+          }`}>
+            <span className={`inline-block w-2 h-2 rounded-full mr-1.5 animate-pulse ${
+              isLive ? 'bg-red-400' : 'bg-amber-400'
+            }`}></span>
+            {isLive ? 'LIVE' : 'PAPER'}
           </span>
           
-          {/* P&L Summary */}
-          <div className="hidden sm:flex items-center gap-3 px-4 py-2 bg-gradient-to-r from-emerald-500/10 via-green-500/10 to-teal-500/10 border border-emerald-500/30 rounded-lg shadow-lg shadow-emerald-500/20">
-            <span className="text-slate-300 text-sm font-medium">Daily P&L:</span>
-            <span className="font-bold text-emerald-400 text-lg">+$12,847.32</span>
-            <span className="text-emerald-400 text-sm font-semibold bg-emerald-500/20 px-2 py-0.5 rounded">(+2.34%)</span>
+          {/* Kalshi Balance + Daily P&L */}
+          <div className={`hidden sm:flex items-center gap-3 px-4 py-2 bg-gradient-to-r rounded-lg shadow-lg ${
+            pnlPositive
+              ? 'from-emerald-500/10 via-green-500/10 to-teal-500/10 border border-emerald-500/30 shadow-emerald-500/20'
+              : 'from-red-500/10 via-red-500/10 to-rose-500/10 border border-red-500/30 shadow-red-500/20'
+          }`}>
+            {balData?.available != null && (
+              <span className="text-slate-300 text-sm font-medium">
+                {balData.available.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+              </span>
+            )}
+            {balData?.available != null && <span className="text-slate-600">·</span>}
+            <span className="text-slate-300 text-sm font-medium">P&L:</span>
+            <span className={`font-bold text-lg ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
+              {pnlPositive ? '+' : ''}{dailyPnl.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+            </span>
           </div>
         </div>
       </div>
@@ -55,7 +89,9 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
       <div className="hidden md:block flex-1 max-w-md mx-8">
         <div className="relative group">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-blue-400 transition-colors" />
-          <input
+          <input aria-label="Search symbols, commands, or actions..."
+            id="global-search"
+            name="globalSearch"
             type="text"
             placeholder="Search symbols, commands, or actions..."
             className="w-full pl-10 pr-4 py-2.5 bg-slate-800/50 border border-slate-700/50 rounded-lg text-sm text-slate-200 placeholder-slate-400 focus:outline-none focus:border-blue-500 focus:bg-slate-800/70 focus:shadow-lg focus:shadow-blue-500/20 transition-all"
@@ -66,7 +102,7 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
       {/* Right side */}
       <div className="flex items-center gap-2">
         {/* Theme toggle */}
-        <button
+        <button type="button"
           onClick={toggleTheme}
           className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105"
           title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
@@ -78,17 +114,20 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
           )}
         </button>
 
+        {/* Connection Status */}
+        <ConnectionStatusIndicator />
+
         {/* Notifications */}
         <LiveNotifications />
 
         {/* Settings */}
-        <button className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105" title="Settings">
+        <button type="button" className="p-2 rounded-lg hover:bg-slate-800/50 transition-all hover:scale-105" title="Settings" aria-label="Settings">
           <Settings className="w-5 h-5 text-slate-300" />
         </button>
 
         {/* User avatar */}
-        <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-sm font-bold text-white shadow-lg shadow-blue-500/25">
-          JD
+        <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-sm font-bold text-white shadow-lg shadow-blue-500/25" title="Operator">
+          OP
         </div>
       </div>
     </header>

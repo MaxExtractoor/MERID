@@ -67,6 +67,14 @@ class ReflectionLayer:
         self._lock = threading.Lock()
         self._load()
     
+    def _get_new_system(self):
+        """Lazy-import the v2 ReflectionSystem to avoid circular imports."""
+        try:
+            from agents.reflection.integration import get_reflection_system
+            return get_reflection_system()
+        except Exception:
+            return None
+
     def record_decision(
         self,
         agent_id: str,
@@ -92,6 +100,20 @@ class ReflectionLayer:
             self._reflections.append(reflection)
             self._agent_stats[agent_id]["total_decisions"] += 1
             self._persist()
+        
+        # Forward to new ReflectionSystem so v2 storage stays in sync
+        new_sys = self._get_new_system()
+        if new_sys:
+            try:
+                new_sys.record_decision(
+                    agent_id=agent_id,
+                    energy_id=energy_id,
+                    decision=decision,
+                    confidence=confidence,
+                    reasoning=reasoning[:500],
+                )
+            except Exception as exc:
+                logger.debug("v2 bridge record_decision failed: %s", exc)
         
         logger.debug(
             "Recorded decision for %s on energy %s: %s (%.2f confidence)",
@@ -138,6 +160,22 @@ class ReflectionLayer:
                         })
             
             self._persist()
+        
+        # Forward outcome to new ReflectionSystem
+        new_sys = self._get_new_system()
+        if new_sys:
+            try:
+                price_change = (reality_gap or 0.0) * (1 if validated else -1)
+                # Find matching reflection IDs in v2 and validate them
+                v2_refs = new_sys.core.get_energy_reflections(energy_id)
+                for ref in v2_refs:
+                    if ref.outcome is None:
+                        new_sys.validate_market_outcome(
+                            reflection_id=ref.reflection_id,
+                            actual_price_change=price_change,
+                        )
+            except Exception as exc:
+                logger.debug("v2 bridge record_outcome failed: %s", exc)
         
         logger.info(
             "Recorded outcome for energy %s: %s (gap: %s)",
@@ -230,25 +268,56 @@ class ReflectionLayer:
         persist.write_json(self._path, data, immediate=False)
     
     def _load(self) -> None:
-        """Load reflections from disk."""
-        if not self._path.exists():
+        """Load reflections from disk — tries v2 file first, falls back to v1."""
+        v2_path = self._path.parent / "agent_reflections_v2.json"
+        load_path = v2_path if v2_path.exists() else self._path
+        
+        if not load_path.exists():
+            logger.info("No reflection storage found, starting fresh")
             return
         
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
+            data = json.loads(load_path.read_text(encoding="utf-8"))
             
-            # Load reflections
-            for item in data.get("reflections", []):
-                self._reflections.append(Reflection(**item))
+            # v2 format nests under 'reflections' with different schema
+            raw_refs = data.get("reflections", [])
+            for item in raw_refs:
+                # v2 Reflection objects have extra fields — only take what we need
+                try:
+                    self._reflections.append(Reflection(
+                        agent_id=item.get("agent_id", "unknown"),
+                        energy_id=item.get("energy_id", ""),
+                        decision=item.get("decision", "abstain"),
+                        confidence=float(item.get("confidence", 0.0)),
+                        reasoning=item.get("reasoning", "")[:500],
+                        outcome=item.get("outcome"),
+                        reality_gap=item.get("reality_gap"),
+                        timestamp=item.get("timestamp", ""),
+                        learning=item.get("learning_insight") or item.get("learning"),
+                    ))
+                except Exception:
+                    continue
             
-            # Load agent stats
-            for agent_id, stats in data.get("agent_stats", {}).items():
-                self._agent_stats[agent_id] = stats
+            # Load agent stats (v1 format) or rebuild from reflections
+            v1_stats = data.get("agent_stats", {})
+            if v1_stats:
+                for agent_id, stats in v1_stats.items():
+                    self._agent_stats[agent_id] = stats
+            else:
+                # Rebuild stats from loaded reflections
+                for ref in self._reflections:
+                    self._agent_stats[ref.agent_id]["total_decisions"] += 1
+                    if ref.outcome == "validated":
+                        self._agent_stats[ref.agent_id]["correct_predictions"] += 1
+                    elif ref.outcome == "invalidated":
+                        self._agent_stats[ref.agent_id]["incorrect_predictions"] += 1
             
+            source = "v2" if load_path == v2_path else "v1"
             logger.info(
-                "Loaded %d reflections for %d agents",
+                "Loaded %d reflections for %d agents (source: %s)",
                 len(self._reflections),
-                len(self._agent_stats)
+                len(self._agent_stats),
+                source,
             )
         except (json.JSONDecodeError, TypeError) as exc:
             logger.warning("Failed to load reflections: %s", exc)

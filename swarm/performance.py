@@ -26,10 +26,13 @@ LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 def _coerce_dt(value: str) -> datetime:
     try:
         if value.endswith("Z"):
-            value = value[:-1]
-        return datetime.fromisoformat(value)
+            value = value[:-1] + "+00:00"
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc)
 
 
 @dataclass

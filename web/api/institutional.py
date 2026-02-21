@@ -880,7 +880,6 @@ async def get_intelligence_signals(
 async def get_market_sentiment() -> Dict[str, Any]:
     """Get aggregated market sentiment analysis."""
     try:
-        from monitoring.intelligence_layer import get_intelligence_layer
         layer = get_intelligence_layer()
         
         return layer.get_market_sentiment()
@@ -893,7 +892,6 @@ async def get_market_sentiment() -> Dict[str, Any]:
 async def get_intelligence_alerts(limit: int = 20) -> Dict[str, Any]:
     """Get high-priority market alerts."""
     try:
-        from monitoring.intelligence_layer import get_intelligence_layer
         layer = get_intelligence_layer()
         
         alerts = layer.get_alerts(limit=limit)
@@ -927,7 +925,6 @@ async def start_intelligence() -> Dict[str, Any]:
 async def get_realtime_stream() -> Dict[str, Any]:
     """Get real-time data stream snapshot."""
     from data.live_price_feed import get_live_price_feed
-    from simulation.shadow_merid import get_shadow_merid
     
     price_feed = get_live_price_feed()
     shadow = get_shadow_merid()
@@ -1022,7 +1019,6 @@ async def get_odds_drift_signals(request: Request, limit: int = 20) -> Dict[str,
         aggregator = getattr(request.app.state, 'prediction_aggregator', None)
         
         if not aggregator:
-            from monitoring.prediction_markets import get_prediction_aggregator
             aggregator = get_prediction_aggregator()
         signals = aggregator.get_drift_signals(limit)
         
@@ -1058,7 +1054,6 @@ async def get_arbitrage_opportunities(request: Request, limit: int = 10) -> Dict
         aggregator = getattr(request.app.state, 'prediction_aggregator', None)
         
         if not aggregator:
-            from monitoring.prediction_markets import get_prediction_aggregator
             aggregator = get_prediction_aggregator()
         opportunities = aggregator.get_arbitrage_opportunities(limit)
         
@@ -1090,7 +1085,6 @@ async def get_arbitrage_opportunities(request: Request, limit: int = 10) -> Dict
 async def get_market_decay_metrics(market_id: str) -> Dict[str, Any]:
     """Get resolution decay metrics for a market."""
     try:
-        from monitoring.prediction_markets import get_prediction_aggregator
         
         aggregator = get_prediction_aggregator()
         metrics = aggregator.get_decay_metrics(market_id)
@@ -1108,7 +1102,6 @@ async def get_market_decay_metrics(market_id: str) -> Dict[str, Any]:
 async def get_urgent_markets() -> Dict[str, Any]:
     """Get markets with high exit urgency (approaching resolution)."""
     try:
-        from monitoring.prediction_markets import get_prediction_aggregator
         
         aggregator = get_prediction_aggregator()
         urgent = aggregator.get_high_urgency_markets()
@@ -1164,7 +1157,6 @@ async def start_prediction_markets() -> Dict[str, Any]:
 async def get_prediction_status() -> Dict[str, Any]:
     """Get prediction market aggregator status."""
     try:
-        from monitoring.prediction_markets import get_prediction_aggregator
         
         aggregator = get_prediction_aggregator()
         return aggregator.get_status()
@@ -1203,7 +1195,6 @@ async def get_consensus_status() -> Dict[str, Any]:
 async def get_pending_votes() -> Dict[str, Any]:
     """Get current pending votes."""
     try:
-        from core.consensus_engine import get_consensus_engine
         
         engine = get_consensus_engine()
         
@@ -1232,7 +1223,6 @@ async def get_pending_votes() -> Dict[str, Any]:
 async def start_consensus_engine() -> Dict[str, Any]:
     """Start the consensus engine."""
     try:
-        from core.consensus_engine import get_consensus_engine
         
         engine = get_consensus_engine()
         await engine.start()
@@ -1250,7 +1240,6 @@ async def start_consensus_engine() -> Dict[str, Any]:
 async def stop_consensus_engine() -> Dict[str, Any]:
     """Stop the consensus engine."""
     try:
-        from core.consensus_engine import get_consensus_engine
         
         engine = get_consensus_engine()
         await engine.stop()
@@ -1295,7 +1284,6 @@ async def get_simulation_status() -> Dict[str, Any]:
 async def get_simulation_chain(limit: int = 20) -> Dict[str, Any]:
     """Get recent simulation blocks."""
     try:
-        from simulation.continuous_miner import get_continuous_miner
         
         miner = get_continuous_miner()
         
@@ -1316,7 +1304,6 @@ async def get_simulation_chain(limit: int = 20) -> Dict[str, Any]:
 async def get_simulation_block(block_number: int) -> Dict[str, Any]:
     """Get a specific simulation block."""
     try:
-        from simulation.continuous_miner import get_continuous_miner
         
         miner = get_continuous_miner()
         
@@ -1334,7 +1321,6 @@ async def get_simulation_block(block_number: int) -> Dict[str, Any]:
 async def get_simulation_strategies() -> Dict[str, Any]:
     """Get strategy performance metrics."""
     try:
-        from simulation.continuous_miner import get_continuous_miner
         
         miner = get_continuous_miner()
         
@@ -1365,7 +1351,6 @@ async def get_simulation_strategies() -> Dict[str, Any]:
 async def start_simulation_miner() -> Dict[str, Any]:
     """Start the simulation miner."""
     try:
-        from simulation.continuous_miner import get_continuous_miner
         
         miner = get_continuous_miner()
         await miner.start()
@@ -1383,7 +1368,6 @@ async def start_simulation_miner() -> Dict[str, Any]:
 async def stop_simulation_miner() -> Dict[str, Any]:
     """Stop the simulation miner."""
     try:
-        from simulation.continuous_miner import get_continuous_miner
         
         miner = get_continuous_miner()
         await miner.stop()
@@ -1425,7 +1409,6 @@ async def get_audit_status() -> Dict[str, Any]:
 async def get_audit_entries(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     """Get audit trail entries."""
     try:
-        from core.audit_trail import get_audit_trail
         
         audit = get_audit_trail()
         entries = audit.get_entries(limit=limit, offset=offset)
@@ -1445,7 +1428,6 @@ async def get_audit_entries(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
 async def get_recent_audit_entries(limit: int = 20) -> Dict[str, Any]:
     """Get most recent audit entries."""
     try:
-        from core.audit_trail import get_audit_trail
         
         audit = get_audit_trail()
         
@@ -1467,7 +1449,6 @@ async def get_recent_audit_entries(limit: int = 20) -> Dict[str, Any]:
 async def get_audit_by_source(source: str, limit: int = 50) -> Dict[str, Any]:
     """Get audit entries by source."""
     try:
-        from core.audit_trail import get_audit_trail
         
         audit = get_audit_trail()
         entries = audit.get_by_source(source, limit=limit)
@@ -1486,7 +1467,6 @@ async def get_audit_by_source(source: str, limit: int = 50) -> Dict[str, Any]:
 async def verify_audit_chain() -> Dict[str, Any]:
     """Verify the integrity of the audit chain."""
     try:
-        from core.audit_trail import get_audit_trail
         
         audit = get_audit_trail()
         is_valid = audit.verify_chain()
@@ -1505,7 +1485,6 @@ async def verify_audit_chain() -> Dict[str, Any]:
 async def get_audit_entry(sequence: int) -> Dict[str, Any]:
     """Get a specific audit entry by sequence number."""
     try:
-        from core.audit_trail import get_audit_trail
         
         audit = get_audit_trail()
         
@@ -1523,7 +1502,6 @@ async def get_audit_entry(sequence: int) -> Dict[str, Any]:
 async def start_audit_trail() -> Dict[str, Any]:
     """Start the audit trail."""
     try:
-        from core.audit_trail import get_audit_trail
         
         audit = get_audit_trail()
         await audit.start()
@@ -1563,7 +1541,6 @@ async def get_execution_status() -> Dict[str, Any]:
 async def get_execution_positions() -> Dict[str, Any]:
     """Get all open positions."""
     try:
-        from trading.execution import get_execution_engine
         
         engine = get_execution_engine()
         positions = engine.get_all_positions()
@@ -1596,7 +1573,6 @@ async def get_execution_positions() -> Dict[str, Any]:
 async def get_execution_orders() -> Dict[str, Any]:
     """Get open orders."""
     try:
-        from trading.execution import get_execution_engine
         
         engine = get_execution_engine()
         orders = engine.get_open_orders()
@@ -1628,7 +1604,6 @@ async def get_execution_orders() -> Dict[str, Any]:
 async def get_execution_history(limit: int = 50) -> Dict[str, Any]:
     """Get order history."""
     try:
-        from trading.execution import get_execution_engine
         
         engine = get_execution_engine()
         history = engine._order_history[-limit:]
@@ -1698,7 +1673,6 @@ async def submit_execution_order(
 async def close_execution_position(symbol: str, reason: str = "manual") -> Dict[str, Any]:
     """Close a position."""
     try:
-        from trading.execution import get_execution_engine
         
         engine = get_execution_engine()
         order = await engine.close_position(symbol, reason=reason)
@@ -1720,7 +1694,6 @@ async def close_execution_position(symbol: str, reason: str = "manual") -> Dict[
 async def start_execution_engine() -> Dict[str, Any]:
     """Start the execution engine."""
     try:
-        from trading.execution import get_execution_engine
         
         engine = get_execution_engine()
         await engine.start()
@@ -1775,7 +1748,6 @@ async def configure_execution(
 ) -> Dict[str, Any]:
     """Configure execution engine settings."""
     try:
-        from trading.execution import get_execution_engine
         
         engine = get_execution_engine()
         
@@ -1809,7 +1781,6 @@ async def configure_execution(
 async def get_execution_config() -> Dict[str, Any]:
     """Get current execution configuration."""
     try:
-        from trading.execution import get_execution_engine
         
         engine = get_execution_engine()
         
@@ -1834,7 +1805,6 @@ async def get_execution_config() -> Dict[str, Any]:
 async def sync_with_exchange() -> Dict[str, Any]:
     """Synchronize positions and balance with exchange."""
     try:
-        from trading.execution import get_execution_engine
         
         engine = get_execution_engine()
         result = await engine.sync_with_exchange()
@@ -1866,7 +1836,6 @@ async def get_analytics_summary() -> Dict[str, Any]:
 async def get_analytics_trades(limit: int = 20) -> Dict[str, Any]:
     """Get recent trades."""
     try:
-        from analytics.performance import get_performance_tracker
         
         tracker = get_performance_tracker()
         return {
@@ -1882,7 +1851,6 @@ async def get_analytics_trades(limit: int = 20) -> Dict[str, Any]:
 async def get_equity_curve(points: int = 100) -> Dict[str, Any]:
     """Get equity curve data."""
     try:
-        from analytics.performance import get_performance_tracker
         
         tracker = get_performance_tracker()
         return {
@@ -1925,7 +1893,6 @@ async def get_portfolio_positions() -> Dict[str, Any]:
 async def get_audit_trail(limit: int = 100) -> Dict[str, Any]:
     """Get audit trail events."""
     try:
-        from core.audit_trail import get_audit_trail
         
         audit = get_audit_trail()
         events = []
@@ -1970,7 +1937,6 @@ async def get_audit_trail(limit: int = 100) -> Dict[str, Any]:
 async def get_agent_analytics() -> Dict[str, Any]:
     """Get performance breakdown by agent."""
     try:
-        from analytics.performance import get_performance_tracker
         
         tracker = get_performance_tracker()
         return {
@@ -1985,7 +1951,6 @@ async def get_agent_analytics() -> Dict[str, Any]:
 async def get_daily_pnl(days: int = 7) -> Dict[str, Any]:
     """Get daily P&L for the last N days."""
     try:
-        from analytics.performance import get_performance_tracker
         
         tracker = get_performance_tracker()
         return {
@@ -2071,7 +2036,6 @@ async def create_price_alert(
 async def delete_alert(alert_id: str) -> Dict[str, Any]:
     """Delete an alert."""
     try:
-        from core.alerts import get_alert_manager
         
         manager = get_alert_manager()
         success = manager.delete_alert(alert_id)
@@ -2089,7 +2053,6 @@ async def delete_alert(alert_id: str) -> Dict[str, Any]:
 async def get_notifications(unread_only: bool = False) -> Dict[str, Any]:
     """Get notifications."""
     try:
-        from core.alerts import get_alert_manager
         
         manager = get_alert_manager()
         notifications = manager.get_notifications(unread_only)
@@ -2107,7 +2070,6 @@ async def get_notifications(unread_only: bool = False) -> Dict[str, Any]:
 async def mark_notification_read(notification_id: str) -> Dict[str, Any]:
     """Mark a notification as read."""
     try:
-        from core.alerts import get_alert_manager
         
         manager = get_alert_manager()
         success = manager.mark_notification_read(notification_id)
@@ -2124,7 +2086,6 @@ async def mark_notification_read(notification_id: str) -> Dict[str, Any]:
 async def mark_all_notifications_read() -> Dict[str, Any]:
     """Mark all notifications as read."""
     try:
-        from core.alerts import get_alert_manager
         
         manager = get_alert_manager()
         count = manager.mark_all_read()
@@ -2164,7 +2125,6 @@ async def get_health() -> Dict[str, Any]:
 async def get_component_health(component: str) -> Dict[str, Any]:
     """Get health of a specific component."""
     try:
-        from core.health import get_health_monitor
         
         monitor = get_health_monitor()
         await monitor.check_all()
@@ -2211,7 +2171,6 @@ async def get_config() -> Dict[str, Any]:
 async def validate_config() -> Dict[str, Any]:
     """Validate current configuration."""
     try:
-        from config.settings import get_settings
         
         settings = get_settings()
         warnings = settings.validate()
@@ -2256,7 +2215,7 @@ async def run_backtest(
     """Run a backtest."""
     try:
         from backtesting.engine import get_backtest_engine, BacktestConfig
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         import uuid
         
         engine = get_backtest_engine()
@@ -2265,8 +2224,8 @@ async def run_backtest(
             backtest_id=f"bt_{uuid.uuid4().hex[:8]}",
             strategy_name=strategy,
             symbols=[symbol],
-            start_date=datetime.now() - timedelta(days=days),
-            end_date=datetime.now(),
+            start_date=datetime.now(timezone.utc) - timedelta(days=days),
+            end_date=datetime.now(timezone.utc),
             initial_capital=initial_capital,
         )
         
@@ -2285,7 +2244,6 @@ async def run_backtest(
 async def get_backtest_results() -> Dict[str, Any]:
     """Get all backtest results."""
     try:
-        from backtesting.engine import get_backtest_engine
         
         engine = get_backtest_engine()
         results = engine.get_all_results()
@@ -2303,7 +2261,6 @@ async def get_backtest_results() -> Dict[str, Any]:
 async def get_backtest_result(backtest_id: str) -> Dict[str, Any]:
     """Get a specific backtest result."""
     try:
-        from backtesting.engine import get_backtest_engine
         
         engine = get_backtest_engine()
         result = engine.get_result(backtest_id)
@@ -2338,7 +2295,6 @@ async def get_portfolio_summary() -> Dict[str, Any]:
 async def get_portfolio_holdings() -> Dict[str, Any]:
     """Get portfolio holdings."""
     try:
-        from portfolio.manager import get_portfolio_manager
         
         manager = get_portfolio_manager()
         return {
@@ -2354,7 +2310,6 @@ async def get_portfolio_holdings() -> Dict[str, Any]:
 async def get_portfolio_history(limit: int = 30) -> Dict[str, Any]:
     """Get portfolio value history for charting."""
     try:
-        from portfolio.manager import get_portfolio_manager
         
         manager = get_portfolio_manager()
         history = manager.get_value_history(limit=limit)
@@ -2373,7 +2328,6 @@ async def get_portfolio_history(limit: int = 30) -> Dict[str, Any]:
 async def get_portfolio_allocation() -> Dict[str, Any]:
     """Get current vs target allocation."""
     try:
-        from portfolio.manager import get_portfolio_manager
         
         manager = get_portfolio_manager()
         return {
@@ -2389,7 +2343,6 @@ async def get_portfolio_allocation() -> Dict[str, Any]:
 async def set_target_weights(weights: Dict[str, float]) -> Dict[str, Any]:
     """Set target portfolio weights."""
     try:
-        from portfolio.manager import get_portfolio_manager
         
         manager = get_portfolio_manager()
         manager.set_target_weights(weights)
@@ -2407,7 +2360,6 @@ async def set_target_weights(weights: Dict[str, float]) -> Dict[str, Any]:
 async def get_rebalance_orders() -> Dict[str, Any]:
     """Get orders needed to rebalance portfolio."""
     try:
-        from portfolio.manager import get_portfolio_manager
         
         manager = get_portfolio_manager()
         orders = manager.calculate_rebalance_orders()
@@ -2440,7 +2392,6 @@ async def calculate_position_size(
 ) -> Dict[str, Any]:
     """Calculate position size based on risk management."""
     try:
-        from portfolio.manager import get_portfolio_manager
         
         manager = get_portfolio_manager()
         size = manager.calculate_position_size(
@@ -2492,7 +2443,6 @@ async def get_mesh_status() -> Dict[str, Any]:
 async def get_mesh_metrics() -> Dict[str, Any]:
     """Get streaming agent mesh metrics."""
     try:
-        from agents.agent_mesh import agent_mesh
         
         return agent_mesh.get_metrics()
     except Exception as e:
@@ -2504,7 +2454,6 @@ async def get_mesh_metrics() -> Dict[str, Any]:
 async def get_mesh_agent(agent_id: str) -> Dict[str, Any]:
     """Get specific agent details."""
     try:
-        from agents.agent_mesh import agent_mesh
         
         for agent in agent_mesh.agents:
             if agent.agent_id == agent_id:
@@ -2525,7 +2474,6 @@ async def get_mesh_agent(agent_id: str) -> Dict[str, Any]:
 async def start_mesh() -> Dict[str, Any]:
     """Start the streaming agent mesh."""
     try:
-        from agents.agent_mesh import agent_mesh
         
         if not agent_mesh.agents:
             await agent_mesh.initialize()
@@ -2545,7 +2493,6 @@ async def start_mesh() -> Dict[str, Any]:
 async def stop_mesh() -> Dict[str, Any]:
     """Stop the streaming agent mesh."""
     try:
-        from agents.agent_mesh import agent_mesh
         
         await agent_mesh.stop()
         

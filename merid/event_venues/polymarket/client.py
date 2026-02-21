@@ -672,7 +672,6 @@ class PolymarketVenueClient(EventVenueClient):
     
     def _to_venue_orderbook(self, data: Dict[str, Any], market_id: str, outcome_id: Optional[str]) -> VenueOrderBook:
         """Convert to VenueOrderBook."""
-        from datetime import datetime, timezone
         
         bids = [(Decimal(str(b[0])), Decimal(str(b[1]))) for b in data.get("bids", [])]
         asks = [(Decimal(str(a[0])), Decimal(str(a[1]))) for a in data.get("asks", [])]
@@ -688,7 +687,6 @@ class PolymarketVenueClient(EventVenueClient):
     
     def _to_placed_order(self, data: Dict[str, Any]) -> PlacedOrder:
         """Convert to PlacedOrder."""
-        from datetime import datetime, timezone
         
         return PlacedOrder(
             order_id=data.get("id", ""),
@@ -722,7 +720,6 @@ class PolymarketVenueClient(EventVenueClient):
     
     def _parse_trades(self, data: Dict[str, Any]) -> List[VenueTrade]:
         """Parse trades from Data API."""
-        from datetime import datetime
         trades = []
         for trade_data in data.get("trades", []):
             trades.append(VenueTrade(

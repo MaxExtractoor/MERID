@@ -7,8 +7,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-FAST_MODEL = os.getenv("MERID_FAST_MODEL", "merid-interface:latest")
-DEEP_MODEL = os.getenv("MERID_DEEP_MODEL", "merid-strategist:latest")
+FAST_MODEL = os.getenv("MERID_FAST_MODEL", "gemma3:1b")
+DEEP_MODEL = os.getenv("MERID_DEEP_MODEL", "gemma3:1b")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_GENERATE_ENDPOINT = os.getenv("OLLAMA_GENERATE_ENDPOINT", "/api/generate")

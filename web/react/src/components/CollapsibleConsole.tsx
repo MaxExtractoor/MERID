@@ -8,7 +8,7 @@ export default function CollapsibleConsole() {
   return (
     <div className="bg-slate-900/70 rounded-xl border border-slate-800 overflow-hidden">
       {/* Header - Always Visible */}
-      <button
+      <button type="button"
         onClick={() => setIsExpanded(!isExpanded)}
         className="w-full px-6 py-4 flex items-center justify-between hover:bg-slate-800/50 transition-colors"
       >

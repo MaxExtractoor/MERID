@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Any
 from fastapi import APIRouter
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["api-status"])
 

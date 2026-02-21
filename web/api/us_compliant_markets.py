@@ -7,7 +7,7 @@ Replaces restricted APIs with free, unrestricted alternatives.
 
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 
 from data.us_compliant_data_sources import USCompliantDataAggregator, PredictionMarketsAggregator
@@ -68,7 +68,7 @@ async def get_markets(
         # Format response
         response = {
             "status": "success",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "sources": list(set(data.source for data in market_data.values())),
             "markets": []
         }
@@ -166,7 +166,7 @@ async def get_top_liquid_markets(
         
         response = {
             "status": "success",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "markets": []
         }
         
@@ -190,6 +190,24 @@ async def get_top_liquid_markets(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _lookup_paper_position(trading_engine, market_id: str) -> dict:
+    """Look up real paper trading position for a Kalshi market.
+    
+    Returns dict with side/size/pnl — all zeros if no position exists.
+    """
+    try:
+        for portfolio in trading_engine.portfolios.values():
+            for symbol, pos in portfolio.positions.items():
+                if market_id in symbol:
+                    side = "YES" if pos.get("quantity", pos.get("size", 0)) > 0 else "NO"
+                    size = abs(pos.get("quantity", pos.get("size", 0)))
+                    pnl = round(pos.get("unrealized_pnl", 0.0), 2)
+                    return {"side": side, "size": size, "pnl": pnl}
+    except Exception as _e:
+        logger.debug("_get_position_for_market skipped: %s", _e)
+    return {"side": "NONE", "size": 0, "pnl": 0.0}
+
+
 @router.get("/prediction-markets")
 async def get_prediction_markets():
     """
@@ -199,166 +217,23 @@ async def get_prediction_markets():
     try:
         from monitoring.prediction_markets import get_prediction_aggregator, ResolutionStatus
         from trading.paper_trading import get_paper_trading_engine
-        import random
+        from merid.event_venues.kalshi.client import KalshiVenueClient
+        from merid.event_venues.kalshi.models import KalshiConfig
         
         # Get the prediction markets aggregator which has Kalshi data
         aggregator = get_prediction_aggregator()
         trading_engine = get_paper_trading_engine()
         
-        # Get all markets from the aggregator
-        try:
-            all_markets = aggregator.get_all_markets()
-        except Exception as e:
-            logger.warning(f"Failed to get markets from aggregator: {e}")
-            all_markets = []
-        
-        # Format markets for frontend with trading data
-        formatted_markets = []
-        
-        if all_markets:
-            # Use real Kalshi markets if available
-            for market in all_markets:
-                try:
-                    # Skip markets without required fields
-                    if not hasattr(market, 'market_id') or not market.market_id:
-                        continue
-                    
-                    # Generate symbol from market_id (first 8 chars, uppercase)
-                    symbol = market.market_id[:8].upper() if len(market.market_id) >= 8 else market.market_id.upper()
-                    
-                    # Get position from trading engine (if exists)
-                    # For now, use mock position data - TODO: integrate real positions
-                    has_position = random.random() < 0.3  # 30% chance of having a position
-                    
-                    # Handle resolution_date - it's always a float timestamp or None
-                    end_time = None
-                    if market.resolution_date:
-                        try:
-                            # resolution_date is a Unix timestamp (float)
-                            end_time = datetime.fromtimestamp(float(market.resolution_date)).isoformat()
-                        except (ValueError, TypeError, OSError) as e:
-                            logger.debug(f"Invalid resolution_date for {market.market_id}: {market.resolution_date}")
-                            end_time = None
-                    
-                    if not end_time:
-                        end_time = datetime.now().isoformat()
-                    
-                    formatted_markets.append({
-                        "id": market.market_id,
-                        "symbol": symbol,
-                        "question": market.question,
-                        "yesPrice": market.yes_price,
-                        "noPrice": market.no_price,
-                        "ourPosition": "YES" if has_position and random.random() > 0.5 else "NO" if has_position else "NONE",
-                        "ourSize": random.randint(10, 100) if has_position else 0,
-                        "ourPnl": round(random.uniform(-500, 1000), 2) if has_position else 0.0,
-                        "modelConfidence": round(random.uniform(0.6, 0.95), 2),
-                        "endTime": end_time,
-                        "status": "OPEN" if market.status == ResolutionStatus.OPEN else "CLOSED",
-                        "volume": market.total_volume
-                    })
-                except Exception as e:
-                    market_id = getattr(market, 'market_id', 'unknown')
-                    logger.warning(f"Failed to format market {market_id}: {e}", exc_info=True)
-                    continue
-        else:
-            # Fallback: Use sample prediction markets data in frontend format
-            logger.warning("No Kalshi markets available, using sample data")
-            sample_markets = [
-                {
-                    "id": "PRES-2024-01",
-                    "symbol": "PRES24",
-                    "question": "Will Donald Trump win the 2024 Presidential Election?",
-                    "yesPrice": 0.52,
-                    "noPrice": 0.48,
-                    "ourPosition": "YES",
-                    "ourSize": 50,
-                    "ourPnl": 125.00,
-                    "modelConfidence": 0.78,
-                    "endTime": "2024-11-05T23:59:59",
-                    "status": "OPEN",
-                    "volume": 1250000
-                },
-                {
-                    "id": "BTC-100K-2024",
-                    "symbol": "BTC100K",
-                    "question": "Will Bitcoin reach $100,000 by end of 2024?",
-                    "yesPrice": 0.68,
-                    "noPrice": 0.32,
-                    "ourPosition": "NONE",
-                    "ourSize": 0,
-                    "ourPnl": 0.00,
-                    "modelConfidence": 0.85,
-                    "endTime": "2024-12-31T23:59:59",
-                    "status": "OPEN",
-                    "volume": 890000
-                },
-                {
-                    "id": "FED-RATE-MAR",
-                    "symbol": "FEDMAR",
-                    "question": "Will the Fed cut rates in March 2024?",
-                    "yesPrice": 0.45,
-                    "noPrice": 0.55,
-                    "ourPosition": "NO",
-                    "ourSize": 75,
-                    "ourPnl": -50.00,
-                    "modelConfidence": 0.72,
-                    "endTime": "2024-03-20T14:00:00",
-                    "status": "OPEN",
-                    "volume": 650000
-                },
-                {
-                    "id": "ETH-5K-2024",
-                    "symbol": "ETH5K",
-                    "question": "Will Ethereum reach $5,000 by end of 2024?",
-                    "yesPrice": 0.58,
-                    "noPrice": 0.42,
-                    "ourPosition": "YES",
-                    "ourSize": 100,
-                    "ourPnl": 320.00,
-                    "modelConfidence": 0.81,
-                    "endTime": "2024-12-31T23:59:59",
-                    "status": "OPEN",
-                    "volume": 720000
-                },
-                {
-                    "id": "TECH-LAYOFFS-Q1",
-                    "symbol": "TECHLAY",
-                    "question": "Will tech layoffs exceed 50,000 in Q1 2024?",
-                    "yesPrice": 0.35,
-                    "noPrice": 0.65,
-                    "ourPosition": "NONE",
-                    "ourSize": 0,
-                    "ourPnl": 0.00,
-                    "modelConfidence": 0.65,
-                    "endTime": "2024-03-31T23:59:59",
-                    "status": "OPEN",
-                    "volume": 420000
-                }
-            ]
-            
-            # Add slight random variations to make it feel live
-            for market in sample_markets:
-                variation = random.uniform(-0.03, 0.03)
-                market["yesPrice"] = max(0.01, min(0.99, market["yesPrice"] + variation))
-                market["noPrice"] = 1.0 - market["yesPrice"]
-                formatted_markets.append(market)
-        
-        # Calculate meta statistics
-        total_pnl = sum(m["ourPnl"] for m in formatted_markets)
-        total_volume = sum(m["volume"] for m in formatted_markets)
-        open_markets = sum(1 for m in formatted_markets if m["status"] == "OPEN")
-        
-        return {
-            "markets": formatted_markets,
-            "meta": {
-                "total": len(formatted_markets),
-                "open": open_markets,
-                "totalVolume": total_volume,
-                "totalPnl": total_pnl
-            },
-            "lastUpdated": datetime.now().isoformat()
-        }
+        # Check Kalshi health via client
+        client = KalshiVenueClient(KalshiConfig())
+        circuit = client.get_circuit_status()
+        if circuit.get("state") != "closed":
+            return _offline({
+                "markets": [],
+                "meta": {"total": 0, "open": 0, "totalVolume": 0, "totalPnl": 0}
+            }, reason=f"Kalshi venue is offline or degraded: {circuit.get('state')}")
+
+        # Lazy-start aggregator...
         
     except Exception as e:
         logger.error(f"Error fetching prediction markets: {e}")
@@ -386,7 +261,7 @@ async def get_available_sources():
         
         return {
             "status": "success",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "sources": sources
         }
         
@@ -410,7 +285,7 @@ async def health_check():
         
         return {
             "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "sources_active": len(test_data),
             "api_version": "v1.0"
         }
@@ -419,7 +294,7 @@ async def health_check():
         logger.error(f"Health check failed: {e}")
         return {
             "status": "unhealthy",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e),
             "api_version": "v1.0"
         }
@@ -503,7 +378,7 @@ async def websocket_real_time_feed(websocket):
                 current_data = await aggregator.get_cached_data(symbols)
                 await websocket.send_json({
                     "type": "market_update",
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "data": {
                         symbol: {
                             "price": data.price,

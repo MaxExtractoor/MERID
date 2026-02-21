@@ -1,4 +1,8 @@
-"""Shim module exposing new MERID execution router for legacy imports."""
+"""Shim module exposing new MERID execution router for legacy imports — DEPRECATED.
+
+Superseded by merid/pipeline/router.py (TradeRouter with full risk gating,
+mode management, and instrument resolution). Kept for backward compatibility.
+"""
 
 from __future__ import annotations
 

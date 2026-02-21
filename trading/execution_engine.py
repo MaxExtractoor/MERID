@@ -161,6 +161,28 @@ class TradingExecutionEngine:
     async def _safety_check(self, order: TradeOrder) -> bool:
         """Perform pre-execution safety checks."""
         try:
+            # Execution gate — unified safety check (kill switch, recon, feeds, PnL)
+            try:
+                from core.execution_gate import check_execution_gate
+                gate = check_execution_gate()
+                if gate.blocked:
+                    reasons_str = "; ".join(r.message for r in gate.reasons)
+                    logger.warning(
+                        "execution_blocked | order=%s symbol=%s reasons=[%s]",
+                        order.order_id, order.symbol, reasons_str,
+                    )
+                    return False
+                if gate.is_limited:
+                    is_reduce = getattr(order, 'reduce_only', False) or getattr(order, 'side', '') in ('sell', 'close')
+                    if not is_reduce:
+                        logger.warning(
+                            "execution_limited | order=%s symbol=%s — new risk blocked (reduce-only mode)",
+                            order.order_id, order.symbol,
+                        )
+                        return False
+            except ImportError:
+                pass
+
             # Check daily loss limit
             if self._daily_pnl < -self.max_daily_loss:
                 logger.warning(f"Daily loss limit exceeded: ${self._daily_pnl:.2f}")

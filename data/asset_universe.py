@@ -47,7 +47,7 @@ ASSET_UNIVERSE: Dict[str, Asset] = {
     'ICP': Asset('ICP/USDT', 'Internet Computer', 'Layer1', 'internet-computer', 39, is_layer1=True),
 
     # Layer 2
-    'MATIC': Asset('MATIC/USDT', 'Polygon', 'Layer2', 'matic-network', 15, is_layer2=True),
+    'POL': Asset('POL/USDT', 'Polygon', 'Layer2', 'polygon-ecosystem-token', 15, is_layer2=True),
     'OP': Asset('OP/USDT', 'Optimism', 'Layer2', 'optimism', 27, is_layer2=True),
     'ARB': Asset('ARB/USDT', 'Arbitrum', 'Layer2', 'arbitrum', 29, is_layer2=True),
     'STRK': Asset('STRK/USDT', 'Starknet', 'Layer2', 'starknet', 41, is_layer2=True),

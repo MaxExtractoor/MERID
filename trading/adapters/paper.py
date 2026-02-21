@@ -53,4 +53,7 @@ class PaperTradingAdapter(TradingVenueAdapterBase):
         )
 
 
-register_adapter(PaperTradingAdapter())
+# Only register paper adapter in non-Kalshi mode
+from merid.settings import settings
+if not settings.KALSHI_ONLY:
+    register_adapter(PaperTradingAdapter())

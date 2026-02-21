@@ -11,68 +11,81 @@ export interface SystemHealth {
 }
 
 export interface PnLSummary {
-  daily_pnl: number;
-  daily_pnl_pct: number;
-  total_equity: number;
-  available_margin: number;
-  positions_count: number;
+  today_pnl: number;
+  today_pnl_pct: number;
+  mtm_pnl: number;
+  max_drawdown: number;
+  max_drawdown_pct: number;
+  limit_daily_loss: number;
+  limit_utilization_pct: number;
 }
 
 export interface TradingSummary {
-  active_orders: number;
-  filled_today: number;
-  cancelled_today: number;
-  total_volume_24h: number;
-  avg_fill_time_ms: number;
+  active_strategies: number;
+  paused_strategies: number;
+  venues_connected: number;
+  venues: string[];
+  notional_deployed: number;
+  notional_capacity: number;
+  utilization_pct: number;
 }
 
 export interface AgentSummary {
   total_agents: number;
   active_agents: number;
   idle_agents: number;
-  total_tasks_completed: number;
+  tasks_completed: number;
+  tasks_pending: number;
+  average_response_time: number;
+  success_rate: number;
   agents: Array<{
-    agent_id: string;
+    id: string;
     name: string;
-    status: 'active' | 'idle' | 'error';
+    status: string;
+    heartbeat_age_ms: number;
+    strategy: string;
+    state: string;
+    positions_count: number;
+    today_pnl: number;
     tasks_completed: number;
+    uptime: number;
   }>;
+  summary: {
+    total: number;
+    healthy: number;
+    paused: number;
+    unhealthy: number;
+  };
 }
 
 export interface RiskProtections {
+  timestamp: string;
   circuit_breaker: {
     state: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+    state_color: string;
     error_count: number;
+    window_seconds: number;
     threshold: number;
-    last_failure?: number;
+    last_error_at: string | null;
+    opened_at: string | null;
+    cooldown_seconds: number;
+    half_open_successes: number;
   };
   lockdown: {
     trading_suite_enabled: boolean;
-    reason?: string;
+    global_mode: string;
+    spectator_mode: boolean;
+    lockdown_reason: string | null;
   };
-  exposure: {
-    total_exposure: number;
-    max_exposure: number;
-    utilization_pct: number;
+  risk_limits: {
+    max_daily_loss_usd: number;
+    current_daily_pnl: number;
+    daily_loss_utilization_pct: number;
+    max_per_symbol_exposure_usd: number;
+    max_open_orders: number;
+    current_open_orders: number;
   };
-}
-
-export interface PrimeStatus {
-  connected: boolean;
-  last_heartbeat?: number;
-  active_connections: number;
-  message_queue_size: number;
-}
-
-export interface PredictionMarket {
-  market_id: string;
-  question: string;
-  category: string;
-  yes_price: number;
-  no_price: number;
-  volume_24h: number;
-  platform: string;
-  close_date?: string;
+  recent_events: Array<{ timestamp: string; type: string; details: Record<string, unknown> }>;
 }
 
 class APIService {
@@ -84,62 +97,20 @@ class APIService {
     return response.json();
   }
 
-  // System Health
   async getSystemHealth(): Promise<SystemHealth> {
     return this.fetchJSON<SystemHealth>('/system/health');
   }
 
-  // PnL & Portfolio
   async getPnLSummary(): Promise<PnLSummary> {
     return this.fetchJSON<PnLSummary>('/risk/pnl-summary');
   }
 
-  async getPortfolioSummary() {
-    return this.fetchJSON('/portfolio/summary');
-  }
-
-  // Trading Operations
   async getTradingSummary(): Promise<TradingSummary> {
     return this.fetchJSON<TradingSummary>('/trading/summary');
   }
 
-  // Agents
   async getAgentSummary(): Promise<AgentSummary> {
     return this.fetchJSON<AgentSummary>('/agents/summary');
-  }
-
-  async getAgentActivity() {
-    return this.fetchJSON('/agents/activity');
-  }
-
-  // Risk & Protections
-  async getRiskProtections(): Promise<RiskProtections> {
-    return this.fetchJSON<RiskProtections>('/risk/protections');
-  }
-
-  async getRiskExposure() {
-    return this.fetchJSON('/risk/exposure');
-  }
-
-  // Prime Status
-  async getPrimeStatus(): Promise<PrimeStatus> {
-    return this.fetchJSON<PrimeStatus>('/prime/status');
-  }
-
-  // Prediction Markets
-  async getPredictionMarkets(): Promise<{ markets: PredictionMarket[] }> {
-    return this.fetchJSON<{ markets: PredictionMarket[] }>('/v1/us-compliant/prediction-markets');
-  }
-
-  // Live Prices
-  async getLivePrices(symbols: string[]) {
-    const symbolsParam = symbols.join(',');
-    return this.fetchJSON(`/prices/live?symbols=${symbolsParam}`);
-  }
-
-  // Recent Orders
-  async getRecentOrders() {
-    return this.fetchJSON('/orders/recent');
   }
 }
 

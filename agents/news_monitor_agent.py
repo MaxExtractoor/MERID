@@ -11,7 +11,7 @@ import asyncio
 import time
 from typing import List, Dict, Optional
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from monitoring.news_feeds import AggregatedNewsFeed
 from agents.twitter_agent import get_twitter_agent
@@ -98,7 +98,7 @@ class NewsMonitorAgent:
                     'title': article.headline,
                     'source': article.source,
                     'url': article.url,
-                    'published_at': datetime.fromtimestamp(article.published_at),
+                    'published_at': datetime.fromtimestamp(article.published_at, tz=timezone.utc),
                     'importance': 0.9 if article.importance == 'high' else 0.7 if article.importance == 'medium' else 0.5
                 }
                 for article in all_news_articles
@@ -457,7 +457,7 @@ class NewsMonitorAgent:
         telegram_posts = sum(1 for n in self.posted_news if n.posted_telegram)
         
         # Calculate posting rate (last hour)
-        one_hour_ago = datetime.now() - timedelta(hours=1)
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         recent_posts = [n for n in self.posted_news if n.published_at >= one_hour_ago]
         
         return {

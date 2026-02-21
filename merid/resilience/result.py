@@ -16,6 +16,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Optional, TypeVar
 
+import logging
+logger = logging.getLogger("result")
+
 T = TypeVar("T")
 
 
@@ -147,7 +150,7 @@ def timed_result(func: Callable[..., T]) -> Callable[..., "OperationResult[T]"]:
             return await client.get_market(market_id)
         
         result = await fetch_market("BTC-YES")
-        print(f"Took {result.latency_ms}ms, success={result.success}")
+        logger.info(f"Took {result.latency_ms}ms, success={result.success}")
     """
     import functools
     import asyncio

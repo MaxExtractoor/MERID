@@ -1,0 +1,428 @@
+{
+  "generated": "2026-02-06",
+  "auditor": "Full Codebase Auditor (automated)",
+  "version": "1.0.0",
+
+  "domains": [
+    {
+      "id": "dev_swarm",
+      "name": "Dev Swarm",
+      "paths": ["core/dev_swarm.py", "core/dev_swarm_persistence.py", "core/dev_swarm_metrics.py", "core/dev_swarm_auditor_context.py", "core/dev_swarm_readiness_auditor.py", "web/api/dev_swarm_routes.py"],
+      "criticality": "high",
+      "current_coverage": 93.52,
+      "coverage_target": 90,
+      "gate_enforced": true,
+      "gate_command": "pytest -m dev_swarm --cov=core.dev_swarm --cov=core.dev_swarm_persistence --cov=core.dev_swarm_metrics --cov=web.api.dev_swarm_routes --cov-report=term --cov-fail-under=90 -p no:timeout",
+      "has_tests": true,
+      "test_paths": ["tests/test_dev_swarm.py"],
+      "markers": ["dev_swarm"],
+      "test_count": 150,
+      "python_files": 5
+    },
+    {
+      "id": "trading",
+      "name": "Trading Core",
+      "paths": ["trading/"],
+      "criticality": "critical",
+      "current_coverage": 7,
+      "coverage_target": 60,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/trading/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 35
+    },
+    {
+      "id": "compliance",
+      "name": "Compliance",
+      "paths": ["compliance/"],
+      "criticality": "critical",
+      "current_coverage": 2,
+      "coverage_target": 80,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": false,
+      "test_paths": ["tests/compliance/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 7
+    },
+    {
+      "id": "agents",
+      "name": "Agents",
+      "paths": ["agents/"],
+      "criticality": "high",
+      "current_coverage": 5,
+      "coverage_target": 50,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/agents/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 71
+    },
+    {
+      "id": "core_engine",
+      "name": "Core Engine",
+      "paths": ["core/"],
+      "criticality": "high",
+      "current_coverage": 7.5,
+      "coverage_target": 40,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/core/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 176
+    },
+    {
+      "id": "web_api",
+      "name": "Web API",
+      "paths": ["web/api/"],
+      "criticality": "high",
+      "current_coverage": 5,
+      "coverage_target": 50,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/web/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 124
+    },
+    {
+      "id": "frontend",
+      "name": "Web Frontend",
+      "paths": ["web/react/src/"],
+      "criticality": "medium",
+      "current_coverage": 0,
+      "coverage_target": 30,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": false,
+      "test_paths": [],
+      "markers": [],
+      "test_count": 0,
+      "python_files": 0
+    },
+    {
+      "id": "security",
+      "name": "Security",
+      "paths": ["security/"],
+      "criticality": "critical",
+      "current_coverage": 0,
+      "coverage_target": 70,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": false,
+      "test_paths": ["tests/security/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 17
+    },
+    {
+      "id": "governance",
+      "name": "Governance",
+      "paths": ["governance/"],
+      "criticality": "high",
+      "current_coverage": 2,
+      "coverage_target": 50,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": false,
+      "test_paths": ["tests/governance/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 23
+    },
+    {
+      "id": "data",
+      "name": "Data",
+      "paths": ["data/"],
+      "criticality": "high",
+      "current_coverage": 5,
+      "coverage_target": 40,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/data/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 18
+    },
+    {
+      "id": "monitoring",
+      "name": "Monitoring",
+      "paths": ["monitoring/"],
+      "criticality": "medium",
+      "current_coverage": 5,
+      "coverage_target": 30,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/monitoring/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 24
+    },
+    {
+      "id": "hardening",
+      "name": "Hardening",
+      "paths": ["hardening/"],
+      "criticality": "medium",
+      "current_coverage": 10,
+      "coverage_target": 50,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/hardening/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 5
+    },
+    {
+      "id": "merid_app",
+      "name": "Merid App",
+      "paths": ["merid/"],
+      "criticality": "high",
+      "current_coverage": 15,
+      "coverage_target": 40,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/merid/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 38
+    },
+    {
+      "id": "infra",
+      "name": "Infrastructure",
+      "paths": ["infra/"],
+      "criticality": "medium",
+      "current_coverage": 0,
+      "coverage_target": 20,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": false,
+      "test_paths": [],
+      "markers": [],
+      "test_count": 0,
+      "python_files": 7
+    },
+    {
+      "id": "utils",
+      "name": "Utils",
+      "paths": ["utils/"],
+      "criticality": "low",
+      "current_coverage": 0,
+      "coverage_target": 20,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": true,
+      "test_paths": ["tests/utils/"],
+      "markers": [],
+      "test_count": null,
+      "python_files": 29
+    },
+    {
+      "id": "scripts",
+      "name": "Scripts",
+      "paths": ["scripts/"],
+      "criticality": "low",
+      "current_coverage": null,
+      "coverage_target": null,
+      "gate_enforced": false,
+      "gate_command": null,
+      "has_tests": false,
+      "test_paths": [],
+      "markers": [],
+      "test_count": 0,
+      "python_files": 59
+    }
+  ],
+
+  "legacy_risk_zones": [
+    {
+      "id": "LRZ-1",
+      "domain": "core_engine",
+      "type": "legacy",
+      "files": [
+        "tests/core/test_connection_pool.py",
+        "tests/core/test_health_monitor.py",
+        "tests/streaming/test_stream_bus.py",
+        "tests/consensus/test_consensus_coordinator.py"
+      ],
+      "reason": "Async IOCP GetQueuedCompletionStatus hangs on Windows",
+      "gating": "non_gating",
+      "quarantine_marker": "iocp_hang",
+      "remediation": "Fix async test isolation or move to Linux CI"
+    },
+    {
+      "id": "LRZ-2",
+      "domain": "core_engine",
+      "type": "legacy",
+      "files": ["tests/core/test_redis_events.py"],
+      "reason": "Requires running Redis instance",
+      "gating": "non_gating",
+      "quarantine_marker": null,
+      "remediation": "Add Redis service to CI or mock Redis in tests"
+    },
+    {
+      "id": "LRZ-3",
+      "domain": "compliance",
+      "type": "coverage",
+      "files": ["tests/contracts/", "tests/compliance/"],
+      "reason": "Empty test files, depend on database state",
+      "gating": "non_gating",
+      "quarantine_marker": null,
+      "remediation": "Populate test files with mocked compliance tests"
+    },
+    {
+      "id": "LRZ-4",
+      "domain": "security",
+      "type": "security",
+      "files": ["kalshi_private_key.pem", ".env.backup"],
+      "reason": "Private key and env backup with secrets tracked in git",
+      "gating": "non_gating",
+      "quarantine_marker": null,
+      "remediation": "Rotate all secrets, purge from git history, expand .gitignore"
+    },
+    {
+      "id": "LRZ-5",
+      "domain": "multiple",
+      "type": "arch",
+      "files": [
+        "agents/prediction_arbitrage_analyst.py",
+        "trading/execution.py",
+        "monitoring/prediction_markets.py",
+        "web/api/institutional.py"
+      ],
+      "reason": "God classes: files >40KB, extremely difficult to test and maintain",
+      "gating": "non_gating",
+      "quarantine_marker": null,
+      "remediation": "Break into sub-modules incrementally"
+    },
+    {
+      "id": "LRZ-6",
+      "domain": "tests",
+      "type": "coverage",
+      "files": ["tests/"],
+      "reason": "177 empty (0-byte) test files across tests/ directory",
+      "gating": "non_gating",
+      "quarantine_marker": null,
+      "remediation": "Delete or populate with smoke tests"
+    },
+    {
+      "id": "LRZ-7",
+      "domain": "docs",
+      "type": "arch",
+      "files": ["*.md (root)"],
+      "reason": "323 root-level .md files, many stale or duplicated",
+      "gating": "non_gating",
+      "quarantine_marker": null,
+      "remediation": "Archive into docs_archive/, keep <=20 active root docs"
+    },
+    {
+      "id": "LRZ-8",
+      "domain": "security",
+      "type": "security",
+      "files": [".gitignore"],
+      "reason": "Only 5 entries, missing patterns for secrets, build artifacts, IDE configs",
+      "gating": "non_gating",
+      "quarantine_marker": null,
+      "remediation": "Expand to comprehensive .gitignore"
+    }
+  ],
+
+  "accepted_exceptions": [
+    {
+      "id": "AE-1",
+      "description": "Overall backend coverage ~7.5%",
+      "reason": "Too large to fix in one pass. Domain-by-domain improvement planned.",
+      "review_date": "2026-03-06"
+    },
+    {
+      "id": "AE-2",
+      "description": "IOCP async hangs on Windows (4 test files)",
+      "reason": "Quarantined via markers. Will fix when moving to Linux CI.",
+      "review_date": "2026-03-06"
+    },
+    {
+      "id": "AE-3",
+      "description": "4 god classes >40KB each",
+      "reason": "High-effort refactoring. Will address incrementally.",
+      "review_date": "2026-04-06"
+    },
+    {
+      "id": "AE-4",
+      "description": "177 empty test files",
+      "reason": "Sprint planning placeholders. Will populate or delete domain-by-domain.",
+      "review_date": "2026-03-06"
+    },
+    {
+      "id": "AE-5",
+      "description": "323 root-level .md files",
+      "reason": "Historical artifacts. Low priority compared to code quality.",
+      "review_date": "2026-04-06"
+    },
+    {
+      "id": "AE-6",
+      "description": "Zero React frontend tests",
+      "reason": "Dashboard is supplementary to API. Will add when frontend stabilizes.",
+      "review_date": "2026-04-06"
+    }
+  ],
+
+  "ci_gates": {
+    "enforced": [
+      {
+        "name": "Dev Swarm Domain Coverage",
+        "threshold": ">=90%",
+        "command": "make dev-swarm-test"
+      },
+      {
+        "name": "Dev Swarm Readiness Audit",
+        "threshold": "15/15 checks",
+        "command": "make readiness-audit"
+      }
+    ],
+    "recommended": [
+      {"name": "Trading Domain", "threshold": ">=60%", "priority": "high"},
+      {"name": "Compliance Domain", "threshold": ">=80%", "priority": "high"},
+      {"name": "Security Domain", "threshold": ">=70%", "priority": "high"},
+      {"name": "Agents Domain", "threshold": ">=50%", "priority": "medium"},
+      {"name": "Core Domain", "threshold": ">=40%", "priority": "medium"}
+    ]
+  },
+
+  "stats": {
+    "total_python_files_by_domain": {
+      "core": 176,
+      "agents": 71,
+      "trading": 35,
+      "data": 18,
+      "web": 124,
+      "compliance": 7,
+      "monitoring": 24,
+      "security": 17,
+      "governance": 23,
+      "hardening": 5,
+      "infra": 7,
+      "merid": 38,
+      "utils": 29,
+      "scripts": 59
+    },
+    "test_files": {
+      "total": 550,
+      "non_empty": 373,
+      "empty": 177
+    },
+    "root_md_files": 323,
+    "god_classes_over_40kb": 4
+  }
+}

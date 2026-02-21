@@ -1,0 +1,181 @@
+name: MERID CI
+# Primary CI workflow — 15 legacy workflows removed 2026-02-21
+# Remaining active: ci.yml, autonomous-dev-swarm.yml, cross-browser-tests.yml,
+#   fast_safety.yml, nightly-soak.yml, prompt-eval.yml, reality_enforcement.yml
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  MERID_ENV: "test"
+
+jobs:
+  # ── Swarm integrity + data authenticity gate ──────────────────────
+  swarm-integrity-gate:
+    name: Swarm Integrity Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run swarm integrity policy gate
+        run: |
+          mkdir -p reports
+          python scripts/enforce_swarm_integrity.py \
+            --config .merid_safeguard.yml \
+            --snapshot tests/fixtures/swarm/healthy_snapshot.json \
+            --output-json reports/swarm-integrity.json \
+            --strict
+
+      - name: Upload swarm integrity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-integrity-report
+          path: reports/swarm-integrity.json
+
+  # ── Backend golden path tests ─────────────────────────────────────
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 15
+    env:
+      MERID_SWARM_INTEGRITY_ENFORCE: "1"
+      MERID_SWARM_HEALTH_SNAPSHOT: tests/fixtures/swarm/healthy_snapshot.json
+      MERID_SWARM_SAFEGUARD_CONFIG: .merid_safeguard.yml
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run golden path tests
+        run: |
+          mkdir -p reports
+          python -m pytest tests/test_e2e_golden_path.py \
+                           tests/test_signal_layer.py \
+                           tests/test_live_feeds.py \
+                           tests/test_prediction_markets.py \
+                           tests/test_unified_pipeline.py \
+                           tests/test_canonical_agents.py \
+                           tests/test_hardening.py \
+                           -v --tb=short --junitxml=reports/backend.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-report
+          path: reports/backend.xml
+
+  # ── Frontend tests ────────────────────────────────────────────────
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/react/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web/react
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: web/react
+        run: |
+          mkdir -p ../../reports
+          npx jest --ci --passWithNoTests 2>&1 | tee ../../reports/frontend.txt
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-report
+          path: reports/frontend.txt
+
+  # ── Security scan ─────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for secrets in tracked files
+        run: |
+          echo "Checking for tracked secrets..."
+          if git ls-files | grep -E '\.(pem|key|p12|pfx)$'; then
+            echo "::error::Secret files found in git index!"
+            exit 1
+          fi
+          if git ls-files | grep -E '\.env\.backup$'; then
+            echo "::error::.env.backup tracked in git!"
+            exit 1
+          fi
+          echo "No secrets found in tracked files."
+
+      - name: Verify .gitignore coverage
+        run: |
+          LINES=$(wc -l < .gitignore)
+          echo ".gitignore has $LINES entries"
+          if [ "$LINES" -lt 50 ]; then
+            echo "::warning::.gitignore has fewer than 50 entries — review for gaps"
+          fi
+
+  # ── Lint ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check (non-blocking)
+        run: ruff check . --select E9,F63,F7,F82 --exit-zero
+        # Only check for syntax errors and critical issues
+        # Full lint enforcement can be added incrementally

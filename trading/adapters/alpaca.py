@@ -135,4 +135,7 @@ class AlpacaEquitiesAdapter(TradingVenueAdapterBase):
         )
 
 
-register_adapter(AlpacaEquitiesAdapter())
+# Only register Alpaca adapter in non-Kalshi mode
+from merid.settings import settings
+if not settings.KALSHI_ONLY:
+    register_adapter(AlpacaEquitiesAdapter())

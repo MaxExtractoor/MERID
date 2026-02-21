@@ -242,6 +242,44 @@ groups:
           runbook_url: "https://docs.merid.com/runbooks/connection-pool"
           dashboard_url: "http://grafana.merid.com/d/database-health"
 
+  - name: merid_drift
+    rules:
+      - alert: MERID_Drift_Degraded
+        expr: merid_drift_status >= 2
+        for: 5m
+        labels:
+          severity: warning
+          service: merid-drift
+          team: ml-ops
+        annotations:
+          summary: "Model/strategy drift degraded"
+          description: "Drift monitor {{ $labels.monitor_id }} ({{ $labels.drift_type }}) has been degraded for 5+ minutes"
+          runbook_url: "https://docs.merid.com/runbooks/model-drift-response"
+
+      - alert: MERID_Drift_Critical
+        expr: merid_drift_status >= 3
+        for: 2m
+        labels:
+          severity: critical
+          service: merid-drift
+          team: ml-ops
+        annotations:
+          summary: "Model/strategy drift critical"
+          description: "Drift monitor {{ $labels.monitor_id }} ({{ $labels.drift_type }}) is CRITICAL — automatic demotion triggered"
+          runbook_url: "https://docs.merid.com/runbooks/model-drift-response"
+
+      - alert: MERID_Feed_Stale
+        expr: merid_feeds_stale_total > 0
+        for: 3m
+        labels:
+          severity: warning
+          service: merid-data
+          team: data-ops
+        annotations:
+          summary: "Stale data feeds detected"
+          description: "{{ $value }} data feed(s) are stale — instruments may be auto-paused"
+          runbook_url: "https://docs.merid.com/runbooks/feed-staleness"
+
 # Inhibition Rules
 inhibit_rules:
   # Don't alert on latency if the service is down

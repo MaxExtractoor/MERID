@@ -61,7 +61,6 @@ async def get_constitutional_status() -> Dict[str, Any]:
 @router.get("/constitutional/invariants")
 async def get_all_invariants() -> Dict[str, Any]:
     """Get all constitutional invariant values."""
-    from governance.constitutional import get_constitutional
     
     const = get_constitutional()
     return {
@@ -73,7 +72,6 @@ async def get_all_invariants() -> Dict[str, Any]:
 @router.get("/constitutional/violations")
 async def get_constitutional_violations(limit: int = 100) -> Dict[str, Any]:
     """Get recent constitutional violations."""
-    from governance.constitutional import get_constitutional
     
     const = get_constitutional()
     return {
@@ -85,7 +83,6 @@ async def get_constitutional_violations(limit: int = 100) -> Dict[str, Any]:
 @router.get("/constitutional/bypass-attempts")
 async def get_bypass_attempts() -> Dict[str, Any]:
     """Get all bypass attempts."""
-    from governance.constitutional import get_constitutional
     
     const = get_constitutional()
     return {
@@ -97,7 +94,6 @@ async def get_bypass_attempts() -> Dict[str, Any]:
 @router.post("/constitutional/verify")
 async def verify_constitutional_integrity() -> Dict[str, Any]:
     """Verify constitutional invariants integrity."""
-    from governance.constitutional import get_constitutional
     
     const = get_constitutional()
     is_valid = const.verify_integrity()
@@ -125,7 +121,6 @@ async def get_authority_status() -> Dict[str, Any]:
 @router.get("/authority/violations")
 async def get_authority_violations(limit: int = 100) -> Dict[str, Any]:
     """Get recent authority boundary violations."""
-    from governance.authority_boundary import get_authority_enforcer
     
     enforcer = get_authority_enforcer()
     return {
@@ -137,7 +132,6 @@ async def get_authority_violations(limit: int = 100) -> Dict[str, Any]:
 @router.get("/authority/pending-approvals")
 async def get_pending_approvals() -> Dict[str, Any]:
     """Get pending approval requests."""
-    from governance.authority_boundary import get_authority_enforcer
     
     enforcer = get_authority_enforcer()
     return {
@@ -189,7 +183,6 @@ async def request_approval(request: ApprovalRequest) -> Dict[str, Any]:
 @router.post("/authority/grant-approval")
 async def grant_approval(grant: ApprovalGrant) -> Dict[str, Any]:
     """Grant approval for a pending request."""
-    from governance.authority_boundary import get_authority_enforcer, MeridSystem
     
     try:
         approving_system = MeridSystem(f"MERID-{grant.approving_system.upper()}")
@@ -228,7 +221,6 @@ async def get_decay_status() -> Dict[str, Any]:
 @router.get("/decay/authorities")
 async def get_all_authorities(include_disabled: bool = False) -> Dict[str, Any]:
     """Get all timed authorities."""
-    from governance.time_decay import get_time_decay_manager
     
     manager = get_time_decay_manager()
     return {
@@ -239,7 +231,6 @@ async def get_all_authorities(include_disabled: bool = False) -> Dict[str, Any]:
 @router.get("/decay/expiring-soon")
 async def get_expiring_soon(threshold_seconds: float = 300) -> Dict[str, Any]:
     """Get authorities expiring soon."""
-    from governance.time_decay import get_time_decay_manager
     
     manager = get_time_decay_manager()
     expiring = manager.get_expiring_soon(threshold_seconds)
@@ -274,7 +265,6 @@ async def grant_authority(grant: AuthorityGrant) -> Dict[str, Any]:
 @router.post("/decay/renew")
 async def renew_authority(renewal: AuthorityRenewal) -> Dict[str, Any]:
     """Renew an authority."""
-    from governance.time_decay import get_time_decay_manager
     
     manager = get_time_decay_manager()
     success, reason = manager.renew_authority(
@@ -292,7 +282,6 @@ async def renew_authority(renewal: AuthorityRenewal) -> Dict[str, Any]:
 @router.get("/decay/authority/{authority_id}")
 async def check_authority(authority_id: str) -> Dict[str, Any]:
     """Check if an authority is still valid."""
-    from governance.time_decay import get_time_decay_manager
     
     manager = get_time_decay_manager()
     valid, reason, authority = manager.check_authority(authority_id)
@@ -307,7 +296,6 @@ async def check_authority(authority_id: str) -> Dict[str, Any]:
 @router.post("/decay/cleanup")
 async def cleanup_expired() -> Dict[str, Any]:
     """Clean up expired authorities."""
-    from governance.time_decay import get_time_decay_manager
     
     manager = get_time_decay_manager()
     cleaned = manager.cleanup_expired()
@@ -324,9 +312,6 @@ async def cleanup_expired() -> Dict[str, Any]:
 @router.get("/status")
 async def get_governance_status() -> Dict[str, Any]:
     """Get combined governance status."""
-    from governance.constitutional import get_constitutional
-    from governance.authority_boundary import get_authority_enforcer
-    from governance.time_decay import get_time_decay_manager
     
     const = get_constitutional()
     enforcer = get_authority_enforcer()

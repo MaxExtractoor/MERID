@@ -8,7 +8,7 @@ to tighten feedback loops around Brier-based governance.
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from core.merid_feedback import get_merid_feedback_loop, AlertConfiguration
 from core.merid_governance import CalibrationArchetype
@@ -220,7 +220,7 @@ async def get_decision_history(model_id: str, days: int = Query(default=30, ge=1
             raise HTTPException(status_code=404, detail=f"No governance policy found for {model_id}")
         
         # Get evaluation history
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         recent_evaluations = [
             eval for eval in policy.evaluation_history
             if datetime.fromisoformat(eval["timestamp"]) > cutoff_date
@@ -271,7 +271,7 @@ async def get_threshold_recommendations():
         feedback_loop = get_merid_feedback_loop()
         
         # Analyze recent period for threshold recommendations
-        end_date = datetime.now()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=30)
         
         analysis = feedback_loop.analyze_historical_decisions(start_date, end_date)
@@ -298,7 +298,7 @@ async def simulate_governance_decisions(model_id: str, days: int = Query(default
         feedback_loop = get_merid_feedback_loop()
         
         # Get historical performance
-        end_date = datetime.now()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
         historical_performance = feedback_loop._get_historical_performance(start_date, end_date)
@@ -311,7 +311,6 @@ async def simulate_governance_decisions(model_id: str, days: int = Query(default
         simulated_decisions = []
         for performance in model_performance:
             # Register temporary policy if needed
-            from core.merid_governance import get_merid_governance
             governance = get_merid_governance()
             
             if model_id not in governance.policies:

@@ -240,7 +240,6 @@ class RealPolymarketConnector(RealPredictionMarketConnector):
             async with self.session.get(url, params=params, timeout=10) as response:
                 if response.status != 200:
                     logger.error(f"Polymarket API error: {response.status}")
-=======
             async with self.session.get(url, params=params, timeout=10) as response:
                 if response.status != 200:
                     self._log_connector_issue(f"Polymarket API error: {response.status}")
@@ -254,12 +253,10 @@ class RealPolymarketConnector(RealPredictionMarketConnector):
                     first_market = data[0]
                     created_at = first_market.get("createdAt", "")
                     if "2020" in created_at or "2021" in created_at:
-=======
                         self._log_connector_issue("Polymarket API returning stale data (2020-2021), marking as unavailable")
                         self.is_available = False
                         return []
                 
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                 markets = []
                 
                 for market_data in data:
@@ -270,52 +267,40 @@ class RealPolymarketConnector(RealPredictionMarketConnector):
                             platform=self.platform,
                             question=market_data.get("question", ""),
                             category=self._infer_category(market_data.get("question", "")),
-=======
                             yes_price=float(market_data.get("outcomePrices", "[0, 0]")[1:-1].split(",")[0].strip('"')) / 100,
                             no_price=float(market_data.get("outcomePrices", "[0, 0]")[1:-1].split(",")[1].strip('"')) / 100,
                             volume_24h=float(market_data.get("volume24hr", 0)),
                             total_volume=float(market_data.get("volumeNum", 0)),
                             liquidity=float(market_data.get("liquidityNum", 0)),
                             resolution_date=market_data.get("endDate"),
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                             created_at=market_data.get("createdAt", time.time()),
                             last_updated=time.time()
                         )
                         
-=======
                         # Skip markets with zero prices (stale data)
                         if market.yes_price == 0 and market.no_price == 0:
                             continue
                         
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                         markets.append(market)
                         self._markets[market.market_id] = market
                         self._update_price_history(market)
                         
                     except (ValueError, KeyError, IndexError) as e:
-=======
-                    except (ValueError, KeyError, IndexError) as e:
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                         logger.warning(f"Error parsing Polymarket market: {e}")
                         continue
                 
                 self._last_fetch = time.time()
                 logger.info(f"Fetched {len(markets)} markets from Polymarket")
-=======
                 self.is_available = True
                 return markets
                 
         except asyncio.TimeoutError:
-=======
             self._log_connector_issue("Polymarket fetch timeout - marking as unavailable")
             self.is_available = False
             return []
         except Exception as e:
             self._log_connector_issue(f"Polymarket fetch error: {e}")
             self.is_available = False
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
             return []
     
     def _infer_category(self, question: str) -> MarketCategory:
@@ -343,33 +328,18 @@ class RealAugurConnector(RealPredictionMarketConnector):
         super().__init__(PredictionPlatform.AUGUR)
         self.api_base = "https://api.augur.net"
         self.is_available = True  # Track availability
-=======
-        self.is_available = True  # Track availability
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
-        self.is_available = True  # Track availability
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
-        self.is_available = True  # Track availability
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
     
     async def fetch_markets(self, category: Optional[MarketCategory] = None) -> List[PredictionMarket]:
         """Fetch markets from Augur API."""
         try:
             if not self.session or not self.is_available:
                 logger.warning("Augur connector not available, skipping fetch")
-=======
             if not self.session or not self.is_available:
                 logger.warning("Augur connector not available, skipping fetch")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
             if not self.session or not self.is_available:
                 logger.warning("Augur connector not available, skipping fetch")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
             if not self.session or not self.is_available:
                 self._log_connector_issue("Augur connector not available, skipping fetch")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                 return []
             
             # Fetch active markets
@@ -380,23 +350,14 @@ class RealAugurConnector(RealPredictionMarketConnector):
                 "limit": 50
             }
             
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
             async with self.session.get(url, params=params, timeout=10) as response:
                 if response.status != 200:
                     logger.error(f"Augur API error: {response.status}")
                     self.is_available = False  # Mark as unavailable
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
             async with self.session.get(url, params=params, timeout=10) as response:
                 if response.status != 200:
                     self._log_connector_issue(f"Augur API error: {response.status}")
                     self.is_available = False  # Mark as unavailable
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                     return []
                 
                 data = await response.json()
@@ -430,27 +391,16 @@ class RealAugurConnector(RealPredictionMarketConnector):
                 
                 self._last_fetch = time.time()
                 logger.info(f"Fetched {len(markets)} markets from Augur")
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                 self.is_available = True  # Mark as available
                 return markets
                 
         except asyncio.TimeoutError:
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
             self._log_connector_issue("Augur fetch timeout - marking as unavailable")
             self.is_available = False
             return []
         except Exception as e:
             self._log_connector_issue(f"Augur fetch error: {e}")
             self.is_available = False
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
             return []
     
     def _infer_category(self, question: str) -> MarketCategory:
@@ -474,33 +424,12 @@ class RealManifoldConnector(RealPredictionMarketConnector):
         super().__init__(PredictionPlatform.MANIFOLD)
         self.api_base = "https://api.manifold.markets"
         self.is_available = True  # Track availability
-=======
-        self.is_available = True  # Track availability
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
-        self.is_available = True  # Track availability
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
-        self.is_available = True  # Track availability
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
     
     async def fetch_markets(self, category: Optional[MarketCategory] = None) -> List[PredictionMarket]:
         """Fetch markets from Manifold API."""
         try:
             if not self.session or not self.is_available:
-                logger.warning("Manifold connector not available, skipping fetch")
-=======
-            if not self.session or not self.is_available:
-                logger.warning("Manifold connector not available, skipping fetch")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
-            if not self.session or not self.is_available:
-                logger.warning("Manifold connector not available, skipping fetch")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
-            if not self.session or not self.is_available:
                 self._log_connector_issue("Manifold connector not available, skipping fetch")
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                 return []
             
             # Fetch active markets
@@ -510,23 +439,10 @@ class RealManifoldConnector(RealPredictionMarketConnector):
                 "count": "yes"  # Only markets with bets
             }
             
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-            async with self.session.get(url, params=params, timeout=10) as response:
-                if response.status != 200:
-                    logger.error(f"Manifold API error: {response.status}")
-                    self.is_available = False  # Mark as unavailable
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
             async with self.session.get(url, params=params, timeout=10) as response:
                 if response.status != 200:
                     self._log_connector_issue(f"Manifold API error: {response.status}")
                     self.is_available = False  # Mark as unavailable
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                     return []
                 
                 data = await response.json()
@@ -562,27 +478,16 @@ class RealManifoldConnector(RealPredictionMarketConnector):
                 
                 self._last_fetch = time.time()
                 logger.info(f"Fetched {len(markets)} markets from Manifold")
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                 self.is_available = True  # Mark as available
                 return markets
                 
         except asyncio.TimeoutError:
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
             self._log_connector_issue("Manifold fetch timeout - marking as unavailable")
             self.is_available = False
             return []
         except Exception as e:
             self._log_connector_issue(f"Manifold fetch error: {e}")
             self.is_available = False
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
             return []
     
     def _infer_category(self, question: str) -> MarketCategory:
@@ -597,6 +502,78 @@ class RealManifoldConnector(RealPredictionMarketConnector):
             return MarketCategory.SPORTS
         else:
             return MarketCategory.ENTERTAINMENT
+
+
+class RealKalshiConnector(RealPredictionMarketConnector):
+    """Kalshi connector — fetches live markets via the MERID singleton client."""
+
+    def __init__(self):
+        # Kalshi is not in PredictionPlatform enum; use POLYMARKET as a stand-in key
+        # and override platform label in each PredictionMarket we build.
+        super().__init__(PredictionPlatform.POLYMARKET)
+        self.is_available = True
+
+    async def fetch_markets(self, category: Optional[MarketCategory] = None) -> List[PredictionMarket]:
+        """Fetch active Kalshi markets via the singleton KalshiVenueClient."""
+        if not self.is_available:
+            self._log_connector_issue("RealKalshiConnector marked unavailable, skipping")
+            return []
+        try:
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            client = get_kalshi_client()
+            raw_markets = await client.list_markets(status="open", limit=100)
+            if not raw_markets:
+                return []
+
+            markets: List[PredictionMarket] = []
+            for m in raw_markets:
+                try:
+                    yes_ask = float(getattr(m, "yes_ask", 0) or 0) / 100.0
+                    no_ask = float(getattr(m, "no_ask", 0) or 0) / 100.0
+                    yes_bid = float(getattr(m, "yes_bid", 0) or 0) / 100.0
+                    yes_price = (yes_ask + yes_bid) / 2.0 if (yes_ask or yes_bid) else 0.5
+                    no_price = 1.0 - yes_price
+                    volume = float(getattr(m, "volume", 0) or 0)
+                    liquidity = float(getattr(m, "open_interest", 0) or 0)
+                    question = getattr(m, "question", "") or getattr(m, "title", "") or m.market_id
+                    pm = PredictionMarket(
+                        market_id=m.market_id,
+                        platform=self.platform,
+                        question=question,
+                        category=self._infer_category(question),
+                        yes_price=yes_price,
+                        no_price=no_price,
+                        volume_24h=volume,
+                        total_volume=volume,
+                        liquidity=liquidity,
+                        resolution_date=str(getattr(m, "close_time", "") or ""),
+                        created_at=time.time(),
+                        last_updated=time.time(),
+                    )
+                    markets.append(pm)
+                    self._markets[pm.market_id] = pm
+                    self._update_price_history(pm)
+                except Exception as _pe:
+                    logger.debug("RealKalshiConnector parse error: %s", _pe)
+
+            self.is_available = True
+            logger.info("RealKalshiConnector: fetched %d markets", len(markets))
+            return markets
+        except Exception as exc:
+            self._log_connector_issue(f"RealKalshiConnector fetch error: {exc}")
+            return []
+
+    def _infer_category(self, question: str) -> MarketCategory:
+        q = question.lower()
+        if any(w in q for w in ["bitcoin", "btc", "ethereum", "eth", "crypto"]):
+            return MarketCategory.CRYPTO
+        if any(w in q for w in ["election", "president", "senate", "vote", "congress"]):
+            return MarketCategory.POLITICS
+        if any(w in q for w in ["fed", "inflation", "gdp", "cpi", "rate"]):
+            return MarketCategory.ECONOMICS
+        if any(w in q for w in ["nfl", "nba", "mlb", "super bowl", "championship"]):
+            return MarketCategory.SPORTS
+        return MarketCategory.FINANCE
 
 
 class RealPredictionMarketAggregator:
@@ -626,12 +603,15 @@ class RealPredictionMarketAggregator:
         if self._running:
             return
         
-        # Initialize real connectors
+        # Initialize real connectors (Kalshi uses its own singleton client, no aiohttp session needed)
+        kalshi_connector = RealKalshiConnector()
         self.connectors = {
             PredictionPlatform.POLYMARKET: await RealPolymarketConnector().__aenter__(),
             PredictionPlatform.AUGUR: await RealAugurConnector().__aenter__(),
             PredictionPlatform.MANIFOLD: await RealManifoldConnector().__aenter__(),
         }
+        # Register Kalshi under a sentinel key (reuses POLYMARKET slot is wrong — use a string key)
+        self._kalshi_connector = kalshi_connector
         
         self._running = True
         self._update_task = asyncio.create_task(self._update_loop())
@@ -671,23 +651,10 @@ class RealPredictionMarketAggregator:
         """Fetch markets from all available connectors."""
         total_markets = 0
         successful_connectors = 0
-=======
-        """Fetch markets from all available connectors."""
-        total_markets = 0
-        successful_connectors = 0
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
-        """Fetch markets from all available connectors."""
-        total_markets = 0
-        successful_connectors = 0
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
         
         for platform, connector in self.connectors.items():
             try:
                 markets = await connector.fetch_markets()
-=======
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
                 if markets:
                     self._all_markets.update({m.market_id: m for m in markets})
                     total_markets += len(markets)
@@ -698,12 +665,20 @@ class RealPredictionMarketAggregator:
             except Exception as e:
                 logger.error(f"Failed to fetch from {platform.value}: {e}")
         
-        logger.info(f"Total markets fetched: {total_markets} from {successful_connectors}/{len(self.connectors)} connectors")
+        # Also fetch from Kalshi (separate connector, not in self.connectors dict)
+        if hasattr(self, "_kalshi_connector"):
+            try:
+                kalshi_markets = await self._kalshi_connector.fetch_markets()
+                if kalshi_markets:
+                    self._all_markets.update({m.market_id: m for m in kalshi_markets})
+                    total_markets += len(kalshi_markets)
+                    successful_connectors += 1
+                    logger.info(f"Successfully fetched {len(kalshi_markets)} markets from kalshi")
+            except Exception as _ke:
+                logger.debug("Kalshi connector fetch error (non-fatal): %s", _ke)
+
+        logger.info(f"Total markets fetched: {total_markets} from {successful_connectors}/{len(self.connectors) + 1} connectors")
         self._last_fetch = time.time()
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
-=======
->>>>>>> c:\Users\Chris\.windsurf\worktrees\MERID\MERID-6f096c3e\monitoring\real_prediction_markets.py
     
     def _detect_odds_drift(self) -> None:
         """Detect significant odds movements."""

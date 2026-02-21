@@ -947,7 +947,7 @@ class TimeSeriesAnalyzer:
     def get_forecast_history(self, model_id: Optional[str] = None, limit: int = 100) -> List[ForecastResult]:
         """Get forecast history for models."""
         if model_id:
-            return [result for result in self.forecast_results if result.model_id == model_id][-limit:]]
+            return [result for result in self.forecast_results if result.model_id == model_id][-limit:]
         return list(self.forecast_results)[-limit:]
     
     def get_available_models(self) -> List[Dict[str, Any]]:

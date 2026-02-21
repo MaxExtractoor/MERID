@@ -14,7 +14,7 @@ import random
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, Optional, Set
 
 import websockets
@@ -216,6 +216,8 @@ class WhaleMonitor:
                 self._reconnect_count = 0
             except asyncio.CancelledError:
                 raise
+            except ConnectionClosed as e:
+                logger.warning(f"Solana WebSocket disconnected (will reconnect): {e}")
             except WebSocketException as e:
                 logger.error(f"WebSocket error: {e}")
                 capture_sentry_exception(e)
@@ -334,7 +336,7 @@ class WhaleMonitor:
             )
             
             # Track event
-            self._last_event_time = datetime.utcnow()
+            self._last_event_time = datetime.now(timezone.utc)
             self._event_history.append(whale_event)
             
             # Store in aggregator

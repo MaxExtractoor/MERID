@@ -15,6 +15,7 @@ logger = structlog.get_logger(__name__)
 
 
 class KuCoinAdapter(VenueAdapter):
+    _is_stub = True
     """KuCoin adapter - optional/data venue for US users."""
     
     def __init__(
@@ -78,7 +79,7 @@ class KuCoinAdapter(VenueAdapter):
             self.logger.error("market_data_error", error=str(e))
             return None
     
-    async def place_order(
+    async def _place_order_impl(
         self,
         symbol: str,
         side: OrderSide,

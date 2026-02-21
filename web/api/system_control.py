@@ -50,6 +50,16 @@ async def stop_system():
     try:
         orchestrator.stop()
         
+        # Also pause Kalshi agent grid
+        try:
+            from merid.prediction.agent_grid import get_agent_grid
+            grid = get_agent_grid()
+            for agent in grid._agents:
+                agent.pause()
+            logger.info("Kalshi agent grid paused via system stop")
+        except Exception as e:
+            logger.warning(f"Failed to pause Kalshi agents: {e}")
+        
         return {
             "status": "stopped",
             "message": "MERID system stopped successfully"
@@ -110,24 +120,25 @@ async def get_agents_status():
 @router.get("/decisions/recent")
 async def get_recent_decisions(limit: int = 20):
     """Get recent agent decisions."""
-    orchestrator = get_agent_orchestrator()
-    
-    decisions = orchestrator.get_recent_decisions(limit=limit)
-    
-    return {
-        "decisions": [
-            {
-                "agent": d.agent_role.value,
-                "type": d.decision_type,
-                "data": d.data,
-                "confidence": d.confidence,
-                "reasoning": d.reasoning,
-                "timestamp": d.timestamp.isoformat()
-            }
-            for d in decisions
-        ],
-        "total": len(decisions)
-    }
+    try:
+        orchestrator = get_agent_orchestrator()
+        decisions = orchestrator.get_recent_decisions(limit=limit)
+        return {
+            "decisions": [
+                {
+                    "agent": d.agent_role.value,
+                    "type": d.decision_type,
+                    "data": d.data,
+                    "confidence": d.confidence,
+                    "reasoning": d.reasoning,
+                    "timestamp": d.timestamp.isoformat()
+                }
+                for d in decisions
+            ],
+            "total": len(decisions)
+        }
+    except Exception:
+        return {"decisions": [], "total": 0}
 
 
 @router.get("/consensus/history")

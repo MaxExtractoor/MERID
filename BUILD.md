@@ -1,305 +1,98 @@
-# MERID v2.0 - Build & Deployment Guide
+# MERID — Build & Development Guide
 
 ## Prerequisites
 
-### 1. Install Flutter
-```bash
-# Windows
-# Download Flutter SDK from https://flutter.dev/docs/get-started/install/windows
-# Extract to C:\src\flutter
-# Add to PATH: C:\src\flutter\bin
-
-# Verify installation
-flutter doctor
-```
-
-### 2. Install Android Studio (for Android deployment)
-- Download from https://developer.android.com/studio
-- Install Android SDK
-- Accept licenses: `flutter doctor --android-licenses`
-
-### 3. Install Xcode (for iOS deployment - macOS only)
-- Download from Mac App Store
-- Install command line tools: `xcode-select --install`
-
-### 4. Install Fonts
-Download **JetBrains Mono** from:
-https://www.jetbrains.com/lp/mono/
-
-Place TTF files in `assets/fonts/`:
-- `JetBrainsMono-Regular.ttf`
-- `JetBrainsMono-Bold.ttf`
+- **Python 3.11+**
+- **Node.js 18+** (React dashboard)
+- **make** (Windows: `choco install make`)
 
 ---
 
-## Development
+## Backend
 
-### Install Dependencies
 ```bash
-cd C:\Dev\MERID
-flutter pub get
+pip install -r requirements.txt
+cp .env.example .env              # optional — runs without credentials in paper mode
+make serve                        # FastAPI on http://127.0.0.1:8000
 ```
 
-### Run on Emulator/Device
+API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) (Swagger UI)
+
+---
+
+## Frontend
+
 ```bash
-# List available devices
-flutter devices
-
-# Run on connected device
-flutter run
-
-# Run with hot reload
-flutter run --hot
+cd web/react
+npm install
+npm run dev                       # Vite dev server on http://localhost:5173
 ```
 
-### Debug Mode
-```bash
-# Run with debug output
-flutter run --verbose
+Production build:
 
-# Run with DevTools
-flutter run --observatory-port=8888
+```bash
+npm run build                     # Output in web/react/dist/
 ```
 
 ---
 
-## Production Build
+## MeridLoop
 
-### Android APK
+The MeridLoop orchestrator runs the full agent cycle: market scan → analysis → consensus → sizing → execution → PnL.
+
 ```bash
-# Build release APK
-flutter build apk --release
-
-# Build split APKs by ABI (smaller size)
-flutter build apk --split-per-abi --release
-
-# Output location
-# build/app/outputs/flutter-apk/app-release.apk
-```
-
-### Android App Bundle (for Google Play)
-```bash
-flutter build appbundle --release
-
-# Output location
-# build/app/outputs/bundle/release/app-release.aab
-```
-
-### iOS
-```bash
-# Build iOS app (macOS only)
-flutter build ios --release
-
-# Build for App Store
-flutter build ipa --release
-
-# Output location
-# build/ios/iphoneos/Runner.app
-# build/ios/ipa/merid.ipa
+make loop-start                   # observe mode (no execution)
+make loop-start-execute           # paper execution enabled
 ```
 
 ---
 
 ## Testing
 
-### Run Unit Tests
 ```bash
-flutter test
-```
-
-### Run Widget Tests
-```bash
-flutter test test/widget_test.dart
-```
-
-### Run Integration Tests
-```bash
-flutter drive --target=test_driver/app.dart
+make golden-path                  # full test suite
+make preflight                    # tests + readiness + drift audit + risk context
+make risk-context                 # print live RiskContext JSON
 ```
 
 ---
 
-## Code Quality
+## Makefile Reference
 
-### Analyze Code
-```bash
-flutter analyze
-```
-
-### Format Code
-```bash
-flutter format lib/
-```
-
-### Check for Updates
-```bash
-flutter pub outdated
-flutter pub upgrade
-```
+| Command | Description |
+|---------|-------------|
+| `make serve` | FastAPI server (port 8000) |
+| `make loop-start` | MeridLoop — observe mode |
+| `make loop-start-execute` | MeridLoop — paper execution |
+| `make golden-path` | Run test suite |
+| `make preflight` | Tests + readiness + drift + risk context |
+| `make risk-context` | Print risk state JSON |
+| `make readiness` | Run readiness auditor |
+| `make codebase-drift-audit` | Check for code drift |
+| `make pm-test` | Prediction market tests only |
+| `make pipeline-test` | Pipeline tests only |
 
 ---
 
-## Platform-Specific Configuration
+## Environment
 
-### Android
-Edit `android/app/src/main/AndroidManifest.xml`:
-```xml
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.merid.app">
-    
-    <uses-permission android:name="android.permission.INTERNET"/>
-    
-    <application
-        android:label="MERID"
-        android:icon="@mipmap/ic_launcher">
-        ...
-    </application>
-</manifest>
-```
+Create `.env` for Kalshi credentials (see [ENV_SETUP.md](ENV_SETUP.md) for full reference):
 
-Edit `android/app/build.gradle`:
-```gradle
-android {
-    compileSdkVersion 34
-    
-    defaultConfig {
-        applicationId "com.merid.app"
-        minSdkVersion 21
-        targetSdkVersion 34
-        versionCode 1
-        versionName "2.0.0"
-    }
-}
-```
-
-### iOS
-Edit `ios/Runner/Info.plist`:
-```xml
-<key>CFBundleDisplayName</key>
-<string>MERID</string>
-<key>CFBundleVersion</key>
-<string>1</string>
-<key>CFBundleShortVersionString</key>
-<string>2.0.0</string>
+```bash
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_USE_DEMO=true
+MERID_PM_TRADING_MODE=paper
 ```
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
-
-**Issue**: Flutter not recognized
-```bash
-# Windows: Add to PATH
-setx PATH "%PATH%;C:\src\flutter\bin"
-```
-
-**Issue**: Android licenses not accepted
-```bash
-flutter doctor --android-licenses
-```
-
-**Issue**: Gradle build fails
-```bash
-cd android
-./gradlew clean
-cd ..
-flutter clean
-flutter pub get
-```
-
-**Issue**: iOS build fails
-```bash
-cd ios
-pod install
-cd ..
-flutter clean
-flutter build ios
-```
-
-**Issue**: Fonts not loading
-- Verify font files exist in `assets/fonts/`
-- Check `pubspec.yaml` has correct font paths
-- Run `flutter pub get`
-- Restart app completely
-
----
-
-## Performance Optimization
-
-### Enable ProGuard (Android)
-Edit `android/app/build.gradle`:
-```gradle
-buildTypes {
-    release {
-        minifyEnabled true
-        proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-    }
-}
-```
-
-### Reduce APK Size
-```bash
-# Split APKs by ABI
-flutter build apk --split-per-abi --release
-
-# Enable tree shaking
-flutter build apk --release --tree-shake-icons
-```
-
-### Profile Performance
-```bash
-flutter run --profile
-```
-
----
-
-## Deployment
-
-### Google Play Store
-1. Build app bundle: `flutter build appbundle --release`
-2. Upload to Google Play Console
-3. Complete store listing
-4. Submit for review
-
-### Apple App Store
-1. Build IPA: `flutter build ipa --release`
-2. Open `build/ios/archive/Runner.xcarchive` in Xcode
-3. Distribute to App Store
-4. Submit via App Store Connect
-
----
-
-## Environment Variables
-
-Create `.env` file (ignored by git):
-```env
-# API Keys (if needed for future features)
-QUANTUM_API_KEY=xxx
-BLOCKCHAIN_RPC_URL=xxx
-```
-
----
-
-## Continuous Integration
-
-### GitHub Actions (example)
-```yaml
-name: Build
-on: [push]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: subosito/flutter-action@v2
-      - run: flutter pub get
-      - run: flutter analyze
-      - run: flutter test
-      - run: flutter build apk --release
-```
-
----
-
-**MERID v2.0 - Built for Sovereignty**
+| Issue | Fix |
+|-------|-----|
+| `ModuleNotFoundError` | `pip install -r requirements.txt` |
+| `make` not found (Windows) | `choco install make` |
+| Tests fail | Check Python 3.11+ and reinstall deps |
+| API returns errors | Ensure `make serve` is running |
+| React build fails | `npm install` in `web/react/` |

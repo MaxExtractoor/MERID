@@ -1,3 +1,4 @@
+"""Swarm intelligence API — agent coordination and task management endpoints."""
 from __future__ import annotations
 
 import time
@@ -91,20 +92,61 @@ def _transform_ideas_to_tasks(top_ideas: List[Dict[str, Any]]) -> List[Dict[str,
     return tasks
 
 
+def _get_real_consensus_metrics() -> Dict[str, Any]:
+    """Fetch real consensus rate and response time from the consensus engine."""
+    try:
+        from core.consensus_engine import get_consensus_engine
+        engine = get_consensus_engine()
+        metrics = engine.consensus_logger.get_metrics()
+        total = metrics.get("total_rounds", 0)
+        successful = metrics.get("successful", 0)
+        consensus_rate = round(successful / total, 3) if total > 0 else 0.0
+        # avg_response_time: use consensus_interval as proxy when no real latency tracked
+        avg_response_time = round(engine.consensus_interval, 1)
+        return {"consensus_rate": consensus_rate, "avg_response_time": avg_response_time}
+    except Exception:
+        return {"consensus_rate": 0.0, "avg_response_time": 0.0}
+
+
 def _transform_metrics_for_ui(backend_metrics: Dict[str, Any], agents: List[Dict]) -> Dict[str, Any]:
     """Transform backend metrics to frontend expected format."""
     active_count = sum(1 for a in agents if a.get("status") == "active")
     coordinating = sum(1 for a in agents if a.get("status") == "coordinating")
-    
+    real = _get_real_consensus_metrics()
+
     return {
         "total_agents": backend_metrics.get("total_agents", len(agents)),
         "active_agents": backend_metrics.get("active_agents", active_count),
         "coordinating_agents": coordinating,
-        "tasks_in_progress": backend_metrics.get("ideas_by_status", {}).get("implementing", 0) + 
+        "tasks_in_progress": backend_metrics.get("ideas_by_status", {}).get("implementing", 0) +
                             backend_metrics.get("ideas_by_status", {}).get("testing", 0),
-        "consensus_rate": 0.84,  # Could be wired to consensus engine
-        "avg_response_time": 1.2,  # Could be wired to real metrics
+        "consensus_rate": real["consensus_rate"],
+        "avg_response_time": real["avg_response_time"],
     }
+
+
+def _get_kalshi_agents_for_swarm() -> List[Dict[str, Any]]:
+    """Return Kalshi trading agents in swarm-panel format."""
+    try:
+        from merid.prediction.agent_grid import get_agent_grid
+        grid = get_agent_grid()
+        summary = grid.summary()
+        agents = []
+        for a in summary.get("agents", []):
+            agents.append({
+                "id": a.get("name", "unknown"),
+                "name": a.get("name", "unknown"),
+                "role": f"Kalshi {a.get('asset', '')} {a.get('timeframe', '')}".strip(),
+                "status": a.get("status", "idle"),
+                "tasks_completed": a.get("cycles", 0),
+                "current_task": f"{len(a.get('active_tickers', []))} active markets",
+                "connections": [],
+                "confidence": min(1.0, 0.5 + a.get("win_rate", 0) * 0.5),
+                "venue": "kalshi",
+            })
+        return agents
+    except Exception:
+        return []
 
 
 @router.get("/status")
@@ -113,13 +155,22 @@ async def swarm_status() -> Dict[str, Any]:
     orchestrator = _get_orchestrator()
     payload = orchestrator.get_status_payload()
     health = get_social_bot_health_monitor().get_health_status()
-    
+
     # Transform data for frontend
     backend_agents = payload.get("agents", [])
     ui_agents = _transform_agents_for_ui(backend_agents)
+
+    # Merge Kalshi trading agents into the swarm panel
+    kalshi_agents = _get_kalshi_agents_for_swarm()
+    ui_agents = kalshi_agents + ui_agents
+
     ui_tasks = _transform_ideas_to_tasks(payload.get("top_ideas", []))
     ui_metrics = _transform_metrics_for_ui(payload.get("metrics", {}), ui_agents)
-    
+
+    # Augment metrics with Kalshi agent count
+    ui_metrics["kalshi_agents"] = len(kalshi_agents)
+    ui_metrics["total_agents"] = len(ui_agents)
+
     return {
         "agents": ui_agents,
         "tasks": ui_tasks,

@@ -1,5 +1,8 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Create routers for mock endpoints
 predictions_router = APIRouter()
@@ -15,7 +18,7 @@ async def predictions_markets(request, limit: int = 30):
     start_time = time.time()
     
     # Log the request
-    print(f"[API] predictions_markets called: limit={limit}")
+    logger.debug("[API] predictions_markets called: limit=%s", limit)
     
     # Mock data for testing
     mock_data = {
@@ -53,7 +56,7 @@ async def predictions_markets(request, limit: int = 30):
     }
     
     processing_time = (time.time() - start_time) * 1000
-    print(f"[API] predictions_markets completed: {processing_time:.2f}ms")
+    logger.debug("[API] predictions_markets completed: %.2fms", processing_time)
     
     return JSONResponse(
         content=mock_data,
@@ -69,7 +72,7 @@ async def predictions_drift(request):
     import time
     start_time = time.time()
     
-    print(f"[API] predictions_drift called")
+    logger.debug("[API] predictions_drift called")
     
     mock_data = {
         "signals": [
@@ -96,7 +99,7 @@ async def predictions_drift(request):
     }
     
     processing_time = (time.time() - start_time) * 1000
-    print(f"[API] predictions_drift completed: {processing_time:.2f}ms")
+    logger.debug("[API] predictions_drift completed: %.2fms", processing_time)
     
     return JSONResponse(
         content=mock_data,
@@ -112,7 +115,7 @@ async def predictions_arbitrage(request):
     import time
     start_time = time.time()
     
-    print(f"[API] predictions_arbitrage called")
+    logger.debug("[API] predictions_arbitrage called")
     
     mock_data = {
         "opportunities": [
@@ -146,7 +149,7 @@ async def predictions_arbitrage(request):
     }
     
     processing_time = (time.time() - start_time) * 1000
-    print(f"[API] predictions_arbitrage completed: {processing_time:.2f}ms")
+    logger.debug("[API] predictions_arbitrage completed: %.2fms", processing_time)
     
     return JSONResponse(
         content=mock_data,
@@ -162,7 +165,7 @@ async def intelligence_news(request, limit: int = 15):
     import time
     start_time = time.time()
     
-    print(f"[API] intelligence_news called: limit={limit}")
+    logger.debug("[API] intelligence_news called: limit=%s", limit)
     
     mock_data = {
         "news": [
@@ -212,7 +215,7 @@ async def intelligence_news(request, limit: int = 15):
     }
     
     processing_time = (time.time() - start_time) * 1000
-    print(f"[API] intelligence_news completed: {processing_time:.2f}ms")
+    logger.debug("[API] intelligence_news completed: %.2fms", processing_time)
     
     return JSONResponse(
         content=mock_data,

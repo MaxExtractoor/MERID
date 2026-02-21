@@ -30,6 +30,12 @@ def _resolve_credentials() -> tuple[str, str]:
 @lru_cache(maxsize=1)
 def get_alpaca_client() -> REST:
     """Return a cached Alpaca REST client."""
+    from merid.settings import settings
+    
+    if settings.KALSHI_ONLY:
+        logger.info("Alpaca client SKIPPED (Kalshi-only mode)")
+        return None
+    
     key, secret = _resolve_credentials()
     base_url = _resolve_alpaca_base_url()
     logger.info("Initializing Alpaca REST client (env=%s)", "live" if "api.alpaca" in base_url else "paper")

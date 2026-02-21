@@ -1,0 +1,122 @@
+##############################################################################
+# MERID Analytics Stack - Kafka Connect + PostgreSQL + ClickHouse
+#
+# Extends the streaming stack with analytics sinks for:
+# - PostgreSQL: trades, bars, agent decisions
+# - S3: long-term archival
+# - ClickHouse: time-series analytics (optional)
+#
+# Usage:
+#   docker-compose -f docker-compose.full-stack.yml -f docker-compose.analytics.yml up -d
+##############################################################################
+
+version: "3.8"
+
+services:
+  # ==========================================================================
+  # KAFKA CONNECT - Sink connectors for analytics
+  # ==========================================================================
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:7.5.0
+    container_name: merid-kafka-connect
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "8084:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: redpanda:9092
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: merid-connect-cluster
+      CONNECT_CONFIG_STORAGE_TOPIC: merid-connect-configs
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_TOPIC: merid-connect-offsets
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: merid-connect-status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+    volumes:
+      - ./kafka-connect/connectors:/opt/kafka-connect/connectors:ro
+      - ./kafka-connect/secrets:/opt/kafka-connect/secrets:ro
+    command:
+      - bash
+      - -c
+      - |
+        # Install JDBC and S3 connectors
+        confluent-hub install --no-prompt confluentinc/kafka-connect-jdbc:10.7.4
+        confluent-hub install --no-prompt confluentinc/kafka-connect-s3:10.5.4
+        # Start Connect
+        /etc/confluent/docker/run
+    networks:
+      - merid-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ==========================================================================
+  # POSTGRESQL - Analytics database for trades and metrics
+  # ==========================================================================
+  trading-db:
+    image: postgres:15-alpine
+    container_name: merid-trading-db
+    environment:
+      POSTGRES_USER: merid
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-merid_secret}
+      POSTGRES_DB: merid
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - merid-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U merid"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # CLICKHOUSE - Time-series analytics (optional)
+  # ==========================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: merid-clickhouse
+    ports:
+      - "8123:8123"  # HTTP
+      - "9000:9000"  # Native
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/config:/etc/clickhouse-server/config.d:ro
+    environment:
+      CLICKHOUSE_DB: merid
+      CLICKHOUSE_USER: merid
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-merid_secret}
+    networks:
+      - merid-net
+    profiles:
+      - clickhouse  # Only start with: --profile clickhouse
+
+# ==========================================================================
+# VOLUMES
+# ==========================================================================
+volumes:
+  postgres-data:
+    name: merid-postgres-data
+  clickhouse-data:
+    name: merid-clickhouse-data
+
+# ==========================================================================
+# NETWORKS (uses existing from full-stack)
+# ==========================================================================
+networks:
+  merid-net:
+    external: true
+    name: merid-net

@@ -16,6 +16,8 @@ class KalshiOutcome:
     price: Decimal  # Price in cents (0-100)
     probability: Optional[Decimal] = None
     volume: Optional[Decimal] = None
+    best_bid: Optional[Decimal] = None
+    best_ask: Optional[Decimal] = None
 
 
 @dataclass
@@ -121,7 +123,7 @@ class KalshiConfig:
     
     # API endpoints
     rest_api_url: str = "https://api.elections.kalshi.com/trade-api/v2"
-    ws_api_url: str = "wss://ws.elections.kalshi.com/v2"
+    ws_api_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
     demo_rest_api_url: str = "https://demo-api.kalshi.co/trade-api/v2"
     demo_ws_api_url: str = "wss://demo-ws.kalshi.co/v2"
     
@@ -130,6 +132,7 @@ class KalshiConfig:
     password: Optional[str] = None
     api_key: Optional[str] = None  # For RSA auth
     private_key_path: Optional[str] = None  # Path to RSA private key file
+    private_key_pem: Optional[str] = None   # Inline PEM string (alternative to file path)
     use_demo: bool = False
     
     # Request settings
@@ -138,16 +141,43 @@ class KalshiConfig:
     
     def __post_init__(self):
         import os
+        # Prefer merid.settings over raw env vars for consistency
+        try:
+            from merid.settings import settings as _s
+            _email = _s.KALSHI_EMAIL
+            _password = _s.KALSHI_PASSWORD
+            _api_key = _s.KALSHI_API_KEY_ID or os.getenv("KALSHI_API_KEY")
+            _key_path = _s.KALSHI_PRIVATE_KEY_PATH
+            _key_pem = _s.KALSHI_PRIVATE_KEY_PEM
+            _use_demo = _s.KALSHI_USE_DEMO
+            _api_host = _s.KALSHI_API_HOST
+        except Exception as _se:
+            logger.debug("KalshiConfig: settings unavailable, falling back to env: %s", _se)
+            _email = os.getenv("KALSHI_EMAIL")
+            _password = os.getenv("KALSHI_PASSWORD")
+            _api_key = os.getenv("KALSHI_API_KEY_ID") or os.getenv("KALSHI_API_KEY")
+            _key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+            _key_pem = os.getenv("KALSHI_PRIVATE_KEY_PEM")
+            _use_demo = os.getenv("KALSHI_USE_DEMO", "false").lower() == "true"
+            _api_host = os.getenv("KALSHI_API_HOST")
         if self.email is None:
-            self.email = os.getenv("KALSHI_EMAIL")
+            self.email = _email
         if self.password is None:
-            self.password = os.getenv("KALSHI_PASSWORD")
+            self.password = _password
         if self.api_key is None:
-            self.api_key = os.getenv("KALSHI_API_KEY")
+            self.api_key = _api_key
         if self.private_key_path is None:
-            self.private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+            path = _key_path
+            # Treat placeholder as unset
+            if path and path != "change_me":
+                self.private_key_path = path
+        if self.private_key_pem is None:
+            self.private_key_pem = _key_pem
         if not self.use_demo:
-            self.use_demo = os.getenv("KALSHI_USE_DEMO", "false").lower() == "true"
+            self.use_demo = _use_demo
+        # Override rest_api_url if KALSHI_API_HOST is set (e.g. elections endpoint)
+        if _api_host and not self.use_demo:
+            self.rest_api_url = _api_host
     
     @property
     def base_url(self) -> str:

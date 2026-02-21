@@ -207,36 +207,60 @@ class PersistenceManager:
         compress: bool
     ) -> None:
         """Write JSON data immediately with atomic operation."""
+        import os
+        import tempfile
+        
         path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Write to temporary file first
-        temp_path = path.with_suffix(path.suffix + '.tmp')
-        
+        # Use tempfile in same directory for atomic replace on Windows
         try:
-            if compress:
-                with gzip.open(temp_path, 'wt', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2)
-            else:
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2)
+            with tempfile.NamedTemporaryFile(
+                mode='w' if not compress else 'wb',
+                delete=False,
+                dir=path.parent,
+                suffix='.tmp'
+            ) as tmp:
+                if compress:
+                    with gzip.open(tmp.name, 'wt', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2)
+                else:
+                    json.dump(data, tmp, indent=2)
+                temp_path = Path(tmp.name)
             
             # Create backup if file exists
             if path.exists() and self.backup_count > 0:
-                self._create_backup(path)
+                try:
+                    self._create_backup(path)
+                except PermissionError:
+                    logger.warning(f"Backup skipped for {path} (file locked)")
             
-            # Atomic rename
-            temp_path.replace(path)
-            
-            self._total_writes += 1
-            self._total_bytes_written += path.stat().st_size
+            # Atomic rename - tolerate Windows file locking
+            try:
+                os.replace(str(temp_path), str(path))
+                self._total_writes += 1
+                if path.exists():
+                    self._total_bytes_written += path.stat().st_size
+            except PermissionError:
+                logger.warning(f"Write skipped for {path} (file locked by another process)")
+                if temp_path.exists():
+                    temp_path.unlink()
+                return
             
         except Exception as exc:
             self._write_errors += 1
             logger.error(f"Failed to write {path}: {exc}")
             
             # Clean up temp file
-            if temp_path.exists():
-                temp_path.unlink()
+            try:
+                if 'temp_path' in locals() and temp_path.exists():
+                    temp_path.unlink()
+            except:
+                pass
+            
+            # Don't raise on permission errors - just log and continue
+            if isinstance(exc, PermissionError):
+                logger.warning(f"Reflection write skipped (file locked): {path}")
+                return
             
             raise
     

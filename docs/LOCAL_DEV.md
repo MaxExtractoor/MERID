@@ -1,164 +1,112 @@
-# MERID Local Development Guide
+# MERID — Local Development Guide
 
 ## Quick Start
 
 ```bash
-# Run the setup script
-./scripts/setup-local-dev.sh
+# Backend
+pip install -r requirements.txt
+make serve                          # http://127.0.0.1:8000
 
-# Or manually start services
-docker-compose up -d postgres redis neo4j ollama wiremock prometheus grafana
-
-# Pull an LLM model
-docker exec merid-ollama ollama pull llama3
-
-# Start MERID API
-uvicorn merid_api:app --host 0.0.0.0 --port 8000 --reload
-
-# Start React dashboard (in another terminal)
-cd web/react && npm run dev
+# Frontend (separate terminal)
+cd web/react
+npm install
+npm run dev                         # http://localhost:5173
 ```
+
+No Docker, Redis, Neo4j, or external services required. MERID uses SQLite for storage and runs entirely locally.
+
+---
 
 ## Services
 
-| Service | URL | Credentials | Purpose |
-|---------|-----|-------------|---------|
-| MERID API | http://localhost:8000 | - | FastAPI backend |
-| React Dashboard | http://localhost:3000 | - | Frontend UI |
-| Neo4j | http://localhost:7474 | neo4j/merid | Graph database |
-| PostgreSQL | localhost:5432 | merid/merid_local_dev | Relational data |
-| Redis | localhost:6379 | - | Cache & pub/sub |
-| Prometheus | http://localhost:9090 | - | Metrics |
-| Grafana | http://localhost:3001 | admin/merid_local | Dashboards |
-| Jaeger | http://localhost:16686 | - | Tracing |
-| WireMock | http://localhost:8080 | - | Mock APIs |
-| Ollama | http://localhost:11434 | - | Local LLMs |
-| Portainer | http://localhost:9000 | - | Container UI |
+| Service | URL | Purpose |
+|---------|-----|---------|
+| MERID API | [http://localhost:8000](http://localhost:8000) | FastAPI backend |
+| React Dashboard | [http://localhost:5173](http://localhost:5173) | Operator UI (Vite dev server) |
+| Swagger Docs | [http://localhost:8000/docs](http://localhost:8000/docs) | Interactive API explorer |
 
-## Environment Variables
+---
 
-Create `.env.local`:
+## Environment
+
+Create `.env` (optional — paper mode works without any credentials):
 
 ```bash
-# LLM
-OLLAMA_BASE_URL=http://localhost:11434
-DEEPSEEK_API_KEY=your_key
-
-# Databases
-DATABASE_URL=postgresql://merid:merid_local_dev@localhost:5432/merid
-REDIS_URL=redis://localhost:6379
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=merid
-
-# Mock Brokers
-ALPACA_API_KEY=mock_alpaca_key
-ALPACA_SECRET_KEY=mock_alpaca_secret
-ALPACA_BASE_URL=http://localhost:8080
-KALSHI_API_KEY=mock_kalshi_key
-KALSHI_BASE_URL=http://localhost:8080
+KALSHI_API_KEY_ID=your_key_id
+KALSHI_PRIVATE_KEY_PATH=path/to/private_key.pem
+KALSHI_USE_DEMO=true
+MERID_PM_TRADING_MODE=paper
 ```
+
+See [ENV_SETUP.md](../ENV_SETUP.md) for the full variable reference.
+
+---
 
 ## Running Tests
 
 ```bash
-# Unit tests with mocked dependencies
-pytest tests/ -v --tb=short
-
-# Integration tests with local services
-pytest tests/integration/ -v --tb=short
-
-# Coverage report
-pytest --cov=core --cov=trading --cov-report=html
-
-# Run specific test category
-pytest tests/integration/test_contracts.py -v
+make golden-path                    # full test suite
+make preflight                      # tests + readiness + drift audit + risk context
+pytest tests/ -v --tb=short         # unit tests directly
 ```
 
-## Mock Broker APIs
+---
 
-WireMock provides mock responses for:
-- Alpaca Trading API (`/v2/account`, `/v2/orders`, `/v2/positions`)
-- Kalshi API
-- Polygon market data
-
-Access mock admin UI at http://localhost:8080/__admin/
-
-## Pulling Ollama Models
+## MeridLoop
 
 ```bash
-# Pull Llama 3
-docker exec merid-ollama ollama pull llama3
-
-# Pull CodeLlama
-docker exec merid-ollama ollama pull codellama
-
-# Pull Gemma
-docker exec merid-ollama ollama pull gemma:7b
-
-# List available models
-docker exec merid-ollama ollama list
+make loop-start                     # observe mode (no execution)
+make loop-start-execute             # paper execution enabled
 ```
+
+---
+
+## Frontend Development
+
+The React dashboard lives in `web/react/` and uses:
+
+- **React 18** + TypeScript
+- **TailwindCSS** for styling
+- **Vite** for dev server and builds
+- **Lucide** for icons
+
+```bash
+cd web/react
+npm run dev                         # dev server with HMR
+npm run build                       # production build → dist/
+npm run lint                        # ESLint check
+```
+
+### UI Architecture
+
+- **14 frozen views** in `src/views/`
+- **46 shared components** in `src/components/`
+- **12 hooks** in `src/hooks/`
+- **API constants** in `src/config/constants.ts`
+- **View type union** in `src/types/views.ts` (single source of truth)
+
+See [docs/ui/kalshi_workflow.md](ui/kalshi_workflow.md) for the canonical view list.
+
+---
+
+## Data Reset
+
+To reset all paper trading state:
+
+```bash
+MERID_FRESH_START=1 make serve
+```
+
+This clears paper positions, signals, consensus, and drift state. Kill switch state is preserved. Only works in paper mode.
+
+---
 
 ## Troubleshooting
 
-### Port Conflicts
-
-If ports are already in use, modify `docker-compose.yml` port mappings:
-
-```yaml
-ports:
-  - "8001:8000"  # Use 8001 instead of 8000
-```
-
-### Database Reset
-
-```bash
-# Reset PostgreSQL
-docker-compose down postgres
-docker volume rm merid_postgres_data
-docker-compose up -d postgres
-
-# Reset Neo4j
-docker-compose down neo4j
-docker volume rm merid_neo4j_data
-docker-compose up -d neo4j
-```
-
-### Ollama GPU Support (Linux)
-
-```yaml
-ollama:
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
-```
-
-### Logs
-
-```bash
-# All services
-docker-compose logs -f
-
-# Specific service
-docker-compose logs -f merid-api
-docker-compose logs -f ollama
-```
-
-## Production Parity
-
-Local dev mirrors production via:
-- Same Docker images (PostgreSQL 16, Redis 7, Neo4j 5)
-- Same FastAPI/Uvicorn configuration
-- Same environment variable names
-- Same Prometheus metrics endpoints
-
-Deploy to production:
-```bash
-# GitHub Actions handles deployment
-git push origin main
-```
+| Issue | Fix |
+|-------|-----|
+| Port 8000 in use | Kill existing process or set `--port 8001` |
+| Port 5173 in use | Vite will auto-increment to 5174 |
+| `ModuleNotFoundError` | Activate venv and `pip install -r requirements.txt` |
+| React build fails | `npm install` in `web/react/` |
+| Stale data | Use `MERID_FRESH_START=1` to reset |

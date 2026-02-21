@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException
 import os
 
@@ -31,7 +31,7 @@ async def get_agents_status():
                 'role': agent.role,
                 'model': getattr(agent, 'model_name', 'unknown'),
                 'status': 'active',
-                'last_active': datetime.now().isoformat(),
+                'last_active': datetime.now(timezone.utc).isoformat(),
                 'trust_score': getattr(agent, 'trust_score', 0.5),
                 'predictions': getattr(agent, 'prediction_count', 0),
                 'accuracy': getattr(agent, 'accuracy', 0.0)
@@ -286,7 +286,7 @@ async def get_intelligence_signals():
                     'title': news_item.get('title', 'Unknown'),
                     'source': news_item.get('source', 'Unknown'),
                     'sentiment': news_item.get('sentiment', 0),
-                    'timestamp': news_item.get('timestamp', datetime.now().isoformat()),
+                    'timestamp': news_item.get('timestamp', datetime.now(timezone.utc).isoformat()),
                     'relevance': news_item.get('relevance', 0.5)
                 })
         

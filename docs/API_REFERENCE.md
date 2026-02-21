@@ -1,383 +1,159 @@
 # MERID API Reference
 
-**Version:** 1.0.0  
-**Base URL:** `http://localhost:8001/api/v1`  
-**Documentation:** `/docs` (Swagger UI), `/redoc` (ReDoc)
+**Version:** 3.0.0
+**Base URL:** `http://localhost:8000`
+**Interactive docs:** `/docs` (Swagger UI), `/redoc` (ReDoc)
 
 ---
 
-## Authentication
+## Kalshi Trading
 
-Currently, the API does not require authentication for local development. Production deployments should implement API key authentication.
+#### GET `/api/v1/kalshi/markets`
 
----
+Browse available Kalshi markets with category/status filters.
 
-## Endpoints
+#### GET `/api/v1/kalshi/market/{ticker}`
 
-### Market Data
+Single market detail: orderbook, last price, volume, open interest.
 
-#### GET `/institutional/prices`
-Get current cryptocurrency prices.
+#### GET `/api/v1/kalshi/positions`
 
-**Response:**
-```json
-{
-  "prices": {
-    "BTC/USDT": {"price": 94250.50, "change_24h": 2.5},
-    "ETH/USDT": {"price": 3420.25, "change_24h": 1.8}
-  }
-}
-```
+Current Kalshi positions with unrealized PnL.
 
-#### GET `/institutional/predictions/markets`
-Get prediction market data from Polymarket.
+#### GET `/api/v1/kalshi/orders`
 
-**Response:**
-```json
-{
-  "markets": [...],
-  "count": 49,
-  "status": {
-    "running": true,
-    "total_markets": 49,
-    "platforms": ["polymarket", "kalshi", "augur"]
-  }
-}
-```
+Active and recent orders.
+
+#### GET `/api/v1/kalshi/fills`
+
+Trade fill history.
+
+#### POST `/api/v1/kalshi/order`
+
+Place a Kalshi order. Body: `{"ticker": "...", "side": "yes", "count": 10, "price": 55}`
+
+#### DELETE `/api/v1/kalshi/order/{order_id}`
+
+Cancel a pending order.
+
+#### GET `/api/v1/kalshi/portfolio`
+
+Portfolio summary: balance, equity, PnL, positions count.
 
 ---
 
-### Agent Mesh
+## Agent Grid & Consensus
 
-#### GET `/institutional/mesh/status`
-Get streaming agent mesh status.
+#### GET `/api/v1/kalshi/agent-grid`
 
-**Response:**
-```json
-{
-  "running": true,
-  "total_agents": 8,
-  "agents": [
-    {"id": "market-analyst-01", "status": "running", "model": "merid-strategist:latest"},
-    ...
-  ]
-}
-```
+Agent grid status: 5 rows × 4 columns, per-agent signals, confidence, stance.
 
-#### POST `/institutional/mesh/agent/{agent_id}/start`
-Start a specific agent.
+#### GET `/api/v1/kalshi/agent-performance`
 
-#### POST `/institutional/mesh/agent/{agent_id}/stop`
-Stop a specific agent.
+Agent performance metrics: accuracy, PnL contribution, trust score history.
+
+#### GET `/api/v1/kalshi/consensus`
+
+Swarm consensus state: vote distribution, quorum status, agreement level.
 
 ---
 
-### Consensus Engine
+## Pipeline & Risk
 
-#### GET `/institutional/consensus/status`
-Get consensus engine status.
+#### GET `/api/v1/pipeline/summary`
 
-**Response:**
-```json
-{
-  "running": true,
-  "pending_votes": 3,
-  "total_processed": 150,
-  "consensus_threshold": 0.65
-}
-```
+Full pipeline status (domains, venues, instruments, proposals).
 
-#### GET `/institutional/consensus/votes`
-Get recent votes from agents.
+#### GET `/api/v1/pipeline/risk`
 
----
+Global risk manager summary (exposure, daily loss, position counts).
 
-### Execution Engine
+#### GET `/api/v1/pipeline/risk-context`
 
-#### GET `/institutional/execution/status`
-Get execution engine status.
+Live RiskContext snapshot (CQI, size_scale_factor, approval_threshold_boost, kill switch).
 
-**Response:**
-```json
-{
-  "running": true,
-  "mode": "paper",
-  "balance": 100000.0,
-  "equity": 100000.0,
-  "positions": 0
-}
-```
+#### GET `/api/v1/pipeline/proposals`
 
-#### GET `/institutional/execution/positions`
-Get current positions.
-
-#### POST `/institutional/execution/order`
-Submit a new order.
-
-**Parameters:**
-- `symbol` (string): Trading pair (e.g., "BTC/USDT")
-- `side` (string): "buy" or "sell"
-- `quantity` (float): Order quantity
-- `order_type` (string): "market" or "limit"
-- `price` (float, optional): Limit price
+Recent trade proposal history.
 
 ---
 
-### Performance Analytics
+## Operator
 
-#### GET `/institutional/analytics/summary`
-Get performance analytics summary.
+#### GET `/api/operator/summary`
 
-**Response:**
-```json
-{
-  "total_trades": 25,
-  "winning_trades": 15,
-  "losing_trades": 10,
-  "win_rate": 60.0,
-  "total_pnl": 5250.50,
-  "sharpe_ratio": 1.85,
-  "max_drawdown": 8.5
-}
-```
+Bundled operator dashboard (portfolio + risk + swarm + system status).
 
-#### GET `/institutional/analytics/trades`
-Get trade history.
+#### GET `/api/operator/audit-trail`
+
+Operator audit trail entries.
+
+#### POST `/api/v1/operator/mode`
+
+Set trading mode. Body: `{"mode": "paper"}`
 
 ---
 
-### Backtesting
+## Prediction Markets
 
-#### GET `/institutional/backtest/strategies`
-Get available backtesting strategies.
+#### GET `/api/v1/prediction-markets/summary`
 
-**Response:**
-```json
-{
-  "strategies": ["momentum", "mean_reversion", "breakout", "ma_crossover"],
-  "summary": {
-    "total_backtests": 5,
-    "completed": 5,
-    "failed": 0
-  }
-}
-```
+Prediction markets dashboard summary.
 
-#### POST `/institutional/backtest/run`
-Run a backtest.
+#### GET `/api/v1/prediction-markets/risk`
 
-**Parameters:**
-- `strategy` (string): Strategy name
-- `symbol` (string): Trading pair
-- `days` (int): Number of days to backtest
-- `initial_capital` (float): Starting capital
+Risk summary + breach log.
 
-**Response:**
-```json
-{
-  "status": "completed",
-  "result": {
-    "backtest_id": "bt_abc123",
-    "strategy_name": "momentum",
-    "total_return_pct": 15.5,
-    "sharpe_ratio": 1.25,
-    "max_drawdown_pct": 12.3,
-    "win_rate": 58.0,
-    "total_trades": 42,
-    "profit_factor": 1.8
-  }
-}
-```
+#### POST `/api/v1/prediction-markets/kill-switch`
 
-#### GET `/institutional/backtest/results`
-Get all backtest results.
+Activate/deactivate kill switch. Body: `{"activate": true}`
 
 ---
 
-### Portfolio Management
+## Health & System
 
-#### GET `/institutional/portfolio/summary`
-Get portfolio summary.
+#### GET `/healthz`
 
-**Response:**
-```json
-{
-  "total_value": 100000.0,
-  "cash": 85000.0,
-  "invested": 15000.0,
-  "pnl": 500.0,
-  "pnl_pct": 0.5,
-  "num_positions": 3,
-  "allocation_strategy": "equal_weight"
-}
-```
+Health check.
 
-#### GET `/institutional/portfolio/holdings`
-Get current holdings.
+#### GET `/risk/status`
 
-#### GET `/institutional/portfolio/allocation`
-Get current vs target allocation.
+Circuit breaker + kill switch status.
 
-#### POST `/institutional/portfolio/target-weights`
-Set target portfolio weights.
+#### POST `/risk/kill-switch/enable`
 
-**Body:**
-```json
-{
-  "BTC/USDT": 0.4,
-  "ETH/USDT": 0.3,
-  "SOL/USDT": 0.3
-}
-```
+Emergency stop — halt all trading immediately.
 
-#### GET `/institutional/portfolio/rebalance`
-Get rebalance orders needed.
+#### GET `/api/v1/system/fresh-start`
 
-#### POST `/institutional/portfolio/position-size`
-Calculate position size.
-
-**Parameters:**
-- `symbol` (string): Trading pair
-- `entry_price` (float): Entry price
-- `stop_loss` (float): Stop loss price
-- `risk_per_trade` (float): Risk as fraction (default: 0.02)
+Fresh start status (paper mode reset state).
 
 ---
 
-### Alerts & Notifications
+## WebSocket
 
-#### GET `/institutional/alerts/summary`
-Get alerts summary.
+#### WS `/ws/market/{symbol}`
 
-**Response:**
-```json
-{
-  "running": true,
-  "total_alerts": 5,
-  "active_alerts": 3,
-  "triggered_alerts": 2,
-  "unread_notifications": 4
-}
-```
-
-#### GET `/institutional/alerts`
-Get all alerts.
-
-**Parameters:**
-- `status` (string, optional): Filter by status ("active", "triggered", "cancelled")
-
-#### POST `/institutional/alerts/price`
-Create a price alert.
-
-**Parameters:**
-- `symbol` (string): Trading pair
-- `target_price` (float): Target price
-- `direction` (string): "above" or "below"
-
-#### DELETE `/institutional/alerts/{alert_id}`
-Delete an alert.
-
-#### GET `/institutional/notifications`
-Get notifications.
-
-#### POST `/institutional/notifications/read-all`
-Mark all notifications as read.
+Real-time market data stream for a symbol.
 
 ---
 
-### Health Monitoring
-
-#### GET `/institutional/health`
-Get system health status.
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "uptime_seconds": 3600,
-  "components": {
-    "event_bus": {"status": "healthy", "message": "Processing events"},
-    "consensus": {"status": "healthy", "message": "Running"},
-    "execution": {"status": "healthy", "message": "Mode: paper"},
-    "agent_mesh": {"status": "healthy", "message": "All 8 agents running"},
-    "simulation": {"status": "healthy", "message": "Block 150"},
-    "audit": {"status": "healthy", "message": "500 entries"},
-    "system": {"status": "healthy", "message": "Normal resource usage"}
-  },
-  "healthy_count": 7,
-  "total_components": 7
-}
-```
-
-#### GET `/institutional/health/ping`
-Simple health ping.
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "timestamp": 1704931200.0
-}
-```
-
-#### GET `/institutional/health/component/{name}`
-Get specific component health.
-
----
-
-### Simulation
-
-#### GET `/institutional/simulation/status`
-Get simulation miner status.
-
-#### GET `/institutional/simulation/blocks`
-Get recent simulation blocks.
-
----
-
-### Audit Trail
-
-#### GET `/institutional/audit/entries`
-Get audit trail entries.
-
-**Parameters:**
-- `limit` (int): Number of entries (default: 100)
-
----
-
-### WebSocket Endpoints
-
-#### WS `/api/v1/institutional/realtime/stream`
-Real-time event stream.
-
-**Events:**
-- `price_update` - Price changes
-- `agent_vote` - Agent voting events
-- `consensus_result` - Consensus decisions
-- `trade_executed` - Trade executions
-- `alert_triggered` - Alert notifications
-
----
-
-## Error Responses
-
-All endpoints return errors in this format:
+## Error Format
 
 ```json
 {
-  "error": "Error message",
-  "detail": "Additional details"
+  "detail": "Error message"
 }
 ```
 
-**HTTP Status Codes:**
-- `200` - Success
-- `400` - Bad Request
-- `404` - Not Found
-- `500` - Internal Server Error
+| Code | Meaning |
+|------|---------|
+| 200 | Success |
+| 400 | Bad Request |
+| 404 | Not Found |
+| 422 | Validation Error |
+| 500 | Internal Server Error |
 
 ---
 
-## Rate Limits
-
-No rate limits in development mode. Production deployments should implement appropriate rate limiting.
+*Start the server (`make serve`) and visit [http://localhost:8000/docs](http://localhost:8000/docs) for the full interactive API explorer.*

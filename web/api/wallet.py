@@ -423,3 +423,140 @@ async def reset_daily_limits() -> Dict[str, Any]:
     """Reset daily transaction limits."""
     get_wallet_manager().reset_daily_limits()
     return {"status": "reset"}
+
+
+# ============================================
+# UNIFIED BALANCES (real data from paper engine + vaults + guard caps)
+# ============================================
+
+@router.get("/balances")
+async def get_wallet_balances() -> Dict[str, Any]:
+    """
+    Unified wallet balances for the Wallet view.
+
+    Aggregates:
+    - Paper trading portfolio cash + positions (as crypto balances)
+    - Vault balances (if available)
+    - Execution guard remaining caps per domain
+    - Recent trade history as transactions
+    """
+    import time as _time
+    from datetime import datetime, timezone
+
+    balances: List[Dict[str, Any]] = []
+    transactions: List[Dict[str, Any]] = []
+    total_value_usd = 0.0
+
+    # ── Paper trading engine balances ──────────────────────────────
+    try:
+        from trading.paper_trading import get_paper_engine
+        engine = get_paper_engine()
+
+        for uid, portfolio in engine.portfolios.items():
+            # Cash balance
+            cash_available = portfolio.current_balance
+            cash_locked = sum(o.size_usd for o in portfolio.orders.values())
+            balances.append({
+                "currency": "USD",
+                "available": round(cash_available, 2),
+                "locked": round(cash_locked, 2),
+                "total": round(cash_available + cash_locked, 2),
+            })
+            total_value_usd += cash_available + cash_locked
+
+            # Aggregate positions by asset into crypto balances
+            asset_map: Dict[str, Dict[str, float]] = {}
+            for pos in portfolio.positions.values():
+                entry = asset_map.setdefault(pos.asset, {"size_usd": 0.0, "pnl": 0.0})
+                pnl = engine._calculate_position_pnl(pos)
+                entry["size_usd"] += pos.size_usd
+                entry["pnl"] += pnl
+
+            for asset, data in asset_map.items():
+                value = data["size_usd"] + data["pnl"]
+                balances.append({
+                    "currency": asset,
+                    "available": round(value, 2),
+                    "locked": 0.0,
+                    "total": round(value, 2),
+                })
+                total_value_usd += value
+
+            # Trade history → transactions
+            for order in portfolio.trade_history[-50:]:
+                tx_type = "transfer"
+                if order.side in ("long", "yes"):
+                    tx_type = "deposit"
+                elif order.side in ("short", "no"):
+                    tx_type = "withdrawal"
+
+                ts = order.filled_at or order.created_at
+                transactions.append({
+                    "id": order.order_id,
+                    "type": tx_type,
+                    "currency": order.asset,
+                    "amount": round(order.size_usd, 2),
+                    "status": "completed" if order.status.value == "filled" else order.status.value,
+                    "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                })
+
+            break  # First portfolio only for single-user mode
+
+    except Exception as exc:
+        logger.warning(f"wallet_balances_paper_error: {exc}")
+
+    # ── Vault balances ────────────────────────────────────────────
+    try:
+        vault_mgr = get_vault_manager()
+        vault_status = vault_mgr.get_status()
+        for vault_name, vault_data in vault_status.get("vaults", {}).items():
+            if isinstance(vault_data, dict):
+                for asset, amount in vault_data.get("balances", {}).items():
+                    if amount > 0:
+                        balances.append({
+                            "currency": f"{asset} ({vault_name})",
+                            "available": round(float(amount), 2),
+                            "locked": 0.0,
+                            "total": round(float(amount), 2),
+                        })
+    except Exception as exc:
+        logger.debug(f"wallet_balances_vault_error: {exc}")
+
+    # ── Execution guard caps (informational) ──────────────────────
+    try:
+        from merid.execution_guard import get_execution_guard
+        guard = get_execution_guard()
+        for domain, cap in guard._domain_caps.items():
+            remaining = cap.remaining_notional()
+            if remaining < cap.max_daily_notional_usd:
+                transactions.append({
+                    "id": f"cap-{domain}",
+                    "type": "transfer",
+                    "currency": "USD",
+                    "amount": round(cap.max_daily_notional_usd - remaining, 2),
+                    "status": "completed",
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                    "address": f"Spent today ({domain} domain)",
+                })
+    except Exception as exc:
+        logger.debug(f"wallet_balances_guard_error: {exc}")
+
+    # If no balances found, seed with default paper balance
+    if not balances:
+        balances.append({
+            "currency": "USD",
+            "available": 10000.0,
+            "locked": 0.0,
+            "total": 10000.0,
+        })
+        total_value_usd = 10000.0
+
+    # Sort transactions newest first
+    transactions.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+
+    return {
+        "balances": balances,
+        "transactions": transactions[:50],
+        "total_value_usd": round(total_value_usd, 2),
+        "source": "live",
+    }

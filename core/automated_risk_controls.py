@@ -522,6 +522,142 @@ class AutomatedStopLossManager:
         }
 
 
+class TradingHaltManager:
+    """Manages trading halt state triggered by risk breaches or circuit breakers.
+    
+    This is the central authority for whether new orders can be submitted.
+    When halted, all order submission must be blocked until an operator
+    explicitly resumes or the auto-resume conditions are met.
+    """
+
+    def __init__(
+        self,
+        max_daily_loss_pct: float = 0.05,
+        max_drawdown_pct: float = 0.15,
+        circuit_breaker_halt_threshold: int = 2,
+    ):
+        self.max_daily_loss_pct = max_daily_loss_pct
+        self.max_drawdown_pct = max_drawdown_pct
+        self.circuit_breaker_halt_threshold = circuit_breaker_halt_threshold
+
+        self._halted: bool = False
+        self._halt_reason: Optional[str] = None
+        self._halt_time: Optional[float] = None
+        self._halt_history: List[Dict[str, Any]] = []
+        self._on_halt_callbacks: List[Callable] = []
+        self._on_resume_callbacks: List[Callable] = []
+
+    @property
+    def is_halted(self) -> bool:
+        return self._halted
+
+    @property
+    def halt_reason(self) -> Optional[str]:
+        return self._halt_reason
+
+    def register_on_halt(self, callback: Callable) -> None:
+        """Register a callback invoked when trading is halted."""
+        self._on_halt_callbacks.append(callback)
+
+    def register_on_resume(self, callback: Callable) -> None:
+        """Register a callback invoked when trading is resumed."""
+        self._on_resume_callbacks.append(callback)
+
+    def halt(self, reason: str) -> bool:
+        """Halt all trading.  Returns True if state changed."""
+        if self._halted:
+            logger.warning(f"Trading already halted ({self._halt_reason}). New reason: {reason}")
+            return False
+
+        self._halted = True
+        self._halt_reason = reason
+        self._halt_time = time.time()
+        entry = {
+            "action": "halt",
+            "reason": reason,
+            "timestamp": self._halt_time,
+        }
+        self._halt_history.append(entry)
+        logger.critical(f"TRADING HALTED: {reason}")
+
+        for cb in self._on_halt_callbacks:
+            try:
+                cb(reason)
+            except Exception as exc:
+                logger.error(f"on_halt callback error: {exc}")
+        return True
+
+    def resume(self, operator: str = "system") -> bool:
+        """Resume trading.  Returns True if state changed."""
+        if not self._halted:
+            return False
+
+        prev_reason = self._halt_reason
+        self._halted = False
+        self._halt_reason = None
+        entry = {
+            "action": "resume",
+            "previous_reason": prev_reason,
+            "resumed_by": operator,
+            "timestamp": time.time(),
+        }
+        self._halt_history.append(entry)
+        logger.info(f"TRADING RESUMED by {operator} (was halted: {prev_reason})")
+
+        for cb in self._on_resume_callbacks:
+            try:
+                cb(operator)
+            except Exception as exc:
+                logger.error(f"on_resume callback error: {exc}")
+        return True
+
+    def check_daily_loss(self, daily_pnl: float, portfolio_value: float) -> bool:
+        """Check daily loss and halt if threshold breached.  Returns True if halted."""
+        if portfolio_value <= 0:
+            return False
+        loss_pct = abs(daily_pnl) / portfolio_value if daily_pnl < 0 else 0
+        if loss_pct >= self.max_daily_loss_pct:
+            self.halt(
+                f"Daily loss {loss_pct:.1%} exceeds limit {self.max_daily_loss_pct:.1%} "
+                f"(${daily_pnl:.2f} on ${portfolio_value:.2f})"
+            )
+            return True
+        return False
+
+    def check_drawdown(self, current_drawdown_pct: float) -> bool:
+        """Check drawdown and halt if threshold breached.  Returns True if halted."""
+        if current_drawdown_pct >= self.max_drawdown_pct:
+            self.halt(
+                f"Drawdown {current_drawdown_pct:.1%} exceeds limit {self.max_drawdown_pct:.1%}"
+            )
+            return True
+        return False
+
+    def check_circuit_breakers(self, open_breaker_count: int) -> bool:
+        """Halt if too many circuit breakers are open.  Returns True if halted."""
+        if open_breaker_count >= self.circuit_breaker_halt_threshold:
+            self.halt(
+                f"{open_breaker_count} circuit breakers open "
+                f"(threshold {self.circuit_breaker_halt_threshold})"
+            )
+            return True
+        return False
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "halted": self._halted,
+            "reason": self._halt_reason,
+            "halt_time": self._halt_time,
+            "history_count": len(self._halt_history),
+            "history": self._halt_history[-10:],
+            "limits": {
+                "max_daily_loss_pct": self.max_daily_loss_pct,
+                "max_drawdown_pct": self.max_drawdown_pct,
+                "circuit_breaker_halt_threshold": self.circuit_breaker_halt_threshold,
+            },
+        }
+
+
 class RiskControlCoordinator:
     """Coordinates all risk control systems"""
     
@@ -529,12 +665,41 @@ class RiskControlCoordinator:
         self.portfolio_manager = PortfolioRiskManager()
         self.position_sizer = DynamicPositionSizer()
         self.stop_loss_manager = AutomatedStopLossManager()
+        self.halt_manager = TradingHaltManager()
         self.error_handler = get_error_handler()
+        self.staleness_monitor = None  # Set via wire_staleness_monitor()
         
         self._monitoring = False
         self._monitor_task: Optional[asyncio.Task] = None
+        self._circuit_breakers: Dict[str, Any] = {}
         
         logger.info("Risk control coordinator initialized")
+
+    def wire_staleness_monitor(self, monitor) -> None:
+        """Wire a FeedStalenessMonitor so stale feeds auto-halt trading."""
+        self.staleness_monitor = monitor
+        monitor.on_stale(lambda fid, inst, age: self.halt_manager.halt(
+            f"Stale data: {fid}:{inst} ({age:.0f}s)"
+        ))
+        logger.info("Staleness monitor wired to risk coordinator")
+
+    def register_circuit_breaker(self, name_or_breaker: Any, breaker: Any = None) -> None:
+        """Register an external circuit breaker for monitoring.
+
+        Accepts either (name, breaker) or just (breaker,) where breaker.name is used.
+        """
+        if breaker is None:
+            # Single-arg form: register_circuit_breaker(breaker)
+            breaker = name_or_breaker
+            name = getattr(breaker, "name", str(id(breaker)))
+        else:
+            name = name_or_breaker
+        self._circuit_breakers[name] = breaker
+        logger.info(f"Circuit breaker registered: {name}")
+
+    def can_trade(self) -> bool:
+        """Central gate: returns False if trading is halted."""
+        return not self.halt_manager.is_halted
     
     async def start_monitoring(self, interval: float = 1.0):
         """Start risk monitoring"""
@@ -564,11 +729,38 @@ class RiskControlCoordinator:
         logger.info("Risk monitoring stopped")
     
     async def _check_all_risks(self):
-        """Check all risk controls"""
-        # Get portfolio risk report
+        """Check all risk controls and auto-halt on critical breaches."""
         risk_report = self.portfolio_manager.get_portfolio_risk_report()
         
-        # Check for critical violations
+        # --- Drawdown auto-halt ---
+        drawdown_pct = abs(risk_report.get('total_pnl_pct', 0))
+        self.halt_manager.check_drawdown(drawdown_pct)
+
+        # --- Circuit breaker auto-halt ---
+        open_count = 0
+        for name, breaker in self._circuit_breakers.items():
+            state = breaker.get_state() if hasattr(breaker, 'get_state') else {}
+            if state.get('state') == 'open':
+                open_count += 1
+        self.halt_manager.check_circuit_breakers(open_count)
+
+        # --- Feed staleness auto-halt ---
+        if self.staleness_monitor is not None:
+            self.staleness_monitor.check_all()
+
+        # --- Anomaly detection auto-halt ---
+        try:
+            from ops.anomaly_detection import get_anomaly_detection
+            anomaly_stack = get_anomaly_detection()
+            should_halt, reason = anomaly_stack.should_halt()
+            if should_halt:
+                self.halt_manager.halt(f"Anomaly detection: {reason}")
+        except ImportError:
+            pass  # anomaly detection module not available
+        except Exception as exc:
+            logger.debug(f"Anomaly detection check error: {exc}")
+
+        # --- Legacy: critical violation → error handler ---
         critical_violations = [
             limit for limit in risk_report['risk_limits']
             if limit['breached'] and limit['action_on_breach'] == 'block'
@@ -591,7 +783,10 @@ class RiskControlCoordinator:
                 'take_profits': len(self.stop_loss_manager.take_profits),
                 'trailing_stops': len(self.stop_loss_manager.trailing_stops)
             },
-            'monitoring_active': self._monitoring
+            'monitoring_active': self._monitoring,
+            'trading_halt': self.halt_manager.get_status(),
+            'can_trade': self.can_trade(),
+            'staleness': self.staleness_monitor.get_summary() if self.staleness_monitor else {},
         }
 
 

@@ -55,7 +55,24 @@ class LivePriceFeed:
         Args:
             symbols: List of symbols to track (e.g., ['BTC/USDT', 'ETH/USDT'])
         """
-        self.symbols = symbols or ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT']
+        self.symbols = symbols or [
+            # Major crypto
+            'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT',
+            # Alt L1/L2
+            'ADA/USDT', 'DOT/USDT', 'ATOM/USDT', 'NEAR/USDT',
+            'APT/USDT', 'SUI/USDT', 'SEI/USDT',
+            'POL/USDT', 'ARB/USDT', 'OP/USDT',
+            # DeFi
+            'LINK/USDT', 'UNI/USDT', 'AAVE/USDT', 'MKR/USDT',
+            'SNX/USDT', 'CRV/USDT', 'LDO/USDT',
+            # Memecoins
+            'DOGE/USDT', 'SHIB/USDT', 'PEPE/USDT', 'WIF/USDT',
+            'BONK/USDT', 'FLOKI/USDT',
+            # Infrastructure / Storage
+            'FIL/USDT', 'AR/USDT', 'RENDER/USDT',
+            # Stablecoins (reference)
+            'USDC/USDT',
+        ]
         self.exchanges = {}
         self.price_cache: Dict[str, PriceData] = {}
         self.subscribers: List[Callable] = []
@@ -82,6 +99,12 @@ class LivePriceFeed:
     
     def _initialize_exchanges(self):
         """Initialize exchange connections with real API keys and retry logic."""
+        # Skip crypto exchanges in Kalshi-only mode
+        from merid.settings import settings
+        if settings.KALSHI_ONLY:
+            logger.info("Crypto exchanges SKIPPED (Kalshi-only mode)")
+            return
+        
         if not _CCXT_AVAILABLE:
             logger.warning("CCXT not installed; LivePriceFeed running in offline stub mode")
             return
@@ -102,7 +125,7 @@ class LivePriceFeed:
             ('kraken', {
                 'enableRateLimit': True,
                 'apiKey': os.getenv('KRAKEN_API_KEY'),
-                'privateKey': os.getenv('KRAKE_PRIVATE_KEY')
+                'privateKey': os.getenv('KRAKEN_PRIVATE_KEY')
             }, 'primary'),
             ('coinbase', {
                 'enableRateLimit': True,
@@ -157,8 +180,12 @@ class LivePriceFeed:
     
     async def start_streaming(self):
         """Start streaming price updates."""
+        if self.running:
+            logger.debug("start_streaming() called but already running — skipping")
+            return
         self.running = True
-        logger.info("Price streaming started")
+        self._cycle_count = 0
+        logger.info("Price streaming started for %d symbols across %d exchanges", len(self.symbols), len(self.exchanges))
         
         while self.running:
             try:
@@ -167,6 +194,12 @@ class LivePriceFeed:
                     await asyncio.sleep(self.update_interval)
                     continue
                 await self.fetch_and_broadcast_prices()
+                self._cycle_count += 1
+                if self._cycle_count == 1:
+                    cached = len(self.price_cache)
+                    logger.info("First CCXT fetch cycle complete: %d/%d symbols cached", cached, len(self.symbols))
+                    if cached == 0:
+                        logger.warning("CCXT fetch cycle produced 0 prices — falling back to CoinGecko via /api/prices/live")
                 await asyncio.sleep(self.update_interval)
             except Exception as exc:
                 logger.error(f"Error in price streaming loop: {exc}")
@@ -198,8 +231,11 @@ class LivePriceFeed:
     
     async def fetch_and_broadcast_prices(self):
         """Fetch latest prices and broadcast to subscribers with error recovery."""
-        for symbol in self.symbols:
+        for i, symbol in enumerate(self.symbols):
             await self._fetch_price_with_retry(symbol)
+            # Yield to event loop every 5 symbols so HTTP requests can be served
+            if (i + 1) % 5 == 0:
+                await asyncio.sleep(0)
     
     async def _fetch_price_with_retry(self, symbol: str):
         """Fetch price with retry logic and circuit breaker."""
@@ -217,14 +253,26 @@ class LivePriceFeed:
             for attempt in range(self.max_retries):
                 try:
                     exchange = self.exchanges[exchange_name]
-                    self._guard_network_call("ticker", f"{exchange_name}:{symbol}")
+                    try:
+                        self._guard_network_call("ticker", f"{exchange_name}:{symbol}")
+                    except RuntimeError:
+                        break  # Network guard blocked — skip this exchange
                     
                     # Adjust symbol format for different exchanges
                     fetch_symbol = symbol
-                    if exchange_name in ['kraken', 'coinbase']:
+                    if exchange_name in ['kraken', 'coinbase', 'gemini']:
                         fetch_symbol = symbol.replace('/USDT', '/USD')
                     
-                    ticker = exchange.fetch_ticker(fetch_symbol)
+                    # Load markets if not yet loaded, then skip unlisted symbols
+                    if not exchange.markets:
+                        try:
+                            await asyncio.to_thread(exchange.load_markets)
+                        except Exception:
+                            pass  # proceed anyway
+                    if exchange.markets and fetch_symbol not in exchange.markets:
+                        break
+                    
+                    ticker = await asyncio.to_thread(exchange.fetch_ticker, fetch_symbol)
                     
                     price_data = PriceData(
                         symbol=symbol,
@@ -256,11 +304,17 @@ class LivePriceFeed:
                 except Exception as exc:
                     self.exchange_failures[exchange_name] = self.exchange_failures.get(exchange_name, 0) + 1
                     
+                    # 401/403 = auth or permission error — don't retry, skip exchange
+                    exc_str = str(exc)
+                    if "401" in exc_str or "403" in exc_str:
+                        logger.debug(f"Auth error for {symbol} on {exchange_name}, skipping: {exc}")
+                        break
+                    
                     if attempt < self.max_retries - 1:
                         logger.debug(f"Failed to fetch {symbol} from {exchange_name} (attempt {attempt + 1}/{self.max_retries}): {exc}")
                         await asyncio.sleep(self.retry_delay)
                     else:
-                        logger.warning(f"Failed to fetch {symbol} from {exchange_name} after {self.max_retries} attempts: {exc}")
+                        logger.debug(f"Failed to fetch {symbol} from {exchange_name} after {self.max_retries} attempts: {exc}")
             
             if fetched:
                 break
@@ -268,7 +322,7 @@ class LivePriceFeed:
         if not fetched:
             fetched = await self._fetch_from_coingecko(symbol)
             if not fetched:
-                logger.warning(f"Failed to fetch {symbol} from exchanges and CoinGecko")
+                logger.debug(f"Failed to fetch {symbol} from exchanges and CoinGecko")
                 if symbol in self.price_cache:
                     cached_age = (datetime.now() - self.price_cache[symbol].timestamp).total_seconds()
                     if cached_age < 60:
@@ -277,7 +331,27 @@ class LivePriceFeed:
                         logger.error(f"Cached price for {symbol} too old ({cached_age:.1f}s)")
     
     async def _broadcast_update(self, price_data: PriceData):
-        """Broadcast price update to all subscribers."""
+        """Broadcast price update to all subscribers, validating against data contracts."""
+        # Validate against data contract (if registered for this exchange)
+        try:
+            from core.data_contracts import get_data_contract_registry
+            registry = get_data_contract_registry()
+            feed_id = price_data.exchange.lower()
+            if registry.get_contract(feed_id):
+                data_dict = {
+                    "price": price_data.price,
+                    "volume": price_data.volume_24h,
+                    "symbol": price_data.symbol,
+                    "timestamp": price_data.timestamp.timestamp(),
+                }
+                result = registry.validate(feed_id, data_dict)
+                if not result.valid:
+                    logger.warning(f"Data contract violation for {feed_id}/{price_data.symbol}: {result.errors}")
+        except ImportError:
+            pass  # data_contracts module not available
+        except Exception as exc:
+            logger.debug(f"Data contract check error: {exc}")
+
         for subscriber in self.subscribers:
             try:
                 if asyncio.iscoroutinefunction(subscriber):
@@ -346,7 +420,7 @@ class LivePriceFeed:
                 if exchange_name in ['kraken', 'coinbase']:
                     fetch_symbol = symbol.replace('/USDT', '/USD')
                 
-                ohlcv = exchange.fetch_ohlcv(fetch_symbol, timeframe, limit=limit)
+                ohlcv = await asyncio.to_thread(exchange.fetch_ohlcv, fetch_symbol, timeframe, limit)
                 return ohlcv
             except Exception as exc:
                 logger.debug(f"Failed to fetch OHLCV from {exchange_name}: {exc}")
@@ -505,9 +579,10 @@ class LivePriceFeed:
         for symbol, price_data in self.price_cache.items():
             prices[symbol] = {
                 "price": price_data.price,
-                "change_24h": getattr(price_data, "change_24h", 0.0),
+                "change_24h": getattr(price_data, "change_24h_pct", 0.0),
                 "timestamp": price_data.timestamp.isoformat() if price_data.timestamp else None,
-                "source": price_data.source
+                "source": getattr(price_data, "exchange", "unknown"),
+                "volume_24h": getattr(price_data, "volume_24h", 0.0),
             }
         return prices
 

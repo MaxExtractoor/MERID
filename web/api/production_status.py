@@ -8,9 +8,12 @@ No mock data - only real API status and metrics.
 import os
 import asyncio
 from typing import Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/production", tags=["production"])
 
@@ -79,7 +82,7 @@ async def get_production_status():
         system_health = "unhealthy"
     
     return ProductionStatus(
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
         system_health=system_health,
         categories=categories,
         summary=summary
@@ -198,7 +201,7 @@ async def check_database_connections() -> CategoryStatus:
 
 async def check_exchange_api(exchange_name: str, display_name: str, config: Dict[str, str]) -> ServiceStatus:
     """Check status of a specific exchange API."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
         import ccxt
@@ -219,12 +222,12 @@ async def check_exchange_api(exchange_name: str, display_name: str, config: Dict
             status = "degraded"  # Public access only
             error_message = "Public access only - no API keys configured"
         
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name=display_name,
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -234,11 +237,11 @@ async def check_exchange_api(exchange_name: str, display_name: str, config: Dict
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name=display_name,
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -249,7 +252,7 @@ async def check_exchange_api(exchange_name: str, display_name: str, config: Dict
 
 async def check_polygon_api() -> ServiceStatus:
     """Check Polygon.io API status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
         import httpx
@@ -271,12 +274,12 @@ async def check_polygon_api() -> ServiceStatus:
                 status = "offline"
                 error_message = f"HTTP {response.status_code}"
         
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="Polygon.io",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -286,11 +289,11 @@ async def check_polygon_api() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="Polygon.io",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -300,10 +303,9 @@ async def check_polygon_api() -> ServiceStatus:
 
 async def check_alpha_vantage_api() -> ServiceStatus:
     """Check Alpha Vantage API status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
-        import httpx
         
         api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
         if not api_key or api_key == 'change_me':
@@ -322,12 +324,12 @@ async def check_alpha_vantage_api() -> ServiceStatus:
                 status = "offline"
                 error_message = f"HTTP {response.status_code}"
         
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="Alpha Vantage",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -336,11 +338,11 @@ async def check_alpha_vantage_api() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="Alpha Vantage",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -350,7 +352,7 @@ async def check_alpha_vantage_api() -> ServiceStatus:
 
 async def check_kalshi_api() -> ServiceStatus:
     """Check Kalshi API status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
         from trading.integrations.kalshi_client import get_kalshi_client
@@ -360,12 +362,12 @@ async def check_kalshi_api() -> ServiceStatus:
         
         status = "online"
         error_message = ""
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="Kalshi",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -375,11 +377,11 @@ async def check_kalshi_api() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="Kalshi",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -389,10 +391,9 @@ async def check_kalshi_api() -> ServiceStatus:
 
 async def check_helius_api() -> ServiceStatus:
     """Check Helius (Solana) API status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
-        import httpx
         
         rpc_url = os.getenv("HELIUS_RPC_URL")
         if not rpc_url:
@@ -416,12 +417,12 @@ async def check_helius_api() -> ServiceStatus:
                 status = "offline"
                 error_message = f"HTTP {response.status_code}"
         
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="Helius (Solana)",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -430,11 +431,11 @@ async def check_helius_api() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="Helius (Solana)",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -444,10 +445,9 @@ async def check_helius_api() -> ServiceStatus:
 
 async def check_openai_api() -> ServiceStatus:
     """Check OpenAI API status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
-        import httpx
         
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key or api_key == 'change_me':
@@ -479,12 +479,12 @@ async def check_openai_api() -> ServiceStatus:
                 status = "offline"
                 error_message = f"HTTP {response.status_code}"
         
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="OpenAI",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -493,11 +493,11 @@ async def check_openai_api() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="OpenAI",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -507,10 +507,9 @@ async def check_openai_api() -> ServiceStatus:
 
 async def check_huggingface_api() -> ServiceStatus:
     """Check HuggingFace API status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
-        import httpx
         
         api_key = os.getenv("HUGGINGFACE_API_KEY")
         if not api_key or api_key == 'change_me':
@@ -530,12 +529,12 @@ async def check_huggingface_api() -> ServiceStatus:
                 status = "offline"
                 error_message = f"HTTP {response.status_code}"
         
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="HuggingFace",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -544,11 +543,11 @@ async def check_huggingface_api() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="HuggingFace",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -558,7 +557,7 @@ async def check_huggingface_api() -> ServiceStatus:
 
 async def check_mongodb_connection() -> ServiceStatus:
     """Check MongoDB connection status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
         from pymongo import MongoClient
@@ -572,12 +571,12 @@ async def check_mongodb_connection() -> ServiceStatus:
         
         status = "online"
         error_message = ""
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="MongoDB",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -586,11 +585,11 @@ async def check_mongodb_connection() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="MongoDB",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -600,7 +599,7 @@ async def check_mongodb_connection() -> ServiceStatus:
 
 async def check_redis_connection() -> ServiceStatus:
     """Check Redis connection status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
         import redis
@@ -614,12 +613,12 @@ async def check_redis_connection() -> ServiceStatus:
         
         status = "online"
         error_message = ""
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="Redis",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -628,11 +627,11 @@ async def check_redis_connection() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="Redis",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={
@@ -642,7 +641,7 @@ async def check_redis_connection() -> ServiceStatus:
 
 async def check_neo4j_connection() -> ServiceStatus:
     """Check Neo4j connection status."""
-    start_time = datetime.now()
+    start_time = datetime.now(timezone.utc)
     
     try:
         from neo4j import GraphDatabase
@@ -659,12 +658,12 @@ async def check_neo4j_connection() -> ServiceStatus:
         
         status = "online"
         error_message = ""
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         
         return ServiceStatus(
             name="Neo4j",
             status=status,
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=error_message,
             metrics={
@@ -673,11 +672,11 @@ async def check_neo4j_connection() -> ServiceStatus:
         )
         
     except Exception as e:
-        response_time = (datetime.now() - start_time).total_seconds() * 1000
+        response_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         return ServiceStatus(
             name="Neo4j",
             status="offline",
-            last_check=datetime.now(),
+            last_check=datetime.now(timezone.utc),
             response_time_ms=response_time,
             error_message=str(e),
             metrics={

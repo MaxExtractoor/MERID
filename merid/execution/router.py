@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from merid.execution.base import TradeExecutor, TradeResult, TradeSideLiteral, Position
 from merid.execution.portfolio import PortfolioAggregator, PortfolioSnapshot
+from merid.risk.kill_switches import risk_controller
 from trading.adapters.base import TradeRequest, TradeSide
 from trading.config.runtime_config import TradingRuntimeConfig, get_runtime_config
 from trading.guards.trading_guard import (
@@ -113,6 +114,35 @@ class ExecutionRouter:
         return await self.execute(intent)
 
     async def execute(self, intent: TradeIntent) -> TradeResult:
+        # ═══ HARD GATE 1: Kill Switch & Risk Controller ═══════════════════
+        # Check BEFORE any guards or execution - this is the final safety gate
+        if not risk_controller.can_trade():
+            reason = risk_controller.get_kill_reason()
+            logger.warning(
+                f"Trade blocked by kill switch: {reason}",
+                extra={
+                    "intent_id": intent.intent_id,
+                    "trader_id": intent.trader.trader_id,
+                    "venue": intent.venue_id,
+                    "symbol": intent.symbol,
+                    "kill_reason": reason,
+                }
+            )
+            return TradeResult(
+                success=False,
+                venue=intent.venue_id,
+                symbol=intent.symbol,
+                side=intent.side,
+                size=intent.size,
+                price=intent.price or 0.0,
+                error=f"Trading halted: {reason}",
+                metadata={
+                    "kill_switch_active": True,
+                    "kill_reason": reason,
+                    "risk_state": risk_controller.state(),
+                },
+            )
+        
         executor = self._executors.get(intent.venue_id)
         if executor is None and self._executor_factory is not None:
             executor = self._executor_factory(intent.venue_id)

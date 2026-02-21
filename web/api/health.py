@@ -7,6 +7,9 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Request, HTTPException
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # from agents.base_agent import AgentErrorResponse, AgentErrorType
 from agents.registry import load_agents
