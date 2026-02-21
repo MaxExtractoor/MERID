@@ -138,6 +138,11 @@ from web.api.paper_ladder_api import router as paper_ladder_router
 from web.api.paper_session_api import router as paper_session_router
 from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
 from web.api.kalshi_agent_performance_api import router as kalshi_agent_performance_router
+from web.api.kalshi_deployment import router as kalshi_deployment_router
+from web.api.kalshi_metrics_api import router as kalshi_metrics_api_router
+from web.api.sentiment_api import router as sentiment_api_router
+from web.api.xtf_api import router as xtf_api_router
+from web.api.auto_promoter_api import router as auto_promoter_api_router
 
 # Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
 # from web.api.mock_simulation import router as mock_simulation_router
@@ -155,8 +160,8 @@ from web.api.kalshi_agent_performance_api import router as kalshi_agent_performa
 from merid.settings import settings
 
 # Basic environment logging (moved validation to startup_event)
-print(f">> MERID Environment: {settings.MERID_ENV}")
-print(f">> Log Level: {settings.MERID_LOG_LEVEL}")
+logger.info("MERID Environment: %s", settings.MERID_ENV)
+logger.info("Log Level: %s", settings.MERID_LOG_LEVEL)
 from web.api.ops import router as ops_router
 from web.api.archive import router as archive_router
 from web.api.trading_mode import router as trading_mode_router
@@ -185,7 +190,6 @@ from web.api.moat import router as moat_router
 from web.api.health import router as health_router
 from web.api.analytics import router as analytics_router
 from web.api.brier_metrics import router as brier_metrics_router
-from web.api.governance import router as governance_router
 from web.api.feedback import router as feedback_router
 from web.api.production_status import router as production_status_router
 from web.api.prime_screen import router as prime_screen_router
@@ -249,73 +253,6 @@ def _dashboard_key():
 def _templates():
     return _context_value("templates")
 
-
-@asynccontextmanager
-async def lifespan_with_agents(app: FastAPI):
-    """Application lifespan manager - starts/stops orchestrator agents."""
-    # Startup
-    logger.info("Starting application lifespan...")
-    orchestrator_manager = get_orchestrator_manager()
-    await orchestrator_manager.start_all()
-    logger.info("✅ Orchestrator agents started")
-    
-    # Start Kalshi agent grid if enabled
-    if settings.KALSHI_ONLY or settings.MERID_PM_LIVE_ENABLED:
-        try:
-            from merid.prediction.agent_grid import get_agent_grid
-            grid = get_agent_grid()
-            await grid.start()
-            logger.info(f"✅ Kalshi agent grid started: {len(grid._agents)} agents running")
-        except Exception as e:
-            logger.error(f"Failed to start Kalshi agent grid: {e}")
-    
-    # Run reconciliation once on startup to clear execution gate
-    if settings.KALSHI_ONLY or settings.MERID_PM_LIVE_ENABLED:
-        try:
-            logger.info("=" * 80)
-            logger.info("Running startup reconciliation to unblock execution gate...")
-            logger.info("=" * 80)
-            import asyncio as _asyncio
-            from merid.reconciliation import (
-                reconcile_all_venues,
-                has_critical_discrepancies,
-            )
-            # reconcile_all_venues is synchronous — run in thread pool to avoid blocking event loop
-            discrepancies = await _asyncio.get_event_loop().run_in_executor(
-                None, lambda: reconcile_all_venues(["kalshi"])
-            )
-            n_crit = sum(1 for d in discrepancies if d.severity == "critical")
-            n_warn = sum(1 for d in discrepancies if d.severity == "warning")
-            logger.info(
-                f"✅ Startup reconciliation complete: {len(discrepancies)} discrepancies "
-                f"({n_crit} critical, {n_warn} warning)"
-            )
-            if has_critical_discrepancies():
-                logger.warning("⚠️  Execution gate: BLOCKED (critical reconciliation issues found)")
-            else:
-                logger.info("✅ Execution gate: CLEAR - trades can proceed")
-            logger.info("=" * 80)
-        except Exception as e:
-            logger.error(f"Startup reconciliation failed: {e}", exc_info=True)
-            logger.warning("⚠️  Execution gate may remain BLOCKED - reconciliation incomplete")
-    
-    yield
-    
-    # Shutdown
-    logger.info("Shutting down application...")
-    
-    # Stop Kalshi agent grid
-    if settings.KALSHI_ONLY or settings.MERID_PM_LIVE_ENABLED:
-        try:
-            from merid.prediction.agent_grid import get_agent_grid
-            grid = get_agent_grid()
-            await grid.stop()
-            logger.info("✅ Kalshi agent grid stopped")
-        except Exception as e:
-            logger.error(f"Failed to stop Kalshi agent grid: {e}")
-    
-    await orchestrator_manager.stop_all()
-    logger.info("✅ Application shutdown complete")
 
 
 def create_app(lifespan=None) -> FastAPI:
@@ -502,7 +439,6 @@ def create_app(lifespan=None) -> FastAPI:
     # application.include_router(assertion_router)
     if not _kalshi_only:
         application.include_router(brier_metrics_router)
-    application.include_router(governance_router)
     application.include_router(feedback_router)
     if not _kalshi_only:
         application.include_router(prime_screen_router)
@@ -549,6 +485,11 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(paper_session_router)
     application.include_router(kalshi_agent_grid_router)
     application.include_router(kalshi_agent_performance_router)
+    application.include_router(kalshi_deployment_router)
+    application.include_router(kalshi_metrics_api_router)
+    application.include_router(sentiment_api_router)
+    application.include_router(xtf_api_router)
+    application.include_router(auto_promoter_api_router)
 
     # Register fallback stubs last so concrete implementations win route precedence.
     application.include_router(missing_endpoints_router)
@@ -785,13 +726,13 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
 
     try:
         import asyncio, uuid
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         # Send welcome
         await websocket.send_json({
             "event_id": str(uuid.uuid4()),
             "event_type": "connected",
-            "timestamp": int(datetime.utcnow().timestamp() * 1000),
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
             "source": "consensus",
             "payload": {"message": "Connected to consensus stream"},
         })
@@ -821,8 +762,10 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
                     "payload": d,
                 })
                 _sent_plan_ids.add(d["id"])
-        except Exception:
-            pass  # Store not available — fall through to coordinator
+        except (WebSocketDisconnect, RuntimeError):
+            return
+        except Exception as _snap_exc:
+            logger.debug("consensus_ws: initial snapshot unavailable: %s", _snap_exc)
 
         while True:
             # ── Push any NEW opinions/plans since last tick ───────────
@@ -853,8 +796,10 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
                             "payload": d,
                         })
                         _sent_plan_ids.add(plan.id)
-            except Exception:
-                pass
+            except (WebSocketDisconnect, RuntimeError):
+                break
+            except Exception as _poll_exc:
+                logger.debug("consensus_ws: poll error (non-fatal): %s", _poll_exc)
 
             # ── Coordinator status heartbeat ─────────────────────────
             try:
@@ -866,7 +811,7 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
                 await websocket.send_json({
                     "event_id": str(uuid.uuid4()),
                     "event_type": "consensus_update",
-                    "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                    "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
                     "source": "taco_consensus",
                     "payload": {
                         "phase": phase,
@@ -880,7 +825,7 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
                     await websocket.send_json({
                         "event_id": str(uuid.uuid4()),
                         "event_type": "consensus_update",
-                        "timestamp": int(datetime.utcnow().timestamp() * 1000),
+                        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
                         "source": "taco_consensus",
                         "payload": {"phase": "idle", "status": {}},
                     })
@@ -906,21 +851,22 @@ async def trades_websocket_endpoint(websocket: WebSocket):
 
     try:
         import asyncio as _asyncio
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt, timezone as _tz
 
         # Send mode status immediately
         try:
             from trading.config.runtime import get_runtime_config
             cfg = get_runtime_config()
             mode = cfg.mode if hasattr(cfg, "mode") else "offline"
-        except Exception:
+        except Exception as _rce:
+            logger.debug("WS mode_status: runtime config unavailable: %s", _rce)
             mode = "offline"
 
         await websocket.send_json({
             "event_type": "mode_status",
             "mode": str(mode).upper(),
             "is_simulated": True,
-            "timestamp": _dt.utcnow().timestamp(),
+            "timestamp": _dt.now(_tz.utc).timestamp(),
         })
 
         # Send initial order snapshot from paper engine (skip in Kalshi-only mode)
@@ -946,17 +892,19 @@ async def trades_websocket_endpoint(websocket: WebSocket):
                             "price": round(price, 2),
                             "status": "filled",
                             "venue": "paper",
-                            "timestamp": _dt.utcnow().timestamp(),
+                            "timestamp": _dt.now(_tz.utc).timestamp(),
                         })
-            except Exception:
-                pass
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            except Exception as _snap_exc:
+                logger.debug("trades_ws: initial snapshot unavailable: %s", _snap_exc)
 
         async def _send_heartbeats():
             while True:
                 try:
                     await websocket.send_json({
                         "event_type": "heartbeat",
-                        "timestamp": _dt.utcnow().timestamp(),
+                        "timestamp": _dt.now(_tz.utc).timestamp(),
                     })
                 except (WebSocketDisconnect, RuntimeError):
                     break
@@ -970,11 +918,11 @@ async def trades_websocket_endpoint(websocket: WebSocket):
                     msg = _json.loads(raw)
                     # Respond to client ping with pong
                     if msg.get("event") == "ping":
-                        await websocket.send_json({"event": "pong", "ts": _dt.utcnow().timestamp()})
+                        await websocket.send_json({"event": "pong", "ts": _dt.now(_tz.utc).timestamp()})
                 except (WebSocketDisconnect, RuntimeError):
                     break
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("ws _receive_messages skipped: %s", _e)
 
         # Run heartbeat sender and message receiver concurrently
         done, pending = await _asyncio.wait(
@@ -999,12 +947,12 @@ async def risk_websocket_endpoint(websocket: WebSocket):
 
     try:
         import asyncio as _asyncio
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt, timezone as _tz
 
         while True:
             try:
                 # Pull real portfolio data if available
-                equity = 10000.0
+                equity = 0.0
                 pnl = 0.0
                 position_count = 0
                 exposure = 0.0
@@ -1015,7 +963,7 @@ async def risk_websocket_endpoint(websocket: WebSocket):
                     uid = next(iter(engine.portfolios), None)
                     if uid:
                         p = engine.get_portfolio(uid)
-                        equity = getattr(p, "equity", 10000.0)
+                        equity = getattr(p, "equity", 0.0)
                         pnl = getattr(p, "total_pnl", 0.0)
                         positions = getattr(p, "positions", {})
                         position_count = len(positions)
@@ -1024,8 +972,8 @@ async def risk_websocket_endpoint(websocket: WebSocket):
                             qty = abs(getattr(pos, "quantity", getattr(pos, "size", 0)))
                             px = getattr(pos, "avg_price", getattr(pos, "entry_price", 0))
                             exposure += qty * px
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("risk_summary exposure build skipped: %s", _e)
 
                 await websocket.send_json({
                     "event_type": "risk_summary",
@@ -1034,7 +982,7 @@ async def risk_websocket_endpoint(websocket: WebSocket):
                     "unrealized_pnl": round(unrealized, 2),
                     "position_count": position_count,
                     "exposure": round(exposure, 2),
-                    "timestamp": _dt.utcnow().timestamp(),
+                    "timestamp": _dt.now(_tz.utc).timestamp(),
                 })
             except (WebSocketDisconnect, RuntimeError):
                 break
@@ -1077,9 +1025,10 @@ async def paper_trading_websocket_endpoint(websocket: WebSocket):
                 logger.error(f"Failed to send summary event: {e}")
         
         # Subscribe to all event types
-        unsubscribe_trade = engine._subscribe("trade", on_trade)
-        unsubscribe_position = engine._subscribe("position", on_position)
-        unsubscribe_summary = engine._subscribe("summary", on_summary)
+        _sub = getattr(engine, 'subscribe', getattr(engine, '_subscribe', None))
+        unsubscribe_trade = _sub("trade", on_trade) if _sub else None
+        unsubscribe_position = _sub("position", on_position) if _sub else None
+        unsubscribe_summary = _sub("summary", on_summary) if _sub else None
         
         # Keep connection alive and listen for client messages
         while True:
@@ -1090,6 +1039,8 @@ async def paper_trading_websocket_endpoint(websocket: WebSocket):
             except asyncio.TimeoutError:
                 # Send ping to keep connection alive
                 await websocket.send_json({"type": "ping", "ts": time.time()})
+            except (WebSocketDisconnect, RuntimeError):
+                break
             except Exception as e:
                 logger.error(f"Paper trading WebSocket error: {e}")
                 break
@@ -1097,14 +1048,21 @@ async def paper_trading_websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Paper trading WebSocket connection error: {e}")
     finally:
-        # Cleanup subscriptions
+        # Cleanup subscriptions — each may be None if subscribe() returned None
+        for _unsub in (
+            locals().get("unsubscribe_trade"),
+            locals().get("unsubscribe_position"),
+            locals().get("unsubscribe_summary"),
+        ):
+            if callable(_unsub):
+                try:
+                    _unsub()
+                except Exception:
+                    pass
         try:
-            unsubscribe_trade()
-            unsubscribe_position()
-            unsubscribe_summary()
-        except:
+            await websocket.close()
+        except Exception:
             pass
-        await websocket.close()
         logger.info("Paper trading WebSocket client disconnected")
 
 
@@ -1756,12 +1714,60 @@ async def _app_lifespan(application: FastAPI):
         from merid.prediction.agent_grid import get_agent_grid
         agent_grid = get_agent_grid()
         await agent_grid.start()
-        logger.info("✅ Kalshi Agent Grid started")
-        print(f">> Kalshi Agent Grid started: {len(agent_grid._agents)} trading agents")
+        logger.info("✅ Kalshi Agent Grid started: %d trading agents", len(agent_grid.agents))
     except Exception as e:
-        logger.error(f"Failed to start Kalshi Agent Grid: {e}", exc_info=True)
-        print(f">> Failed to start Kalshi Agent Grid: {e}")
-    
+        logger.error("Failed to start Kalshi Agent Grid: %s", e, exc_info=True)
+
+    # ── Phase 0.51: Bootstrap canonical agent registry (C9) ────────────────
+    try:
+        from merid.agents.bootstrap import ensure_bootstrapped
+        _n_agents = ensure_bootstrapped()
+        logger.info("✅ Canonical agent registry bootstrapped: %d agents", _n_agents)
+        _startup_state["services"]["canonical_registry"] = {"status": "running", "agents": _n_agents, "started_at": time.time()}
+    except Exception as e:
+        logger.warning("Canonical agent bootstrap failed (non-fatal): %s", e)
+        _startup_state["services"]["canonical_registry"] = {"status": "failed", "error": str(e)}
+
+    # ── Phase 0.52: RealityAuditor + RewardEngine init (W4) ───────────────
+    try:
+        from core.reality_auditor import get_reality_auditor
+        _auditor = get_reality_auditor()
+        _auditor.reload_from_persistent_store()
+        logger.info("✅ RealityAuditor started + initial assertions loaded")
+        _startup_state["services"]["reality_auditor"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning("RealityAuditor init failed (non-fatal): %s", e)
+        _startup_state["services"]["reality_auditor"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from merid.rewards.engine import get_reward_engine
+        get_reward_engine()
+        logger.info("✅ RewardEngine singleton initialised")
+        _startup_state["services"]["reward_engine"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning("RewardEngine init failed (non-fatal): %s", e)
+        _startup_state["services"]["reward_engine"] = {"status": "failed", "error": str(e)}
+
+    # ── Phase 0.53: PortfolioRebalancer bootstrap (W3) ─────────────────────
+    try:
+        from merid.event_venues.kalshi.rebalancer import get_portfolio_rebalancer
+        _rebalancer = get_portfolio_rebalancer()
+        _rebalancer._bootstrap_targets()
+        logger.info("✅ PortfolioRebalancer bootstrapped from paper_config + agent grid")
+        _startup_state["services"]["portfolio_rebalancer"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning("PortfolioRebalancer bootstrap failed (non-fatal): %s", e)
+        _startup_state["services"]["portfolio_rebalancer"] = {"status": "failed", "error": str(e)}
+
+    # ── Phase 0.55: MeridLoop ───────────────────────────────────────────
+    try:
+        from merid.loop import get_merid_loop as _get_merid_loop
+        _merid_loop = _get_merid_loop()
+        asyncio.create_task(_merid_loop.run())
+        logger.info("✅ MeridLoop started")
+    except Exception as e:
+        logger.warning(f"MeridLoop start failed (non-fatal): {e}")
+
     # ── Phase 0.6: Orchestrator Agents ─────────────────────────────────
     logger.info("=" * 80)
     logger.info("🤖 Starting Orchestrator Agents (news monitor, social feeds, etc.)")
@@ -1769,11 +1775,9 @@ async def _app_lifespan(application: FastAPI):
     try:
         orchestrator_manager = get_orchestrator_manager()
         await orchestrator_manager.start_all()
-        logger.info("✅ Orchestrator agents started")
-        print(">> Orchestrator agents started (news monitor, twitter, telegram)")
+        logger.info("✅ Orchestrator agents started (news monitor, twitter, telegram)")
     except Exception as e:
-        logger.error(f"Failed to start orchestrator agents: {e}", exc_info=True)
-        print(f">> Failed to start orchestrator agents: {e}")
+        logger.error("Failed to start orchestrator agents: %s", e, exc_info=True)
 
     # ── Phase 1: Core systems ──────────────────────────────────────────
     logger.info("=" * 80)
@@ -1852,7 +1856,15 @@ async def _app_lifespan(application: FastAPI):
         except Exception as exc:
             logger.warning("Fresh-start: prediction consensus reset failed: %s", exc)
 
-        # 7. Run any additional registered hooks
+        # 7. Paper trading engine state (positions, ladder)
+        try:
+            from trading.paper_trading import get_paper_engine as _get_paper_engine
+            _get_paper_engine().reset_state()
+            logger.info("Fresh-start: paper trading state reset")
+        except Exception as exc:
+            logger.warning("Fresh-start: paper trading reset failed: %s", exc)
+
+        # 8. Run any additional registered hooks
         from core.fresh_start import run_reset_hooks
         hook_count = run_reset_hooks()
         if hook_count:
@@ -1897,7 +1909,8 @@ async def _app_lifespan(application: FastAPI):
         try:
             from backup import get_backup_manager
             get_backup_manager()
-        except Exception:
+        except Exception as _bue:
+            logger.debug("backup manager unavailable: %s", _bue)
             backup_api_ok = False
         logger.info(f"✅ Data persistence: dir={data_dir.exists()}, backup_api={backup_api_ok}")
         _startup_state["services"]["data_persistence"] = {"status": "running", "data_dir": str(data_dir), "backup_api": backup_api_ok, "started_at": time.time()}
@@ -1907,8 +1920,8 @@ async def _app_lifespan(application: FastAPI):
 
     try:
         from agents.reflection_layer import reflection_layer
-        reflection_count = len(reflection_layer._reflections)
-        agent_count = len(reflection_layer._agent_stats)
+        reflection_count = len(getattr(reflection_layer, 'reflections', getattr(reflection_layer, '_reflections', [])))
+        agent_count = len(getattr(reflection_layer, 'agent_stats', getattr(reflection_layer, '_agent_stats', {})))
         logger.info(f"✅ Reflection layer: {reflection_count} reflections, {agent_count} agents")
         _startup_state["services"]["reflection"] = {"status": "running", "started_at": time.time()}
     except Exception as e:
@@ -1918,7 +1931,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from monitoring.brier_metrics import get_brier_tracker
         brier = get_brier_tracker()
-        prediction_count = len(brier._predictions)
+        prediction_count = len(getattr(brier, 'predictions', getattr(brier, '_predictions', [])))
         logger.info(f"✅ Brier metrics: {prediction_count} predictions tracked")
         _startup_state["services"]["brier_metrics"] = {"status": "running", "started_at": time.time()}
     except Exception as e:
@@ -1947,6 +1960,320 @@ async def _app_lifespan(application: FastAPI):
 
     # Live price feed streaming (DISABLED — legacy CCXT crypto feed, not needed for Kalshi)
     logger.info("Live price feed SKIPPED (Kalshi-only mode)")
+
+    # Event bus bridge — forwards core.event_bus events into observability.event_stream
+    # so the /ws WebSocket sees Kalshi trade events and MeridCore consensus events.
+    # Without this bridge the two buses are completely isolated silos.
+    async def _event_bus_bridge() -> None:
+        from core.event_bus import event_stream as _core_bus
+        from observability.event_stream import get_event_stream as _get_obs_stream
+        _obs_stream = _get_obs_stream()
+        _queue = await _core_bus.subscribe()
+        logger.info("Event bus bridge started (core.event_bus → observability.event_stream)")
+        try:
+            while True:
+                try:
+                    evt = await asyncio.wait_for(_queue.get(), timeout=5.0)
+                    await _obs_stream.publish(evt.get("type", ""), evt.get("payload", {}))
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+                except Exception as _bridge_exc:
+                    logger.debug(f"Event bus bridge error (ignored): {_bridge_exc}")
+        finally:
+            await _core_bus.unsubscribe(_queue)
+            logger.info("Event bus bridge stopped")
+
+    try:
+        task = asyncio.create_task(_event_bus_bridge(), name="event-bus-bridge")
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ Event bus bridge started")
+        _startup_state["services"]["event_bus_bridge"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  Event bus bridge failed: {e}")
+        _startup_state["services"]["event_bus_bridge"] = {"status": "failed", "error": str(e)}
+
+    # Core infrastructure: HealthMonitor, AlertManager, AuditTrail, SystemOrchestrator
+    # These are foundational and must start before Kalshi subsystems
+    try:
+        from core.health import get_health_monitor
+        _health_mon = get_health_monitor()
+        await _health_mon.start()
+        logger.info("✅ HealthMonitor started")
+        _startup_state["services"]["health_monitor"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  HealthMonitor failed to start: {e}")
+        _startup_state["services"]["health_monitor"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from core.alerts import get_alert_manager
+        _alert_mgr = get_alert_manager()
+        await _alert_mgr.start()
+        logger.info("✅ AlertManager started")
+        _startup_state["services"]["alert_manager"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  AlertManager failed to start: {e}")
+        _startup_state["services"]["alert_manager"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from core.audit_trail import get_audit_trail
+        _audit = get_audit_trail()
+        await _audit.start()
+        logger.info("✅ AuditTrail started")
+        _startup_state["services"]["audit_trail"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  AuditTrail failed to start: {e}")
+        _startup_state["services"]["audit_trail"] = {"status": "failed", "error": str(e)}
+
+    try:
+        from core.system_orchestrator import start_merid
+        await start_merid()
+        logger.info("✅ SystemOrchestrator started (consensus engine, inter-system API)")
+        _startup_state["services"]["system_orchestrator"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  SystemOrchestrator failed to start: {e}")
+        _startup_state["services"]["system_orchestrator"] = {"status": "failed", "error": str(e)}
+
+    # KalshiMarketCache — background TTL cleanup task for Kalshi API cache
+    try:
+        from merid.event_venues.kalshi.market_cache import get_market_cache
+        _market_cache = get_market_cache()
+        await _market_cache.start()
+        logger.info("✅ KalshiMarketCache started (TTL cleanup loop)")
+        _startup_state["services"]["kalshi_market_cache"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  KalshiMarketCache failed to start: {e}")
+        _startup_state["services"]["kalshi_market_cache"] = {"status": "failed", "error": str(e)}
+
+    # KalshiMarketCatalog — fetches + caches all active Kalshi markets (backbone for pipeline/agents)
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        _catalog = get_market_catalog()
+        await _catalog.start()
+        logger.info("✅ KalshiMarketCatalog started (market data backbone)")
+        _startup_state["services"]["kalshi_market_catalog"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  KalshiMarketCatalog failed to start: {e}")
+        _startup_state["services"]["kalshi_market_catalog"] = {"status": "failed", "error": str(e)}
+
+    # KalshiSentimentService — background loop ingesting catalog → sentiment scores
+    try:
+        from merid.event_venues.kalshi.sentiment import get_sentiment_service
+        _sentiment_svc = get_sentiment_service()
+        await _sentiment_svc.start()
+        logger.info("✅ KalshiSentimentService started (sentiment refresh loop)")
+        _startup_state["services"]["kalshi_sentiment_service"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  KalshiSentimentService failed to start: {e}")
+        _startup_state["services"]["kalshi_sentiment_service"] = {"status": "failed", "error": str(e)}
+
+    # KalshiWebSocketBridge — pipes real-time Kalshi WS events into core event bus
+    try:
+        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog as _get_cat
+        _ws_bridge = get_ws_bridge()
+        # Subscribe to top active tickers from catalog (up to 50)
+        _active_tickers = [m.ticker for m in _get_cat().get_all_markets()[:50]]
+        task = asyncio.create_task(
+            _ws_bridge.start(_active_tickers or None), name="kalshi-ws-bridge"
+        )
+        _startup_state["background_tasks"].append(task)
+        logger.info(f"✅ KalshiWebSocketBridge started ({len(_active_tickers)} tickers)")
+        _startup_state["services"]["kalshi_ws_bridge"] = {"status": "running", "started_at": time.time(), "tickers": len(_active_tickers)}
+    except Exception as e:
+        logger.warning(f"⚠️  KalshiWebSocketBridge failed to start: {e}")
+        _startup_state["services"]["kalshi_ws_bridge"] = {"status": "failed", "error": str(e)}
+
+    # TickerCollector — accumulates kalshi:price_update events into in-memory DataFrame
+    try:
+        from merid.event_venues.kalshi.ticker_collector import get_ticker_collector
+        _ticker_collector = get_ticker_collector()
+        await _ticker_collector.start()
+        logger.info("✅ TickerCollector started (WS tick accumulator)")
+        _startup_state["services"]["ticker_collector"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  TickerCollector failed to start: {e}")
+        _startup_state["services"]["ticker_collector"] = {"status": "failed", "error": str(e)}
+
+    # KalshiInsightPipeline — Kalshi markets → swarm consensus → InsightObject emitter
+    # Wire KalshiNewsAgent as consumer BEFORE starting so no insights are dropped
+    try:
+        from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline
+        from merid.publishing.kalshi_news_agent import get_kalshi_news_agent
+        _insight_pipeline = get_insight_pipeline()
+        _news_agent = get_kalshi_news_agent()
+        _insight_pipeline.add_consumer(_news_agent.handle_insight)
+
+        # Bridge: also publish each InsightObject to streaming_bus.NEWS so
+        # NewsAnalystAgent (and any other NEWS subscribers) receive Kalshi insights
+        async def _insight_to_news_bus(ins) -> None:
+            try:
+                from core.streaming_bus import publish_news
+                await publish_news(
+                    title=ins.question,
+                    content=ins.narrative,
+                    source=f"kalshi:{ins.ticker}",
+                    sentiment=ins.swarm_prob - 0.5,  # centre around 0
+                    category=ins.category,
+                    ticker=ins.ticker,
+                    kalshi_prob=ins.kalshi_prob,
+                    swarm_confidence=ins.swarm_confidence,
+                    action=ins.action,
+                    source_name="Kalshi",
+                )
+            except Exception as _e:
+                logger.debug(f"insight→news_bus bridge error (non-fatal): {_e}")
+
+        _insight_pipeline.add_consumer(_insight_to_news_bus)
+        await _insight_pipeline.start()
+        logger.info("✅ KalshiInsightPipeline started (11 category loops → KalshiNewsAgent + streaming_bus.NEWS)")
+        _startup_state["services"]["kalshi_insight_pipeline"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  KalshiInsightPipeline failed to start: {e}")
+        _startup_state["services"]["kalshi_insight_pipeline"] = {"status": "failed", "error": str(e)}
+
+    # EnhancedConsensusCoordinator opinion subscriber — listens for strategy_opinion events
+    # on core.event_bus and triggers consensus rounds when quorum is reached
+    try:
+        from consensus.consensus_coordinator import EnhancedConsensusCoordinator
+        _enhanced_consensus = EnhancedConsensusCoordinator.get_instance()
+        await _enhanced_consensus.start_opinion_subscriber()
+        logger.info("✅ EnhancedConsensusCoordinator opinion subscriber started")
+        _startup_state["services"]["enhanced_consensus_coordinator"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  EnhancedConsensusCoordinator opinion subscriber failed to start: {e}")
+        _startup_state["services"]["enhanced_consensus_coordinator"] = {"status": "failed", "error": str(e)}
+
+    # OrchestratorAgentManager — NewsMonitorAgent, AgentMesh (8 streaming agents),
+    # KalshiSocialBroadcaster, ReflectionSystem. Must start AFTER WSFeedManager so
+    # streaming_bus.MARKET_DATA has live prices before AgentMesh subscribes.
+    try:
+        from web.startup_agents import get_orchestrator_manager
+        _orchestrator_mgr = get_orchestrator_manager()
+        await _orchestrator_mgr.start_all()
+        logger.info("✅ OrchestratorAgentManager started (AgentMesh + NewsMonitor + SocialBroadcaster + ReflectionSystem)")
+        _startup_state["services"]["orchestrator_agent_manager"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  OrchestratorAgentManager failed to start: {e}")
+        _startup_state["services"]["orchestrator_agent_manager"] = {"status": "failed", "error": str(e)}
+
+    # WatchdogCoordinator — periodic liveness + consensus health checks
+    try:
+        from agents.watchdog_agents import get_watchdog_coordinator
+        _watchdog = get_watchdog_coordinator()
+        await _watchdog.start()
+        logger.info("✅ WatchdogCoordinator started (liveness + consensus checks)")
+        _startup_state["services"]["watchdog_coordinator"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  WatchdogCoordinator failed to start: {e}")
+        _startup_state["services"]["watchdog_coordinator"] = {"status": "failed", "error": str(e)}
+
+    # MarketMoodBus — unified sentiment/context aggregation loop for all agents
+    try:
+        from merid.swarm.market_mood_bus import get_market_mood_bus
+        _mood_bus = get_market_mood_bus()
+        await _mood_bus.start()
+        logger.info("✅ MarketMoodBus started (sentiment aggregation loop)")
+        _startup_state["services"]["market_mood_bus"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  MarketMoodBus failed to start: {e}")
+        _startup_state["services"]["market_mood_bus"] = {"status": "failed", "error": str(e)}
+
+    # SentimentBus — Twitter + Reddit background loops → MarketMoodBus social sentiment
+    # Must start AFTER MarketMoodBus since it pushes data into it
+    try:
+        from merid.sentiment.sentiment_bus import get_sentiment_bus
+        _sentiment_bus = get_sentiment_bus()
+        await _sentiment_bus.start()
+        logger.info("✅ SentimentBus started (Twitter+Reddit → MarketMoodBus)")
+        _startup_state["services"]["sentiment_bus"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  SentimentBus failed to start: {e}")
+        _startup_state["services"]["sentiment_bus"] = {"status": "failed", "error": str(e)}
+
+    # TwitterStreamHandler — real-time Twitter stream (threaded, sync start)
+    try:
+        from merid.sentiment.twitter_fetcher import get_twitter_stream_handler
+        _twitter_stream = get_twitter_stream_handler()
+        _twitter_stream.start(assets=["BTC", "ETH", "SOL", "XRP", "DOGE"])
+        logger.info("✅ TwitterStreamHandler started (real-time tweet stream)")
+        _startup_state["services"]["twitter_stream_handler"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  TwitterStreamHandler failed to start: {e}")
+        _startup_state["services"]["twitter_stream_handler"] = {"status": "failed", "error": str(e)}
+
+    # HashtagMonitor — background loops for hashtag scraping + news ingestion → SentimentBusV2
+    # Must start AFTER SentimentBus and TwitterStreamHandler so data sources are available
+    try:
+        from merid.sentiment.hashtag_monitor import get_hashtag_monitor
+        _hashtag_monitor = get_hashtag_monitor()
+        await _hashtag_monitor.start()
+        logger.info("✅ HashtagMonitor started (hashtag=%ds, asset=%ds, news=%ds)",
+                     _hashtag_monitor._hashtag_interval,
+                     _hashtag_monitor._asset_interval,
+                     _hashtag_monitor._news_interval)
+        _startup_state["services"]["hashtag_monitor"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  HashtagMonitor failed to start: {e}")
+        _startup_state["services"]["hashtag_monitor"] = {"status": "failed", "error": str(e)}
+
+    # CFGI fear/greed refresh loop — periodic push of F&G index into MarketMoodBus
+    async def _cfgi_refresh_loop():
+        _assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        while True:
+            try:
+                from merid.sentiment.cfgi_client import get_cfgi_client
+                _cfgi = get_cfgi_client()
+                for _asset in _assets:
+                    try:
+                        _cfgi.update_mood_bus(_asset)
+                    except Exception as _cue:
+                        logger.debug("CFGI update_mood_bus(%s) skipped: %s", _asset, _cue)
+            except Exception as _e:
+                logger.debug(f"CFGI refresh error (non-fatal): {_e}")
+            await asyncio.sleep(300)  # Refresh every 5 minutes
+
+    try:
+        task = asyncio.create_task(_cfgi_refresh_loop(), name="cfgi-fg-refresh")
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ CFGI fear/greed refresh loop started (5-min interval)")
+        _startup_state["services"]["cfgi_refresh"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  CFGI refresh loop failed to start: {e}")
+        _startup_state["services"]["cfgi_refresh"] = {"status": "failed", "error": str(e)}
+
+    # WSFeedManager — Coinbase WebSocket price feed → feature service ingestion
+    try:
+        from merid.signals.ws_price_feed import get_ws_feed_manager
+        from merid.loop import LoopConfig
+        _ws_mgr = get_ws_feed_manager()
+        _ws_symbols = LoopConfig().active_symbols  # BTC, ETH, SOL baseline
+        try:
+            _ws_symbols = LoopConfig.from_paper_config().active_symbols
+        except Exception as _lce:
+            logger.debug("LoopConfig.from_paper_config skipped, using defaults: %s", _lce)
+        task = asyncio.create_task(
+            _ws_mgr.start(_ws_symbols), name="ws-price-feed"
+        )
+        _startup_state["background_tasks"].append(task)
+        logger.info(f"✅ WSFeedManager started (symbols: {_ws_symbols})")
+        _startup_state["services"]["ws_feed_manager"] = {"status": "running", "started_at": time.time(), "symbols": _ws_symbols}
+    except Exception as e:
+        logger.warning(f"⚠️  WSFeedManager failed to start: {e}")
+        _startup_state["services"]["ws_feed_manager"] = {"status": "failed", "error": str(e)}
+
+    # MeridLoop — persistent swarm orchestrator (features → agents → consensus → arb → execution → CQI → reconcile)
+    try:
+        from merid.loop import get_merid_loop
+        _merid_loop = get_merid_loop()
+        task = asyncio.create_task(_merid_loop.run(), name="merid-loop")
+        _startup_state["background_tasks"].append(task)
+        logger.info("✅ MeridLoop started (swarm orchestrator)")
+        _startup_state["services"]["merid_loop"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning(f"⚠️  MeridLoop failed to start: {e}")
+        _startup_state["services"]["merid_loop"] = {"status": "failed", "error": str(e)}
 
     # Agent orchestrator
     try:
@@ -1997,7 +2324,8 @@ async def _app_lifespan(application: FastAPI):
                 )
                 enabled = getattr(agent_obj, "enabled", True)
                 bridge.status = AgentStatus.ACTIVE if enabled else AgentStatus.PAUSED
-                bridge._running = True
+                if hasattr(bridge, '_running'):
+                    bridge._running = True
                 registry.register(bridge)
             logger.info("✅ Bridged %d orchestrator agents into framework registry", len(orchestrator.agents))
         except Exception as bridge_err:
@@ -2105,6 +2433,7 @@ async def _app_lifespan(application: FastAPI):
         task = asyncio.create_task(alert_mgr.start())
         _startup_state["background_tasks"].append(task)
         try:
+            from data.live_price_feed import get_live_price_feed
             price_feed = get_live_price_feed()
             def on_alert_price_update(price_data):
                 alert_mgr.update_price(price_data.symbol, price_data.price)
@@ -2153,7 +2482,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from merid.reconciliation import reconcile_all_venues, has_critical_discrepancies
         logger.info("Running startup reconciliation to unblock execution gate...")
-        discrepancies = await asyncio.get_event_loop().run_in_executor(
+        discrepancies = await asyncio.get_running_loop().run_in_executor(
             None, lambda: reconcile_all_venues(["kalshi"])
         )
         n_crit = sum(1 for d in discrepancies if d.severity == "critical")
@@ -2206,6 +2535,18 @@ async def _app_lifespan(application: FastAPI):
     except Exception as exc:
         logger.debug("Kalshi venue reconciliation loop not started: %s", exc)
 
+    # ── Phase N: Kalshi Insight Pipeline + News Agent ──────────────────
+    try:
+        from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline
+        from merid.publishing.kalshi_news_agent import get_kalshi_news_agent
+        _insight_pipeline = get_insight_pipeline()
+        _news_agent = get_kalshi_news_agent()
+        _insight_pipeline.add_consumer(_news_agent.handle_insight)
+        asyncio.create_task(_insight_pipeline.start())
+        logger.info("✅ KalshiInsightPipeline + KalshiNewsAgent started")
+    except Exception as exc:
+        logger.warning("KalshiInsightPipeline start failed (non-fatal): %s", exc)
+
     # Terminal telemetry loop DISABLED — was printing synthetic crypto trades/portfolio
     # Kalshi agent grid has its own telemetry via the /api/v1/kalshi-grid/* endpoints.
     logger.info("Terminal telemetry loop SKIPPED (Kalshi-only mode)")
@@ -2215,6 +2556,166 @@ async def _app_lifespan(application: FastAPI):
 
     # ── SHUTDOWN ───────────────────────────────────────────────────────
     logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
+
+    # Stop MeridLoop
+    try:
+        from merid.loop import get_merid_loop as _get_merid_loop
+        _get_merid_loop().stop()
+        logger.info("✅ MeridLoop stopped")
+    except Exception as exc:
+        logger.warning("MeridLoop stop failed: %s", exc)
+
+    # Stop KalshiInsightPipeline
+    try:
+        from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline as _get_pipeline
+        await _get_pipeline().stop()
+        logger.info("✅ KalshiInsightPipeline stopped")
+    except Exception as exc:
+        logger.warning("KalshiInsightPipeline stop failed: %s", exc)
+
+    # Stop MarketMoodBus aggregation loop
+    try:
+        from merid.swarm.market_mood_bus import get_market_mood_bus as _get_mood_bus
+        await _get_mood_bus().stop()
+        logger.info("✅ MarketMoodBus stopped")
+    except Exception as exc:
+        logger.warning("MarketMoodBus stop failed: %s", exc)
+
+    # Stop WSFeedManager (Coinbase WS price feed)
+    try:
+        from merid.signals.ws_price_feed import get_ws_feed_manager as _get_ws_mgr
+        await _get_ws_mgr().stop()
+        logger.info("✅ WSFeedManager stopped")
+    except Exception as exc:
+        logger.warning("WSFeedManager stop failed: %s", exc)
+
+    # Close LiveFeedManager httpx client
+    try:
+        from merid.signals.live_feeds import get_live_feed_manager as _get_live_feed_mgr
+        await _get_live_feed_mgr().close()
+        logger.info("✅ LiveFeedManager closed")
+    except Exception as exc:
+        logger.warning("LiveFeedManager close failed: %s", exc)
+
+    # Stop SentimentBus (Twitter+Reddit background loops)
+    try:
+        from merid.sentiment.sentiment_bus import get_sentiment_bus as _get_sent_bus
+        await _get_sent_bus().stop()
+        logger.info("✅ SentimentBus stopped")
+    except Exception as exc:
+        logger.warning("SentimentBus stop failed: %s", exc)
+
+    # Stop TwitterStreamHandler (threaded, sync stop)
+    try:
+        from merid.sentiment.twitter_fetcher import get_twitter_stream_handler as _get_tw_stream
+        _get_tw_stream().stop()
+        logger.info("✅ TwitterStreamHandler stopped")
+    except Exception as exc:
+        logger.warning("TwitterStreamHandler stop failed: %s", exc)
+
+    # Stop KalshiWebSocketBridge
+    try:
+        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge as _get_ws_bridge
+        await _get_ws_bridge().stop()
+        logger.info("✅ KalshiWebSocketBridge stopped")
+    except Exception as exc:
+        logger.warning("KalshiWebSocketBridge stop failed: %s", exc)
+
+    # Stop KalshiSentimentService
+    try:
+        from merid.event_venues.kalshi.sentiment import get_sentiment_service as _get_sentiment_svc
+        await _get_sentiment_svc().stop()
+        logger.info("✅ KalshiSentimentService stopped")
+    except Exception as exc:
+        logger.warning("KalshiSentimentService stop failed: %s", exc)
+
+    # Stop KalshiInsightPipeline
+    try:
+        from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline as _get_insight_pl
+        await _get_insight_pl().stop()
+        logger.info("✅ KalshiInsightPipeline stopped")
+    except Exception as exc:
+        logger.warning("KalshiInsightPipeline stop failed: %s", exc)
+
+    # Stop KalshiMarketCatalog
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog as _get_catalog
+        await _get_catalog().stop()
+        logger.info("✅ KalshiMarketCatalog stopped")
+    except Exception as exc:
+        logger.warning("KalshiMarketCatalog stop failed: %s", exc)
+
+    # Stop TickerCollector
+    try:
+        from merid.event_venues.kalshi.ticker_collector import get_ticker_collector as _get_ticker_col
+        await _get_ticker_col().stop()
+        logger.info("✅ TickerCollector stopped")
+    except Exception as exc:
+        logger.warning("TickerCollector stop failed: %s", exc)
+
+    # Stop KalshiMarketCache
+    try:
+        from merid.event_venues.kalshi.market_cache import get_market_cache as _get_mkt_cache
+        await _get_mkt_cache().stop()
+        logger.info("✅ KalshiMarketCache stopped")
+    except Exception as exc:
+        logger.warning("KalshiMarketCache stop failed: %s", exc)
+
+    # Stop EnhancedConsensusCoordinator opinion subscriber
+    try:
+        from consensus.consensus_coordinator import EnhancedConsensusCoordinator as _ECC
+        await _ECC.get_instance().stop_opinion_subscriber()
+        logger.info("✅ EnhancedConsensusCoordinator opinion subscriber stopped")
+    except Exception as exc:
+        logger.warning("EnhancedConsensusCoordinator stop failed: %s", exc)
+
+    # Stop OrchestratorAgentManager (AgentMesh, NewsMonitor, SocialBroadcaster, ReflectionSystem)
+    try:
+        from web.startup_agents import get_orchestrator_manager as _get_orch_mgr
+        await _get_orch_mgr().stop_all()
+        logger.info("✅ OrchestratorAgentManager stopped")
+    except Exception as exc:
+        logger.warning("OrchestratorAgentManager stop failed: %s", exc)
+
+    # Stop WatchdogCoordinator
+    try:
+        from agents.watchdog_agents import get_watchdog_coordinator as _get_watchdog
+        await _get_watchdog().stop()
+        logger.info("✅ WatchdogCoordinator stopped")
+    except Exception as exc:
+        logger.warning("WatchdogCoordinator stop failed: %s", exc)
+
+    # Stop SystemOrchestrator (also stops ConsensusEngine)
+    try:
+        from core.system_orchestrator import stop_merid
+        await stop_merid()
+        logger.info("✅ SystemOrchestrator stopped")
+    except Exception as exc:
+        logger.warning("SystemOrchestrator stop failed: %s", exc)
+
+    # Stop AuditTrail
+    try:
+        from core.audit_trail import get_audit_trail as _get_audit
+        await _get_audit().stop()
+        logger.info("✅ AuditTrail stopped")
+    except Exception as exc:
+        logger.warning("AuditTrail stop failed: %s", exc)
+
+    # Stop AlertManager
+    try:
+        from core.alerts import get_alert_manager as _get_alert_mgr
+        await _get_alert_mgr().stop()
+        logger.info("✅ AlertManager stopped")
+    except Exception as exc:
+        logger.warning("AlertManager stop failed: %s", exc)
+
+    # Stop HealthMonitor
+    try:
+        from core.health import get_health_monitor as _get_health_mon
+        await _get_health_mon().stop()
+        logger.info("✅ HealthMonitor stopped")
+    except Exception as exc:
+        logger.warning("HealthMonitor stop failed: %s", exc)
 
     # Stop Kalshi agent grid gracefully (flushes pending orders, stops agents)
     try:
@@ -2232,6 +2733,14 @@ async def _app_lifespan(application: FastAPI):
         logger.info("✅ Orchestrator agents stopped")
     except Exception as exc:
         logger.warning("Orchestrator agents stop failed: %s", exc)
+
+    # Flush PortfolioRebalancer state (W10)
+    try:
+        from merid.event_venues.kalshi.rebalancer import get_portfolio_rebalancer as _get_rebalancer
+        _get_rebalancer()._bootstrap_targets()  # persist final targets
+        logger.info("✅ PortfolioRebalancer flushed")
+    except Exception as exc:
+        logger.debug("PortfolioRebalancer flush skipped: %s", exc)
 
     # Final reconciliation + save paper state
     try:
@@ -2459,10 +2968,12 @@ async def startup_health():
     bg_tasks = _startup_state.get("background_tasks", [])
     active_tasks = sum(1 for t in bg_tasks if not t.done())
     
+    _sa = _startup_state.get("started_at")
+    _uptime = time.time() - _sa if _sa else 0.0
     return {
-        "startup_completed": started_at is not None,
-        "started_at": started_at,
-        "uptime_seconds": uptime,
+        "startup_completed": _sa is not None,
+        "started_at": _sa,
+        "uptime_seconds": round(_uptime, 1),
         "services": {
             "total": len(services),
             "running": running_count,
@@ -2533,5 +3044,5 @@ if __name__ == "__main__":
         # Clean up event loop
         try:
             loop.close()
-        except:
+        except Exception:
             pass
