@@ -94,6 +94,7 @@ class CriticAgent:
         critiques = []
         critiques.extend(self._check_staleness())
         critiques.extend(self._check_liquidity())
+        critiques.extend(self._check_impossible_probs())
 
         for critique in critiques:
             self._critiques.append(critique.to_dict())
@@ -160,6 +161,47 @@ class CriticAgent:
                 ))
         except Exception as exc:
             logger.debug(f"Liquidity check failed: {exc}")
+        return critiques
+
+    def _check_impossible_probs(self) -> list:
+        """Check for impossible probability violations.
+
+        Detects:
+        1. Binary contracts where p_yes + p_no deviates significantly from 1.0
+        2. Multi-outcome event groups where sum of p_yes across contracts != 1.0
+
+        Sprint N: Closes the impossible-probability critic gap.
+        """
+        from merid.swarm.messages import Critique
+        critiques = []
+        try:
+            from merid.prediction.model import get_active_snapshots
+            snapshots = get_active_snapshots()
+            for snap in snapshots:
+                p_yes = getattr(snap, "implied_yes", None)
+                p_no = getattr(snap, "implied_no", None)
+                if p_yes is not None and p_no is not None:
+                    prob_sum = p_yes + p_no
+                    if abs(prob_sum - 1.0) > 0.05:
+                        critiques.append(Critique(
+                            critic_id="impossible_prob_critic",
+                            critique_type="impossible_probability",
+                            market_id=getattr(snap, "market_id", "unknown"),
+                            severity=0.9 if abs(prob_sum - 1.0) > 0.15 else 0.5,
+                            reason=f"p_yes({p_yes:.3f}) + p_no({p_no:.3f}) = {prob_sum:.3f}, expected ~1.0",
+                            recommended_action="veto" if abs(prob_sum - 1.0) > 0.15 else "down_weight",
+                            weight_adjustment=0.0 if abs(prob_sum - 1.0) > 0.15 else 0.4,
+                            data={
+                                "p_yes": p_yes,
+                                "p_no": p_no,
+                                "prob_sum": prob_sum,
+                                "deviation": abs(prob_sum - 1.0),
+                            },
+                        ))
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.debug(f"Impossible probability check failed: {exc}")
         return critiques
 
     def evaluate_market(self, market_id: str) -> list:

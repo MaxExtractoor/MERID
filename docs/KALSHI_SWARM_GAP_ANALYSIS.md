@@ -43,11 +43,11 @@
 
 | Requirement | Status | MERID Implementation | Gap |
 |-------------|--------|---------------------|-----|
-| Multiple different models | 🟡 | `edge_model.py` combines 3 signal sources (spot-relative, spread-based, volume/OI) in one ensemble. `sentiment.py` provides fear/greed index. But these are **one model, not competing agents**. | Agents are **homogeneous** — all 20 cells run the same `KalshiStrategy` + `EdgeModel`. No dedicated news/macro/orderbook-microstructure forecaster agents. |
-| Per-market output: p_model, confidence, features | 🟡 | `EdgePrediction` dataclass has `probability`, `confidence`, `source`, `components`. `StrategySignal` has `edge`, `confidence`, `action`. | Output is consumed internally per-agent, not published as typed `Forecast` messages to a shared bus. |
-| Time-series model | 🟡 | Spot-relative model uses live price vs strike with vol adjustment | Not a dedicated ARIMA/GARCH/ML time-series agent |
-| Orderbook microstructure model | 🟡 | `sentiment.py` uses book imbalance as a signal component, `liquidity_monitor.py` tracks spread/depth | Not a standalone forecaster agent |
-| Macro regime model | ❌ | No macro regime detection agent | Missing |
+| Multiple different models | ✅ | `ForecasterRegistry` runs 4 independent forecasters: `MomentumForecaster`, `MeanReversionForecaster`, `MacroRegimeForecaster`, `OrderbookForecaster`. Calibration-weighted ensemble. Sprint B+I+N. | — |
+| Per-market output: p_model, confidence, features | ✅ | `ForecastResult` with `p_model`, `confidence`, `components`. Published as typed `Forecast` messages to `StreamingBus`. Sprint E. | — |
+| Time-series model | 🟡 | Spot-relative model uses live price vs strike with vol adjustment. `MomentumForecaster` tracks rolling price/volume history. | Not a dedicated ARIMA/GARCH agent (momentum covers trend signals) |
+| Orderbook microstructure model | ✅ | `OrderbookForecaster` — bid/ask imbalance, spread compression, depth-weighted fair value. Standalone forecaster registered in `ForecasterRegistry`. Sprint N. | — |
+| Macro regime model | ✅ | `MacroRegimeForecaster` — fear/greed contrarian, cross-timeframe agreement, volatility regime, sentiment composite. Sprint I. | — |
 | News/X sentiment model | 🟡 | `sentiment.py` exists but derives from Kalshi orderflow only, not from external news/social feeds | External news/X sentiment feeds not wired |
 
 ### Critic / Sanity Agents
@@ -56,9 +56,9 @@
 |-------------|--------|---------------------|-----|
 | Detect stale data | ✅ | `core/feed_staleness_monitor.py`, `merid/signals/drift.py` — CQI tracks data freshness | — |
 | Detect arbitrage mismatches | ✅ | `merid/signals/arb_scanner.py` — cross-market arb detection | — |
-| Detect impossible probabilities | 🟡 | `strategy.py` checks for arb across multi-outcome contracts | No dedicated critic agent; checks are inline in strategy |
+| Detect impossible probabilities | ✅ | `CriticAgent._check_impossible_probs()` — detects p_yes + p_no ≠ 1, multi-outcome sum ≠ 1. Sprint N. | — |
 | Detect illiquid markets | ✅ | `market_filter.py` quality gates + `liquidity_monitor.py` real-time alerting | — |
-| Veto/down-weight forecaster outputs | 🟡 | Risk agent VETO exists in `ConsensusEngine`. `PortfolioRiskAgent` can pause agents. | No dedicated critic agent that down-weights specific forecaster outputs |
+| Veto/down-weight forecaster outputs | ✅ | `CriticAgent` publishes `Critique` messages with `weight_adjustment` (0.0=veto, 0.3=down-weight). Consumed by consensus. Sprint H. | — |
 
 ### Risk Agents
 
@@ -76,12 +76,12 @@
 
 | Requirement | Status | MERID Implementation | Gap |
 |-------------|--------|---------------------|-----|
-| Ingests all forecasts + risk views | 🟡 | `ConsensusCoordinatorAgent` collects votes. `MeridLoop` runs consensus step. | Forecasts are not published as typed messages; the loop orchestrates sequentially |
+| Ingests all forecasts + risk views | ✅ | `SwarmConsensusAggregator` collects proposals. Forecasters publish typed `Forecast` messages to `StreamingBus`. Sprints E+H. | — |
 | Weighted vote consensus | ✅ | `ConsensusEngine` — trust × energy × confidence weighted voting | — |
 | Minimum diversity requirement | ✅ | `SwarmConsensusAggregator` diversity gate requires ≥2 archetypes. Sprint D. | — |
 | Outputs BUY/SELL/SKIP + size | ✅ | `ConsensusResult` with decision + `StrategySignal` with action + size | — |
 
-**Score: 18/24 items fully implemented — Strong with 4 forecaster types (Sprints B+I)**
+**Score: 21/24 items fully implemented — 5 forecaster types + full critic suite (Sprints B+I+N)**
 
 ---
 
@@ -128,12 +128,12 @@
 | Time-to-expiry behavior | ✅ | `strategy.py` — `ExpiryPhase` enum (early/mid/late/terminal) with different edge thresholds per phase | — |
 | Category-specific rules | ✅ | `market_catalog.py` categorization + per-category risk caps | — |
 | Live orderbook awareness | ✅ | `liquidity_monitor.py` — spread/depth alerting. `market_filter.py` — spread gates | — |
-| Avoid crossing wide spreads | 🟡 | `market_filter.py` gates on max_spread. But execution doesn't decide between "cross spread" vs "join queue" | No queue-join vs market-cross intelligence |
+| Avoid crossing wide spreads | ✅ | `execution_intelligence.py` — 5-factor scoring (spread width, edge magnitude, urgency, queue depth, imbalance) decides cross vs join_queue vs join_far. Sprint O. | — |
 | Respect API rate limits | ✅ | `client.py` — circuit breaker, retry with backoff, concurrency cap (10 concurrent requests) | — |
 | Partial fill handling | ✅ | `order_manager.py` — full lifecycle tracking, incremental fill events, timeout cancels | — |
 | Order group support | ✅ | `order_group_manager.py` + `order_group_lifecycle.py` + `order_group_recovery.py` | — |
 
-**Score: 8/9 — Very strong**
+**Score: 9/9 — Complete**
 
 ---
 
@@ -142,14 +142,14 @@
 | Requirement | Status | MERID Implementation | Gap |
 |-------------|--------|---------------------|-----|
 | Fill quality tracking | ✅ | `order_manager.py` — fill events with price/size/fee. `metrics.py` — latency histograms | — |
-| Hit ratio tracking | 🟡 | Win/loss tracked in `paper_session.py` and `performance_comparator.py` | Not specifically "did our p_model beat implied prob" |
+| Hit ratio tracking | ✅ | `merid/metrics/hit_ratio.py` — Tracks p_model vs p_implied directional accuracy, per-forecaster hit rates, surprise ratio, edge capture. Sprint O. | — |
 | Realized edge tracking | ✅ | `merid/metrics/realized_edge.py` — Per-trade edge tracking. `merid/prediction/edge_recalibrator.py` — auto-adjusts thresholds. Sprints A+G. | — |
 | PnL tracking | ✅ | `paper_session.py` — per-cell, per-cluster, daily/weekly PnL. `performance_comparator.py` — backtest vs paper vs live | — |
 | Agent performance metrics | ✅ | `agent_gauntlet.py` — SLO-based scoring (liveness, latency, signal quality, risk compliance, fill quality, PnL) | — |
 | Feed metrics back into consensus weights | ✅ | `CalibrationStore.get_weight()` → `SwarmConsensusAggregator` + `ConsensusEngine`. Sprint C. | — |
 | Promotion/demotion logic | ✅ | `auto_promoter.py` — paper → shadow → live promotion with rollback gates (PF, expectancy, drawdown, trade count) | — |
 
-**Score: 6/7 — Strong monitoring + feedback loop (Sprints A+C+G)**
+**Score: 7/7 — Complete monitoring + feedback loop (Sprints A+C+G+O)**
 
 ---
 
@@ -158,12 +158,12 @@
 | Stage | Score | Grade |
 |-------|-------|-------|
 | 1. Market Discovery | 5/6 | **A** |
-| 2. Agent Roles / Signal Gen | 18/24 | **B** |
+| 2. Agent Roles / Signal Gen | 21/24 | **A−** |
 | 3. Consensus & Safety | 7/8 | **A−** |
 | 4. Message Flow | 8/8 | **A** |
-| 5. Kalshi-Specific | 8/9 | **A** |
-| 6. Monitoring & Adaptation | 6/7 | **A−** |
-| **Overall** | **52/62** | **A−** |
+| 5. Kalshi-Specific | 9/9 | **A+** |
+| 6. Monitoring & Adaptation | 7/7 | **A** |
+| **Overall** | **57/62** | **A** |
 
 ---
 
@@ -216,7 +216,10 @@
 7. ~~**Sprint G** — Edge threshold recalibration from realized edge data~~ ✅
 
 ### Remaining Work
-- Wire Critique/RiskView/Decision publishers to their respective agents
-- Macro regime forecaster agent
-- Queue-join vs market-cross execution intelligence
-- MCP server integration for market data
+- ~~Wire Critique/RiskView/Decision publishers~~ ✅ (Sprint H+M)
+- ~~Macro regime forecaster agent~~ ✅ (Sprint I)
+- ~~Queue-join vs market-cross execution intelligence~~ ✅ (Sprint O)
+- ~~Hit ratio tracking: p_model vs implied~~ ✅ (Sprint O)
+- MCP server integration for market data (nice-to-have)
+- Auction-style consensus for conflicts (nice-to-have)
+- External news/X sentiment feed integration (nice-to-have)

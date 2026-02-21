@@ -249,11 +249,9 @@ def get_forecaster_registry() -> ForecasterRegistry:
     """Get or create the singleton ForecasterRegistry."""
     global _registry
     if _registry is None:
-        from merid.prediction.forecasters.momentum import MomentumForecaster
-        from merid.prediction.forecasters.mean_reversion import MeanReversionForecaster
         from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
-        _registry = ForecasterRegistry()
-        _registry.register(MomentumForecaster())
-        _registry.register(MeanReversionForecaster())
+        from merid.prediction.forecasters.orderbook import OrderbookForecaster
+        _registry = ForecasterRegistry()  # __init__ auto-registers momentum + mean_reversion
         _registry.register(MacroRegimeForecaster())
+        _registry.register(OrderbookForecaster())
     return _registry
