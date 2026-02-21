@@ -171,8 +171,9 @@ class KalshiInsightPipeline:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def add_consumer(self, fn: Callable[[InsightObject], Any]) -> None:
-        """Register a downstream consumer (sync or async callable)."""
-        self._consumers.append(fn)
+        """Register a downstream consumer (sync or async callable). Idempotent."""
+        if fn not in self._consumers:
+            self._consumers.append(fn)
 
     async def start(self) -> None:
         if self._running:
@@ -240,7 +241,7 @@ class KalshiInsightPipeline:
 
     async def _fetch_via_executor(self, executor: Any, category: str) -> List[KalshiMarket]:
         """Fetch via KalshiExecutor (authenticated)."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         raw = await loop.run_in_executor(
             None,
             lambda: executor.get_markets(status="open", limit=200),
@@ -376,8 +377,8 @@ class KalshiInsightPipeline:
                 fg_signal = "short_fear_no"
             else:
                 fg_signal = "neutral"
-        except Exception:
-            pass
+        except Exception as _fge:
+            logger.debug("fg_signal enrichment skipped: %s", _fge)
 
         insight = InsightObject(
             source="kalshi",
@@ -441,8 +442,8 @@ class KalshiInsightPipeline:
                 prob    = yes_w / total_w if total_w > 0 else market.prob
                 conf    = sum(v.confidence for v in relevant) / len(relevant)
                 return prob, conf
-        except Exception:
-            pass
+        except Exception as _ve:
+            logger.debug("vote-weighted prob skipped: %s", _ve)
 
         try:
             # Fall back to AgentPerformanceTracker system win rate as proxy confidence
@@ -451,8 +452,8 @@ class KalshiInsightPipeline:
             sys = tracker.get_system_summary()
             conf = float(sys.get("system_win_rate", 0.6))
             return market.prob, max(0.5, conf)
-        except Exception:
-            pass
+        except Exception as _sye:
+            logger.debug("system win_rate conf skipped: %s", _sye)
 
         # Default: trust Kalshi price, low confidence
         return market.prob, 0.60
@@ -509,11 +510,14 @@ class KalshiInsightPipeline:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _get_executor(self) -> Optional[Any]:
-        try:
-            from merid.execution.executors.kalshi import KalshiExecutor
-            return KalshiExecutor()
-        except Exception:
-            return None
+        if not hasattr(self, "_executor_cache"):
+            try:
+                from merid.execution.executors.kalshi import KalshiExecutor
+                self._executor_cache = KalshiExecutor()
+            except Exception as _exe:
+                logger.debug("KalshiExecutor init failed, executor disabled: %s", _exe)
+                self._executor_cache = None
+        return self._executor_cache
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

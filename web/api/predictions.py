@@ -5,7 +5,7 @@ Real prediction market data for MERID (Kalshi)
 
 import aiohttp
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -103,7 +103,7 @@ async def fetch_kalshi_markets():
                     'end_date': datetime.fromtimestamp(market.resolution_date).isoformat() if market.resolution_date else None
                 })
             _markets_cache = markets
-            _last_update = datetime.now()
+            _last_update = datetime.now(timezone.utc)
             logger.info(f"[Predictions] Updated with {len(markets)} Kalshi markets")
         else:
             logger.info("[Predictions] No Kalshi markets available")

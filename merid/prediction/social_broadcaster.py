@@ -1,15 +1,14 @@
-"""KalshiSocialBroadcaster — Log-only event consumer for social channels.
+"""KalshiSocialBroadcaster — Real-time social media publisher.
 
-Subscribes to the event bus for Kalshi trade events and logs structured
-messages that mirror what would be sent to Twitter/Telegram. This validates
-the event schema end-to-end without hitting external APIs.
+Subscribes to the event bus for Kalshi trade events and publishes them
+to Twitter/X and Telegram channels.
 
 Event types consumed:
   - kalshi:order_filled   — trade execution
-  - kalshi:order_placed   — order submission (future)
-  - kalshi:market_resolved — market settlement (future)
+  - kalshi:order_placed   — order submission
+  - kalshi:market_resolved — market settlement
 
-Once validated, swap the _log_* methods for real Twitter/Telegram calls.
+Posts are sent to both Twitter and Telegram (if configured).
 """
 
 from __future__ import annotations
@@ -76,7 +75,7 @@ class KalshiSocialBroadcaster:
                 payload = event.get("payload", {})
 
                 if event_type in self.WATCHED_EVENTS:
-                    self._dispatch(event_type, payload)
+                    await self._dispatch(event_type, payload)
 
             except asyncio.TimeoutError:
                 continue
@@ -85,68 +84,149 @@ class KalshiSocialBroadcaster:
             except Exception as exc:
                 logger.warning(f"Social broadcaster error: {exc}")
 
-    def _dispatch(self, event_type: str, payload: Dict[str, Any]) -> None:
-        """Route event to the appropriate formatter."""
+    async def _dispatch(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Route event to the appropriate handler."""
         if event_type == "kalshi:order_filled":
-            self._log_fill(payload)
+            await self._publish_fill(payload)
         elif event_type == "kalshi:order_placed":
-            self._log_order(payload)
+            await self._publish_order(payload)
         elif event_type == "kalshi:market_resolved":
-            self._log_resolution(payload)
+            await self._publish_resolution(payload)
 
-    # ── Formatters (log-only; swap for real API calls later) ──────
+    # ── Real Social Media Publishers ──────────────────────────────────
 
-    def _log_fill(self, p: Dict[str, Any]) -> None:
-        """Format and log a fill event as a social-ready message."""
-        agent = p.get("agent", "unknown")
-        side = p.get("side", "?").upper()
-        action = p.get("action", "?").upper()
-        market = p.get("market_id", "?")
-        price = p.get("price_cents", 0)
-        qty = p.get("contracts", 0)
-        sim = p.get("simulated", True)
-        mode = "SIM" if sim else "PAPER"
+    async def _publish_fill(self, p: Dict[str, Any]) -> None:
+        """Format and publish a fill event to Twitter/Telegram."""
+        agent    = p.get("agent", "unknown")
+        side     = p.get("side", "?").upper()
+        action   = p.get("action", "buy").upper()
+        market   = p.get("market_id", "?")
+        price    = p.get("price_cents", 0)
+        qty      = p.get("contracts", 0)
+        sim      = p.get("simulated", True)
+        ref_bid  = p.get("ref_bid")
+        ref_ask  = p.get("ref_ask")
+        question = p.get("question", market)
 
-        # Twitter-style message (≤280 chars)
+        # Truncate question for X post
+        q = question if len(question) <= 80 else question[:77] + "…"
+
+        # Mode label
+        mode = "SIM" if sim else "LIVE"
+
+        # X/Twitter post (≤280 chars)
+        bid_ask = f"Bid {ref_bid}¢ / Ask {ref_ask}¢" if ref_bid and ref_ask else f"@{price}¢"
         tweet = (
-            f"🔔 MERID Kalshi Fill [{mode}]\n"
-            f"{action} {qty}x {side} on {market}\n"
-            f"Price: {price}¢ | Agent: {agent}\n"
-            f"#Kalshi #PredictionMarkets #Crypto"
+            f"🔔 [{mode}] Kalshi {action} {qty}× {side}\n"
+            f"{q}\n"
+            f"{bid_ask} | Agent: {agent}\n"
+            f"#Kalshi #PredictionMarkets"
         )
+        if len(tweet) > 280:
+            tweet = tweet[:277] + "…"
 
-        # Telegram-style message (richer formatting)
+        # Telegram HTML brief (richer)
+        bid_ask_tg = (
+            f"Ref bid: <b>{ref_bid}¢</b> | Ref ask: <b>{ref_ask}¢</b>"
+            if ref_bid and ref_ask
+            else f"Fill price: <b>{price}¢</b>"
+        )
         tg_msg = (
             f"📊 <b>Kalshi Fill</b> [{mode}]\n"
             f"<b>{action}</b> {qty}× {side} on <code>{market}</code>\n"
-            f"Price: {price}¢ | Agent: {agent}\n"
-            f"Ref bid: {p.get('ref_bid', '—')} | Ref ask: {p.get('ref_ask', '—')}"
+            f"{bid_ask_tg}\n"
+            f"Agent: {agent}"
         )
 
-        logger.info(f"[SOCIAL:TWITTER] {tweet}")
-        logger.info(f"[SOCIAL:TELEGRAM] {tg_msg}")
+        # Post to Twitter/X
+        await self._post_to_twitter(tweet)
+
+        # Post to Telegram
+        await self._post_to_telegram(tg_msg, parse_mode="HTML")
+
         self._messages_logged += 1
 
-    def _log_order(self, p: Dict[str, Any]) -> None:
-        """Format and log an order event."""
-        market = p.get("market_id", "?")
-        side = p.get("side", "?").upper()
-        action = p.get("action", "?").upper()
-        price = p.get("price_cents", 0)
-        qty = p.get("contracts", 0)
+    async def _publish_order(self, p: Dict[str, Any]) -> None:
+        """Format and publish an order placement event."""
+        market   = p.get("market_id", "?")
+        side     = p.get("side", "?").upper()
+        action   = p.get("action", "buy").upper()
+        price    = p.get("price_cents", 0)
+        qty      = p.get("contracts", 0)
+        question = p.get("question", market)
+        q = question if len(question) <= 60 else question[:57] + "…"
 
-        msg = f"📝 Order: {action} {qty}x {side} on {market} @{price}¢"
-        logger.info(f"[SOCIAL:ORDER] {msg}")
+        msg = f"📝 [{action}] {qty}× {side} on {q} @{price}¢"
+
+        # Post to Twitter/X (simple text)
+        await self._post_to_twitter(msg)
+
+        # Post to Telegram (with HTML formatting)
+        tg_msg = (
+            f"📝 <b>Order Placed</b>\n"
+            f"<b>{action}</b> {qty}× {side}\n"
+            f"Market: <code>{market}</code>\n"
+            f"Price: {price}¢"
+        )
+        await self._post_to_telegram(tg_msg, parse_mode="HTML")
+
         self._messages_logged += 1
 
-    def _log_resolution(self, p: Dict[str, Any]) -> None:
-        """Format and log a market resolution event."""
-        market = p.get("market_id", "?")
-        result = p.get("result", "?")
+    async def _publish_resolution(self, p: Dict[str, Any]) -> None:
+        """Format and publish a market resolution event."""
+        market   = p.get("market_id", "?")
+        result   = p.get("result", "?").upper()
+        question = p.get("question", market)
+        q = question if len(question) <= 80 else question[:77] + "…"
 
-        msg = f"✅ Market Resolved: {market} → {result}"
-        logger.info(f"[SOCIAL:RESOLUTION] {msg}")
+        # X post
+        tweet = (
+            f"🏁 SETTLED {result}\n"
+            f"{q}\n"
+            f"#Kalshi"
+        )
+
+        # Telegram
+        result_icon = "✅" if result == "YES" else "❌"
+        tg_msg = (
+            f"🏁 <b>Market Settled</b>\n"
+            f"{result_icon} <b>{result}</b> — <code>{market}</code>\n"
+            f"{question}"
+        )
+
+        # Post to Twitter/X
+        await self._post_to_twitter(tweet)
+
+        # Post to Telegram
+        await self._post_to_telegram(tg_msg, parse_mode="HTML")
+
         self._messages_logged += 1
+
+    # ── Social Media Helper Methods ────────────────────────────────────
+
+    async def _post_to_twitter(self, message: str) -> None:
+        """Post message to Twitter/X."""
+        try:
+            from agents.twitter_agent import get_twitter_agent
+            twitter = get_twitter_agent()
+            await twitter.post_tweet(message)
+            logger.info(f"[TWITTER] Posted: {message[:50]}...")
+        except Exception as exc:
+            # Fall back to logging if Twitter agent not configured or fails
+            logger.warning(f"[TWITTER] Post failed (using fallback logging): {exc}")
+            logger.info(f"[SOCIAL:TWITTER] {message}")
+
+    async def _post_to_telegram(self, message: str, parse_mode: Optional[str] = None) -> None:
+        """Post message to Telegram."""
+        try:
+            from agents.telegram_agent import get_telegram_agent
+            telegram = get_telegram_agent()
+            await telegram.send_message(message, parse_mode=parse_mode)
+            logger.info(f"[TELEGRAM] Posted: {message[:50]}...")
+        except Exception as exc:
+            # Fall back to logging if Telegram agent not configured or fails
+            logger.warning(f"[TELEGRAM] Post failed (using fallback logging): {exc}")
+            logger.info(f"[SOCIAL:TELEGRAM] {message}")
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serialisable status."""

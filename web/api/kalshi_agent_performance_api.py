@@ -152,7 +152,7 @@ async def export_trades_csv(filepath: Optional[str] = None) -> Dict[str, Any]:
         return {
             "success": True,
             "filepath": filepath,
-            "trades_exported": len(tracker._closed_trades),
+            "trades_exported": tracker.get_closed_trade_count(),
         }
     except Exception as exc:
         logger.error(f"Failed to export trades: {exc}")

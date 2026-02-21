@@ -5,8 +5,6 @@ import TopBar from "./components/TopBar";
 import Overview from "./views/Overview";
 import Logs from "./views/Logs";
 import Settings from "./views/Settings";
-import Positions from "./views/Positions";
-import Orders from "./views/Orders";
 import KillSwitchView from "./views/KillSwitchView";
 import KalshiGridView from "./views/KalshiGridView";
 import KalshiDashboardView from "./views/KalshiDashboardView";
@@ -15,6 +13,8 @@ import KalshiVolDashboardView from "./views/KalshiVolDashboardView";
 import KalshiTerminalView from "./views/KalshiTerminalView";
 import KalshiAgentPerformanceView from "./views/KalshiAgentPerformanceView";
 import KalshiSentimentView from "./views/KalshiSentimentView";
+import LaneControlDashboard from "./views/LaneControlDashboard";
+import SwarmConsensusMatrix from "./views/SwarmConsensusMatrix";
 import OperatorDashboard from "./views/OperatorDashboard";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
@@ -108,8 +108,8 @@ export default function App() {
               {view === "kalshi-terminal" && <KalshiTerminalView />}
               {view === "kalshi-performance" && <KalshiAgentPerformanceView />}
               {view === "kalshi-sentiment" && <KalshiSentimentView />}
-              {view === "positions" && <Positions />}
-              {view === "orders" && <Orders />}
+              {view === "lane-control" && <LaneControlDashboard />}
+              {view === "swarm-consensus" && <SwarmConsensusMatrix />}
               {view === "operator" && <OperatorDashboard />}
               {view === "kill-switch" && <KillSwitchView />}
               {view === "logs" && <Logs />}

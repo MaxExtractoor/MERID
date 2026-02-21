@@ -8,6 +8,9 @@ Sprint 13: Dev Swarm Governance & Guardrails
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 from core.dev_swarm_governance import (
     DevProposal,

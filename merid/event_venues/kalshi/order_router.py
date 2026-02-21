@@ -48,6 +48,96 @@ KALSHI_CHANNEL_TRADE = "kalshi:trade"
 KALSHI_CHANNEL_ORDERBOOK = "kalshi:orderbook_delta"
 KALSHI_CHANNEL_ORDER_FILL = "kalshi:order_fill"
 KALSHI_CHANNEL_ORDER_REJECT = "kalshi:order_reject"
+KALSHI_CHANNEL_ORDER_GROUP_TRIGGERED = "kalshi:order_group_triggered"
+
+
+# ── Order Group Auto-Cancel Handler ─────────────────────────────────────
+
+async def handle_order_group_triggered(group_id: str, group_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle order group triggered event - cancel all orders in the group.
+
+    Called when WebSocket receives a triggered status for an order group.
+    Fetches all open orders in the group and cancels them.
+
+    Args:
+        group_id: The order group ID that was triggered
+        group_data: Full group data from the WebSocket message
+
+    Returns:
+        Dict with canceled order IDs and status
+    """
+    from merid.event_venues.kalshi.client import get_kalshi_client
+
+    logger.warning(f"[order-router] Order group {group_id} triggered - initiating auto-cancel")
+
+    client = get_kalshi_client()
+    if not client:
+        return {"error": "Kalshi client not available", "canceled": []}
+
+    try:
+        await client.connect()
+
+        # Get all open orders
+        result = await client.get_open_orders_result()
+        if not result.success:
+            return {"error": str(result.error), "canceled": []}
+
+        all_orders = result.data or []
+
+        # Filter orders by group_id
+        group_orders = [
+            o for o in all_orders
+            if o.get("order_group_id") == group_id or o.get("group_id") == group_id
+        ]
+
+        if not group_orders:
+            logger.info(f"[order-router] No open orders found for triggered group {group_id}")
+            return {"group_id": group_id, "canceled": [], "message": "No orders to cancel"}
+
+        # Cancel each order
+        canceled = []
+        failed = []
+
+        for order in group_orders:
+            order_id = order.get("order_id")
+            if not order_id:
+                continue
+
+            try:
+                cancel_result = await client.cancel_order_result(order_id)
+                if cancel_result.success:
+                    canceled.append(order_id)
+                    logger.info(f"[order-router] Auto-canceled order {order_id} from triggered group {group_id}")
+                else:
+                    failed.append({"order_id": order_id, "error": str(cancel_result.error)})
+            except Exception as e:
+                failed.append({"order_id": order_id, "error": str(e)})
+
+        await client.close()
+
+        # Publish event for other components
+        try:
+            from core.events import publish_event
+            publish_event(KALSHI_CHANNEL_ORDER_GROUP_TRIGGERED, {
+                "group_id": group_id,
+                "canceled_orders": canceled,
+                "failed_cancels": failed,
+                "group_data": group_data,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+        except ImportError:
+            pass
+
+        return {
+            "group_id": group_id,
+            "canceled": canceled,
+            "failed": failed,
+            "total_orders": len(group_orders),
+        }
+
+    except Exception as exc:
+        logger.error(f"[order-router] Auto-cancel failed for triggered group {group_id}: {exc}")
+        return {"error": str(exc), "group_id": group_id, "canceled": []}
 
 
 # ── OrderIntent ───────────────────────────────────────────────────────────
@@ -67,6 +157,8 @@ class OrderIntent:
         time_in_force: ``"fill_or_kill"`` | ``"gtc"`` | ``"ioc"``
         edge_pct: Optional edge estimate for risk checks
         source: Originating agent/strategy name
+        order_group_id: Optional order group ID for aggregate limits
+        self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
     """
     ticker: str
     side: str
@@ -78,6 +170,9 @@ class OrderIntent:
     time_in_force: str = "fill_or_kill"
     edge_pct: Optional[float] = None
     source: str = "manual"
+    order_group_id: Optional[str] = None
+    self_trade_prevention_type: Optional[str] = None
+    post_only: bool = False
 
 
 @dataclass
@@ -106,7 +201,8 @@ def _resolve_mode(override: Optional[TradingMode]) -> TradingMode:
         return override
     try:
         return TradingMode(get_trade_mode().value)
-    except Exception:
+    except Exception as _e:
+        logger.debug("_resolve_mode: get_trade_mode failed, falling back to venue_gate: %s", _e)
         return get_venue_gate().mode
 
 
@@ -257,8 +353,26 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 reason=f"kill_switch:{reason}",
                 latency_ms=round(latency, 2),
             )
-    except ImportError:
-        pass  # risk_controller not available — proceed cautiously
+    except ImportError as exc:
+        # Fail-closed: if risk_controller unavailable, block live orders for safety
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(f"[order-router] Risk controller unavailable - blocking live order: {exc}")
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason="risk_controller_unavailable",
+            latency_ms=round(latency, 2),
+        )
+    except Exception as exc:
+        # Fail-closed: any unexpected error in risk check should block order
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(f"[order-router] Risk check failed - blocking live order: {exc}")
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"risk_check_error:{str(exc)}",
+            latency_ms=round(latency, 2),
+        )
 
     gate = get_venue_gate()
     if not gate.live_enabled:
@@ -270,12 +384,78 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             latency_ms=round(latency, 2),
         )
 
+    # KalshiRiskManager — position limits, category caps, drawdown, rate limiting
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+        risk = get_kalshi_risk()
+        allowed, reason = risk.check_order(
+            ticker=intent.ticker,
+            category=None,  # category inferred downstream if needed
+            contracts=intent.count,
+            price_cents=intent.price_cents,
+            edge=intent.edge_pct or 0.0,
+        )
+        if not allowed:
+            latency = (time.monotonic() - t0) * 1000
+            logger.warning(f"[order-router] Live order blocked by KalshiRiskManager: {reason}")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"risk_check:{reason}",
+                latency_ms=round(latency, 2),
+            )
+    except Exception as exc:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(f"[order-router] KalshiRiskManager unavailable — blocking live order: {exc}")
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"risk_manager_unavailable:{exc}",
+            latency_ms=round(latency, 2),
+        )
+
     try:
         from merid.event_venues.base import VenueOrder
         from merid.event_venues.kalshi.client import get_kalshi_client
+        from merid.event_venues.kalshi.order_group_manager import OrderGroupRiskManager
 
         client = get_kalshi_client()
         await client.connect()
+
+        # ── Order Group Risk Check ─────────────────────────────────────────
+        if intent.order_group_id:
+            og_manager = OrderGroupRiskManager(client)
+            group = og_manager.get_group(intent.order_group_id)
+            
+            if not group:
+                latency = (time.monotonic() - t0) * 1000
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"order_group_not_found:{intent.order_group_id}",
+                    latency_ms=round(latency, 2),
+                )
+            
+            if not group.is_active():
+                latency = (time.monotonic() - t0) * 1000
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"order_group_not_active:{intent.order_group_id}:status={group.status}",
+                    latency_ms=round(latency, 2),
+                )
+            
+            if not group.can_add_contracts(intent.count):
+                latency = (time.monotonic() - t0) * 1000
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"order_group_limit_exceeded:{intent.order_group_id}:used={group.used_contracts}:limit={group.contracts_limit}:requested={intent.count}",
+                    latency_ms=round(latency, 2),
+                )
+            
+            # Record optimistic usage
+            og_manager.record_new_order(intent.order_group_id, intent.count)
 
         tif = intent.time_in_force.upper()
         if tif not in {"GTC", "IOC", "FOK"}:
@@ -292,7 +472,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             client_order_id=f"merid_{intent.source}_{int(time.time() * 1000)}",
         )
 
-        placed_res = await client.place_order_result(order)
+        placed_res = await client.place_order_result(
+            order,
+            order_group_id=intent.order_group_id,
+            self_trade_prevention_type=intent.self_trade_prevention_type,
+        )
         latency = (time.monotonic() - t0) * 1000
         if not placed_res.success or placed_res.data is None:
             reason = getattr(placed_res, "error_message", None) or str(placed_res.error) if placed_res.error else "live_order_failed"
@@ -316,6 +500,14 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             status = "partial_live"
         else:
             status = "accepted_live"
+
+        # Record fill in KalshiRiskManager for exposure/rate tracking
+        if filled_count > 0:
+            try:
+                from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+                get_kalshi_risk().record_order(None, filled_count, fill_price_cents)
+            except Exception as _rr:
+                logger.debug("record_order after live fill failed (non-fatal): %s", _rr)
 
         return OrderResult(
             status=status,
@@ -407,11 +599,122 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
 
     return _route_sync_non_live(intent, mode, t0)
 
-    # Fallback
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Batch Order Placement with Order Group Assignment
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class BatchOrderIntent:
+    """Batch of orders with shared order group."""
+    orders: List[OrderIntent]
+    order_group_id: Optional[str] = None
+    self_trade_prevention_type: Optional[str] = None
+    mode: Optional[TradingMode] = None
+
+
+@dataclass
+class BatchOrderResult:
+    """Result of batch order placement."""
+    total: int
+    successful: int
+    failed: int
+    results: List[OrderResult]
+    latency_ms: float
+    order_group_id: Optional[str] = None
+
+
+async def route_batch_orders_async(
+    batch: BatchOrderIntent,
+    max_concurrent: int = 5,
+) -> BatchOrderResult:
+    """Route multiple orders with optional shared order group.
+
+    All orders in the batch share the same order_group_id and STP type
+    if specified at the batch level. Individual order settings override
+    batch-level defaults.
+
+    Args:
+        batch: Batch of orders to place
+        max_concurrent: Max concurrent order placements
+
+    Returns:
+        BatchOrderResult with aggregated results
+    """
+    t0 = time.monotonic()
+
+    # Apply batch-level defaults to each order
+    orders: List[OrderIntent] = []
+    for intent in batch.orders:
+        # Merge batch-level settings
+        order_group_id = intent.order_group_id or batch.order_group_id
+        stp_type = intent.self_trade_prevention_type or batch.self_trade_prevention_type
+        mode = intent.mode or batch.mode
+
+        orders.append(OrderIntent(
+            ticker=intent.ticker,
+            side=intent.side,
+            action=intent.action,
+            price_cents=intent.price_cents,
+            count=intent.count,
+            mode=mode,
+            order_type=intent.order_type,
+            time_in_force=intent.time_in_force,
+            edge_pct=intent.edge_pct,
+            source=intent.source,
+            order_group_id=order_group_id,
+            self_trade_prevention_type=stp_type,
+            post_only=intent.post_only,
+        ))
+
+    # Validate all orders first
+    valid_orders: List[OrderIntent] = []
+    pre_validated_results: List[OrderResult] = []
+
+    for intent in orders:
+        reject_reason = _check_intent_risk(intent)
+        if reject_reason:
+            pre_validated_results.append(OrderResult(
+                status="rejected",
+                mode=_resolve_mode(intent.mode),
+                reason=f"pre_validation_failed:{reject_reason}",
+                latency_ms=0.0,
+            ))
+        else:
+            valid_orders.append(intent)
+
+    # Route valid orders with concurrency limit
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def route_with_limit(intent: OrderIntent) -> OrderResult:
+        async with semaphore:
+            return await route_order_async(intent)
+
+    # Execute all valid orders concurrently
+    route_tasks = [route_with_limit(intent) for intent in valid_orders]
+    route_results = await asyncio.gather(*route_tasks, return_exceptions=True)
+
+    # Combine pre-validation failures with routing results
+    all_results = pre_validated_results + [
+        r if isinstance(r, OrderResult) else OrderResult(
+            status="rejected",
+            mode=TradingMode.MOCK,
+            reason=f"routing_exception:{str(r)}",
+            latency_ms=0.0,
+        )
+        for r in route_results
+    ]
+
     latency = (time.monotonic() - t0) * 1000
-    return OrderResult(
-        status="rejected",
-        mode=mode,
-        reason=f"unknown_mode_{mode}",
+
+    successful = sum(1 for r in all_results if "filled" in r.status or "accepted" in r.status)
+    failed = len(all_results) - successful
+
+    return BatchOrderResult(
+        total=len(batch.orders),
+        successful=successful,
+        failed=failed,
+        results=all_results,
         latency_ms=round(latency, 2),
+        order_group_id=batch.order_group_id,
     )

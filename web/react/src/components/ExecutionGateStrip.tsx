@@ -1,6 +1,7 @@
-import { ShieldAlert, ShieldCheck, AlertTriangle, TrendingUp, Activity, Radio } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, AlertTriangle, TrendingUp, Activity, Radio, RefreshCw } from 'lucide-react';
+import { useState, useCallback } from 'react';
 import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { useKalshiMode } from '../context/KalshiModeContext';
 
 interface BlockReason {
@@ -43,6 +44,23 @@ export default function ExecutionGateStrip() {
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
   const { data: modeData } = useKalshiMode();
+
+  const [reloading, setReloading] = useState(false);
+  const [reloadStatus, setReloadStatus] = useState<'idle' | 'ok' | 'err'>('idle');
+
+  const handleConfigReload = useCallback(async () => {
+    setReloading(true);
+    setReloadStatus('idle');
+    try {
+      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.CONFIG_RELOAD}`, { method: 'POST' });
+      setReloadStatus(res.ok ? 'ok' : 'err');
+    } catch {
+      setReloadStatus('err');
+    } finally {
+      setReloading(false);
+      setTimeout(() => setReloadStatus('idle'), 4000);
+    }
+  }, []);
 
   if (!gate) return null;
 
@@ -138,6 +156,24 @@ export default function ExecutionGateStrip() {
             </div>
           </>
         )}
+
+        {/* Config hot-reload button */}
+        <div className="w-px h-4 bg-current opacity-20" />
+        <button
+          onClick={handleConfigReload}
+          disabled={reloading}
+          title="Hot-reload risk limits, reality assertions, and rebalancer targets"
+          className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+            reloadStatus === 'ok'
+              ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300'
+              : reloadStatus === 'err'
+                ? 'bg-red-600/20 border-red-500/40 text-red-300'
+                : 'bg-slate-700/60 border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-500'
+          } disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          <RefreshCw className={`w-3 h-3 ${reloading ? 'animate-spin' : ''}`} />
+          {reloadStatus === 'ok' ? 'RELOADED' : reloadStatus === 'err' ? 'FAILED' : 'RELOAD'}
+        </button>
       </div>
     </div>
   );

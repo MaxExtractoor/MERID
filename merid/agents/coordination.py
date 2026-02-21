@@ -352,11 +352,71 @@ class DebateCoordinatorAgent(CanonicalAgent):
         instruments = context.get("instruments", [])
         results = []
 
+        # W5: Build a MarketState snapshot and call observe() + analyze() on all
+        # registered canonical agents so they can enrich the debate context with
+        # their latest market observations before the debate round begins.
+        agent_analyses: Dict[str, Any] = {}
+        try:
+            import time as _time
+            from agents.interface import MarketState
+            from merid.agents.base import get_canonical_registry
+
+            market_state = MarketState(
+                timestamp=_time.time(),
+                prices={inst.get("ticker", inst.get("symbol", "")): inst.get("market_prob", 0.5)
+                        for inst in instruments},
+                volumes={},
+                funding_rates={},
+                news_sentiment=context.get("news_sentiment", 0.0),
+                volatility_index=context.get("volatility_index", 0.5),
+                metadata={"source": "debate_coordinator", "instrument_count": len(instruments)},
+            )
+            registry = get_canonical_registry()
+            for agent in registry.all().values():
+                try:
+                    await agent.observe(market_state)
+                    analysis = await agent.analyze()
+                    if analysis:
+                        agent_analyses[agent.agent_id] = analysis
+                except Exception as _ae:
+                    self.logger.debug("observe/analyze skipped for %s: %s", agent.agent_id, _ae)
+
+            if agent_analyses:
+                context = {**context, "agent_analyses": agent_analyses}
+        except Exception as exc:
+            self.logger.debug("W5 observe/analyze phase skipped: %s", exc)
+
         for inst in instruments:
             result = self.run_debate(inst, context)
             if result:
                 results.append(result)
                 self._debate_history.append(result)
+
+                # W5: Call reflect() on all canonical agents with the debate outcome
+                # so they can update learned patterns and adjust future behaviour.
+                try:
+                    from agents.interface import Outcome
+                    import uuid as _uuid
+                    outcome = Outcome(
+                        outcome_id=str(_uuid.uuid4()),
+                        proposal_id=result.get("debate_id", ""),
+                        result="debate_complete",
+                        actual_value=result.get("post_debate_prob"),
+                        predicted_value=result.get("market_prob"),
+                        timestamp=_time.time(),
+                        metadata={
+                            "symbol": result.get("symbol"),
+                            "disagreement_width": result.get("disagreement_width"),
+                            "debate_suppressed": result.get("debate_suppressed"),
+                        },
+                    )
+                    for agent in registry.all().values():
+                        try:
+                            await agent.reflect(outcome)
+                        except Exception as _re:
+                            self.logger.debug("reflect skipped for %s: %s", agent.agent_id, _re)
+                except Exception as exc:
+                    self.logger.debug("W5 reflect phase skipped: %s", exc)
 
         return AgentOutput(
             agent_id=self.agent_id,

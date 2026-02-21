@@ -251,8 +251,8 @@ class PaperLadder:
         try:
             from core.session_log import set_session_bracket
             set_session_bracket(f"{new_tier.name} (${new_tier.seed_usd:,.0f})")
-        except Exception:
-            pass
+        except Exception as _sle:
+            logger.debug("set_session_bracket (promote) skipped: %s", _sle)
         return "promoted"
 
     def _demote(self, p: LadderProgress) -> str:
@@ -286,8 +286,8 @@ class PaperLadder:
         try:
             from core.session_log import set_session_bracket
             set_session_bracket(f"{new_tier.name} (${new_tier.seed_usd:,.0f})")
-        except Exception:
-            pass
+        except Exception as _sle:
+            logger.debug("set_session_bracket (demote) skipped: %s", _sle)
         return "demoted"
 
     def _apply_to_paper_engine(self, portfolio_id: str, balance: float) -> None:

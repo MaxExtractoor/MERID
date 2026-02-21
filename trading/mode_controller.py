@@ -16,7 +16,7 @@ from collections import deque
 
 from enum import Enum
 
-from trading.trade_mode import TradeMode
+from trading.trade_mode import TradeMode, get_trade_mode, set_trade_mode
 from utils.logger import get_logger
 
 logger = get_logger("trading.mode_controller")
@@ -88,7 +88,8 @@ class TradingModeController:
     """
     
     def __init__(self):
-        self._mode = TradingMode.PAPER
+        # Use canonical trade mode from trading.trade_mode (respects MERID_TRADE_MODE env var)
+        self._mode = get_trade_mode()
         self._spectator_trades: deque = deque(maxlen=1000)
         self._mode_history: deque = deque(maxlen=100)
         self._subscribers: List[Callable] = []
@@ -105,7 +106,7 @@ class TradingModeController:
             "last_reset": time.time(),
         }
         self._running = False
-        logger.info("TradingModeController initialized in PAPER mode")
+        logger.info(f"TradingModeController initialized in {self._mode.value.upper()} mode")
     
     @property
     def mode(self) -> TradingMode:

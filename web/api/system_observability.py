@@ -39,6 +39,20 @@ class AlertRule:
         """Evaluate the rule. Returns {firing, severity, name, description, detail}."""
         raise NotImplementedError
 
+    def safe_evaluate(self) -> Dict[str, Any]:
+        """Evaluate with debug logging on exception — use at call sites instead of evaluate()."""
+        try:
+            return self.evaluate()
+        except Exception as _e:
+            logger.debug("AlertRule %s probe failed: %s", self.name, _e)
+            return {
+                "firing": False,
+                "severity": self.severity,
+                "name": self.name,
+                "description": self.description,
+                "detail": {"error": str(_e)},
+            }
+
 
 class SignalSLOBreachAlert(AlertRule):
     """Fires when signal metrics SLO is breached."""
@@ -1073,8 +1087,8 @@ class PnlDivergenceAlert(AlertRule):
             from web.api.system_endpoints import _real_pnl
             pnl_data = _real_pnl()
             risk_pnl = pnl_data.get("total_pnl", 0.0)
-        except Exception:
-            pass
+        except Exception as _pe:
+            logger.debug("PnL divergence probe: _real_pnl unavailable: %s", _pe)
 
         if paper_pnl is None or risk_pnl is None:
             return {"firing": False, "severity": self.severity, "name": self.name,
@@ -1400,11 +1414,7 @@ def evaluate_all_alerts() -> Dict[str, Any]:
     firing_count = 0
     critical_count = 0
     for rule in ALERT_RULES:
-        try:
-            result = rule.evaluate()
-        except Exception as exc:
-            result = {"firing": False, "name": rule.name, "severity": rule.severity,
-                      "description": rule.description, "detail": {"error": str(exc)}}
+        result = rule.safe_evaluate()
         results.append(result)
         if result.get("firing"):
             firing_count += 1

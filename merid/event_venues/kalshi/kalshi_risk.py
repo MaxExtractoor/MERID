@@ -90,14 +90,21 @@ def kelly_size_kalshi(
     kelly_fraction: float = 0.25,
     max_contracts: int = 250,
     min_edge: float = 0.02,
+    sentiment_score: Optional[float] = None,
+    volatility_regime: Optional[str] = None,
 ) -> int:
-    """Fee-aware Kelly position sizing for Kalshi binary contracts.
+    """Fee-aware Kelly position sizing for Kalshi binary contracts with sentiment adjustment.
 
     Kelly fraction f* = (p * b - q) / b
     where:
       p = implied probability + edge
       q = 1 - p
       b = (100 - price - fee_per) / price  (net odds after fees)
+
+    Sentiment adjustment:
+      - Extreme fear/greed (score <20 or >80): reduce size by 50%
+      - High volatility regime: reduce size by 30%
+      - Normal conditions: no adjustment
 
     Args:
         edge: Estimated edge (e.g. 0.08 for 8%)
@@ -106,6 +113,8 @@ def kelly_size_kalshi(
         kelly_fraction: Fraction of full Kelly to use (default quarter-Kelly)
         max_contracts: Hard cap on position size
         min_edge: Minimum edge to trade
+        sentiment_score: Fear/greed index 0-100 (None = no adjustment)
+        volatility_regime: "calm", "normal", "hot" (None = no adjustment)
 
     Returns:
         Number of contracts to buy (0 if edge insufficient)
@@ -133,6 +142,26 @@ def kelly_size_kalshi(
 
     # Apply fractional Kelly
     fraction = kelly_f * kelly_fraction
+
+    # Sentiment-based sizing adjustment
+    sentiment_multiplier = 1.0
+
+    if sentiment_score is not None:
+        if sentiment_score <= 20 or sentiment_score >= 80:
+            # Extreme fear/greed: reduce size significantly
+            sentiment_multiplier *= 0.5
+        elif sentiment_score <= 30 or sentiment_score >= 70:
+            # Moderate fear/greed: slight reduction
+            sentiment_multiplier *= 0.75
+
+    if volatility_regime == "hot":
+        # High volatility: reduce position size
+        sentiment_multiplier *= 0.7
+    elif volatility_regime == "calm":
+        # Low volatility: can size up slightly
+        sentiment_multiplier *= 1.1
+
+    fraction *= sentiment_multiplier
 
     # Convert to contracts
     contracts = int(fraction * bankroll_cents / price_cents)
@@ -581,6 +610,23 @@ class KalshiRiskManager:
         if self._state.daily_pnl_usd < -self._config.max_daily_loss_usd:
             self._activate_kill_switch("Daily loss limit breached")
 
+        # L8: Trigger DeploymentController auto-rollback on drawdown breach
+        if self._state.peak_equity_usd > 0:
+            _dd = (self._state.peak_equity_usd - self._state.current_equity_usd) / self._state.peak_equity_usd
+            if _dd >= self._config.drawdown_halt_pct:
+                try:
+                    from merid.event_venues.kalshi.deployment import get_deployment_controller
+                    _dc = get_deployment_controller()
+                    for _aname, _dep in list(_dc._agents.items()):
+                        from merid.event_venues.kalshi.deployment import AgentMode
+                        if _dep.mode in (AgentMode.LIVE, AgentMode.SHADOW):
+                            _dc.check_auto_rollback(
+                                _aname,
+                                drawdown_pct=round(_dd * 100, 2),
+                            )
+                except Exception as _rbe:
+                    pass  # non-fatal — risk manager already halts via kill switch
+
     def record_equity_snapshot(self, equity_usd: float) -> None:
         """Record an equity snapshot from live balance (called by PortfolioRiskAgent)."""
         self._state.current_equity_usd = equity_usd
@@ -615,6 +661,18 @@ class KalshiRiskManager:
             self._state.kill_switch_reason = reason
             self._log_breach("kill_switch", reason)
             logger.warning(f"KILL SWITCH ACTIVATED: {reason}")
+
+            # G9: Halt all LIVE/SHADOW agents via DeploymentController
+            try:
+                from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
+                _dc = get_deployment_controller()
+                for _aname, _dep in list(_dc._agents.items()):
+                    if _dep.mode in (AgentMode.LIVE, AgentMode.SHADOW):
+                        _dc.halt(_aname, reason=f"kill_switch: {reason}")
+                        logger.warning("[kill-switch] Halted agent %s via DeploymentController", _aname)
+            except Exception as _dce:
+                logger.debug("kill_switch DeploymentController halt skipped: %s", _dce)
+
             # Fire Telegram alert (non-blocking, best-effort)
             try:
                 import asyncio
@@ -623,21 +681,38 @@ class KalshiRiskManager:
                 if agent.enabled:
                     msg = f"🚨 <b>KALSHI KILL SWITCH ACTIVATED</b>\n\nReason: {reason}\n\n<i>All trading halted. Manual reset required.</i>"
                     try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.ensure_future(agent.send_message(msg, force=True))
-                        else:
-                            loop.run_until_complete(agent.send_message(msg, force=True))
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(agent.send_message(msg, force=True))
                     except RuntimeError:
-                        pass
+                        try:
+                            asyncio.run(agent.send_message(msg, force=True))
+                        except Exception as _tg_exc:
+                            logger.debug("kill_switch telegram fallback failed: %s", _tg_exc)
             except Exception as _exc:
                 logger.debug(f"Telegram kill-switch alert error (ignored): {_exc}")
+
+    def fire_kill_switch(self, reason: str = "Manual operator activation") -> None:
+        """Public method to activate the kill switch (operator action)."""
+        self._activate_kill_switch(reason)
 
     def reset_kill_switch(self) -> None:
         """Reset kill switch (operator action)."""
         self._state.kill_switch_active = False
         self._state.kill_switch_reason = None
         logger.info("Kill switch reset by operator")
+
+        # G11: Restore HALTED agents back to PAPER so they can trade again
+        # (they were halted by _activate_kill_switch; leave LIVE/SHADOW untouched
+        #  since those require explicit re-promotion by the operator)
+        try:
+            from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
+            _dc = get_deployment_controller()
+            for _aname, _dep in list(_dc._agents.items()):
+                if _dep.mode == AgentMode.HALTED:
+                    _dc.rollback(_aname, reason="kill_switch_reset")
+                    logger.info("[kill-switch-reset] Restored agent %s to PAPER", _aname)
+        except Exception as _dce:
+            logger.debug("kill_switch_reset DeploymentController restore skipped: %s", _dce)
 
     # ── Rate limit helpers ───────────────────────────────────────────────
 

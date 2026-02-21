@@ -12,15 +12,21 @@ const getEnv = (key: string, fallback: string): string => {
 
 export const API_BASE_URL = getEnv('VITE_API_BASE', "");
 export const WS_URL = getEnv('VITE_WS_URL', `ws://${window?.location?.host || '127.0.0.1:8000'}/ws/trades`);
-export const WS_PORTFOLIO_URL = getEnv('VITE_WS_PORTFOLIO_URL', `ws://${window?.location?.host || '127.0.0.1:8000'}/ws/portfolio`);
+export const WS_PORTFOLIO_URL = getEnv('VITE_WS_PORTFOLIO_URL', `ws://${window?.location?.host || '127.0.0.1:8000'}/ws/risk`);
 
 // API Endpoints
 export const API_ENDPOINTS = {
   // ── System ────────────────────────────────────────────────────
   SYSTEM_HEALTH: "/api/v1/system/health",
   SYSTEM_EXECUTION_GATE: "/api/v1/system/execution-gate",
+  SYSTEM_MODE_SAFETY: "/api/v1/system/mode-safety",
+  SYSTEM_PNL_CONSISTENCY: "/api/v1/system/pnl-consistency",
+  SYSTEM_PRICE_FEED_STALENESS: "/api/v1/system/price-feed-staleness",
+  SYSTEM_SESSION_LOG: "/api/v1/system/session-log",
+  SYSTEM_SYMBOL_STATUS: "/api/v1/system/symbol-status",
+  SYSTEM_FRESH_START: "/api/v1/system/fresh-start",
   SYSTEM_STOP: "/api/v1/monitoring/system/stop",
-  SYSTEM_DECISIONS: "/api/v1/system/decisions/recent",
+  SYSTEM_DECISIONS: "/api/v1/operator/decisions/recent",
   TELEMETRY: "/api/v1/telemetry",
 
   // ── Risk & Protections ────────────────────────────────────────
@@ -55,11 +61,11 @@ export const API_ENDPOINTS = {
   OPERATOR_AGENT_ACTIVITY: "/api/v1/operator/agent-activity",
   OPERATOR_EMERGENCY_STOP: "/api/v1/operator/emergency-stop",
   OPERATOR_RESET_KILL_SWITCH: "/api/v1/operator/reset-kill-switch",
-  OPERATOR_ORDERS: "/api/v1/orders",
-  OPERATOR_AUDIT_TRAIL: "/api/operator/audit-trail",
-  TRADING_MODE_SET: "/api/v1/trading-mode/mode",
-  GUARD_KILL: "/api/v1/loop/guard/kill",
-  GUARD_UNKILL: "/api/v1/loop/guard/unkill",
+  OPERATOR_ORDERS: "/api/v1/kalshi/orders",
+  OPERATOR_AUDIT_TRAIL: "/api/v1/operator/audit-trail",
+  TRADING_MODE_SET: "/api/v1/operator/trading-mode",
+  GUARD_KILL: "/api/v1/operator/guard/kill",
+  GUARD_UNKILL: "/api/v1/operator/guard/unkill",
   DEV_SWARM_PAUSE: "/api/dev-swarm/pause",
   DEV_SWARM_RESUME: "/api/dev-swarm/resume",
   DEV_SWARM_SHUTDOWN: "/api/dev-swarm/shutdown",
@@ -141,6 +147,113 @@ export const API_ENDPOINTS = {
   KALSHI_ORDER_CANCEL: (orderId: string) => `/api/v1/kalshi/orders/${orderId}`,
   KALSHI_ORDER_AMEND: (orderId: string) => `/api/v1/kalshi/orders/${orderId}`,
   KALSHI_ORDERS_BATCH_CANCEL: "/api/v1/kalshi/orders",
+
+  // ── Order Groups ────────────────────────────────────────────────
+  KALSHI_ORDER_GROUPS: "/api/v1/kalshi/order-groups",
+  KALSHI_ORDER_GROUP_DETAIL: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}`,
+  KALSHI_ORDER_GROUP_CREATE: "/api/v1/kalshi/order-groups",
+  KALSHI_ORDER_GROUP_LIMIT: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}/limit`,
+  KALSHI_ORDER_GROUP_TRIGGER: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}/trigger`,
+  KALSHI_ORDER_GROUP_RESET: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}/reset`,
+  KALSHI_ORDER_GROUP_DELETE: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}`,
+  KALSHI_ORDER_GROUP_DASHBOARD: "/api/v1/kalshi/order-groups/dashboard",
+  KALSHI_ORDER_GROUP_STREAM: "/api/v1/kalshi/order-groups/stream",
+  KALSHI_BATCH_ORDERS: "/api/v1/kalshi/orders/batch",
+
+  // ── Deployment Controller (paper → shadow → live) ─────────────────
+  KALSHI_DEPLOYMENT_STATUS: "/api/v1/kalshi/deployment/status",
+  KALSHI_DEPLOYMENT_PROMOTE_SHADOW: "/api/v1/kalshi/deployment/promote-shadow",
+  KALSHI_DEPLOYMENT_PROMOTE_LIVE: "/api/v1/kalshi/deployment/promote-live",
+  KALSHI_DEPLOYMENT_ROLLBACK: "/api/v1/kalshi/deployment/rollback",
+  KALSHI_DEPLOYMENT_HALT: "/api/v1/kalshi/deployment/halt",
+  KALSHI_DEPLOYMENT_TRANSITIONS: "/api/v1/kalshi/deployment/transitions",
+
+  // ── Sentiment API (hashtag + news + FG) ───────────────────────────
+  SENTIMENT_ASSET: (asset: string) => `/api/v1/sentiment/asset/${asset}`,
+  SENTIMENT_ASSETS_ALL: "/api/v1/sentiment/assets",
+  SENTIMENT_EVENT: (eventId: string) => `/api/v1/sentiment/event/${eventId}`,
+  SENTIMENT_MARKET: (marketId: string) => `/api/v1/sentiment/market/${marketId}`,
+  SENTIMENT_HASHTAGS: "/api/v1/sentiment/hashtags",
+  SENTIMENT_HASHTAG_SIGNALS: "/api/v1/sentiment/hashtags/signals",
+  SENTIMENT_NEWS: "/api/v1/sentiment/news",
+  SENTIMENT_RISK_OVERLAY: (asset: string) => `/api/v1/sentiment/risk/${asset}`,
+  SENTIMENT_MONITOR_STATUS: "/api/v1/sentiment/monitor/status",
+  SENTIMENT_MONITOR_FORCE_CYCLE: "/api/v1/sentiment/monitor/force-cycle",
+  SENTIMENT_MONITOR_FORCE_NEWS: "/api/v1/sentiment/monitor/force-news-cycle",
+
+  // ── BTC 15m Risk Layer ─────────────────────────────────────────────
+  KALSHI_RISK_BTC15M_EVALUATE: "/api/v1/kalshi/risk/btc15m/evaluate",
+  KALSHI_RISK_BTC15M_STATUS: "/api/v1/kalshi/risk/btc15m/status",
+  KALSHI_RISK_BTC15M_FEAR_GREED: "/api/v1/kalshi/risk/btc15m/fear-greed",
+  KALSHI_RISK_BTC15M_RECORD_RESULT: "/api/v1/kalshi/risk/btc15m/record-result",
+  KALSHI_RISK_DD_GUARD: "/api/v1/kalshi/risk/dd-guard",
+
+  // ── Market Mood Bus ────────────────────────────────────────────────
+  KALSHI_MOOD: (asset: string, timeframe: string) => `/api/v1/kalshi/mood/${asset}/${timeframe}`,
+  KALSHI_MOOD_ALL: "/api/v1/kalshi/mood/all",
+  KALSHI_MOOD_FEAR_GREED: (asset: string) => `/api/v1/kalshi/mood/fear-greed/${asset}`,
+
+  // ── Swarm Consensus ────────────────────────────────────────────────
+  KALSHI_CONSENSUS: (asset: string, timeframe: string) => `/api/v1/kalshi/consensus/${asset}/${timeframe}`,
+  KALSHI_CONSENSUS_ALL: "/api/v1/kalshi/consensus/all",
+
+  // ── Swarm Journal / Insights ───────────────────────────────────────
+  KALSHI_INSIGHTS: "/api/v1/kalshi/insights",
+
+  // ── Sentiment ────────────────────────────────────────────────────────
+  KALSHI_SENTIMENT_TWITTER: (asset: string) => `/api/v1/kalshi/sentiment/twitter/${asset}`,
+  KALSHI_SENTIMENT_REDDIT: (asset: string) => `/api/v1/kalshi/sentiment/reddit/${asset}`,
+  KALSHI_SENTIMENT_UNIFIED: (asset: string) => `/api/v1/kalshi/sentiment/unified/${asset}`,
+  KALSHI_SENTIMENT_MULTI: "/api/v1/kalshi/sentiment/multi",
+  KALSHI_SENTIMENT_REFRESH: (asset: string) => `/api/v1/kalshi/sentiment/refresh/${asset}`,
+  KALSHI_SENTIMENT_COMPARE: "/api/v1/kalshi/sentiment/compare",
+  
+  // ── SentimentBundle ──────────────────────────────────────────────────
+  KALSHI_SENTIMENT_BUNDLE: (asset: string) => `/api/v1/kalshi/sentiment/bundle/${asset}`,
+  KALSHI_SENTIMENT_BUNDLE_MULTI: "/api/v1/kalshi/sentiment/bundle-multi",
+  KALSHI_SENTIMENT_DECIDE_BTC_15M: "/api/v1/kalshi/sentiment/decide-btc-15m",
+  
+  // ── Threshold Optimizer ─────────────────────────────────────────────
+  KALSHI_SENTIMENT_OPTIMIZE_THRESHOLDS: (asset: string) => `/api/v1/kalshi/sentiment/optimize-thresholds/${asset}`,
+  KALSHI_SENTIMENT_THRESHOLDS_STATUS: "/api/v1/kalshi/sentiment/thresholds/status",
+  KALSHI_SENTIMENT_BACKTEST: (asset: string, days: number) => `/api/v1/kalshi/sentiment/backtest?asset=${asset}&days=${days}`,
+
+  // ── CFGI Fear/Greed ──────────────────────────────────────────────────
+  KALSHI_FEAR_GREED: (asset: string) => `/api/v1/kalshi/sentiment/fear-greed/${asset}`,
+  KALSHI_FEAR_GREED_SUMMARY: "/api/v1/kalshi/sentiment/fear-greed/market-summary",
+  
+  // ── VADER Signal ─────────────────────────────────────────────────────
+  KALSHI_VADER_SIGNAL: "/api/v1/kalshi/sentiment/vader/signal",
+  KALSHI_VADER_KALSHI_ADJUSTMENT: "/api/v1/kalshi/sentiment/vader/kalshi-adjustment",
+  
+  // ── Twitter Streaming ────────────────────────────────────────────────
+  KALSHI_TWITTER_STREAM_START: "/api/v1/kalshi/sentiment/twitter/stream/start",
+  KALSHI_TWITTER_STREAM_STOP: "/api/v1/kalshi/sentiment/twitter/stream/stop",
+  KALSHI_TWITTER_STREAM_ROLLING: (asset: string) => `/api/v1/kalshi/sentiment/twitter/stream/rolling/${asset}`,
+  
+  // ── Full Context ─────────────────────────────────────────────────────
+  KALSHI_SENTIMENT_CONTEXT: (asset: string) => `/api/v1/kalshi/sentiment/context/${asset}`,
+
+  // ── Lane Snapshot (live cached_sentiment from BTC15m lane) ───────────
+  KALSHI_SENTIMENT_LANE_SNAPSHOT: "/api/v1/kalshi/sentiment/lane-snapshot",
+
+  // ── Lane Control ─────────────────────────────────────────────────────
+  KALSHI_LANE_STATUS:  "/api/v1/kalshi/lane/status",
+  KALSHI_LANE_CONTROL: "/api/v1/kalshi/lane/control",
+  KALSHI_LANE_METRICS: "/api/v1/kalshi/lane/metrics",
+
+  // ── Cross-Timeframe Aggregator ────────────────────────────────────────
+  XTF_SIGNAL: (asset: string) => `/api/v1/xtf/signal/${asset}`,
+  XTF_SIGNALS_ALL: "/api/v1/xtf/signals",
+  XTF_STATUS: "/api/v1/xtf/status",
+  XTF_SYNC: "/api/v1/xtf/sync",
+
+  // ── Auto Promoter ─────────────────────────────────────────────────────
+  AUTO_PROMOTER_STATUS: "/api/v1/kalshi/deployment/auto-promoter/status",
+  AUTO_PROMOTER_PROMOTIONS: "/api/v1/kalshi/deployment/auto-promoter/promotions",
+
+  // ── System Config ─────────────────────────────────────────────────────
+  CONFIG_RELOAD: "/api/v1/system/config-reload",
 
 } as const;
 

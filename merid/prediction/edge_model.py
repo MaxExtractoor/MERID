@@ -247,7 +247,7 @@ class EdgeModel:
 
         # Confidence based on:
         # - Data freshness (how old is the spot price?)
-        age_seconds = (datetime.now() - price_data.timestamp).total_seconds()
+        age_seconds = (datetime.now(timezone.utc) - price_data.timestamp).total_seconds()
         freshness = max(0.0, 1.0 - age_seconds / 120.0)  # decays over 2 min
 
         # - Bid-ask spread tightness on exchange

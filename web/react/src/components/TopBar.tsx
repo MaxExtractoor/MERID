@@ -2,6 +2,7 @@ import { Search, Menu, Sun, Moon, Settings } from "lucide-react";
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 import { useTheme } from '../theme';
+import { useKalshiMode } from '../context/KalshiModeContext';
 import LiveNotifications from './LiveNotifications';
 import ConnectionStatusIndicator from './ConnectionStatusIndicator';
 
@@ -20,6 +21,7 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
     API_ENDPOINTS.KALSHI_BALANCE,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
+  const { isLive } = useKalshiMode();
 
   const dailyPnl = pnlData?.daily_pnl_usd ?? 0;
   const pnlPositive = dailyPnl >= 0;
@@ -52,9 +54,15 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
 
         {/* Environment badge */}
         <div className="flex items-center gap-3">
-          <span className="px-3 py-1 text-xs font-bold text-emerald-400 bg-gradient-to-r from-emerald-500/20 to-teal-500/20 border border-emerald-400/50 rounded-full shadow-lg shadow-emerald-500/30 animate-pulse-slow">
-            <span className="inline-block w-2 h-2 bg-emerald-400 rounded-full mr-1.5 animate-pulse"></span>
-            LIVE
+          <span className={`px-3 py-1 text-xs font-bold rounded-full shadow-lg animate-pulse-slow ${
+            isLive
+              ? 'text-red-400 bg-gradient-to-r from-red-500/20 to-rose-500/20 border border-red-400/50 shadow-red-500/30'
+              : 'text-amber-400 bg-gradient-to-r from-amber-500/20 to-yellow-500/20 border border-amber-400/50 shadow-amber-500/30'
+          }`}>
+            <span className={`inline-block w-2 h-2 rounded-full mr-1.5 animate-pulse ${
+              isLive ? 'bg-red-400' : 'bg-amber-400'
+            }`}></span>
+            {isLive ? 'LIVE' : 'PAPER'}
           </span>
           
           {/* Kalshi Balance + Daily P&L */}
@@ -118,8 +126,8 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
         </button>
 
         {/* User avatar */}
-        <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-sm font-bold text-white shadow-lg shadow-blue-500/25">
-          JD
+        <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-sm font-bold text-white shadow-lg shadow-blue-500/25" title="Operator">
+          OP
         </div>
       </div>
     </header>

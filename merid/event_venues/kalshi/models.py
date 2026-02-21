@@ -151,7 +151,8 @@ class KalshiConfig:
             _key_pem = _s.KALSHI_PRIVATE_KEY_PEM
             _use_demo = _s.KALSHI_USE_DEMO
             _api_host = _s.KALSHI_API_HOST
-        except Exception:
+        except Exception as _se:
+            logger.debug("KalshiConfig: settings unavailable, falling back to env: %s", _se)
             _email = os.getenv("KALSHI_EMAIL")
             _password = os.getenv("KALSHI_PASSWORD")
             _api_key = os.getenv("KALSHI_API_KEY_ID") or os.getenv("KALSHI_API_KEY")

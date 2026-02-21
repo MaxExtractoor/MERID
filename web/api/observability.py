@@ -6,7 +6,7 @@ REST API for accessing logs, metrics, alerts, and system health
 from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 from core.observability_manager import (
@@ -185,7 +185,7 @@ async def get_metrics_summary():
         obs_manager = get_observability_manager()
         
         # Get recent metrics (last hour)
-        since = datetime.now() - timedelta(hours=1)
+        since = datetime.now(timezone.utc) - timedelta(hours=1)
         recent_metrics = obs_manager.get_metrics(since=since)
         
         # Group by name and calculate statistics
@@ -224,7 +224,7 @@ async def get_metrics_summary():
                 "total_metrics": len(recent_metrics),
                 "time_range": {
                     "since": since.isoformat(),
-                    "until": datetime.now().isoformat()
+                    "until": datetime.now(timezone.utc).isoformat()
                 }
             }
         }
@@ -302,7 +302,7 @@ async def resolve_alert(alert_name: str, request: AlertResolution):
             "data": {
                 "alert_name": alert_name,
                 "resolved_by": request.resolved_by,
-                "resolved_at": datetime.now().isoformat()
+                "resolved_at": datetime.now(timezone.utc).isoformat()
             }
         }
     except Exception as e:
@@ -386,7 +386,7 @@ async def get_statistics():
     try:
         obs_manager = get_observability_manager()
         
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         last_hour = now - timedelta(hours=1)
         last_24h = now - timedelta(hours=24)
         

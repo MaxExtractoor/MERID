@@ -211,6 +211,9 @@ class PortfolioRiskAgent:
             logger.warning(f"Portfolio risk breaches: {breaches}")
             await self._enforce_breaches(breaches)
 
+        # 5. Auto-rollback check for live agents
+        self._check_agent_auto_rollback(snapshot)
+
     def _check_limits(self, snapshot: PortfolioSnapshot) -> List[str]:
         """Check portfolio against configured limits. Returns list of breach descriptions."""
         breaches: List[str] = []
@@ -265,33 +268,36 @@ class PortfolioRiskAgent:
         if has_critical and not self._kill_switch_active:
             logger.error(f"CRITICAL PORTFOLIO BREACH - Pausing all agents: {breaches}")
             self._kill_switch_active = True
-            
+
             # Pause all trading agents
             for agent in self._agents:
                 if agent.state.enabled:
                     agent.pause()
-                    self._paused_agents.append(agent.config.name)
+                    if agent.config.name not in self._paused_agents:
+                        self._paused_agents.append(agent.config.name)
                     logger.warning(f"Paused agent {agent.config.name} due to portfolio breach")
-        
-        return
-        """Pause agents that are contributing to breaches."""
-        # For daily loss breach — pause ALL agents (kill switch)
-        daily_loss_breach = any("Daily loss" in b for b in breaches)
-        if daily_loss_breach and not self._kill_switch_active:
-            self._kill_switch_active = True
-            logger.error("KILL SWITCH: Daily loss limit breached — pausing all agents")
-            for agent in self._agents:
-                agent.pause()
-                if agent.config.name not in self._paused_agents:
-                    self._paused_agents.append(agent.config.name)
 
-            # Fire alert
+            # Fire alert via PredictionAlertManager
             try:
                 from merid.prediction.alerts import get_alert_manager
                 mgr = get_alert_manager()
-                mgr.kill_switch("Daily loss limit breached — all agents paused")
+                reason = "; ".join(breaches)
+                mgr.fire_kill_switch(reason, unwind=False)
             except Exception as exc:
                 logger.debug(f"Alert manager error (ignored): {exc}")
+
+            # Telegram alert for critical portfolio breach
+            try:
+                import asyncio as _aio
+                from merid.alerts.webhook_client import tg_send
+                _aio.get_running_loop().create_task(tg_send(
+                    f"\u26a0\ufe0f [PortfolioRiskAgent] Critical breach — all agents paused\n"
+                    f"{chr(10).join(breaches)}"
+                ))
+            except RuntimeError:
+                pass  # No running loop — Telegram skipped
+            except Exception as _tg_exc:
+                logger.debug("[portfolio_risk] Telegram failed: %s", _tg_exc)
             return
 
         # For per-asset or per-category breach — pause only relevant agents
@@ -301,12 +307,42 @@ class PortfolioRiskAgent:
                 asset_match = any(asset.upper() in breach.upper() for asset in agent.config.assets)
                 # Check if agent trades the breached category
                 category_match = agent.config.category.upper() in breach.upper()
-                
+
                 if (asset_match or category_match) and agent.state.enabled:
                     agent.pause()
                     if agent.config.name not in self._paused_agents:
                         self._paused_agents.append(agent.config.name)
                     logger.warning(f"Paused {agent.config.name} due to breach: {breach}")
+
+    def _check_agent_auto_rollback(self, snapshot: PortfolioSnapshot) -> None:
+        """Check each live agent for auto-rollback conditions using DeploymentController."""
+        try:
+            from merid.event_venues.kalshi.deployment import get_deployment_controller
+            ctrl = get_deployment_controller()
+        except Exception as _dce:
+            logger.debug("_check_agent_auto_rollback: deployment controller unavailable: %s", _dce)
+            return
+
+        for agent in self._agents:
+            if not agent.state.enabled:
+                continue
+            try:
+                state_dict = agent.state.to_dict()
+                pf = float(state_dict.get("profit_factor", 0.0))
+                dd_pct = float(state_dict.get("max_drawdown_pct", 0.0))
+                consec_losses = int(state_dict.get("consecutive_losses", 0))
+                reason = ctrl.check_auto_rollback(
+                    agent.config.name,
+                    profit_factor=pf,
+                    drawdown_pct=dd_pct,
+                    consecutive_losses=consec_losses,
+                )
+                if reason:
+                    logger.warning(
+                        f"[portfolio-risk] Auto-rollback triggered for {agent.config.name}: {reason}"
+                    )
+            except Exception as exc:
+                logger.debug(f"Auto-rollback check failed for {agent.config.name}: {exc}")
 
     def _sync_to_risk_manager(self, snapshot: PortfolioSnapshot) -> None:
         """Push live portfolio snapshot into KalshiRiskManager state."""
@@ -376,8 +412,8 @@ class PortfolioRiskAgent:
             m = catalog.get_market(ticker)
             if m and m.asset:
                 return m.asset
-        except Exception:
-            pass
+        except Exception as _ace:
+            logger.debug("catalog asset lookup skipped for %s: %s", ticker, _ace)
 
         # Fallback to local inference
         ticker_upper = ticker.upper()

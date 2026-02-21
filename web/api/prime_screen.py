@@ -12,6 +12,9 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 router = APIRouter(prefix="/api/v1/swarm/prime-screen", tags=["prime-screen"])

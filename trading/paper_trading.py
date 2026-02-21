@@ -584,6 +584,33 @@ class PaperTradingEngine:
         self._mark_summary_dirty()
         self._mark_positions_dirty()
 
+        # Publish to streaming_bus.SIMULATION so AuditTrail receives paper fills
+        try:
+            import asyncio as _asyncio
+            from core.streaming_bus import streaming_bus, StreamEvent, EventChannel
+            _sim_event = StreamEvent(
+                channel=EventChannel.SIMULATION,
+                event_type="paper_fill",
+                data={
+                    "order_id": order.order_id,
+                    "user_id": order.user_id,
+                    "asset": order.asset,
+                    "side": order.side,
+                    "size_usd": order.size_usd,
+                    "fill_price": order.fill_price,
+                    "market_type": order.market_type,
+                    "market_id": order.market_id,
+                    "venue": order.venue,
+                    "ts": order.filled_at,
+                },
+                source="paper_trading_engine",
+            )
+            _loop = _asyncio.get_event_loop()
+            if _loop.is_running():
+                _loop.create_task(streaming_bus.publish(_sim_event))
+        except Exception as _exc:
+            logger.debug(f"streaming_bus SIMULATION publish error (non-fatal): {_exc}")
+
         logger.info(f"Order executed: {order.order_id} - {order.asset} {order.side} @ {fill_price}")
         _save_paper_state(self)
     

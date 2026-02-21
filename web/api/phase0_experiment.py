@@ -7,7 +7,7 @@ REST API for controlled trial with explicit constraints and validation.
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from core.phase0_implementation import get_phase0_service
 from utils.logger import get_logger
@@ -306,7 +306,7 @@ async def get_experiment_dashboard():
         total_decisions = len(experiment.weekly_decisions)
         recent_decisions = [
             dec for dec in experiment.weekly_decisions
-            if (datetime.now() - dec.timestamp).days <= 7
+            if (datetime.now(timezone.utc) - dec.timestamp).days <= 7
         ]
         
         # Calculate alignment rate

@@ -149,7 +149,8 @@ class VenueSelector:
             from merid.pipeline.mode_manager import get_mode_manager
             mm = get_mode_manager()
             all_venues = [c.venue for c in mm.venues_by_domain(domain)]
-        except Exception:
+        except Exception as _e:
+            logger.debug("routing_policy: mode_manager unavailable for domain %s: %s", domain, _e)
             all_venues = []
 
         # Preferred first, then any remaining

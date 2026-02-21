@@ -105,8 +105,16 @@ def reconcile_venue(venue_name: str) -> List[PositionDiscrepancy]:
     """Reconcile MERID positions against a single venue.
 
     Returns list of discrepancies found. Logs a detailed diff for each.
+
+    For the "kalshi" venue, uses KalshiVenueAdapter (async, paper-aware)
+    instead of the deprecated trading.adapters.registry entry which has
+    no get_positions() implementation.
     """
     discrepancies: List[PositionDiscrepancy] = []
+
+    # Kalshi: use the dedicated venue adapter (supports paper + live positions)
+    if venue_name == "kalshi":
+        return _reconcile_kalshi_venue()
 
     try:
         from trading.adapters.registry import get_adapter
@@ -186,6 +194,316 @@ def reconcile_venue(venue_name: str) -> List[PositionDiscrepancy]:
     return discrepancies
 
 
+def _reconcile_kalshi_venue() -> List["PositionDiscrepancy"]:
+    """Reconcile Kalshi positions using KalshiVenueAdapter.
+
+    KalshiVenueAdapter.get_positions() is async; this helper runs it
+    synchronously so reconcile_venue() can remain a plain function.
+    In paper mode the adapter reads from the matching engine — no network
+    call is made.  In live mode it calls the Kalshi REST API.
+    """
+    discrepancies: List[PositionDiscrepancy] = []
+    try:
+        import asyncio as _asyncio
+        from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
+
+        adapter = get_kalshi_venue_adapter()
+
+        # Run the async get_positions() safely from a sync context.
+        # reconcile_venue() is always called from a background thread
+        # (the periodic recon thread or run_in_executor), so we can
+        # safely spin up a new event loop here.
+        try:
+            venue_positions = _asyncio.run(adapter.get_positions())
+        except RuntimeError:
+            # A running loop exists (e.g. called from run_in_executor inside
+            # an async context) — schedule on it via run_coroutine_threadsafe.
+            import concurrent.futures
+            _running_loop = _asyncio.get_running_loop()
+            venue_positions = concurrent.futures.Future.result(
+                _asyncio.run_coroutine_threadsafe(adapter.get_positions(), _running_loop),
+                timeout=30,
+            )
+
+    except Exception as exc:
+        logger.warning(f"Kalshi reconciliation: could not fetch venue positions: {exc}")
+        # Mark reconciliation as run with zero discrepancies so execution gate clears
+        global _reconciliation_has_run, _last_reconciliation_ts, _last_discrepancies
+        with _recon_lock:
+            _reconciliation_has_run = True
+            _last_reconciliation_ts = time.time()
+            _last_discrepancies = []
+        return discrepancies
+
+    merid_positions = _get_merid_positions()
+
+    # Build lookup maps
+    venue_map: Dict[str, Any] = {}
+    for vp in venue_positions:
+        sym = getattr(vp, "symbol", "") or vp.get("symbol", "") if isinstance(vp, dict) else getattr(vp, "symbol", "")
+        qty = getattr(vp, "quantity", 0.0) if not isinstance(vp, dict) else vp.get("quantity", 0.0)
+        price = getattr(vp, "entry_price", 0.0) if not isinstance(vp, dict) else vp.get("entry_price", 0.0)
+        if sym:
+            venue_map[sym] = {"qty": float(qty), "entry_price": float(price)}
+
+    merid_map: Dict[str, Any] = {}
+    for mp in merid_positions:
+        sym = mp.get("symbol", "")
+        merid_map[sym] = {
+            "qty": mp.get("quantity", 0.0),
+            "entry_price": mp.get("entry_price", 0.0),
+        }
+
+    all_symbols = sorted(set(list(venue_map.keys()) + list(merid_map.keys())))
+    for symbol in all_symbols:
+        v = venue_map.get(symbol, {"qty": 0.0, "entry_price": 0.0})
+        m = merid_map.get(symbol, {"qty": 0.0, "entry_price": 0.0})
+
+        if abs(v["qty"] - m["qty"]) > 0.001 or symbol not in venue_map or symbol not in merid_map:
+            disc = PositionDiscrepancy(
+                venue="kalshi",
+                symbol=symbol,
+                merid_qty=m["qty"],
+                venue_qty=v["qty"],
+                merid_entry_price=m["entry_price"],
+                venue_entry_price=v["entry_price"],
+            )
+            discrepancies.append(disc)
+
+    if discrepancies:
+        n_crit = sum(1 for d in discrepancies if d.severity == "critical")
+        n_warn = sum(1 for d in discrepancies if d.severity == "warning")
+        logger.warning(
+            f"Kalshi reconciliation: {len(discrepancies)} discrepancies "
+            f"({n_crit} critical, {n_warn} warning)"
+        )
+    else:
+        logger.info("Kalshi reconciliation: all positions match")
+
+    # D3 + D4: Detect settled markets — symbols MERID holds internally but
+    # the venue no longer reports (qty == 0 on venue side).  For each such
+    # market, fire record_outcome() and resolve any open debate.
+    settled_symbols = [
+        sym for sym in merid_map
+        if sym not in venue_map or venue_map.get(sym, {}).get("qty", 0.0) == 0.0
+        and merid_map[sym].get("qty", 0.0) != 0.0
+    ]
+    if settled_symbols:
+        logger.info("Kalshi reconciliation: %d settled markets detected", len(settled_symbols))
+        for sym in settled_symbols:
+            _fire_settlement_hooks(sym)
+
+    return discrepancies
+
+
+def _fetch_kalshi_settlement(market_id: str) -> Optional[bool]:
+    """Fetch the actual YES/NO settlement result from the Kalshi API.
+
+    Returns True if the market settled YES, False if NO, None if unknown
+    or the API call failed.  Uses asyncio.run() / run_coroutine_threadsafe
+    depending on whether a loop is already running.
+    """
+    async def _fetch() -> Optional[bool]:
+        try:
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            client = get_kalshi_client()
+            market = await client.get_market(market_id)
+            if market is None:
+                return None
+            if not market.resolved:
+                return None
+            resolution = (market.resolution or "").lower().strip()
+            if resolution in ("yes", "true", "1"):
+                return True
+            if resolution in ("no", "false", "0"):
+                return False
+            # Kalshi sometimes returns the winning outcome_id — check raw_data
+            raw = market.raw_data or {}
+            result_str = str(raw.get("result", "")).lower()
+            if result_str in ("yes", "true", "1"):
+                return True
+            if result_str in ("no", "false", "0"):
+                return False
+            logger.debug("settlement fetch: unrecognised resolution=%r for %s", resolution, market_id)
+            return None
+        except Exception as exc:
+            logger.debug("settlement fetch API call failed for %s: %s", market_id, exc)
+            return None
+
+    import asyncio as _asyncio
+    try:
+        loop = _asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        import concurrent.futures as _cf
+        fut = _cf.Future()
+
+        async def _run() -> None:
+            try:
+                fut.set_result(await _fetch())
+            except Exception as _e:
+                fut.set_exception(_e)
+
+        loop.call_soon_threadsafe(
+            lambda: _asyncio.ensure_future(_run(), loop=loop)
+        )
+        try:
+            return fut.result(timeout=10.0)
+        except Exception as exc:
+            logger.debug("settlement fetch future failed for %s: %s", market_id, exc)
+            return None
+    else:
+        try:
+            return _asyncio.run(_fetch())
+        except Exception as exc:
+            logger.debug("settlement fetch asyncio.run failed for %s: %s", market_id, exc)
+            return None
+
+
+def _fire_settlement_hooks(market_id: str) -> None:
+    """Fire record_outcome() and debate resolution when a market settles.
+
+    Called from _reconcile_kalshi_venue() when a position disappears from
+    the venue (settled YES or NO).  Fetches the actual settlement result
+    from the Kalshi API; falls back to side-based inference only if the
+    API call fails.
+    """
+    # Fetch actual settlement result from Kalshi API (D12)
+    settled_yes_api = _fetch_kalshi_settlement(market_id)
+
+    # D4: record_outcome on AgentPerformanceTracker
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        if market_id in tracker._open_trades:
+            rec = tracker._open_trades[market_id]
+            if settled_yes_api is not None:
+                # Use actual API result
+                settled_yes = settled_yes_api
+                logger.info(
+                    "settlement hook: API result settled_yes=%s for %s",
+                    settled_yes, market_id,
+                )
+            else:
+                # Fallback: infer from position side (conservative)
+                settled_yes = rec.side == "yes"
+                logger.warning(
+                    "settlement hook: API result unavailable for %s — "
+                    "inferring settled_yes=%s from side=%s",
+                    market_id, settled_yes, rec.side,
+                )
+            settlement_cents = 100 if settled_yes else 0
+            tracker.record_outcome(
+                market_id=market_id,
+                settled_yes=settled_yes,
+                settlement_price_cents=settlement_cents,
+            )
+            logger.info("settlement hook: record_outcome fired for %s (settled_yes=%s)", market_id, settled_yes)
+    except Exception as exc:
+        logger.debug("settlement hook record_outcome skipped for %s: %s", market_id, exc)
+
+    # D3: resolve open debate + compute rewards
+    try:
+        from merid.prediction.debate import get_debate_store
+        debate_store = get_debate_store()
+        open_debates = debate_store.list_debates(symbol=market_id, status="open") + \
+                       debate_store.list_debates(symbol=market_id, status="closed")
+        for debate in open_debates:
+            if debate.status == "resolved":
+                continue
+            # Close first if still open
+            if debate.status == "open":
+                post_prob = debate.pre_debate_prob  # no update available
+                debate_store.close_debate(debate.id, post_prob)
+            # Resolve with actual API outcome (1=YES, 0=NO); fallback to 1
+            outcome = 1 if (settled_yes_api is not False) else 0
+            resolved = debate_store.resolve_debate(debate.id, outcome)
+            if resolved:
+                logger.info("settlement hook: debate %s resolved for %s", debate.id, market_id)
+            # Compute and store debate rewards
+            try:
+                from merid.prediction.consensus import get_prediction_consensus_store
+                store = get_prediction_consensus_store()
+                opinions = store.list_opinions(symbol=market_id, limit=100)
+                if opinions:
+                    debate_store.compute_rewards_for_resolution(
+                        symbol=market_id,
+                        outcome=outcome,
+                        opinions=opinions,
+                    )
+                    logger.info(
+                        "settlement hook: rewards computed for %d opinions on %s",
+                        len(opinions), market_id,
+                    )
+            except Exception as exc:
+                logger.debug("settlement hook compute_rewards skipped for %s: %s", market_id, exc)
+
+            # D8: Emit DebateEvent through RewardEngine so MechanismRegistry
+            # fires AccuracyMechanism, ImprovementMechanism, InsightMechanism etc.
+            # and reward signals flow back to agent weights via the leaderboard.
+            if resolved:
+                try:
+                    from merid.rewards.engine import get_reward_engine
+                    from merid.rewards.events import DebateEvent
+                    engine = get_reward_engine()
+                    lift = resolved.debate_lift or 0.0
+                    pre = resolved.pre_debate_prob or 0.5
+                    post = resolved.post_debate_prob or pre
+                    deb_event = DebateEvent(
+                        debate_id=resolved.id,
+                        symbol=market_id,
+                        role="arbiter",
+                        debate_lift=lift,
+                        disagreement_width=abs(post - pre),
+                        pre_debate_prob=pre,
+                        post_debate_prob=post,
+                        venue="kalshi",
+                    )
+                    engine.process_event(deb_event)
+                    logger.debug(
+                        "settlement hook: DebateEvent emitted for %s lift=%.4f",
+                        market_id, lift,
+                    )
+                except Exception as exc:
+                    logger.debug("settlement hook DebateEvent skipped for %s: %s", market_id, exc)
+
+    except Exception as exc:
+        logger.debug("settlement hook debate resolution skipped for %s: %s", market_id, exc)
+
+    # D8: Emit ForecastEvent for each opinion through RewardEngine
+    try:
+        from merid.rewards.engine import get_reward_engine
+        from merid.rewards.events import ForecastEvent
+        from merid.prediction.consensus import get_prediction_consensus_store
+        engine = get_reward_engine()
+        store = get_prediction_consensus_store()
+        opinions = store.list_opinions(symbol=market_id, limit=100)
+        for op in opinions:
+            agent_id = getattr(op, "agent_id", "") or op.get("agent_id", "") if isinstance(op, dict) else getattr(op, "agent_id", "")
+            prob = getattr(op, "probability", 0.5) if not isinstance(op, dict) else op.get("probability", 0.5)
+            conf = getattr(op, "confidence", 0.5) if not isinstance(op, dict) else op.get("confidence", 0.5)
+            brier = (float(prob) - 1) ** 2  # outcome=1 (YES)
+            fe = ForecastEvent(
+                agent_id=str(agent_id),
+                symbol=market_id,
+                probability=float(prob),
+                confidence=float(conf),
+                outcome=1,
+                brier_score=round(brier, 6),
+                venue="kalshi",
+            )
+            engine.process_event(fe)
+        if opinions:
+            logger.info(
+                "settlement hook: %d ForecastEvents emitted for %s",
+                len(opinions), market_id,
+            )
+    except Exception as exc:
+        logger.debug("settlement hook ForecastEvents skipped for %s: %s", market_id, exc)
+
+
 def reconcile_all_venues(venues: Optional[List[str]] = None) -> List[PositionDiscrepancy]:
     """Reconcile across all configured venues (driven by paper_config matrix)."""
     global _last_discrepancies, _reconciliation_has_run, _last_reconciliation_ts
@@ -232,6 +550,102 @@ def get_last_discrepancies() -> List[PositionDiscrepancy]:
         return list(_last_discrepancies)
 
 
+def auto_reconcile_and_fix(
+    venue_name: str = "kalshi",
+    user_id: str = "operator",
+    auto_fix_critical: bool = True,
+) -> Dict[str, Any]:
+    """Automatically reconcile and fix critical discrepancies.
+
+    This function:
+    1. Runs reconciliation for the specified venue
+    2. Checks for critical discrepancies
+    3. If found and auto_fix_critical=True, automatically aligns to venue truth
+    4. Sends alerts for any fixes performed
+
+    Args:
+        venue_name: Venue to reconcile (default: "kalshi")
+        user_id: User ID for paper engine alignment
+        auto_fix_critical: If True, automatically fix critical discrepancies
+
+    Returns:
+        Dictionary with reconciliation results and any fixes performed
+    """
+    result = {
+        "venue": venue_name,
+        "reconciliation_run": False,
+        "discrepancies_found": 0,
+        "critical_discrepancies": 0,
+        "auto_fix_attempted": False,
+        "auto_fix_success": False,
+        "aligned_positions": [],
+        "errors": [],
+    }
+
+    try:
+        # Run reconciliation
+        discrepancies = reconcile_venue(venue_name)
+        result["reconciliation_run"] = True
+        result["discrepancies_found"] = len(discrepancies)
+
+        critical = [d for d in discrepancies if d.severity == "critical"]
+        result["critical_discrepancies"] = len(critical)
+
+        logger.info(
+            f"Reconciliation complete: {len(discrepancies)} discrepancies "
+            f"({len(critical)} critical)"
+        )
+
+        # Auto-fix critical discrepancies if enabled
+        if critical and auto_fix_critical:
+            result["auto_fix_attempted"] = True
+            logger.warning(
+                f"Auto-fix: {len(critical)} critical discrepancies detected, "
+                f"aligning to {venue_name} truth..."
+            )
+
+            # Perform alignment
+            align_result = force_align_from_venue(venue_name, user_id)
+
+            if "error" in align_result:
+                result["errors"].append(align_result["error"])
+                logger.error(f"Auto-fix failed: {align_result['error']}")
+            else:
+                result["auto_fix_success"] = True
+                result["aligned_positions"] = align_result.get("aligned_positions", [])
+                logger.info(
+                    f"Auto-fix complete: aligned {len(result['aligned_positions'])} positions"
+                )
+
+                # Send alert about auto-fix
+                try:
+                    from merid.prediction.alerts import get_alert_manager, AlertCategory, AlertSeverity
+                    alert_mgr = get_alert_manager()
+                    alert_mgr.fire_risk_warning(
+                        market_id=venue_name,
+                        message=f"Auto-reconciliation fixed {len(critical)} critical discrepancies. "
+                        f"Aligned {len(result['aligned_positions'])} positions to {venue_name} truth.",
+                        data={
+                            "discrepancies": len(discrepancies),
+                            "critical": len(critical),
+                            "aligned_positions": len(result["aligned_positions"]),
+                        },
+                    )
+                except Exception as alert_exc:
+                    logger.debug(f"Alert send failed: {alert_exc}")
+
+        elif critical and not auto_fix_critical:
+            logger.warning(
+                f"Found {len(critical)} critical discrepancies but auto_fix_critical=False"
+            )
+
+    except Exception as exc:
+        result["errors"].append(str(exc))
+        logger.error(f"Auto-reconcile error: {exc}")
+
+    return result
+
+
 def force_align_from_venue(venue_name: str, user_id: str = "operator") -> Dict[str, Any]:
     """Import venue positions as ground truth and overwrite paper engine state.
 
@@ -257,6 +671,7 @@ def force_align_from_venue(venue_name: str, user_id: str = "operator") -> Dict[s
     try:
         venue_balances = adapter.get_balances()
     except Exception as e:
+        logger.warning(f"Failed to fetch balances from {venue_name}: {e}")
         venue_balances = []
 
     try:

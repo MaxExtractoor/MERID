@@ -7,7 +7,7 @@ Replaces restricted APIs with free, unrestricted alternatives.
 
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 
 from data.us_compliant_data_sources import USCompliantDataAggregator, PredictionMarketsAggregator
@@ -68,7 +68,7 @@ async def get_markets(
         # Format response
         response = {
             "status": "success",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "sources": list(set(data.source for data in market_data.values())),
             "markets": []
         }
@@ -166,7 +166,7 @@ async def get_top_liquid_markets(
         
         response = {
             "status": "success",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "markets": []
         }
         
@@ -203,8 +203,8 @@ def _lookup_paper_position(trading_engine, market_id: str) -> dict:
                     size = abs(pos.get("quantity", pos.get("size", 0)))
                     pnl = round(pos.get("unrealized_pnl", 0.0), 2)
                     return {"side": side, "size": size, "pnl": pnl}
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("_get_position_for_market skipped: %s", _e)
     return {"side": "NONE", "size": 0, "pnl": 0.0}
 
 
@@ -261,7 +261,7 @@ async def get_available_sources():
         
         return {
             "status": "success",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "sources": sources
         }
         
@@ -285,7 +285,7 @@ async def health_check():
         
         return {
             "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "sources_active": len(test_data),
             "api_version": "v1.0"
         }
@@ -294,7 +294,7 @@ async def health_check():
         logger.error(f"Health check failed: {e}")
         return {
             "status": "unhealthy",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e),
             "api_version": "v1.0"
         }
@@ -378,7 +378,7 @@ async def websocket_real_time_feed(websocket):
                 current_data = await aggregator.get_cached_data(symbols)
                 await websocket.send_json({
                     "type": "market_update",
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "data": {
                         symbol: {
                             "price": data.price,

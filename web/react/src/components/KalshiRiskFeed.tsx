@@ -121,9 +121,10 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, on
     setActionStatus(prev => ({ ...prev, 'reset-ks': 'pending' }));
     logUxEvent('risk_action', 'reset_kill_switch');
     try {
-      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_KILL_SWITCH}?activate=false`, {
+      const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.OPERATOR_RESET_KILL_SWITCH}`, {
         method: 'POST',
         headers: authHeaders(),
+        body: JSON.stringify({ confirm: true }),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
@@ -226,7 +227,7 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, on
           </div>
           <div>
             <span className="text-gray-500">Positions</span>{' '}
-            <span className="text-white font-mono">{wsSummary.position_count}</span>
+            <span className="text-white font-mono">{wsSummary.position_count ?? 0}</span>
           </div>
           <div>
             <span className="text-gray-500">Exposure</span>{' '}

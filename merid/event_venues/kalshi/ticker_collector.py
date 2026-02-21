@@ -114,8 +114,8 @@ class TickerCollector:
                 "kalshi:price_update",
                 self._on_price_update,
             )
-        except Exception:
-            pass
+        except Exception as _use:
+            logger.debug("event_stream unsubscribe skipped: %s", _use)
         logger.info(
             f"TickerCollector stopped — {self._ticks_ingested} ticks ingested, "
             f"{self._ticks_dropped} dropped"

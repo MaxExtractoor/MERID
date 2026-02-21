@@ -383,6 +383,32 @@ class CryptoComPerpAdapter(PerpVenueAdapterBase):
                 break
         return snapshots
 
+    def _fetch_funding_live(self, symbols: Optional[List[str]]) -> List[FundingRateSnapshot]:
+        endpoint = f"{self.base_url}/public/get-tickers"
+        response = self._client.post(endpoint, json={"id": 12, "method": "public/get-tickers", "params": {}})
+        payload = response.json()
+        entries = payload.get("result", {}).get("data", [])
+        symbol_set = set(symbols) if symbols else None
+        snapshots: List[FundingRateSnapshot] = []
+        for entry in entries:
+            instrument = entry.get("instrument_name")
+            if not instrument or not instrument.endswith("PERP"):
+                continue
+            if symbol_set and instrument not in symbol_set:
+                continue
+            funding = _flt(entry.get("funding_rate"))
+            snapshots.append(
+                FundingRateSnapshot(
+                    venue=self.venue,
+                    symbol=instrument,
+                    funding_rate=funding,
+                    next_settlement_ms=0.0,
+                    estimated_apr=funding * 24 * 365,
+                    metadata={"raw": entry},
+                )
+            )
+        return snapshots
+
 
 class DyDxPerpAdapter(PerpVenueAdapterBase):
     """Adapter for dYdX v3 public REST."""
@@ -489,6 +515,35 @@ class GMXPerpAdapter(PerpVenueAdapterBase):
                 break
         return snapshots
 
+    def _fetch_funding_live(self, symbols: Optional[List[str]]) -> List[FundingRateSnapshot]:
+        if not self.base_url:
+            raise RuntimeError(
+                "GMX base URL missing. Set MERID_GMX_BASE_URL to enable live mode."
+            )
+        response = self._client.get(f"{self.base_url}/perp/tickers")
+        payload = response.json()
+        entries = payload.get("result") or payload.get("data") or payload
+        if isinstance(entries, dict):
+            entries = list(entries.values())
+        symbol_set = set(symbols) if symbols else None
+        snapshots: List[FundingRateSnapshot] = []
+        for entry in entries:
+            symbol = entry.get("symbol") or entry.get("market") or entry.get("name")
+            if not symbol or (symbol_set and symbol not in symbol_set):
+                continue
+            funding = _flt(entry.get("fundingRate"))
+            snapshots.append(
+                FundingRateSnapshot(
+                    venue=self.venue,
+                    symbol=symbol,
+                    funding_rate=funding,
+                    next_settlement_ms=0.0,
+                    estimated_apr=funding * 24 * 365,
+                    metadata={"raw": entry},
+                )
+            )
+        return snapshots
+
 
 class PerpetualProtocolAdapter(PerpVenueAdapterBase):
     """Adapter scaffold for Perpetual Protocol v2 (requires MERID_PERP_PROTOCOL_BASE_URL)."""
@@ -529,6 +584,33 @@ class PerpetualProtocolAdapter(PerpVenueAdapterBase):
             )
         return snapshots
 
+    def _fetch_funding_live(self, symbols: Optional[List[str]]) -> List[FundingRateSnapshot]:
+        if not self.base_url:
+            raise RuntimeError(
+                "Perpetual Protocol base URL missing. Set MERID_PERP_PROTOCOL_BASE_URL to enable live mode."
+            )
+        response = self._client.get(f"{self.base_url}/markets")
+        payload = response.json()
+        entries = payload.get("data") or payload.get("result") or payload
+        symbol_set = set(symbols) if symbols else None
+        snapshots: List[FundingRateSnapshot] = []
+        for entry in entries:
+            symbol = entry.get("symbol") or entry.get("market") or entry.get("ticker")
+            if not symbol or (symbol_set and symbol not in symbol_set):
+                continue
+            funding = _flt(entry.get("fundingRate"))
+            snapshots.append(
+                FundingRateSnapshot(
+                    venue=self.venue,
+                    symbol=symbol,
+                    funding_rate=funding,
+                    next_settlement_ms=0.0,
+                    estimated_apr=funding * 24 * 365,
+                    metadata={"raw": entry},
+                )
+            )
+        return snapshots
+
 
 class DriftPerpAdapter(PerpVenueAdapterBase):
     """Adapter scaffold for Drift Protocol (Solana)."""
@@ -564,6 +646,33 @@ class DriftPerpAdapter(PerpVenueAdapterBase):
                     funding_rate=funding,
                     volume_24h=volume,
                     basis=price - index_price,
+                    metadata={"raw": entry},
+                )
+            )
+        return snapshots
+
+    def _fetch_funding_live(self, symbols: Optional[List[str]]) -> List[FundingRateSnapshot]:
+        if not self.base_url:
+            raise RuntimeError(
+                "Drift base URL missing. Set MERID_DRIFT_BASE_URL to enable live mode."
+            )
+        response = self._client.get(f"{self.base_url}/perp/markets")
+        payload = response.json()
+        entries = payload.get("data") or payload.get("result") or payload
+        symbol_set = set(symbols) if symbols else None
+        snapshots: List[FundingRateSnapshot] = []
+        for entry in entries:
+            symbol = entry.get("symbol") or entry.get("market")
+            if not symbol or (symbol_set and symbol not in symbol_set):
+                continue
+            funding = _flt(entry.get("fundingRate"))
+            snapshots.append(
+                FundingRateSnapshot(
+                    venue=self.venue,
+                    symbol=symbol,
+                    funding_rate=funding,
+                    next_settlement_ms=0.0,
+                    estimated_apr=funding * 24 * 365,
                     metadata={"raw": entry},
                 )
             )

@@ -217,6 +217,7 @@ async def _kalshi_place_order(
     action: str = "buy",
     price_cents: int = 0,
     count: int = 1,
+    agent_name: str = "",
 ) -> ToolResult:
     """Place a YES/NO order on Kalshi."""
     t0 = time.time()
@@ -236,6 +237,25 @@ async def _kalshi_place_order(
             ToolErrorCode.POLICY_BLOCKED, str(exc),
             tool_name="kalshi_place_order",
         )
+
+    # Per-agent deployment mode check (PAPER/SHADOW/LIVE/HALTED)
+    _agent_name = agent_name
+    _agent_mode = None
+    if _agent_name:
+        try:
+            from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
+            _dc = get_deployment_controller()
+            _dep = _dc._agents.get(_agent_name)
+            if _dep:
+                _agent_mode = _dep.mode
+                if _dep.mode == AgentMode.HALTED:
+                    return ToolResult.fail(
+                        ToolErrorCode.POLICY_BLOCKED,
+                        f"Agent {_agent_name} is HALTED — no orders allowed",
+                        tool_name="kalshi_place_order",
+                    )
+        except Exception as _dce:
+            logger.debug("deployment_controller check skipped: %s", _dce)
 
     # Unified execution gate — block live orders when safety checks fail
     if not gate.should_simulate_fill():
@@ -261,8 +281,9 @@ async def _kalshi_place_order(
             tool_name="kalshi_place_order",
         )
 
-    # Simulate if in SIM/PAPER mode
-    if gate.should_simulate_fill():
+    # Simulate if in SIM/PAPER mode OR agent is in PAPER deployment mode
+    _force_paper_deploy = (_agent_mode is not None and _agent_mode.value == "PAPER")
+    if gate.should_simulate_fill() or _force_paper_deploy:
         # Realistic fill simulation using orderbook
         try:
             client = _get_client()
@@ -339,6 +360,9 @@ async def _kalshi_place_order(
                 latency_ms=round((time.time() - t0) * 1000, 2),
             )
 
+    # SHADOW mode: place real order AND record a parallel paper fill
+    _is_shadow = (_agent_mode is not None and _agent_mode.value == "SHADOW")
+
     try:
         from merid.event_venues.base import VenueOrder
 
@@ -372,7 +396,31 @@ async def _kalshi_place_order(
             "count": count,
             "status": placed.status if placed else "unknown",
             "simulated": False,
+            "shadow": _is_shadow,
         }
+
+        # L4: Shadow mode — record parallel paper fill and increment counters
+        if _is_shadow and _agent_name:
+            try:
+                from merid.event_venues.kalshi.deployment import get_deployment_controller
+                get_deployment_controller().record_shadow_trade(_agent_name)
+                from merid.prediction.paper_session import get_paper_session
+                _ps = get_paper_session()
+                if _ps.is_active:
+                    _ps.record_fill(
+                        agent_name=_agent_name,
+                        pnl_cents=0.0,  # PnL unknown at fill time; updated on settlement
+                        fees_cents=0.0,
+                        won=None,
+                    )
+            except Exception as _she:
+                logger.debug("shadow parallel paper record skipped: %s", _she)
+        elif _agent_name:
+            try:
+                from merid.event_venues.kalshi.deployment import get_deployment_controller
+                get_deployment_controller().record_live_trade(_agent_name)
+            except Exception as _lte:
+                logger.debug("live trade record skipped: %s", _lte)
 
         return ToolResult(
             success=True,
@@ -391,7 +439,46 @@ async def _kalshi_place_order(
         )
 
 
-async def _kalshi_cancel_order(order_id: str = "") -> ToolResult:
+async def _kalshi_place_paper_order(
+    ticker: str = "",
+    side: str = "yes",
+    action: str = "buy",
+    price_cents: int = 0,
+    count: int = 1,
+) -> ToolResult:
+    """Force-paper order — always simulated, bypasses venue gate.
+
+    Called by trading_agent._execute_signal when the BTC 15m risk layer
+    returns TradeMode.PAPER regardless of the global venue gate setting.
+    """
+    t0 = time.time()
+    if not ticker:
+        return ToolResult.fail(
+            ToolErrorCode.INVALID_INPUT, "ticker is required",
+            tool_name="kalshi_place_paper_order",
+        )
+    payload = {
+        "order_id": f"paper_{ticker}_{int(time.time() * 1000)}",
+        "ticker": ticker,
+        "side": side,
+        "action": action,
+        "price_cents": price_cents,
+        "count": count,
+        "status": "simulated",
+        "simulated": True,
+        "source": "force_paper",
+    }
+    return ToolResult(
+        success=True,
+        payload=payload,
+        source="kalshi_paper",
+        validity=ToolValidity.SIMULATED,
+        tool_name="kalshi_place_paper_order",
+        latency_ms=round((time.time() - t0) * 1000, 2),
+    )
+
+
+async def _kalshi_cancel_order(order_id: str = "", agent_name: str = "") -> ToolResult:
     """Cancel an open Kalshi order."""
     t0 = time.time()
     if not order_id:
@@ -400,7 +487,7 @@ async def _kalshi_cancel_order(order_id: str = "") -> ToolResult:
             tool_name="kalshi_cancel_order",
         )
 
-    # Simulated orders
+    # Simulated orders — always succeed without hitting the real API
     if order_id.startswith("sim_"):
         return ToolResult(
             success=True,
@@ -410,6 +497,35 @@ async def _kalshi_cancel_order(order_id: str = "") -> ToolResult:
             tool_name="kalshi_cancel_order",
             latency_ms=round((time.time() - t0) * 1000, 2),
         )
+
+    # G7: VenueGate — block real cancel in SIM/PAPER/MOCK mode
+    _gate = get_venue_gate()
+    if _gate.should_simulate_fill():
+        return ToolResult(
+            success=True,
+            payload={"order_id": order_id, "cancelled": True, "simulated": True},
+            source="kalshi_sim",
+            validity=ToolValidity.SIMULATED,
+            tool_name="kalshi_cancel_order",
+            latency_ms=round((time.time() - t0) * 1000, 2),
+        )
+
+    # G7: DeploymentController — block cancel for HALTED/PAPER agents
+    if agent_name:
+        try:
+            from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
+            _dep = get_deployment_controller()._agents.get(agent_name)
+            if _dep and _dep.mode in (AgentMode.HALTED, AgentMode.PAPER):
+                return ToolResult(
+                    success=True,
+                    payload={"order_id": order_id, "cancelled": True, "simulated": True},
+                    source="kalshi_sim",
+                    validity=ToolValidity.SIMULATED,
+                    tool_name="kalshi_cancel_order",
+                    latency_ms=round((time.time() - t0) * 1000, 2),
+                )
+        except Exception as _dce:
+            logger.debug("cancel deployment check skipped: %s", _dce)
 
     try:
         client = _get_client()

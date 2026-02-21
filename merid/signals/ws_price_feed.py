@@ -270,7 +270,7 @@ class WSFeedManager:
         self._active = False
 
     def _on_price_update(self, update: PriceUpdate):
-        """Ingest price data into the onchain feature service."""
+        """Ingest price data into the onchain feature service and streaming bus."""
         try:
             from merid.signals.features import get_feature_service
             svc = get_feature_service()
@@ -284,6 +284,30 @@ class WSFeedManager:
             }, ts=update.timestamp)
         except Exception as e:
             logger.warning(f"Failed to ingest WS price for {update.symbol}: {e}")
+
+        # Bridge into core.streaming_bus so AgentMesh streaming agents receive live prices
+        try:
+            import asyncio as _asyncio
+            from core.streaming_bus import streaming_bus, StreamEvent, EventChannel
+            event = StreamEvent(
+                channel=EventChannel.MARKET_DATA,
+                event_type="ticker",
+                data={
+                    "symbol": update.symbol,
+                    "price": update.price,
+                    "bid": update.bid,
+                    "ask": update.ask,
+                    "volume": update.volume_24h,
+                    "spread_bps": update.spread_bps,
+                },
+                source="coinbase_ws",
+            )
+            try:
+                _asyncio.get_running_loop().create_task(streaming_bus.publish(event))
+            except RuntimeError:
+                pass  # No running loop — skip publish (sync context)
+        except Exception as _e:
+            logger.debug(f"streaming_bus bridge error (non-fatal): {_e}")
 
     @property
     def is_active(self) -> bool:

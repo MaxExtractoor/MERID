@@ -4,6 +4,9 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 from core.agent_orchestrator import get_agent_orchestrator
 from core.cross_domain_portfolio import get_portfolio_engine
@@ -104,6 +107,7 @@ async def _get_kalshi_portfolio() -> Dict[str, Any]:
             "venue": "kalshi",
         }
     except Exception as exc:
+        logger.debug("_get_kalshi_positions skipped: %s", exc)
         return {"error": str(exc), "venue": "kalshi", "positions": []}
 
 
@@ -127,6 +131,7 @@ async def _get_kalshi_risk() -> Dict[str, Any]:
             "venue": "kalshi",
         }
     except Exception as exc:
+        logger.debug("_get_kalshi_risk skipped: %s", exc)
         return {"error": str(exc), "venue": "kalshi"}
 
 
@@ -152,7 +157,7 @@ async def get_x_portfolio(_: None = Depends(_require_service_token)) -> Dict[str
             "current_price": pos.current_price,
             "unrealized_pnl": pos.unrealized_pnl,
         }
-        for pos in engine._positions.values()  # type: ignore[attr-defined]
+        for pos in getattr(engine, 'positions', getattr(engine, '_positions', {})).values()
     ]
     return {
         "portfolio_value": total_value,
@@ -204,7 +209,7 @@ def _collect_incidents() -> List[Dict[str, Any]]:
             }
         )
 
-    for sec_incident in security_system._incidents:  # type: ignore[attr-defined]
+    for sec_incident in getattr(security_system, 'incidents', getattr(security_system, '_incidents', [])):
         if sec_incident.resolved:
             continue
         incidents.append(

@@ -7,7 +7,7 @@ REST API for focused deployment with contract tests and human-centered governanc
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from core.merid_minimal_scope import get_minimal_live_scope, GovernanceScorecard
 from utils.logger import get_logger
@@ -266,7 +266,7 @@ async def get_minimal_scope_dashboard():
                     for s in scorecards
                 ]
             },
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
     except Exception as e:
@@ -307,7 +307,7 @@ async def minimal_scope_health():
                 "message": health_message,
                 "models_in_scope": total_models,
                 "contract_test_failures": failed_contract_tests,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         }
         

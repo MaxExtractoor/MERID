@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 from core.autonomy.control import (
     AutonomyGlobal,
@@ -38,7 +38,8 @@ class AutonomyStateUpdateRequest(BaseModel):
     reason: Optional[str] = Field(None, max_length=512)
     updated_by: Optional[str] = Field(None, max_length=128)
 
-    @validator("global_state")
+    @field_validator("global_state")
+    @classmethod
     def validate_state(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return value
@@ -46,7 +47,8 @@ class AutonomyStateUpdateRequest(BaseModel):
             raise ValueError("global_state must be running, paused, or draining")
         return value
 
-    @validator("mode")
+    @field_validator("mode")
+    @classmethod
     def validate_mode(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return value
@@ -92,7 +94,8 @@ class AutonomyPortfolioUpdateRequest(BaseModel):
     allowed_venues: Optional[List[str]]
     allowed_hours: Optional[str]
 
-    @validator("mandate")
+    @field_validator("mandate")
+    @classmethod
     def validate_mandate(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return value

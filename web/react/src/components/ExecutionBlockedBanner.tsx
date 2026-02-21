@@ -1,5 +1,6 @@
 import { ShieldOff, AlertOctagon, Wifi, DollarSign, FileWarning } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { HelpPopover } from './HelpPopover';
 
 interface BlockReason {
@@ -30,8 +31,8 @@ const SOURCE_ICONS: Record<string, typeof ShieldOff> = {
  */
 export function ExecutionBlockedBanner() {
   const { data } = useApiData<ExecutionGateData>(
-    '/api/v1/system/execution-gate',
-    { pollingInterval: 5000 },
+    API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
 
   if (!data || !data.blocked) return null;

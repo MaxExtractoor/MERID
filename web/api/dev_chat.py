@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 from merid.execution import ExecutionRouter, TraderIdentity, PortfolioSnapshot
 from trading.config.runtime_config import get_runtime_config

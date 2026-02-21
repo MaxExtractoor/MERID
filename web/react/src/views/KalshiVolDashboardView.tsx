@@ -131,7 +131,7 @@ const KalshiVolDashboardView: React.FC = () => {
     consensus_rate: number;
     engine_running: boolean;
   }>(API_ENDPOINTS.KALSHI_CONSENSUS_SIGNALS, slow);
-  const killRes         = useApiData<{ state: string; can_trade: boolean; kill_reason: string | null }>(
+  const killRes         = useApiData<{ active: boolean; can_trade: boolean; kill_reason: string | null }>(
     API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, std,
   );
 
@@ -157,7 +157,7 @@ const KalshiVolDashboardView: React.FC = () => {
   const currentMode = modeRes.data?.mode ?? 'paper';
   const isLive      = modeRes.data?.is_live ?? false;
   const liveEnabled = modeRes.data?.live_enabled ?? false;
-  const killActive  = killRes.data?.state === 'triggered' || risk?.kill_switch_active;
+  const killActive  = killRes.data?.active === true || risk?.kill_switch_active;
   const canTrade    = killRes.data?.can_trade ?? !killActive;
   const isConnected = health?.ws?.running ?? false;
   const healthColor = health?.status === 'healthy' ? 'text-green-400'

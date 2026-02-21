@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 from trading.guards.trading_guard import TradingGuard, CircuitBreakerState
 from trading.config.runtime_config import get_runtime_config, GlobalTradingMode
@@ -223,6 +226,7 @@ async def get_historical_commitments() -> Dict[str, Any]:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as exc:
+        logger.debug("commitment_readiness build skipped: %s", exc)
         return {
             "success": False,
             "message": str(exc),

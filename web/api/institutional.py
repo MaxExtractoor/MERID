@@ -2215,7 +2215,7 @@ async def run_backtest(
     """Run a backtest."""
     try:
         from backtesting.engine import get_backtest_engine, BacktestConfig
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         import uuid
         
         engine = get_backtest_engine()
@@ -2224,8 +2224,8 @@ async def run_backtest(
             backtest_id=f"bt_{uuid.uuid4().hex[:8]}",
             strategy_name=strategy,
             symbols=[symbol],
-            start_date=datetime.now() - timedelta(days=days),
-            end_date=datetime.now(),
+            start_date=datetime.now(timezone.utc) - timedelta(days=days),
+            end_date=datetime.now(timezone.utc),
             initial_capital=initial_capital,
         )
         

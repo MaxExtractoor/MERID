@@ -51,6 +51,7 @@ class OrchestratorAgentManager:
         self.portfolio_risk_agent = None
         self.insight_pipeline = None
         self.kalshi_news_agent = None
+        self.social_broadcaster = None
         self.reflection_system = None
         self.background_tasks: List[asyncio.Task] = []
         self.running = False
@@ -125,6 +126,25 @@ class OrchestratorAgentManager:
         except Exception as exc:
             logger.warning(f"Kalshi insight pipeline not started (non-fatal): {exc}")
 
+        # Start AgentMesh — 8 mandatory streaming agents (market analyst, news, risk, skeptic,
+        # synthesizer, strategy, archivist, meta-audit). Requires WSFeedManager to be running
+        # first so streaming_bus.MARKET_DATA receives live price events.
+        try:
+            from agents.agent_mesh import start_agent_mesh
+            await start_agent_mesh()
+            logger.info("✅ AgentMesh started (8 streaming agents operational)")
+        except Exception as exc:
+            logger.warning(f"AgentMesh not started (non-fatal): {exc}")
+
+        # Start KalshiSocialBroadcaster — consumes kalshi:order_filled/placed/resolved events
+        try:
+            from merid.prediction.social_broadcaster import get_social_broadcaster
+            self.social_broadcaster = get_social_broadcaster()
+            await self.social_broadcaster.start()
+            logger.info("✅ KalshiSocialBroadcaster started (trade event → social log)")
+        except Exception as exc:
+            logger.warning(f"KalshiSocialBroadcaster not started (non-fatal): {exc}")
+
         # Start ReflectionSystem — loads persisted reflections, starts background flush
         try:
             from agents.reflection.integration import get_reflection_system
@@ -132,6 +152,22 @@ class OrchestratorAgentManager:
             logger.info("✅ ReflectionSystem started (persistence, learning, analytics active)")
         except Exception as exc:
             logger.warning(f"ReflectionSystem not started (non-fatal): {exc}")
+
+        # Start LaneOrchestrator — BTC 15m primary lane + phase-gated additional lanes
+        try:
+            from merid.lanes.btc15m_lane import get_lane_orchestrator
+            from merid.risk.promotion_engine import get_promotion_engine
+            _promo = get_promotion_engine()
+            _lane_orch = get_lane_orchestrator(base_equity=10.52)
+            await _lane_orch.start()
+            self._lane_orchestrator = _lane_orch
+            logger.info(
+                "✅ LaneOrchestrator started (BTC 15m primary | phase=%s)",
+                _promo.current_phase.name,
+            )
+        except Exception as exc:
+            logger.warning(f"LaneOrchestrator not started (non-fatal): {exc}")
+            self._lane_orchestrator = None
 
         logger.info(f"✅ {len(self.background_tasks)} orchestrator agents running")
         
@@ -156,6 +192,14 @@ class OrchestratorAgentManager:
             except Exception as exc:
                 logger.warning(f"Kalshi agent grid stop failed: {exc}")
 
+        # Stop LaneOrchestrator
+        if getattr(self, "_lane_orchestrator", None):
+            try:
+                await self._lane_orchestrator.stop()
+                logger.info("✅ LaneOrchestrator stopped")
+            except Exception as exc:
+                logger.warning(f"LaneOrchestrator stop failed: {exc}")
+
         # Stop insight pipeline
         if self.insight_pipeline:
             try:
@@ -163,6 +207,22 @@ class OrchestratorAgentManager:
                 logger.info("✅ Kalshi insight pipeline stopped")
             except Exception as exc:
                 logger.warning(f"Insight pipeline stop failed: {exc}")
+
+        # Stop AgentMesh
+        try:
+            from agents.agent_mesh import stop_agent_mesh
+            await stop_agent_mesh()
+            logger.info("✅ AgentMesh stopped")
+        except Exception as exc:
+            logger.warning(f"AgentMesh stop failed: {exc}")
+
+        # Stop KalshiSocialBroadcaster
+        if self.social_broadcaster:
+            try:
+                await self.social_broadcaster.stop()
+                logger.info("✅ KalshiSocialBroadcaster stopped")
+            except Exception as exc:
+                logger.warning(f"KalshiSocialBroadcaster stop failed: {exc}")
 
         # Shutdown ReflectionSystem — flushes persistence buffer
         if self.reflection_system:

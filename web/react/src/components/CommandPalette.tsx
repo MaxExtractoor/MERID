@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, ClipboardList, Activity } from 'lucide-react';
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid } from 'lucide-react';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -14,20 +14,25 @@ interface CommandItem {
 }
 
 const COMMANDS: CommandItem[] = [
-  { id: 'overview', label: 'Overview', section: 'Live Trading', icon: LayoutDashboard, keywords: ['home', 'dashboard', 'summary'] },
-  { id: 'kalshi-terminal', label: 'Terminal', section: 'Live Trading', icon: Monitor, keywords: ['terminal', 'trade', 'kalshi', 'orderbook', 'ticket'] },
-  { id: 'kalshi-dashboard', label: 'Markets', section: 'Live Trading', icon: BarChart3, keywords: ['kalshi', 'markets', 'catalog', 'discovery'] },
-  { id: 'kalshi-grid', label: 'Agent Grid', section: 'Live Trading', icon: BarChart3, keywords: ['kalshi', 'grid', 'agents', 'paper'] },
-  { id: 'kalshi-portfolio', label: 'Portfolio', section: 'Live Trading', icon: Briefcase, keywords: ['kalshi', 'positions', 'pnl', 'equity'] },
-  { id: 'orders', label: 'Orders', section: 'Live Trading', icon: ClipboardList, keywords: ['order', 'open', 'pending', 'fill', 'cancel'] },
-  { id: 'kalshi-vol-dashboard', label: 'Vol & Sizing', section: 'Live Trading', icon: Gauge, keywords: ['kalshi', 'volatility', 'sizing', 'kelly', 'sharpe'] },
-  { id: 'kalshi-sentiment', label: 'Fear / Greed', section: 'Live Trading', icon: Activity, keywords: ['fear', 'greed', 'sentiment', 'regime', 'index'] },
-  { id: 'kalshi-performance', label: 'Performance', section: 'Live Trading', icon: BarChart3, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
-  { id: 'kill-switch', label: 'Kill Switch', section: 'Risk & Limits', icon: ShieldAlert, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
-  { id: 'operator', label: 'Orchestrator', section: 'System', icon: Monitor, keywords: ['ops', 'control', 'status', 'operator'] },
+  // Trading
+  { id: 'overview', label: 'Overview', section: 'Trading', icon: LayoutDashboard, keywords: ['home', 'dashboard', 'summary'] },
+  { id: 'kalshi-terminal', label: 'Terminal', section: 'Trading', icon: Monitor, keywords: ['terminal', 'trade', 'kalshi', 'orderbook', 'ticket'] },
+  { id: 'kalshi-dashboard', label: 'Markets', section: 'Trading', icon: BarChart3, keywords: ['kalshi', 'markets', 'catalog', 'discovery'] },
+  { id: 'kalshi-portfolio', label: 'Portfolio', section: 'Trading', icon: Briefcase, keywords: ['kalshi', 'positions', 'orders', 'fills', 'pnl', 'equity'] },
+  // Swarm Intelligence
+  { id: 'kalshi-grid', label: 'Agent Grid', section: 'Swarm Intelligence', icon: BarChart3, keywords: ['kalshi', 'grid', 'agents', 'paper'] },
+  { id: 'swarm-consensus', label: 'Swarm Matrix', section: 'Swarm Intelligence', icon: Grid, keywords: ['swarm', 'consensus', 'matrix', 'agents', 'voting', 'direction'] },
+  { id: 'kalshi-performance', label: 'Performance', section: 'Swarm Intelligence', icon: BarChart3, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
+  { id: 'lane-control', label: 'Lane Control', section: 'Swarm Intelligence', icon: GitBranch, keywords: ['lane', 'timeframe', 'cross', 'xtf', 'promoter', 'deployment', 'phase'] },
+  // Analytics
+  { id: 'kalshi-sentiment', label: 'Fear / Greed', section: 'Analytics', icon: Activity, keywords: ['fear', 'greed', 'sentiment', 'regime', 'index'] },
+  { id: 'kalshi-vol-dashboard', label: 'Vol & Sizing', section: 'Analytics', icon: Gauge, keywords: ['kalshi', 'volatility', 'sizing', 'kelly', 'sharpe'] },
+  // Operator
+  { id: 'operator', label: 'Operator', section: 'Operator', icon: Monitor, keywords: ['ops', 'control', 'status', 'operator', 'orchestrator'] },
+  { id: 'kill-switch', label: 'Kill Switch', section: 'Operator', icon: ShieldAlert, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
+  // System
   { id: 'logs', label: 'Logs', section: 'System', icon: Terminal, keywords: ['log', 'error', 'debug'] },
   { id: 'settings', label: 'Settings', section: 'System', icon: Settings, keywords: ['config', 'preference', 'theme'] },
-  { id: 'positions', label: 'Kalshi Positions', section: 'Live Trading', icon: Briefcase, keywords: ['positions', 'holdings', 'kalshi', 'contracts'] },
 ];
 
 interface CommandPaletteProps {

@@ -69,7 +69,11 @@ class KalshiWebSocket(EventVenueStream):
         self._last_message_ts: float = 0.0
         self._connect_ts: float = 0.0
 
-        # ── Performance instrumentation ──────────────────────────────────
+        # ── Order group state tracking ───────────────────────────────────
+        self._order_groups_state: Dict[str, Dict[str, Any]] = {}  # group_id -> latest update
+        self._order_groups_initialized: set = set()  # groups that have received snapshot
+        self._order_group_updates_enabled: bool = False
+        self._watched_group_ids: Optional[set] = None  # None = watch all
         self._loop_lag_samples: List[float] = []    # recent event-loop lag
         self._process_time_sum: float = 0.0         # total handler time (s)
         self._process_time_max: float = 0.0         # worst-case handler (s)
@@ -134,26 +138,49 @@ class KalshiWebSocket(EventVenueStream):
         self._sub_id += 1
         return self._sub_id
 
-    async def subscribe_quotes(self, market_ids: List[str]) -> None:
-        """Subscribe to ticker channel for market quote updates."""
+    async def subscribe_quotes(self, market_ids: Optional[List[str]] = None, event_ticker: Optional[str] = None) -> None:
+        """Subscribe to ticker channel for market quote updates.
+
+        Args:
+            market_ids: List of market tickers to subscribe to
+            event_ticker: Optional event ticker to subscribe to all markets in event
+        """
         if not self._ws:
             raise RuntimeError("WebSocket not connected")
 
-        message = {
+        if not market_ids and not event_ticker:
+            raise ValueError("Must provide either market_ids or event_ticker")
+
+        message: Dict[str, Any] = {
             "id": self._next_sub_id(),
             "cmd": "subscribe",
             "params": {
                 "channels": ["ticker"],
-                "market_tickers": market_ids,
             },
         }
 
-        await self._ws.send(json.dumps(message))
-        self._subscriptions.update(market_ids)
-        logger.info(f"Subscribed to ticker for {len(market_ids)} Kalshi markets")
+        if market_ids:
+            message["params"]["market_tickers"] = market_ids
+            self._subscriptions.update(market_ids)
+        if event_ticker:
+            message["params"]["event_ticker"] = event_ticker
+            self._subscriptions.add(f"event:{event_ticker}")
 
-    async def subscribe_trades(self, market_ids: Optional[List[str]] = None) -> None:
-        """Subscribe to trade channel."""
+        await self._ws.send(json.dumps(message))
+        logger.info(f"Subscribed to Kalshi ticker for {len(market_ids) if market_ids else 0} markets" +
+                   (f", event={event_ticker}" if event_ticker else ""))
+
+    async def subscribe_trades(
+        self,
+        market_ids: Optional[List[str]] = None,
+        event_ticker: Optional[str] = None,
+    ) -> None:
+        """Subscribe to trade channel.
+
+        Args:
+            market_ids: List of market tickers to filter trades
+            event_ticker: Optional event ticker to filter trades by event
+        """
         if not self._ws:
             raise RuntimeError("WebSocket not connected")
 
@@ -161,6 +188,9 @@ class KalshiWebSocket(EventVenueStream):
         if market_ids:
             params["market_tickers"] = market_ids
             self._trade_tickers.update(market_ids)
+        if event_ticker:
+            params["event_ticker"] = event_ticker
+            self._trade_tickers.add(f"event:{event_ticker}")
 
         message = {
             "id": self._next_sub_id(),
@@ -169,27 +199,138 @@ class KalshiWebSocket(EventVenueStream):
         }
 
         await self._ws.send(json.dumps(message))
-        logger.info(f"Subscribed to Kalshi trades")
+        logger.info(f"Subscribed to Kalshi trades" +
+                   (f" for event={event_ticker}" if event_ticker else ""))
 
-    async def subscribe_orderbook(self, market_id: str, outcome_id: Optional[str] = None) -> None:
-        """Subscribe to orderbook_delta channel for a market."""
+    async def subscribe_orderbook(
+        self,
+        market_id: str,
+        event_ticker: Optional[str] = None,
+        outcome_id: Optional[str] = None,
+    ) -> None:
+        """Subscribe to orderbook_delta channel for a market.
+
+        Args:
+            market_id: Market ticker to subscribe to
+            event_ticker: Optional event ticker (for multivariate events)
+            outcome_id: Optional outcome ID for specific orderbook
+        """
+        if not self._ws:
+            raise RuntimeError("WebSocket not connected")
+
+        params: Dict[str, Any] = {
+            "channels": ["orderbook_delta"],
+            "market_tickers": [market_id],
+        }
+        if event_ticker:
+            params["event_ticker"] = event_ticker
+        if outcome_id:
+            params["outcome_id"] = outcome_id
+
+        message = {
+            "id": self._next_sub_id(),
+            "cmd": "subscribe",
+            "params": params,
+        }
+
+        await self._ws.send(json.dumps(message))
+        self._subscriptions.add(f"orderbook:{market_id}")
+        self._orderbook_tickers.add(market_id)
+        logger.info(f"Subscribed to Kalshi orderbook_delta for {market_id}" +
+                   (f" (event={event_ticker})" if event_ticker else ""))
+    
+    async def subscribe_order_group_updates(self) -> None:
+        """Subscribe to order_group_updates channel for real-time group state.
+
+        This is an authenticated private channel that streams updates
+        for order groups including status changes, filled_cost, remaining_cost.
+        """
         if not self._ws:
             raise RuntimeError("WebSocket not connected")
 
         message = {
             "id": self._next_sub_id(),
             "cmd": "subscribe",
-            "params": {
-                "channels": ["orderbook_delta"],
-                "market_tickers": [market_id],
-            },
+            "params": {"channels": ["order_group_updates"]},
         }
 
         await self._ws.send(json.dumps(message))
-        self._subscriptions.add(f"orderbook:{market_id}")
-        self._orderbook_tickers.add(market_id)
-        logger.info(f"Subscribed to Kalshi orderbook_delta for {market_id}")
-    
+        self._order_group_updates_enabled = True
+        logger.info("Subscribed to Kalshi order_group_updates")
+
+    def get_order_group_state(self, group_id: str) -> Optional[Dict[str, Any]]:
+        """Get the latest state for an order group from WS cache.
+
+        Args:
+            group_id: Order group ID
+
+        Returns:
+            Latest order group update dict, or None if no updates received
+        """
+        return self._order_groups_state.get(group_id)
+
+    def get_all_order_group_states(self) -> Dict[str, Dict[str, Any]]:
+        """Get all cached order group states.
+
+        Returns:
+            Dict mapping group_id -> latest update
+        """
+        return dict(self._order_groups_state)
+
+    def set_watched_groups(self, group_ids: Optional[List[str]]) -> None:
+        """Set watched group IDs for client-side filtering.
+
+        When set, only updates for these groups will be stored and forwarded.
+        Set to None to watch all groups.
+
+        Args:
+            group_ids: List of group IDs to watch, or None for all
+        """
+        self._watched_group_ids = set(group_ids) if group_ids else None
+        logger.info(f"Set watched order groups: {group_ids if group_ids else 'all'}")
+
+    def clear_watched_groups(self) -> None:
+        """Clear watched groups filter - watch all groups."""
+        self._watched_group_ids = None
+        logger.info("Cleared watched order groups filter")
+
+    def is_group_watched(self, group_id: str) -> bool:
+        """Check if a group is in the watched set.
+
+        Args:
+            group_id: Order group ID
+
+        Returns:
+            True if group is watched (or no filter set)
+        """
+        if self._watched_group_ids is None:
+            return True
+        return group_id in self._watched_group_ids
+
+    def get_order_group_summary(self, group_id: str) -> Optional[Dict[str, Any]]:
+        """Get a summary of order group state.
+
+        Args:
+            group_id: Order group ID
+
+        Returns:
+            Dict with status, contracts_limit, matched_contracts, etc.
+        """
+        data = self._order_groups_state.get(group_id)
+        if not data:
+            return None
+
+        return {
+            "order_group_id": group_id,
+            "status": data.get("status"),
+            "contracts_limit": data.get("contracts_limit"),
+            "matched_contracts": data.get("matched_contracts"),
+            "filled_cost": data.get("filled_cost"),
+            "remaining_cost": data.get("remaining_cost"),
+            "max_cost": data.get("max_cost"),
+            "is_snapshot": group_id not in self._order_groups_initialized,
+        }
+
     async def listen(self, callback: Callable[[Any], None]) -> None:
         """Listen for WebSocket messages.
 
@@ -306,7 +447,7 @@ class KalshiWebSocket(EventVenueStream):
             # Force a reconnect by closing the socket; the listen loop
             # will catch the resulting exception and call _reconnect.
             if self._ws:
-                asyncio.ensure_future(self._ws.close())
+                asyncio.get_running_loop().create_task(self._ws.close())
         elif code in _WARN_ERROR_CODES:
             logger.warning(
                 f"Kalshi WS error code={code} msg={msg!r} ctx={context} "
@@ -385,11 +526,14 @@ class KalshiWebSocket(EventVenueStream):
                 await self.subscribe_trades(list(self._trade_tickers))
             for ob_ticker in self._orderbook_tickers:
                 await self.subscribe_orderbook(ob_ticker)
+            if self._order_group_updates_enabled:
+                await self.subscribe_order_group_updates()
 
             logger.info(
                 f"Reconnected successfully — resubscribed to "
                 f"{len(ticker_ids)} quotes, {len(self._trade_tickers)} trades, "
-                f"{len(self._orderbook_tickers)} orderbooks"
+                f"{len(self._orderbook_tickers)} orderbooks" +
+                (", order_group_updates" if self._order_group_updates_enabled else "")
             )
         except (ConnectionError, RuntimeError, ValueError) as e:
             logger.error(f"Kalshi reconnection failed: {e}")
@@ -458,6 +602,34 @@ class KalshiWebSocket(EventVenueStream):
                 )
                 return None
             return data  # forward to bridge
+
+        elif channel == "order_group_updates":
+            group_id = data.get("order_group_id") or data.get("group_id")
+            if not group_id:
+                return None
+
+            # Check watched groups filter
+            if not self.is_group_watched(group_id):
+                return None
+
+            # Determine if this is a snapshot (first message) or delta (update)
+            is_snapshot = group_id not in self._order_groups_initialized
+            if is_snapshot:
+                # First message for this group - treat as full snapshot
+                self._order_groups_initialized.add(group_id)
+                self._order_groups_state[group_id] = dict(data)
+                logger.debug(f"Order group snapshot: {group_id} status={data.get('status')}")
+            else:
+                # Delta update - merge into existing state
+                current = self._order_groups_state.get(group_id, {})
+                updated = dict(current)
+                updated.update(data)
+                self._order_groups_state[group_id] = updated
+                logger.debug(f"Order group delta: {group_id} status={data.get('status')}")
+
+            # Mark message with update type for callback
+            data["_update_type"] = "snapshot" if is_snapshot else "delta"
+            return data  # forward to callback
 
         return None
 

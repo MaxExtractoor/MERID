@@ -130,7 +130,19 @@ class RiskController:
             logger.info(f"[risk] New trading day, resetting daily P&L from {self._daily_pnl}")
             self._daily_pnl = 0.0
             self._daily_pnl_reset_date = today
-        
+
+        # Inline daily-loss check: fire kill if limit already breached
+        # (catches cases where _global_kill was not yet set by record_pnl)
+        if (
+            not self._global_kill
+            and self._daily_pnl < 0
+            and abs(self._daily_pnl) >= self.daily_loss_limit
+        ):
+            self._trigger_kill(
+                KillSwitchReason.DAILY_LOSS,
+                f"Daily loss ${abs(self._daily_pnl):.2f} exceeds limit ${self.daily_loss_limit:.2f} (detected in can_trade)",
+            )
+
         return not self._global_kill
     
     def get_state(self) -> KillSwitchState:
@@ -215,9 +227,22 @@ class RiskController:
                 hint="Reset via Mode & Safety panel after investigating the trigger cause.",
                 metadata={"reason": reason.value if hasattr(reason, 'value') else str(reason)},
             )
-        except Exception:
-            pass
+        except Exception as _se_exc:
+            logger.debug("[risk] kill_switch session log failed: %s", _se_exc)
         
+        # Telegram alert — kill switch is the most critical event
+        try:
+            import asyncio as _aio
+            from merid.alerts.webhook_client import tg_send
+            _loop = _aio.get_running_loop()
+            _loop.create_task(tg_send(
+                f"\U0001f6a8 [KILL SWITCH] <b>{reason.value.upper()}</b>\n{details}"
+            ))
+        except RuntimeError:
+            logger.debug("[risk] kill_switch Telegram skipped — no running loop")
+        except Exception as _tg_exc:
+            logger.debug("[risk] kill_switch Telegram failed: %s", _tg_exc)
+
         # Notify callbacks
         for callback in self._callbacks:
             try:
@@ -267,8 +292,8 @@ class RiskController:
                 hint="Monitor for recurrence. If the trigger was automatic, check risk thresholds.",
                 metadata={"operator": operator},
             )
-        except Exception:
-            pass
+        except Exception as _se_exc:
+            logger.debug("[risk] kill_switch reset session log failed: %s", _se_exc)
         
         logger.warning(f"[risk] Kill switch RESET by {operator}")
         return True

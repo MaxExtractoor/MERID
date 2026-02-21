@@ -1085,6 +1085,7 @@ const KalshiDashboardView: React.FC = () => {
           })}
         </div>
       )}
+
       </div>
 
       {/* Market Detail Slide-over */}

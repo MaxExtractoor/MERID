@@ -26,6 +26,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Query
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 signal_layer_router = APIRouter(prefix="/api/v1/signal-layer", tags=["signal-layer"])
 
@@ -338,8 +341,8 @@ def warm_signal_metrics_cache() -> None:
             with _METRICS_LOCK:
                 _METRICS_CACHE = snapshot
                 _METRICS_CACHE_TS = time.monotonic()
-        except Exception:
-            pass  # Non-critical — first request will compute it
+        except Exception as _e:
+            logger.debug("signal_metrics warmup skipped: %s", _e)
 
     t = threading.Thread(target=_warm, daemon=True, name="sig_metrics_warm")
     t.start()

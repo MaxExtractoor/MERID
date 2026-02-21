@@ -394,8 +394,8 @@ def run_paper_scenario(
         _pt_mod._get_risk_controller = old_get_risk
         try:
             set_trade_mode(old_mode, reason="capital_ladder:restore")
-        except Exception:
-            pass
+        except Exception as _tme:
+            logger.debug("trade mode restore skipped: %s", _tme)
 
     _last_metrics = metrics
     logger.info(

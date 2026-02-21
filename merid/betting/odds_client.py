@@ -416,7 +416,8 @@ def _parse_iso(iso_str: str) -> float:
             iso_str = iso_str[:-1] + "+00:00"
         dt = datetime.fromisoformat(iso_str)
         return dt.timestamp()
-    except Exception:
+    except Exception as _e:
+        logger.debug("_parse_iso_to_ts failed for %r: %s", iso_str, _e)
         return 0.0
 
 

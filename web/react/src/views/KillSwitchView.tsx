@@ -71,7 +71,7 @@ const CYCLE: CatMode[] = ['live', 'read-only', 'blocked'];
 
 export default function KillSwitchView() {
   // Real kill switch state from backend
-  const { data: killSwitch, refetch: refetchKillSwitch } = useApiData<KillSwitchState>(
+  const { data: killSwitch, refetch: refetchKillSwitch, lastUpdated: ksLastUpdated } = useApiData<KillSwitchState>(
     API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
@@ -322,7 +322,7 @@ export default function KillSwitchView() {
             </button>
           )}
           <span className="text-xs text-slate-500 flex items-center">
-            {killSwitch ? `Last updated: ${new Date(killSwitch.kill_timestamp || Date.now()).toLocaleTimeString()}` : 'Loading...'}
+            {ksLastUpdated ? `Last updated: ${ksLastUpdated.toLocaleTimeString()}` : 'Loading...'}
           </span>
         </div>
       </div>

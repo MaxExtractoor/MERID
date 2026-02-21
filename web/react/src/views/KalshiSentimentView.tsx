@@ -12,9 +12,10 @@ import React, { useMemo } from 'react';
 import {
   Activity, TrendingUp, TrendingDown, BarChart3,
   AlertTriangle, Gauge, RefreshCw, Flame, Snowflake,
-  ArrowUp, ArrowDown,
+  ArrowUp, ArrowDown, Clock, Zap,
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
+import { useLaneSentimentSnapshot } from '../hooks/useSentimentBundle';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
@@ -163,6 +164,323 @@ function CategoryCard({ name, data }: { name: string; data: SentimentScore }) {
   );
 }
 
+// ── Lane Sentiment Strip ─────────────────────────────────────────────────────
+
+function sigColor(v: number): string {
+  if (v >= 0.15) return 'text-green-400';
+  if (v <= -0.15) return 'text-red-400';
+  return 'text-slate-400';
+}
+
+function fmtSig(v: number): string {
+  return (v >= 0 ? '+' : '') + v.toFixed(3);
+}
+
+function LaneSentimentStrip() {
+  const { snapshot: s, loading, error, refetch } = useLaneSentimentSnapshot();
+
+  const fgRegimeCfg = (r: string) =>
+    ({
+      extreme_fear:  { label: 'Extreme Fear',  color: 'text-red-400',     bg: 'bg-red-500/15' },
+      fear:          { label: 'Fear',          color: 'text-orange-400',  bg: 'bg-orange-500/15' },
+      neutral:       { label: 'Neutral',       color: 'text-yellow-400',  bg: 'bg-yellow-500/15' },
+      greed:         { label: 'Greed',         color: 'text-green-400',   bg: 'bg-green-500/15' },
+      extreme_greed: { label: 'Extreme Greed', color: 'text-emerald-400', bg: 'bg-emerald-500/15' },
+    }[r] ?? { label: r, color: 'text-slate-400', bg: 'bg-slate-800' });
+
+  if (loading && !s) {
+    return (
+      <div className="bg-slate-900/80 rounded-2xl border border-slate-800 p-4 animate-pulse">
+        <div className="h-4 bg-slate-800 rounded w-48 mb-3" />
+        <div className="h-16 bg-slate-800 rounded" />
+      </div>
+    );
+  }
+
+  if (error && !s) {
+    return (
+      <div className="bg-slate-900/80 rounded-2xl border border-amber-800/40 p-4 flex items-center gap-2 text-amber-400 text-xs">
+        <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+        Lane sentiment unavailable — lane may not be running yet.
+      </div>
+    );
+  }
+
+  if (!s) return null;
+
+  const cfg = fgRegimeCfg(s.fg_regime ?? 'neutral');
+  const clamp = s.fg_clamp_breakdown;
+  const isContrarian = (s.fg_index <= 20 && s.combined_raw > 0.2) ||
+                       (s.fg_index >= 80 && s.combined_raw < -0.2);
+
+  return (
+    <div className="bg-slate-900/80 rounded-2xl border border-slate-800 p-4 space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Zap className="w-4 h-4 text-blue-400" />
+          <span className="text-sm font-semibold text-white">BTC 15m Lane · Live Signal</span>
+          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${cfg.color} ${cfg.bg}`}>
+            {cfg.label}
+          </span>
+          {s.fg_is_synthetic && (
+            <span className="flex items-center gap-1 text-[10px] bg-amber-500/15 text-amber-400 px-2 py-0.5 rounded-full">
+              <AlertTriangle className="w-3 h-3" /> synthetic FG
+            </span>
+          )}
+          {isContrarian && (
+            <span className="text-[10px] bg-purple-600/15 text-purple-300 px-2 py-0.5 rounded-full">
+              🎯 contrarian
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {s.sentiment_stale && (
+            <span className="flex items-center gap-1 text-[10px] text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full">
+              <Clock className="w-3 h-3" /> stale
+            </span>
+          )}
+          {s.sentiment_age_seconds != null && (
+            <span className="text-[10px] text-slate-500">{Math.round(s.sentiment_age_seconds)}s ago</span>
+          )}
+          <button onClick={refetch} title="Refresh lane sentiment" className="p-1 rounded hover:bg-slate-800 text-slate-500 hover:text-white transition-colors">
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* FG bar */}
+      <div className="flex items-center gap-3">
+        <div className="flex-1">
+          <div className="flex justify-between text-[10px] text-slate-600 mb-1">
+            <span>0 · Fear</span><span>Greed · 100</span>
+          </div>
+          <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-700 ${
+                s.fg_index <= 20 ? 'bg-red-500' :
+                s.fg_index <= 40 ? 'bg-orange-500' :
+                s.fg_index <= 60 ? 'bg-yellow-500' :
+                s.fg_index <= 80 ? 'bg-green-500' : 'bg-emerald-500'
+              }`}
+              style={{ width: `${s.fg_index}%` }}
+            />
+          </div>
+        </div>
+        <span className={`text-lg font-bold font-mono ${cfg.color} min-w-[2.5rem] text-right`}>
+          {s.fg_index}
+        </span>
+      </div>
+
+      {/* Signal stack */}
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { label: 'Kalman', value: s.combined_smoothed, sub: s.kalman_gain != null ? `gain ${s.kalman_gain.toFixed(2)}` : 'primary' },
+          { label: 'Fib',    value: s.combined_fib,      sub: 'smoothed' },
+          { label: 'Raw',    value: s.combined_raw,      sub: 'Tw+Rd' },
+        ].map(({ label, value, sub }) => (
+          <div key={label} className="bg-slate-800/60 rounded-lg p-2 text-center">
+            <div className="text-[10px] text-slate-500 mb-0.5">{label}</div>
+            <div className={`text-sm font-bold font-mono ${sigColor(value)}`}>{fmtSig(value)}</div>
+            <div className="text-[9px] text-slate-600 mt-0.5">{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Sources + confidence */}
+      <div className="grid grid-cols-4 gap-2 text-xs">
+        {[
+          { label: 'Twitter', value: s.twitter },
+          { label: 'Reddit',  value: s.reddit },
+          { label: 'Conf',    value: s.confidence, pct: true },
+          { label: 'Adj',     value: s.kalshi_prob_adj, pct: true },
+        ].map(({ label, value, pct }) => (
+          <div key={label} className="bg-slate-800/40 rounded px-2 py-1 flex flex-col items-center">
+            <span className="text-[10px] text-slate-500">{label}</span>
+            <span className={`font-mono text-xs ${pct ? 'text-slate-300' : sigColor(value)}`}>
+              {pct ? `${(value * 100).toFixed(0)}%` : fmtSig(value)}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* FG clamp breakdown */}
+      {clamp && (
+        <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-1.5 text-xs border border-slate-700/50">
+          <div className="flex items-center justify-between">
+            <span className="text-slate-400 font-semibold">FG Clamp</span>
+            <span className={`font-mono font-bold ${clamp.sizing_multiplier < 0.8 ? 'text-amber-400' : 'text-green-400'}`}>
+              {(clamp.sizing_multiplier * 100).toFixed(0)}% of base size
+            </span>
+          </div>
+          <div className="flex justify-between text-slate-500">
+            <span>Per-trade cap</span>
+            <span className="font-mono text-slate-300">${clamp.per_trade_cap.toFixed(3)}</span>
+          </div>
+          <div className="flex justify-between text-slate-500">
+            <span>Book cap</span>
+            <span className="font-mono text-slate-300">${clamp.max_book_cap.toFixed(2)}</span>
+          </div>
+          {clamp.rules_fired.length > 0 && (
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              {clamp.rules_fired.map((r: string) => (
+                <span key={r} className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded">
+                  {r}
+                </span>
+              ))}
+            </div>
+          )}
+          {clamp.fg_filter_blocked && (
+            <div className="flex items-center gap-1 text-red-400 text-[10px]">
+              <AlertTriangle className="w-3 h-3" />
+              <span>Directional filter: {clamp.fg_filter_reason}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── Swarm Sentiment Panel ────────────────────────────────────────────────────
+
+function SwarmSentimentPanel() {
+  const { data: assets, loading: assetsLoading } = useApiData<Record<string, any>>(
+    API_ENDPOINTS.SENTIMENT_ASSETS_ALL,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
+  );
+  const { data: signalsData } = useApiData<{ count: number; signals: any[] }>(
+    API_ENDPOINTS.SENTIMENT_HASHTAG_SIGNALS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
+  );
+  const { data: monitor } = useApiData<Record<string, any>>(
+    API_ENDPOINTS.SENTIMENT_MONITOR_STATUS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND }
+  );
+
+  const assetList = useMemo(() => {
+    if (!assets) return [];
+    return Object.entries(assets)
+      .map(([sym, ctx]: [string, any]) => ({ sym, ...ctx }))
+      .sort((a, b) => Math.abs(b.combined_score ?? 0) - Math.abs(a.combined_score ?? 0));
+  }, [assets]);
+
+  const signals = signalsData?.signals ?? [];
+
+  if (assetsLoading && !assets) {
+    return (
+      <div className="bg-slate-900/80 rounded-2xl border border-slate-800 p-4 animate-pulse">
+        <div className="h-4 bg-slate-800 rounded w-56 mb-3" />
+        <div className="h-24 bg-slate-800 rounded" />
+      </div>
+    );
+  }
+
+  if (!assets || assetList.length === 0) {
+    return (
+      <div className="bg-slate-900/80 rounded-2xl border border-amber-800/40 p-4 flex items-center gap-2 text-amber-400 text-xs">
+        <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+        Swarm sentiment unavailable — HashtagMonitor may not be running yet.
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-slate-900/80 rounded-2xl border border-slate-800 p-4 space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Zap className="w-4 h-4 text-purple-400" />
+          <span className="text-sm font-semibold text-white">Swarm Sentiment Intelligence</span>
+          {monitor?.running && (
+            <span className="text-[10px] bg-green-500/15 text-green-400 px-2 py-0.5 rounded-full font-semibold">LIVE</span>
+          )}
+          {monitor && !monitor.running && (
+            <span className="text-[10px] bg-amber-500/15 text-amber-400 px-2 py-0.5 rounded-full font-semibold">STOPPED</span>
+          )}
+        </div>
+        {monitor && (
+          <div className="flex items-center gap-3 text-[10px] text-slate-500">
+            <span>Hashtag: {monitor.hashtag_cycles ?? 0} cycles</span>
+            <span>News: {monitor.news_cycles ?? 0} cycles</span>
+            <span>Signals: {monitor.signals_generated ?? 0}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Asset sentiment cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+        {assetList.slice(0, 10).map((a) => {
+          const score = a.combined_score ?? 0;
+          const label = a.label ?? 'neutral';
+          const conf = a.confidence ?? 0;
+          const contrarian = a.is_contrarian ?? false;
+          const reduce = a.should_reduce_size ?? false;
+          const labelColor = label === 'positive' ? 'text-green-400' : label === 'negative' ? 'text-red-400' : 'text-slate-400';
+          const scoreBg = label === 'positive' ? 'bg-green-500/10' : label === 'negative' ? 'bg-red-500/10' : 'bg-slate-800/60';
+
+          return (
+            <div key={a.sym} className={`rounded-lg border border-slate-700/50 p-2.5 ${scoreBg}`}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-bold text-white">{a.sym}</span>
+                <div className="flex items-center gap-1">
+                  {contrarian && <span className="text-[9px] bg-purple-600/20 text-purple-300 px-1 rounded">CTR</span>}
+                  {reduce && <span className="text-[9px] bg-red-600/20 text-red-300 px-1 rounded">RED</span>}
+                </div>
+              </div>
+              <div className={`text-lg font-bold font-mono ${labelColor}`}>
+                {score >= 0 ? '+' : ''}{score.toFixed(3)}
+              </div>
+              <div className="flex items-center justify-between mt-1">
+                <span className={`text-[10px] font-semibold capitalize ${labelColor}`}>{label}</span>
+                <span className="text-[10px] text-slate-500">{(conf * 100).toFixed(0)}%</span>
+              </div>
+              {a.fg_index != null && (
+                <div className="mt-1 text-[10px] text-slate-500">
+                  FG {a.fg_index} · {(a.fg_regime ?? '').replace(/_/g, ' ')}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Active signals */}
+      {signals.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <Activity className="w-3.5 h-3.5 text-amber-400" />
+            <span className="text-xs font-semibold text-slate-300">Active Signals ({signals.length})</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {signals.slice(0, 6).map((s: any, i: number) => {
+              const dirColor = s.direction === 'bullish' ? 'text-green-400 bg-green-500/10 border-green-800/30'
+                : s.direction === 'bearish' ? 'text-red-400 bg-red-500/10 border-red-800/30'
+                : 'text-slate-400 bg-slate-800/60 border-slate-700/30';
+              return (
+                <div key={i} className={`rounded-lg border p-2 text-xs ${dirColor}`}>
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold">{s.asset_or_event}</span>
+                    <span className="font-semibold capitalize">{s.direction}</span>
+                  </div>
+                  <div className="text-[10px] mt-1 opacity-80">{s.reason}</div>
+                  <div className="flex items-center gap-2 mt-1 text-[10px] opacity-60">
+                    <span>str: {(s.strength ?? 0).toFixed(2)}</span>
+                    <span>vol: {s.volume ?? 0}</span>
+                    {s.tags?.length > 0 && <span>{s.tags.slice(0, 3).join(' ')}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ── Main View ───────────────────────────────────────────────────────────────
 
 export default function KalshiSentimentView() {
@@ -265,7 +583,13 @@ export default function KalshiSentimentView() {
         </div>
       </div>
 
-      {/* ── Category Cards ────────────────────────────────────── */}
+      {/* ── BTC 15m Lane Sentiment Strip ─────────────────── */}
+      <LaneSentimentStrip />
+
+      {/* ── Swarm Sentiment Intelligence ───────────────────── */}
+      <SwarmSentimentPanel />
+
+      {/* ── Category Cards ────────────────────────────────── */}
       {categories.length > 0 && (
         <div>
           <h2 className="text-sm font-semibold text-slate-300 mb-3">By Category</h2>

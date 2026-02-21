@@ -72,11 +72,11 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
             summary["positions"] = [
                 {
                     "ticker": p.symbol,
-                    "outcome": "yes",  # Kalshi uses yes/no
+                    "outcome": getattr(p, "side", getattr(p, "outcome", "yes")).lower(),
                     "size": float(p.quantity),
                     "avg_price": float(p.average_entry_price) if p.average_entry_price else 0.0,
                     "unrealized_pnl": float(p.unrealized_pnl) if p.unrealized_pnl else 0.0,
-                    "realized_pnl": 0.0,  # TODO: Track separately
+                    "realized_pnl": float(getattr(p, "realized_pnl", 0.0) or 0.0),
                 }
                 for p in positions_raw
             ]
@@ -98,17 +98,32 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
                 for o in orders_raw
             ]
             
-            # Get recent fills (last 50)
-            # TODO: Implement get_fills() in venue adapter
-            summary["fills"] = []
-            
-            # Get balance
-            # TODO: Implement get_balance() in venue adapter
-            summary["balance"] = {
-                "usd": 10000.0,  # Placeholder for paper mode
-                "locked": 0.0,
-                "available": 10000.0,
-            }
+            # Get recent fills — aggregate from agent grid
+            try:
+                from merid.prediction.agent_grid import get_agent_grid as _get_ag
+                _grid = _get_ag()
+                _all_fills: list = []
+                for _agent in _grid.agents:
+                    _all_fills.extend(_agent.get_fills(50))
+                _all_fills.sort(key=lambda x: x.get("ts", ""), reverse=True)
+                summary["fills"] = _all_fills[:50]
+            except Exception as _e:
+                logger.debug("fills aggregation skipped: %s", _e)
+                summary["fills"] = []
+
+            # Get balance from Kalshi REST client
+            try:
+                from web.api.kalshi_api import get_balance as _get_bal
+                import asyncio as _aio
+                _bal = await _get_bal()
+                summary["balance"] = {
+                    "usd": float(_bal.get("usd", 0.0)),
+                    "locked": float(_bal.get("locked", 0.0)),
+                    "available": float(_bal.get("available", 0.0)),
+                }
+            except Exception as _e:
+                logger.debug("balance lookup skipped: %s", _e)
+                summary["balance"] = {"usd": 0.0, "locked": 0.0, "available": 0.0}
             
         except Exception as exc:
             logger.warning(f"Failed to fetch positions/orders/balance: {exc}")
@@ -119,33 +134,57 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
         
         # ── Risk Summary ──────────────────────────────────────────────────
         try:
-            # TODO: Wire to real risk manager when available
-            # For now, compute basic risk from positions
             total_notional = sum(
                 abs(p["size"] * p["avg_price"]) for p in summary["positions"]
             )
             total_unrealized_pnl = sum(p["unrealized_pnl"] for p in summary["positions"])
-            
+
+            # Pull real kill-switch state + daily PnL from global risk_controller
+            _ks_active = False
+            _ks_reason = None
+            _daily_pnl = 0.0
+            _drawdown = 0.0
+            _recent_breaches: list = []
+            _limits: dict = {}
+            try:
+                from merid.risk.kill_switches import risk_controller as _rc
+                _rc_status = _rc.get_status()
+                _ks_active = not bool(_rc_status.get("can_trade", True))
+                _ks_reason = _rc_status.get("kill_reason")
+                _daily_pnl = float(_rc_status.get("daily_pnl", 0.0))
+            except Exception as _e:
+                logger.debug("risk_controller status skipped: %s", _e)
+            try:
+                from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr
+                _kr = _gkr()
+                _rs = _kr.summary()
+                if not _ks_active:
+                    _ks_active = bool(_rs.get("kill_switch_active", False))
+                    _ks_reason = _rs.get("kill_switch_reason", _ks_reason)
+                if _daily_pnl == 0.0:
+                    _daily_pnl = float(_rs.get("daily_pnl_usd", _rs.get("daily_total_pnl_usd", 0.0)))
+                _drawdown = float(_rs.get("drawdown_pct", _drawdown))
+                _recent_breaches = _rs.get("recent_breaches", [])
+                _limits = _rs.get("limits", {})
+            except Exception as _e:
+                logger.debug("kalshi_risk summary skipped: %s", _e)
+
             summary["risk"] = {
-                "kill_switch_active": False,
-                "kill_switch_reason": None,
-                "daily_pnl_usd": 0.0,  # TODO: Track daily PnL
+                "kill_switch_active": _ks_active,
+                "kill_switch_reason": _ks_reason,
+                "daily_pnl_usd": _daily_pnl,
                 "total_notional_usd": total_notional,
                 "total_unrealized_pnl_usd": total_unrealized_pnl,
-                "daily_realized_pnl_usd": 0.0,
-                "daily_total_pnl_usd": total_unrealized_pnl,
+                "daily_realized_pnl_usd": _daily_pnl,
+                "daily_total_pnl_usd": _daily_pnl + total_unrealized_pnl,
                 "daily_trades": len(summary["fills"]),
                 "daily_fees_usd": 0.0,
-                "drawdown_pct": 0.0,
+                "drawdown_pct": _drawdown,
                 "category_notional": {},
                 "category_contracts": {},
                 "open_market_count": len(summary["positions"]),
-                "recent_breaches": [],
-                "limits": {
-                    "max_notional_usd": 5000.0,
-                    "max_daily_loss_usd": 250.0,
-                    "max_positions": 20,
-                },
+                "recent_breaches": _recent_breaches,
+                "limits": _limits,
             }
         except Exception as exc:
             logger.warning(f"Failed to compute risk summary: {exc}")
@@ -273,8 +312,19 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
             
             grid = get_agent_grid()
             
+            # Aggregate PnL from paper session
+            _pnl_total = 0.0
+            _pnl_today = 0.0
+            try:
+                from merid.prediction.paper_session import get_paper_session as _gps
+                _sess = _gps()
+                _pnl_total = float(getattr(_sess, "total_pnl_cents", 0.0)) / 100.0
+                _pnl_today = float(getattr(_sess, "session_pnl_cents", 0.0)) / 100.0
+            except Exception as _e:
+                logger.debug("paper_session pnl skipped: %s", _e)
+
             summary["grid"] = {
-                "status": "running" if grid._running else "stopped",
+                "status": "running" if grid.is_running else "stopped",
                 "agents": [
                     {
                         "agent_id": agent.config.agent_id,
@@ -285,8 +335,8 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
                     for agent in grid.agents
                 ],
                 "pnl": {
-                    "total": 0.0,  # TODO: Aggregate from agent states
-                    "today": 0.0,
+                    "total": _pnl_total,
+                    "today": _pnl_today,
                 },
             }
         except Exception as exc:

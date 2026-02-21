@@ -223,6 +223,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Orchestrator agent manager not started (non-fatal): {e}")
 
+    await asyncio.sleep(0)
+
+    # Start PortfolioRiskAgent (cross-asset exposure caps, drawdown, margin monitoring)
+    try:
+        logger.info("Starting portfolio risk agent...")
+        from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
+        from merid.prediction.agent_grid_config import PortfolioRiskConfig
+        portfolio_risk = PortfolioRiskAgent(config=PortfolioRiskConfig())
+        await portfolio_risk.start()
+        app.state.portfolio_risk_agent = portfolio_risk
+        logger.info("✅ Portfolio risk agent started")
+    except Exception as e:
+        logger.warning(f"Portfolio risk agent not started (non-fatal): {e}")
+
     await asyncio.sleep(0)  # Final yield before completing startup
 
     logger.info("=" * 60)
@@ -241,73 +255,93 @@ async def lifespan(app: FastAPI):
         from web.services.price_publisher import get_price_publisher
         price_publisher = get_price_publisher()
         await price_publisher.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: price_publisher stop error: %s", e)
+
     try:
         from web.services.portfolio_publisher import get_portfolio_publisher
         portfolio_publisher = get_portfolio_publisher()
         await portfolio_publisher.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: portfolio_publisher stop error: %s", e)
+
     try:
         health_mon = get_health_monitor()
         await health_mon.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: health_monitor stop error: %s", e)
+
     try:
         alert_mgr = get_alert_manager()
         await alert_mgr.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: alert_manager stop error: %s", e)
+
     try:
         prediction_agg = get_prediction_aggregator()
         await prediction_agg.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: prediction_aggregator stop error: %s", e)
+
     try:
         price_feed = get_live_price_feed()
         price_feed.stop_streaming()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: price_feed stop error: %s", e)
+
     try:
         await agent_mesh.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: agent_mesh stop error: %s", e)
+
     try:
         execution = get_optimal_executor()
         await execution.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: execution stop error: %s", e)
+
     try:
         audit = get_audit_trail()
         await audit.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: audit_trail stop error: %s", e)
+
     try:
         miner = get_continuous_miner()
         await miner.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: miner stop error: %s", e)
+
     try:
         consensus = get_consensus_engine()
         await consensus.stop()
-    except: pass
-    
+    except Exception as e:
+        logger.debug("shutdown: consensus stop error: %s", e)
+
     try:
         orchestrator = get_agent_orchestrator()
         orchestrator.stop()
-    except: pass
+    except Exception as e:
+        logger.debug("shutdown: orchestrator stop error: %s", e)
 
     try:
         from web.startup_agents import get_orchestrator_manager
         orch_mgr = get_orchestrator_manager()
         await orch_mgr.stop_all()
-    except: pass
+    except Exception as e:
+        logger.debug("shutdown: orchestrator_manager stop error: %s", e)
 
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
         await get_ws_bridge().stop()
-    except: pass
+    except Exception as e:
+        logger.debug("shutdown: ws_bridge stop error: %s", e)
+
+    try:
+        if hasattr(app.state, "portfolio_risk_agent"):
+            await app.state.portfolio_risk_agent.stop()
+    except Exception as e:
+        logger.debug("shutdown: portfolio_risk_agent stop error: %s", e)
 
     logger.info("All components stopped - shutdown complete")
 

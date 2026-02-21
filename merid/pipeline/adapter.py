@@ -107,7 +107,8 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
             _key_pem = _s.KALSHI_PRIVATE_KEY_PEM
             _use_demo = _s.KALSHI_USE_DEMO
             _rate_tier = os.getenv("KALSHI_RATE_TIER", "basic")
-        except Exception:
+        except Exception as _se:
+            logger.debug("KalshiPipelineAdapter: settings unavailable, falling back to env: %s", _se)
             _api_key = os.getenv("KALSHI_API_KEY_ID")
             _key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
             _key_pem = None
@@ -140,7 +141,8 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
             await self._client.connect()
             self._connected = True
             return True
-        except Exception:
+        except Exception as _ce:
+            logger.warning("KalshiPipelineAdapter.connect failed: %s", _ce)
             return False
 
     async def disconnect(self) -> bool:

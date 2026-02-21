@@ -14,9 +14,9 @@ export type View =
   | "kalshi-terminal"
   | "kalshi-performance"
   | "kalshi-sentiment"
-  | "positions"
-  | "orders"
   | "operator"
   | "kill-switch"
   | "logs"
-  | "settings";
+  | "settings"
+  | "lane-control"
+  | "swarm-consensus";

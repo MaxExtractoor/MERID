@@ -92,8 +92,90 @@ class KalshiExecutor:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeResult:
         """Submit an order to Kalshi via the canonical venue client."""
-        client = self._get_client()
         meta = metadata or {}
+
+        # Kill switch hard gate — fail-CLOSED on any error
+        try:
+            from merid.risk.kill_switches import risk_controller
+            if not risk_controller.can_trade():
+                reason = risk_controller.get_kill_reason() or "kill_switch_active"
+                return TradeResult(
+                    success=False, venue=self.venue, symbol=symbol,
+                    side=side, size=amount, price=price or 0.0,
+                    error=f"Trading halted: {reason}", metadata={},
+                )
+        except Exception as exc:
+            logger.error("Kill-switch unavailable — blocking order (fail-closed): %s", exc)
+            return TradeResult(
+                success=False, venue=self.venue, symbol=symbol,
+                side=side, size=amount, price=price or 0.0,
+                error=f"Risk controller unavailable: {exc}", metadata={},
+            )
+
+        # VenueGate — block real orders in SIM/PAPER/MOCK mode (fail-CLOSED)
+        try:
+            from merid.prediction.venue_gate import get_venue_gate
+            _gate = get_venue_gate()
+            if _gate.should_simulate_fill():
+                return TradeResult(
+                    success=False, venue=self.venue, symbol=symbol,
+                    side=side, size=amount, price=price or 0.0,
+                    error=f"VenueGate blocked: mode={_gate.mode.value} (paper/sim)",
+                    metadata={"simulated": True},
+                )
+        except Exception as _vge:
+            logger.error("VenueGate unavailable — blocking order (fail-closed): %s", _vge)
+            return TradeResult(
+                success=False, venue=self.venue, symbol=symbol,
+                side=side, size=amount, price=price or 0.0,
+                error=f"VenueGate unavailable: {_vge}", metadata={},
+            )
+
+        # KalshiRiskManager — position limits, category caps, drawdown, rate limiting (fail-CLOSED)
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            _risk = get_kalshi_risk()
+            price_cents = int(round(price * 100)) if price and price <= 1.0 else int(price or 50)
+            _allowed, _reason = _risk.check_order(
+                ticker=symbol, category=None,
+                contracts=int(amount), price_cents=price_cents,
+            )
+            if not _allowed:
+                return TradeResult(
+                    success=False, venue=self.venue, symbol=symbol,
+                    side=side, size=amount, price=price or 0.0,
+                    error=f"Risk check blocked: {_reason}", metadata={},
+                )
+        except Exception as _rke:
+            logger.error("KalshiRiskManager unavailable — blocking order (fail-closed): %s", _rke)
+            return TradeResult(
+                success=False, venue=self.venue, symbol=symbol,
+                side=side, size=amount, price=price or 0.0,
+                error=f"KalshiRiskManager unavailable: {_rke}", metadata={},
+            )
+
+        # DeploymentController — block HALTED/PAPER agents
+        _agent_name = meta.get("agent_name", "")
+        if _agent_name:
+            try:
+                from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
+                _dep = get_deployment_controller()._agents.get(_agent_name)
+                if _dep and _dep.mode in (AgentMode.HALTED, AgentMode.PAPER):
+                    return TradeResult(
+                        success=False, venue=self.venue, symbol=symbol,
+                        side=side, size=amount, price=price or 0.0,
+                        error=f"Agent {_agent_name} is {_dep.mode.value} — no live orders",
+                        metadata={},
+                    )
+            except Exception as _dce:
+                logger.error("DeploymentController unavailable — blocking order (fail-closed): %s", _dce)
+                return TradeResult(
+                    success=False, venue=self.venue, symbol=symbol,
+                    side=side, size=amount, price=price or 0.0,
+                    error=f"DeploymentController unavailable: {_dce}", metadata={},
+                )
+
+        client = self._get_client()
 
         # Kalshi v2 order payload
         # side here is "buy"/"sell" from MERID; Kalshi uses action + side(yes/no)
