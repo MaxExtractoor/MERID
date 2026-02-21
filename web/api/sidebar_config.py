@@ -40,7 +40,7 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 "color": "text-blue-400",
                 "endpoints": [
                     "/api/portfolio/summary",
-                    "/api/system/health",
+                    "/api/v1/system/health",
                     "/api/risk/exposure",
                 ],
                 "workflow_phase": "monitoring",
@@ -79,55 +79,6 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 ],
                 "workflow_phase": "discovery",
                 "links_to": ["kalshi-terminal", "kalshi-grid", "kalshi-portfolio", "orders"],
-            },
-            {
-                "id": "kalshi-grid",
-                "label": "Agent Grid",
-                "href": "kalshi-grid",
-                "icon": "LayoutGrid",
-                "color": "text-orange-500",
-                "endpoints": [
-                    "/api/v1/kalshi-grid/status",
-                    "/api/v1/kalshi-grid/matrix",
-                    "/api/v1/kalshi-grid/agents",
-                ],
-                "workflow_phase": "strategy",
-                "links_to": ["kalshi-dashboard", "kalshi-portfolio", "kalshi-performance"],
-                "bus_channels": [
-                    "kalshi:price_update",
-                    "kalshi:trade",
-                    "kalshi:orderbook_delta",
-                ],
-            },
-            {
-                "id": "kalshi-performance",
-                "label": "Performance",
-                "href": "kalshi-performance",
-                "icon": "Award",
-                "color": "text-emerald-400",
-                "endpoints": [
-                    "/api/v1/kalshi-grid/performance/agents",
-                    "/api/v1/kalshi-grid/performance/summary",
-                    "/api/v1/kalshi-grid/performance/top",
-                    "/api/v1/kalshi-grid/performance/calibration",
-                ],
-                "workflow_phase": "monitoring",
-                "links_to": ["kalshi-grid", "kalshi-portfolio"],
-            },
-            {
-                "id": "calibration-dashboard",
-                "label": "Calibration",
-                "href": "calibration-dashboard",
-                "icon": "Target",
-                "color": "text-rose-400",
-                "endpoints": [
-                    "/api/v1/kalshi/metrics/forecasters",
-                    "/api/v1/kalshi/metrics/resolver",
-                    "/api/v1/kalshi/correlation/matrix",
-                    "/api/v1/kalshi/correlation/clusters",
-                ],
-                "workflow_phase": "monitoring",
-                "links_to": ["kalshi-performance", "kalshi-grid"],
             },
             {
                 "id": "kalshi-portfolio",
@@ -174,6 +125,108 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 "links_to": ["kalshi-portfolio", "kill-switch"],
                 "mode_aware": True,
             },
+        ],
+    },
+    # ── §2 Swarm Intelligence ─────────────────────────────────
+    {
+        "id": "swarm-intelligence",
+        "label": "Swarm Intelligence",
+        "items": [
+            {
+                "id": "kalshi-grid",
+                "label": "Agent Grid",
+                "href": "kalshi-grid",
+                "icon": "LayoutGrid",
+                "color": "text-orange-500",
+                "endpoints": [
+                    "/api/v1/kalshi-grid/status",
+                    "/api/v1/kalshi-grid/matrix",
+                    "/api/v1/kalshi-grid/agents",
+                ],
+                "workflow_phase": "strategy",
+                "links_to": ["kalshi-dashboard", "kalshi-portfolio", "kalshi-performance"],
+                "bus_channels": [
+                    "kalshi:price_update",
+                    "kalshi:trade",
+                    "kalshi:orderbook_delta",
+                ],
+            },
+            {
+                "id": "swarm-consensus",
+                "label": "Swarm Matrix",
+                "href": "swarm-consensus",
+                "icon": "Grid",
+                "color": "text-cyan-500",
+                "endpoints": [
+                    "/api/v1/kalshi/consensus/all",
+                    "/api/v1/kalshi-grid/sentiment",
+                ],
+                "workflow_phase": "strategy",
+                "links_to": ["kalshi-grid", "kalshi-performance", "calibration-dashboard"],
+            },
+            {
+                "id": "kalshi-performance",
+                "label": "Performance",
+                "href": "kalshi-performance",
+                "icon": "Award",
+                "color": "text-emerald-400",
+                "endpoints": [
+                    "/api/v1/kalshi-grid/performance/agents",
+                    "/api/v1/kalshi-grid/performance/summary",
+                    "/api/v1/kalshi-grid/performance/top",
+                    "/api/v1/kalshi-grid/performance/calibration",
+                ],
+                "workflow_phase": "monitoring",
+                "links_to": ["kalshi-grid", "kalshi-portfolio"],
+            },
+            {
+                "id": "calibration-dashboard",
+                "label": "Calibration",
+                "href": "calibration-dashboard",
+                "icon": "Target",
+                "color": "text-rose-400",
+                "endpoints": [
+                    "/api/v1/kalshi/metrics/forecasters",
+                    "/api/v1/kalshi/metrics/resolver",
+                    "/api/v1/kalshi/correlation/matrix",
+                    "/api/v1/kalshi/correlation/clusters",
+                ],
+                "workflow_phase": "monitoring",
+                "links_to": ["kalshi-performance", "kalshi-grid"],
+            },
+            {
+                "id": "lane-control",
+                "label": "Lane Control",
+                "href": "lane-control",
+                "icon": "GitBranch",
+                "color": "text-violet-400",
+                "endpoints": [
+                    "/api/v1/kalshi/lane/status",
+                    "/api/v1/kalshi/lane/control",
+                    "/api/v1/kalshi/lane/metrics",
+                ],
+                "workflow_phase": "strategy",
+                "links_to": ["kalshi-grid", "kalshi-performance"],
+            },
+        ],
+    },
+    # ── §3 Analytics ──────────────────────────────────────────
+    {
+        "id": "analytics",
+        "label": "Analytics",
+        "items": [
+            {
+                "id": "kalshi-sentiment",
+                "label": "Fear / Greed",
+                "href": "kalshi-sentiment",
+                "icon": "Activity",
+                "color": "text-rose-400",
+                "endpoints": [
+                    "/api/v1/kalshi-grid/sentiment",
+                ],
+                "workflow_phase": "monitoring",
+                "links_to": ["kalshi-dashboard", "kalshi-vol-dashboard"],
+            },
             {
                 "id": "kalshi-vol-dashboard",
                 "label": "Vol & Sizing",
@@ -187,21 +240,9 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 "workflow_phase": "strategy",
                 "links_to": ["kalshi-dashboard", "kalshi-portfolio"],
             },
-            {
-                "id": "kalshi-sentiment",
-                "label": "Fear / Greed",
-                "href": "kalshi-sentiment",
-                "icon": "Activity",
-                "color": "text-rose-400",
-                "endpoints": [
-                    "/api/v1/kalshi-grid/sentiment",
-                ],
-                "workflow_phase": "monitoring",
-                "links_to": ["kalshi-dashboard", "kalshi-vol-dashboard"],
-            },
         ],
     },
-    # ── §2 Command Center ─────────────────────────────────────
+    # ── §4 Command Center ─────────────────────────────────────
     {
         "id": "command-center",
         "label": "Command Center",
@@ -239,7 +280,7 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
             },
         ],
     },
-    # ── §3 System ─────────────────────────────────────────────
+    # ── §5 System ─────────────────────────────────────────────
     {
         "id": "system",
         "label": "System",
@@ -289,7 +330,10 @@ WORKFLOW_PHASES: List[Dict[str, Any]] = [
         "id": "strategy",
         "label": "Strategy & Configuration",
         "order": 2,
-        "views": ["kalshi-grid", "kalshi-performance", "operator"],
+        "views": [
+            "kalshi-grid", "swarm-consensus", "kalshi-performance",
+            "calibration-dashboard", "lane-control", "operator",
+        ],
     },
     {
         "id": "execution",

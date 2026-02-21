@@ -271,6 +271,25 @@ export const API_ENDPOINTS = {
   METRICS_MARKET: (marketId: string) => `/api/v1/kalshi/metrics/markets/${marketId}`,
   METRICS_RESOLVER: "/api/v1/kalshi/metrics/resolver",
 
+  // ── Portfolio & Orchestrator ──────────────────────────────────────────
+  PORTFOLIO_SUMMARY: "/api/portfolio/summary",
+  RISK_EXPOSURE: "/api/risk/exposure",
+  ORCHESTRATOR_SUMMARY: "/api/v1/orchestrator/summary",
+
+  // ── Trade Mode & Reconciliation ─────────────────────────────────────
+  TRADE_MODE: "/api/v1/trade-mode",
+  RECONCILIATION_RUN: "/api/v1/reconciliation/run",
+  RECONCILIATION_STATUS: "/api/v1/reconciliation/status",
+
+  // ── Audit Trail ─────────────────────────────────────────────────────
+  AUDIT_TRAIL_SUMMARY: "/api/v1/audit-trail/summary",
+  AUDIT_TRAIL_ENTRIES: "/api/v1/audit-trail/entries",
+
+  // ── UI Sidebar Config ───────────────────────────────────────────────
+  UI_SIDEBAR: "/api/v1/ui/sidebar",
+  UI_MODE_INDICATOR: "/api/v1/ui/mode-indicator",
+  UI_WORKFLOW: "/api/v1/ui/workflow",
+
 } as const;
 
 // WebSocket Events

@@ -25,8 +25,12 @@ const DRAWDOWN_TIER_CONFIG: Record<string, { label: string; color: string; bg: s
 
 type Tab = 'positions' | 'orders' | 'fills' | 'risk';
 
-const KalshiPortfolioView: React.FC = () => {
-  const [tab, setTab] = useState<Tab>('positions');
+interface KalshiPortfolioProps {
+  initialTab?: Tab;
+}
+
+const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => {
+  const [tab, setTab] = useState<Tab>(initialTab ?? 'positions');
   const [assetFilter, setAssetFilter] = useState<string>('');
 
   const pollOpts = { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD };
