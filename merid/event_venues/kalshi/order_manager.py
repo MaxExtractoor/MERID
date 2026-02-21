@@ -229,6 +229,34 @@ class OrderManager:
         except ImportError:
             pass
 
+        # G6: VenueGate — block real orders in SIM/PAPER/MOCK mode
+        try:
+            from merid.prediction.venue_gate import get_venue_gate
+            _gate = get_venue_gate()
+            if _gate.should_simulate_fill():
+                logger.warning(
+                    "[order-manager] Order blocked: VenueGate mode=%s (simulated fill mode)",
+                    _gate.mode.value,
+                )
+                return None
+        except Exception as _vge:
+            logger.debug("[order-manager] VenueGate check skipped: %s", _vge)
+
+        # G6: DeploymentController — block real orders for HALTED or PAPER agents
+        _agent_name = getattr(order, "agent_name", "") or ""
+        if _agent_name:
+            try:
+                from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
+                _dep = get_deployment_controller()._agents.get(_agent_name)
+                if _dep and _dep.mode in (AgentMode.HALTED, AgentMode.PAPER):
+                    logger.warning(
+                        "[order-manager] Order blocked: agent %s is in %s mode",
+                        _agent_name, _dep.mode.value,
+                    )
+                    return None
+            except Exception as _dce:
+                logger.debug("[order-manager] DeploymentController check skipped: %s", _dce)
+
         placed = await self._client.place_order(order)
         if placed is None:
             return None
@@ -247,6 +275,34 @@ class OrderManager:
             created_at=time.time(),
         )
         self._orders[tracked.order_id] = tracked
+
+        # Publish to streaming_bus.EXECUTION so AuditTrail receives order placements
+        try:
+            import asyncio as _asyncio
+            from core.streaming_bus import streaming_bus, StreamEvent, EventChannel
+            _place_event = StreamEvent(
+                channel=EventChannel.EXECUTION,
+                event_type="order_placed",
+                data={
+                    "order_id": tracked.order_id,
+                    "ticker": tracked.ticker,
+                    "side": tracked.side,
+                    "outcome": tracked.outcome,
+                    "size": tracked.requested_size,
+                    "price_cents": tracked.price_cents,
+                    "status": tracked.status,
+                    "ts": tracked.created_at,
+                },
+                source="kalshi_order_manager",
+            )
+            try:
+                _loop = _asyncio.get_running_loop()
+                _loop.create_task(streaming_bus.publish(_place_event))
+            except RuntimeError:
+                pass  # No running loop — skip publish (sync context)
+        except Exception as _exc:
+            logger.debug(f"streaming_bus EXECUTION order_placed publish error (non-fatal): {_exc}")
+
         return tracked
 
     # ── Poll and update ──────────────────────────────────────────────
@@ -340,6 +396,24 @@ class OrderManager:
                 self._on_fill(tracked.order_id, event)
             except Exception as exc:
                 logger.warning(f"Fill callback error for {tracked.order_id}: {exc}")
+
+        # Publish to streaming_bus.EXECUTION so AuditTrail + any EXECUTION subscribers receive fills
+        try:
+            import asyncio as _asyncio
+            from core.streaming_bus import streaming_bus, StreamEvent, EventChannel
+            _exec_event = StreamEvent(
+                channel=EventChannel.EXECUTION,
+                event_type="order_fill",
+                data=event.to_dict(),
+                source="kalshi_order_manager",
+            )
+            try:
+                _loop = _asyncio.get_running_loop()
+                _loop.create_task(streaming_bus.publish(_exec_event))
+            except RuntimeError:
+                pass  # No running loop — skip publish (sync context)
+        except Exception as _exc:
+            logger.debug(f"streaming_bus EXECUTION publish error (non-fatal): {_exc}")
 
     # ── Wait for fill ────────────────────────────────────────────────
 
@@ -488,15 +562,29 @@ class OrderManager:
         if place_flatten_order and filled_before_cancel > 0 and self._client is not None:
             opposite_side = "sell" if tracked.side == "buy" else "buy"
             try:
-                from merid.event_venues.base import VenueOrder
-                flatten_order = VenueOrder(
-                    market_id=tracked.ticker,
-                    side=opposite_side,
-                    size=filled_before_cancel,
-                    order_type="market",
-                    outcome_id=tracked.outcome,
-                )
-                flatten_placed = await self._client.place_order(flatten_order)
+                # G14: VenueGate — skip real flatten order in paper/sim mode
+                _allow_flatten = True
+                try:
+                    from merid.prediction.venue_gate import get_venue_gate as _gvg
+                    if _gvg().should_simulate_fill():
+                        _allow_flatten = False
+                        logger.debug(
+                            "[order-manager] flatten skipped: VenueGate in paper/sim mode for %s",
+                            tracked.ticker,
+                        )
+                except Exception:
+                    pass
+                flatten_placed = None
+                if _allow_flatten:
+                    from merid.event_venues.base import VenueOrder
+                    flatten_order = VenueOrder(
+                        market_id=tracked.ticker,
+                        side=opposite_side,
+                        size=filled_before_cancel,
+                        order_type="market",
+                        outcome_id=tracked.outcome,
+                    )
+                    flatten_placed = await self._client.place_order(flatten_order)
                 if flatten_placed is not None:
                     result.flatten_order_id = flatten_placed.order_id
                     result.flatten_placed = True

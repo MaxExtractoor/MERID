@@ -27,8 +27,8 @@ async def get_grid_summary() -> Dict[str, Any]:
         summary = grid.summary()
         
         return {
-            "running": grid._running,
-            "agent_count": len(grid._agents),
+            "running": grid.is_running,
+            "agent_count": len(grid.agents),
             "summary": summary,
         }
         

@@ -126,7 +126,8 @@ def _get_venue_gate():
     try:
         from merid.prediction.venue_gate import get_venue_gate
         return get_venue_gate()
-    except Exception:
+    except Exception as _e:
+        logger.debug("_get_venue_gate skipped: %s", _e)
         return None
 
 
@@ -189,7 +190,8 @@ async def grid_health() -> Dict[str, Any]:
         }
         if catalog_info["market_count"] == 0:
             issues.append("Market catalog is empty — agents have no markets to trade")
-    except Exception:
+    except Exception as _e:
+        logger.debug("catalog health probe skipped: %s", _e)
         issues.append("Market catalog unavailable")
 
     # WebSocket feed
@@ -205,8 +207,8 @@ async def grid_health() -> Dict[str, Any]:
         }
         if not ws_info["running"]:
             issues.append("WebSocket feed is not running — real-time data unavailable")
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("ws_feed health probe skipped: %s", _e)
 
     # Rate limits (from venue_health if available, else defaults)
     rate_limits_raw = venue_health.get("rate_limits", {})
@@ -220,12 +222,34 @@ async def grid_health() -> Dict[str, Any]:
     if isinstance(write_tokens, (int, float)) and write_tokens < 2:
         issues.append(f"Rate limit nearly exhausted: {write_tokens:.0f} write tokens remaining")
 
-    # Risk snapshot
+    # Risk snapshot — overlay global risk_controller for authoritative daily_pnl
     snapshot = portfolio.get("latest_snapshot") or portfolio
+    _ks_active = bool(portfolio.get("kill_switch_active", False))
+    _daily_pnl = float(snapshot.get("daily_pnl_usd", 0))
+    _drawdown = float(snapshot.get("margin_utilization_pct", snapshot.get("margin_utilization", 0)))
+    try:
+        from merid.risk.kill_switches import risk_controller as _rc
+        _rc_st = _rc.get_status()
+        if not _rc_st.get("can_trade", True):
+            _ks_active = True
+        if _rc_st.get("daily_pnl", 0.0) != 0.0:
+            _daily_pnl = float(_rc_st["daily_pnl"])
+    except Exception as _e:
+        logger.debug("risk_controller status skipped: %s", _e)
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr
+        _krm = _gkr()
+        _krs = _krm.summary()
+        if _krs.get("drawdown_pct", 0) > 0:
+            _drawdown = float(_krs["drawdown_pct"])
+        if _krs.get("daily_pnl_usd", 0) != 0.0 and _daily_pnl == 0.0:
+            _daily_pnl = float(_krs["daily_pnl_usd"])
+    except Exception as _e:
+        logger.debug("kalshi_risk status skipped: %s", _e)
     risk_info: Dict[str, Any] = {
-        "kill_switch": bool(portfolio.get("kill_switch_active", False)),
-        "daily_pnl": float(snapshot.get("daily_pnl_usd", 0)),
-        "drawdown_pct": float(snapshot.get("margin_utilization_pct", snapshot.get("margin_utilization", 0))),
+        "kill_switch": _ks_active,
+        "daily_pnl": _daily_pnl,
+        "drawdown_pct": _drawdown,
     }
 
     return {
@@ -261,8 +285,43 @@ async def list_agents(
     agents: List[Dict[str, Any]] = []
     for a in grid.agents:
         entry = a.summary()
-        entry["signals"] = a.get_signals(include_signals) if include_signals > 0 else []
-        entry["orders"] = a.get_orders(include_orders) if include_orders > 0 else []
+
+        # Normalize signals to KalshiActivityLog shape:
+        #   { ts, market_id, question, side, confidence, ev_cents, agent }
+        raw_signals = a.get_signals(include_signals) if include_signals > 0 else []
+        normalized_signals = []
+        for s in raw_signals:
+            edge_float = s.get("edge") or 0.0
+            action = s.get("action", "")
+            side = "yes" if "YES" in action.upper() or "BUY" in action.upper() else "no"
+            normalized_signals.append({
+                "ts": s.get("ts", ""),
+                "market_id": s.get("market_id", ""),
+                "question": s.get("question", ""),
+                "side": side,
+                "confidence": s.get("confidence") or 0.0,
+                "ev_cents": round(edge_float * 100, 1),
+                "agent": a.config.name,
+            })
+        entry["signals"] = normalized_signals
+
+        # Normalize orders to KalshiActivityLog shape:
+        #   { ts, market_id, side, size, price_cents, status, source, agent }
+        raw_orders = a.get_orders(include_orders) if include_orders > 0 else []
+        normalized_orders = []
+        for o in raw_orders:
+            normalized_orders.append({
+                "ts": o.get("ts", ""),
+                "market_id": o.get("market_id", ""),
+                "side": o.get("side", "yes"),
+                "size": o.get("contracts", o.get("size", 0)),
+                "price_cents": o.get("price_cents") or 0,
+                "status": "filled" if o.get("success") else ("blocked" if o.get("error") else "placed"),
+                "source": "paper" if o.get("simulated") else "live",
+                "agent": a.config.name,
+            })
+        entry["orders"] = normalized_orders
+
         agents.append(entry)
     return {
         "agents": agents,
@@ -285,7 +344,8 @@ async def agent_signals(name: str, limit: int = Query(50, ge=1, le=200)) -> Dict
     agent = _get_grid().get_agent(name)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-    return {"agent": name, "signals": agent.get_signals(limit), "count": len(agent.get_signals(limit))}
+    sigs = agent.get_signals(limit)
+    return {"agent": name, "signals": sigs, "count": len(sigs)}
 
 
 @router.get("/agents/{name}/orders")
@@ -294,7 +354,8 @@ async def agent_orders(name: str, limit: int = Query(50, ge=1, le=200)) -> Dict[
     agent = _get_grid().get_agent(name)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-    return {"agent": name, "orders": agent.get_orders(limit), "count": len(agent.get_orders(limit))}
+    orders = agent.get_orders(limit)
+    return {"agent": name, "orders": orders, "count": len(orders)}
 
 
 @router.get("/fills")
@@ -311,33 +372,83 @@ async def all_fills(limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
 
 @router.get("/pnl")
 async def aggregated_pnl() -> Dict[str, Any]:
-    """Aggregated PnL per asset, per timeframe, and total."""
+    """Aggregated PnL per agent, plus system-wide totals."""
     grid = _get_grid()
     per_agent: List[Dict[str, Any]] = []
     total_fills = 0
-    total_wins = 0
+
+    # Pull per-agent PnL from performance tracker
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        all_metrics = tracker.get_all_metrics()
+    except Exception as _e:
+        logger.debug("agent_performance_tracker skipped: %s", _e)
+        all_metrics = {}
+
     for agent in grid.agents:
         fills = agent.get_fills(200)
         total_fills += len(fills)
+        m = all_metrics.get(agent.config.agent_id) or all_metrics.get(agent.config.name)
         per_agent.append({
             "name": agent.config.name,
             "assets": agent.config.assets,
             "timeframes": agent.config.timeframes,
             "fill_count": len(fills),
             "orders_placed": agent.state.orders_placed,
+            "total_pnl_usd": float(m.total_pnl_usd) if m else 0.0,
+            "win_rate": round(m.win_rate, 3) if m else 0.0,
+            "total_closes": m.total_closes if m else 0,
         })
+
+    # System-wide totals from paper session + performance tracker
+    session_pnl_total = 0.0
+    session_pnl_today = 0.0
+    try:
+        from merid.prediction.paper_session import get_paper_session
+        sess = get_paper_session()
+        session_pnl_total = float(getattr(sess, "total_pnl_cents", 0.0)) / 100.0
+        session_pnl_today = float(getattr(sess, "session_pnl_cents", 0.0)) / 100.0
+    except Exception as _e:
+        logger.debug("paper_session pnl skipped: %s", _e)
+
+    tracker_pnl = 0.0
+    system_win_rate = 0.0
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        sys_summary = get_agent_performance_tracker().get_system_summary()
+        tracker_pnl = float(sys_summary.get("system_pnl_usd", 0))
+        system_win_rate = float(sys_summary.get("system_win_rate", 0))
+    except Exception as _e:
+        logger.debug("tracker system_summary skipped: %s", _e)
+
     return {
         "agents": per_agent,
         "total_fills": total_fills,
         "total_agents": len(grid.agents),
+        "total_pnl_usd": tracker_pnl or session_pnl_total,
+        "session_pnl_usd": session_pnl_today,
+        "system_win_rate": system_win_rate,
     }
 
 
 @router.get("/portfolio")
 async def portfolio_status() -> Dict[str, Any]:
-    """Portfolio risk snapshot."""
+    """Portfolio risk snapshot — equity, daily PnL, open interest, position count."""
     grid = _get_grid()
-    return grid.summary().get("portfolio_risk", {})
+    raw_pr = grid.summary().get("portfolio_risk", {})
+    snapshot = raw_pr.get("latest_snapshot") or {}
+    agents = grid.agents
+    # Count open positions across all agents
+    position_count = sum(len(a.state.active_tickers) for a in agents)
+    return {
+        "equity_usd": float(snapshot.get("total_equity_usd", snapshot.get("total_notional_usd", 0))),
+        "daily_pnl_usd": float(snapshot.get("daily_pnl_usd", 0)),
+        "open_interest": float(snapshot.get("total_notional_usd", 0)),
+        "position_count": position_count,
+        "kill_switch_active": bool(raw_pr.get("kill_switch_active", False)),
+        "margin_utilization": float(snapshot.get("margin_utilization_pct", 0)) / 100.0,
+    }
 
 
 @router.get("/session")
@@ -349,15 +460,31 @@ async def session_status() -> Dict[str, Any]:
 
 # ── Control endpoints ──────────────────────────────────────────────────
 
+def _get_default_trading_mode() -> str:
+    """Get the default trading mode from settings."""
+    try:
+        from merid.settings import settings
+        if settings.MERID_PM_LIVE_ENABLED and settings.MERID_PM_TRADING_MODE == "live":
+            return "live"
+        return settings.MERID_PM_TRADING_MODE or "paper"
+    except Exception as _e:
+        logger.debug("_get_trading_mode settings skipped: %s", _e)
+        return "paper"
+
+
 @router.post("/start")
 async def start_grid(
-    mode: str = Query("paper", description="Trading mode: 'paper' or 'live'"),
+    mode: str = Query(None, description="Trading mode: 'paper' or 'live'. Defaults to MERID_PM_TRADING_MODE from settings."),
 ) -> Dict[str, Any]:
     """Start the agent grid.
 
     Pass ?mode=live to start in live trading mode (requires MERID_PM_LIVE_ENABLED=true).
-    Defaults to paper mode.
+    Defaults to MERID_PM_TRADING_MODE from settings (paper if not configured).
     """
+    # Use configured default if not explicitly provided
+    if mode is None:
+        mode = _get_default_trading_mode()
+        logger.info(f"Using default trading mode from settings: {mode}")
     if mode not in ("paper", "live", "mock"):
         raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'. Use 'paper' or 'live'.")
 

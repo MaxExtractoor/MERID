@@ -256,6 +256,61 @@ class AgentPerformanceTracker:
         if time.time() - self._last_recalc > self._recalc_interval:
             self._recalculate_metrics()
 
+    def record_outcome(
+        self,
+        market_id: str,
+        settled_yes: bool,
+        settlement_price_cents: int = 100,
+    ) -> None:
+        """Record a Kalshi market settlement outcome.
+
+        Called when a market resolves (YES=100c or NO=0c).  Finds the open
+        trade for this market, computes realised P&L from the settlement price,
+        closes the record, and triggers a promotion-engine eligibility check.
+
+        Args:
+            market_id: Kalshi ticker that settled.
+            settled_yes: True if the YES contract paid out (resolved YES).
+            settlement_price_cents: Settlement price in cents (100=YES, 0=NO).
+        """
+        if market_id not in self._open_trades:
+            logger.debug("record_outcome: no open trade for %s — skipping", market_id)
+            return
+
+        record = self._open_trades[market_id]
+        agent_id = record.agent_id
+
+        # Compute realised P&L in cents then convert to USD
+        # YES holder: pnl = (settlement - entry) * contracts
+        # NO  holder: pnl = ((100 - settlement) - (100 - entry)) * contracts
+        #                  = (entry - settlement) * contracts
+        if record.side == "yes":
+            pnl_cents = (settlement_price_cents - record.entry_price_cents) * record.contracts
+        else:
+            pnl_cents = (record.entry_price_cents - settlement_price_cents) * record.contracts
+
+        profit_usd = Decimal(str(round(pnl_cents / 100.0, 4)))
+
+        logger.info(
+            "record_outcome: %s settled_yes=%s pnl=$%.2f agent=%s",
+            market_id, settled_yes, float(profit_usd), agent_id,
+        )
+
+        # Delegate to record_close which handles metrics + reflection feedback
+        self.record_close(
+            agent_id=agent_id,
+            market_id=market_id,
+            exit_price_cents=settlement_price_cents,
+            profit_usd=profit_usd,
+        )
+
+        # Trigger promotion-engine eligibility check
+        try:
+            from merid.promotion_report import run_promotion_check
+            run_promotion_check(agent_id)
+        except Exception as exc:
+            logger.debug("promotion check skipped for %s: %s", agent_id, exc)
+
     # ── Metrics Retrieval ──────────────────────────────────────────
 
     def get_agent_metrics(self, agent_id: str) -> AgentMetrics:
@@ -389,6 +444,10 @@ class AgentPerformanceTracker:
         return round(total / len(trades), 4)
 
     # ── Export ─────────────────────────────────────────────────────
+
+    def get_closed_trade_count(self) -> int:
+        """Return the number of closed trades in history."""
+        return len(self._closed_trades)
 
     def export_trades_csv(self, filepath: str) -> None:
         """Export closed trades to CSV for analysis."""

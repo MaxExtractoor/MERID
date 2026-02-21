@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query
 import httpx
 import re
@@ -33,8 +33,8 @@ router = APIRouter(prefix="/api/v1/intelligence", tags=["intelligence"])
 _news_cache: List[dict] = []
 _defi_cache: Dict = {}
 _market_signals_cache: List[dict] = []
-_last_news_update = datetime.now()
-_last_defi_update = datetime.now()
+_last_news_update = datetime.now(timezone.utc)
+_last_defi_update = datetime.now(timezone.utc)
 
 # API Keys from environment
 MESSARI_API_KEY = os.getenv("MESSARI_API_KEY", "")
@@ -50,7 +50,7 @@ async def fetch_coingecko_news():
                 url = "https://api.coingecko.com/api/v3/news"
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -62,7 +62,7 @@ async def fetch_coingecko_news():
                     'url': item.get('url', ''),
                     'source': 'CoinGecko',
                     'author': item.get('author', 'Unknown'),
-                    'timestamp': item.get('updated_at', datetime.now().isoformat()),
+                    'timestamp': item.get('updated_at', datetime.now(timezone.utc).isoformat()),
                     'sentiment': analyze_sentiment(item.get('title', '') + ' ' + item.get('description', '')),
                     'category': categorize_news(item.get('title', '') + ' ' + item.get('description', ''))
                 }
@@ -86,7 +86,7 @@ async def fetch_cryptopanic_news():
                 url = "https://cryptopanic.com/api/v1/posts/?auth_token=free&public=true"
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -97,7 +97,7 @@ async def fetch_cryptopanic_news():
                     'url': item.get('url', ''),
                     'source': 'CryptoPanic',
                     'author': item.get('source', {}).get('title', 'Unknown'),
-                    'timestamp': item.get('published_at', datetime.now().isoformat()),
+                    'timestamp': item.get('published_at', datetime.now(timezone.utc).isoformat()),
                     'sentiment': analyze_sentiment(item.get('title', '')),
                     'category': categorize_news(item.get('title', '')),
                     'votes': {
@@ -122,7 +122,7 @@ async def fetch_rss_feed(url: str, source_name: str):
             with httpx.Client(timeout=15.0, verify=False) as client:
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             content = response.text
@@ -146,7 +146,7 @@ async def fetch_rss_feed(url: str, source_name: str):
                     'url': link.text if link is not None else '',
                     'source': source_name,
                     'author': source_name,
-                    'timestamp': pub_date.text if pub_date is not None else datetime.now().isoformat(),
+                    'timestamp': pub_date.text if pub_date is not None else datetime.now(timezone.utc).isoformat(),
                     'sentiment': analyze_sentiment(title_text + ' ' + desc_text),
                     'category': categorize_news(title_text + ' ' + desc_text)
                 })
@@ -194,7 +194,7 @@ async def fetch_messari_news():
                         'url': item.get('url', ''),
                         'source': 'Messari',
                         'author': item.get('author', {}).get('name', 'Messari Research'),
-                        'timestamp': item.get('published_at', datetime.now().isoformat()),
+                        'timestamp': item.get('published_at', datetime.now(timezone.utc).isoformat()),
                         'sentiment': analyze_sentiment(item.get('title', '')),
                         'category': 'research',
                         'tags': item.get('tags', [])
@@ -216,7 +216,7 @@ async def fetch_defi_pulse_data():
                 url = 'https://api.llama.fi/protocols'
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -238,9 +238,9 @@ async def fetch_defi_pulse_data():
                     for p in protocols
                 ],
                 'total_tvl': sum(p.get('tvl') or 0 for p in protocols),
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
-            _last_defi_update = datetime.now()
+            _last_defi_update = datetime.now(timezone.utc)
             logger.info(f"[Intelligence] Fetched {len(protocols)} DeFi protocols")
             return _defi_cache
     except Exception as e:
@@ -258,7 +258,7 @@ async def fetch_fear_greed_index():
                 url = 'https://api.alternative.me/fng/?limit=30'
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -281,7 +281,7 @@ async def fetch_global_market_data():
                 url = 'https://api.coingecko.com/api/v3/global'
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -300,7 +300,7 @@ async def fetch_trending_coins():
                 url = 'https://api.coingecko.com/api/v3/search/trending'
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -418,7 +418,7 @@ async def aggregate_news():
     unique_news.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
     
     _news_cache = unique_news[:100]  # Keep top 100 for institutional coverage
-    _last_news_update = datetime.now()
+    _last_news_update = datetime.now(timezone.utc)
     
     logger.info(f"[Intelligence] Aggregated {len(_news_cache)} unique news items from {len(source_counts)} sources")
 @router.get("/news")
@@ -430,7 +430,7 @@ async def get_news(
 ):
     """Get aggregated news with filtering."""
     # Update if cache is stale (older than 5 minutes)
-    if not _news_cache or (datetime.now() - _last_news_update).total_seconds() > 300:
+    if not _news_cache or (datetime.now(timezone.utc) - _last_news_update).total_seconds() > 300:
         await aggregate_news()
     
     news = list(_news_cache)
@@ -557,7 +557,7 @@ async def refresh_news():
         'status': 'success',
         'message': 'News refreshed',
         'count': len(_news_cache),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat()
     }
 
 
@@ -567,7 +567,7 @@ async def get_defi_data():
     global _defi_cache, _last_defi_update
     
     # Update if cache is stale (older than 10 minutes)
-    if not _defi_cache or (datetime.now() - _last_defi_update).total_seconds() > 600:
+    if not _defi_cache or (datetime.now(timezone.utc) - _last_defi_update).total_seconds() > 600:
         await fetch_defi_pulse_data()
     
     return {
@@ -629,7 +629,7 @@ async def get_intelligence_dashboard():
     
     return {
         'status': 'success',
-        'timestamp': datetime.now().isoformat(),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'news': {
             'count': len(_news_cache),
             'latest': _news_cache[:10],

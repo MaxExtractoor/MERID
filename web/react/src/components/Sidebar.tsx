@@ -8,12 +8,12 @@ import {
   Gauge,
   LayoutGrid,
   Search,
-  ClipboardList,
   Award,
   Sliders,
-  TrendingUp,
   Settings as SettingsIcon,
   Activity,
+  GitBranch,
+  Grid,
 } from 'lucide-react';
 import type { View } from '../types/views';
 import { useKalshiMode } from '../context/KalshiModeContext';
@@ -26,20 +26,28 @@ interface SidebarProps {
   onToggleCollapse?: () => void;
 }
 
-const liveTrading = [
+/* ── Sidebar groups aligned to the Kalshi swarm workflow ──────────── */
+
+const tradingCore = [
   { name: 'Overview', href: 'overview', icon: LayoutDashboard, color: 'text-blue-400' },
   { name: 'Terminal', href: 'kalshi-terminal', icon: Monitor, color: 'text-orange-400' },
   { name: 'Markets', href: 'kalshi-dashboard', icon: Search, color: 'text-orange-300' },
-  { name: 'Agent Grid', href: 'kalshi-grid', icon: LayoutGrid, color: 'text-orange-500' },
-  { name: 'Performance', href: 'kalshi-performance', icon: Award, color: 'text-emerald-400' },
   { name: 'Portfolio', href: 'kalshi-portfolio', icon: Briefcase, color: 'text-orange-300' },
-  { name: 'Positions', href: 'positions', icon: TrendingUp, color: 'text-cyan-400' },
-  { name: 'Orders', href: 'orders', icon: ClipboardList, color: 'text-teal-300' },
-  { name: 'Vol & Sizing', href: 'kalshi-vol-dashboard', icon: Gauge, color: 'text-purple-400' },
-  { name: 'Fear/Greed', href: 'kalshi-sentiment', icon: Activity, color: 'text-rose-400' },
 ];
 
-const commandCenter = [
+const swarmIntelligence = [
+  { name: 'Agent Grid', href: 'kalshi-grid', icon: LayoutGrid, color: 'text-orange-500' },
+  { name: 'Swarm Matrix', href: 'swarm-consensus', icon: Grid, color: 'text-cyan-500' },
+  { name: 'Performance', href: 'kalshi-performance', icon: Award, color: 'text-emerald-400' },
+  { name: 'Lane Control', href: 'lane-control', icon: GitBranch, color: 'text-violet-400' },
+];
+
+const analytics = [
+  { name: 'Fear/Greed', href: 'kalshi-sentiment', icon: Activity, color: 'text-rose-400' },
+  { name: 'Vol & Sizing', href: 'kalshi-vol-dashboard', icon: Gauge, color: 'text-purple-400' },
+];
+
+const operatorSection = [
   { name: 'Operator', href: 'operator', icon: Sliders, color: 'text-indigo-400' },
   { name: 'Kill Switch', href: 'kill-switch', icon: ShieldAlert, color: 'text-red-400' },
 ];
@@ -49,7 +57,7 @@ const system = [
   { name: 'Settings', href: 'settings', icon: SettingsIcon, color: 'text-gray-400' },
 ];
 
-function NavItem({ item, current, onChange, collapsed, isLive }: { item: typeof liveTrading[0]; current: View; onChange: (v: View) => void; collapsed: boolean; isLive?: boolean }) {
+function NavItem({ item, current, onChange, collapsed, isLive }: { item: typeof tradingCore[0]; current: View; onChange: (v: View) => void; collapsed: boolean; isLive?: boolean }) {
   const Icon = item.icon;
   const isActive = current === item.href;
   const showModeDot = item.href === 'kalshi-dashboard' || item.href === 'kalshi-grid' || item.href === 'kalshi-terminal';
@@ -96,8 +104,10 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
   const { data: modeData, isLive } = useKalshiMode();
 
   const primarySections = [
-    { label: 'Live Trading', items: liveTrading },
-    { label: 'Command Center', items: commandCenter },
+    { label: 'Trading', items: tradingCore },
+    { label: 'Swarm Intelligence', items: swarmIntelligence },
+    { label: 'Analytics', items: analytics },
+    { label: 'Operator', items: operatorSection },
     { label: 'System', items: system },
   ];
 

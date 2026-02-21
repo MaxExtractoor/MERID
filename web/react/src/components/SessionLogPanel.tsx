@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Clock, ShieldOff, Zap, RefreshCw, Radio, Settings, Filter, Lightbulb } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
-import { DEFAULTS } from '../config/constants';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { HelpPopover } from './HelpPopover';
 
 interface SessionEvent {
@@ -72,7 +72,7 @@ export default function SessionLogPanel() {
 
   const queryParam = categoryFilter === 'all' ? '' : `&category=${categoryFilter}`;
   const { data, loading, refetch } = useApiData<SessionLogData>(
-    `/api/v1/system/session-log?limit=50${queryParam}`,
+    `${API_ENDPOINTS.SYSTEM_SESSION_LOG}?limit=50${queryParam}`,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
 

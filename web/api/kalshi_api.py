@@ -22,6 +22,7 @@ Endpoints:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -31,6 +32,21 @@ from utils.logger import get_logger
 logger = get_logger("web.api.kalshi_api")
 
 router = APIRouter(prefix="/api/v1/kalshi", tags=["kalshi"])
+
+
+# ── Shared helpers ────────────────────────────────────────────────────────
+
+def _minutes_to_expiry_from_str(close_time_str: Optional[str]) -> Optional[float]:
+    """Compute minutes until expiry from an ISO-8601 close_time string."""
+    if not close_time_str:
+        return None
+    try:
+        import datetime as _dt
+        ct = _dt.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+        delta = (ct - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60.0
+        return round(delta, 1) if delta > 0 else None
+    except Exception:
+        return None
 
 
 # ── Lazy imports (with merid_core fallbacks) ─────────────────────────────
@@ -148,16 +164,35 @@ def _enrich_from_ticker(ticker: str) -> Dict[str, Any]:
     Used by fallback paths when catalog is unavailable.
     """
     try:
-        from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog
-        cat, asset = KalshiMarketCatalog._detect_from_ticker(ticker)
-        return {"category": cat, "asset": asset, "timeframe": None}
-    except Exception:
-        return {"category": None, "asset": None, "timeframe": None}
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        catalog = get_market_catalog()
+        entry = catalog.get_market(ticker)
+        if entry:
+            return {"category": getattr(entry, "category", None), "asset": getattr(entry, "asset", None), "timeframe": None}
+    except Exception as _e:
+        logger.debug("_classify_ticker catalog lookup skipped for %s: %s", ticker, _e)
+    # Inline prefix-based fallback
+    _PREFIX_MAP = {
+        "KXBTC": ("crypto", "BTC"), "KXETH": ("crypto", "ETH"), "KXSOL": ("crypto", "SOL"),
+        "KXAVAX": ("crypto", "AVAX"), "INXD": ("equity", "SPX"), "NASDAQ": ("equity", "NDX"),
+        "FED": ("macro", "FED"), "CPI": ("macro", "CPI"), "GDP": ("macro", "GDP"),
+        "PRES": ("politics", "PRES"), "HOUSE": ("politics", "HOUSE"), "SENATE": ("politics", "SENATE"),
+    }
+    upper = ticker.upper()
+    for prefix, (cat, asset) in _PREFIX_MAP.items():
+        if upper.startswith(prefix):
+            return {"category": cat, "asset": asset, "timeframe": None}
+    return {"category": None, "asset": None, "timeframe": None}
 
 
 # ── Market browsing ──────────────────────────────────────────────────────
 
-@router.get("/markets")
+@router.get("/markets",
+    summary="List Kalshi Markets",
+    description="Browse cataloged Kalshi markets with filters for category, asset, timeframe, and search keywords.",
+    response_description="List of markets with volume, prices, and expiry info",
+    tags=["kalshi", "markets"],
+)
 async def list_markets(
     category: Optional[str] = Query(None, description="Filter by category (crypto, politics, sports, culture, climate, economics, mentions, companies, financials, tech, science)"),
     asset: Optional[str] = Query(None, description="Filter by asset (BTC, ETH, CPI, etc.)"),
@@ -243,7 +278,7 @@ async def list_markets(
 
     # Fallback: hit Kalshi public API directly
     import os, requests as req
-    base = "https://api.elections.kalshi.com"
+    base = os.getenv("KALSHI_API_BASE_URL", "https://api.elections.kalshi.com")
     try:
         params: Dict[str, Any] = {"limit": limit, "status": "open"}
         if search:
@@ -293,7 +328,7 @@ async def list_markets(
                     "active": m.get("status") == "open",
                     "volume": m.get("volume", 0),
                     "expires_at": m.get("close_time", None),
-                    "minutes_to_expiry": None,
+                    "minutes_to_expiry": _minutes_to_expiry_from_str(m.get("close_time")),
                     "outcomes": _extract_outcomes(m),
                 }
                 for m in raw_markets
@@ -370,7 +405,6 @@ async def get_market_detail(ticker: str) -> Dict[str, Any]:
                 "volume": market.get("volume", 0),
                 "liquidity": 0,
                 "expires_at": market.get("close_time", None),
-                "minutes_to_expiry": None,
                 "outcomes": [],
                 "tags": [],
                 "created_at": None,
@@ -380,6 +414,7 @@ async def get_market_detail(ticker: str) -> Dict[str, Any]:
                 "liquidity_score": 0.0,
                 "last_trade_price": last_price_cents / 100.0 if last_price_cents else None,
                 "last_trade_ts": market.get("last_trade_ts", None),
+                "minutes_to_expiry": _minutes_to_expiry_from_str(market.get("close_time")),
             }
         except Exception as exc:
             logger.warning(f"merid_core market detail failed: {exc}")
@@ -388,6 +423,240 @@ async def get_market_detail(ticker: str) -> Dict[str, Any]:
 
 
 # ── Orderbook ─────────────────────────────────────────────────────────────
+
+from fastapi.responses import StreamingResponse
+import asyncio
+
+@router.get("/markets/{ticker}/orderbook/stream")
+async def stream_orderbook(
+    ticker: str,
+    max_updates: int = Query(1000, ge=1, le=10000, description="Max updates before auto-close"),
+    heartbeat_interval: int = Query(30, ge=5, le=300, description="Heartbeat interval in seconds"),
+) -> StreamingResponse:
+    """Stream real-time orderbook updates via Server-Sent Events.
+
+    Uses Kalshi WebSocket under the hood to receive snapshot+delta updates
+    and streams them to the client as SSE events.
+
+    Events:
+      - snapshot: Full orderbook state
+      - delta: Incremental price level update
+      - heartbeat: Periodic keepalive
+      - error: Error message
+
+    Query params:
+      - max_updates: Auto-close after N updates (prevents runaway connections)
+      - heartbeat_interval: Seconds between heartbeats
+
+    Example:
+      curl -N "http://localhost:8000/api/v1/kalshi/markets/KXBTC-24DEC-ABOVE-60000/orderbook/stream"
+    """
+    from merid.event_venues.kalshi.ws import KalshiWebSocket
+    from merid.event_venues.kalshi.orderbook import LocalOrderbook
+
+    async def event_generator():
+        ws = KalshiWebSocket()
+        ob = LocalOrderbook(ticker)
+        update_count = 0
+        last_heartbeat = asyncio.get_running_loop().time()
+
+        try:
+            await ws.connect()
+            await ws.subscribe_orderbook(ticker)
+
+            # Send initial connecting event
+            yield f"event: connecting\ndata: {ticker}\n\n"
+
+            async def message_handler(msg):
+                nonlocal update_count, last_heartbeat
+                msg_type = msg.get("type", "")
+
+                if msg_type == "orderbook_snapshot":
+                    ob.apply_snapshot(msg.get("data", {}))
+                    update_count += 1
+                    yield f"event: snapshot\ndata: {ob.to_dict()}\n\n"
+
+                elif msg_type == "orderbook_delta":
+                    ob.apply_delta(msg.get("data", {}))
+                    update_count += 1
+                    delta_data = {
+                        "ticker": ticker,
+                        "side": msg.get("data", {}).get("side"),
+                        "price": msg.get("data", {}).get("price"),
+                        "size_delta": msg.get("data", {}).get("size_delta"),
+                        "best_bid": ob.get_best_bid(),
+                        "best_ask": ob.get_best_ask(),
+                        "spread_cents": ob.get_spread(),
+                    }
+                    yield f"event: delta\ndata: {delta_data}\n\n"
+
+                elif msg_type == "trade":
+                    # Trade updates affect book indirectly
+                    trade_data = {
+                        "ticker": msg.get("ticker", ""),
+                        "price": msg.get("price"),
+                        "count": msg.get("count"),
+                        "side": msg.get("side"),
+                    }
+                    yield f"event: trade\ndata: {trade_data}\n\n"
+
+                # Check heartbeat
+                now = asyncio.get_running_loop().time()
+                if now - last_heartbeat >= heartbeat_interval:
+                    yield f"event: heartbeat\ndata: {{'ts': {now}, 'updates': {update_count}}}\n\n"
+                    last_heartbeat = now
+
+                # Auto-close after max updates
+                if update_count >= max_updates:
+                    yield f"event: closing\ndata: {{'reason': 'max_updates_reached', 'count': {update_count}}}\n\n"
+                    return
+
+            # Start listening
+            try:
+                await ws.listen(lambda msg: asyncio.create_task(message_handler(msg)))
+            except Exception as e:
+                yield f"event: error\ndata: {{'error': '{str(e)}'}}\n\n"
+
+        except Exception as e:
+            yield f"event: error\ndata: {{'error': 'Connection failed: {str(e)}'}}\n\n"
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            yield f"event: closed\ndata: {{'ticker': '{ticker}'}}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )
+
+
+@router.get("/order-groups/stream")
+async def stream_order_group_updates(
+    group_ids: Optional[str] = Query(None, description="Comma-separated group IDs to watch (None = all)"),
+    max_updates: int = Query(1000, ge=1, le=10000, description="Max updates before auto-close"),
+    heartbeat_interval: int = Query(30, ge=5, le=300, description="Heartbeat interval in seconds"),
+) -> StreamingResponse:
+    """Stream real-time order group updates via Server-Sent Events.
+
+    Uses Kalshi WebSocket order_group_updates channel to receive lifecycle
+    and usage updates for order groups.
+
+    Events:
+      - snapshot: Full group state (first message per group)
+      - delta: Incremental update
+      - triggered: Group triggered (auto-cancel occurred)
+      - heartbeat: Periodic keepalive
+      - error: Error message
+
+    Query params:
+      - group_ids: Filter to specific groups (comma-separated)
+      - max_updates: Auto-close after N updates
+      - heartbeat_interval: Seconds between heartbeats
+
+    Example:
+      curl -N "http://localhost:8000/api/v1/kalshi/order-groups/stream?group_ids=og-1,og-2"
+    """
+    from merid.event_venues.kalshi.ws import KalshiWebSocket
+
+    async def event_generator():
+        ws = KalshiWebSocket()
+        update_count = 0
+        last_heartbeat = asyncio.get_running_loop().time()
+
+        # Parse watched groups
+        watched_groups = set(group_ids.split(",")) if group_ids else None
+
+        try:
+            await ws.connect()
+
+            # Subscribe to order_group_updates
+            await ws.subscribe_order_group_updates()
+
+            # Set watched groups filter if specified
+            if watched_groups:
+                ws.set_watched_groups(list(watched_groups))
+
+            # Send initial connecting event
+            yield f"event: connecting\ndata: {{'watched_groups': {list(watched_groups) if watched_groups else 'all'}}}\n\n"
+
+            async def message_handler(msg):
+                nonlocal update_count, last_heartbeat
+
+                channel = msg.get("channel") or msg.get("type")
+                if channel != "order_group_updates":
+                    return
+
+                data = msg.get("data", msg)
+                group_id = data.get("order_group_id") or data.get("group_id")
+                update_type = data.get("_update_type", "delta")
+                status = data.get("status")
+
+                update_count += 1
+
+                # Build event data
+                event_data = {
+                    "order_group_id": group_id,
+                    "status": status,
+                    "contracts_limit": data.get("contracts_limit"),
+                    "matched_contracts": data.get("matched_contracts"),
+                    "used_contracts": data.get("used_contracts"),
+                    "filled_cost": data.get("filled_cost"),
+                    "remaining_cost": data.get("remaining_cost"),
+                    "update_type": update_type,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+
+                # Send appropriate event type
+                if status == "triggered":
+                    yield f"event: triggered\ndata: {event_data}\n\n"
+                elif update_type == "snapshot":
+                    yield f"event: snapshot\ndata: {event_data}\n\n"
+                else:
+                    yield f"event: delta\ndata: {event_data}\n\n"
+
+                # Check heartbeat
+                now = asyncio.get_running_loop().time()
+                if now - last_heartbeat >= heartbeat_interval:
+                    yield f"event: heartbeat\ndata: {{'ts': {now}, 'updates': {update_count}}}\n\n"
+                    last_heartbeat = now
+
+                # Auto-close after max updates
+                if update_count >= max_updates:
+                    yield f"event: closing\ndata: {{'reason': 'max_updates_reached', 'count': {update_count}}}\n\n"
+                    return
+
+            # Start listening
+            try:
+                await ws.listen(lambda msg: asyncio.create_task(message_handler(msg)))
+            except Exception as e:
+                yield f"event: error\ndata: {{'error': '{str(e)}'}}\n\n"
+
+        except Exception as e:
+            yield f"event: error\ndata: {{'error': 'Connection failed: {str(e)}'}}\n\n"
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            yield f"event: closed\ndata: {{'updates_total': {update_count}}}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 @router.get("/markets/{ticker}/orderbook")
 async def get_orderbook(ticker: str) -> Dict[str, Any]:
@@ -500,6 +769,34 @@ async def get_event(event_ticker: str) -> Dict[str, Any]:
     return {"event_ticker": event_ticker, "market_count": 0, "markets": []}
 
 
+# ── Health ───────────────────────────────────────────────────────────────
+
+@router.get("/health")
+async def kalshi_health() -> Dict[str, Any]:
+    """Kalshi system health — delegates to grid health for the full shape.
+
+    Returns the shape expected by KalshiDashboardView:
+      { status, issues, catalog, ws, rate_limits, risk, venue, session, metrics }
+    where risk = { kill_switch, daily_pnl, drawdown_pct }.
+    """
+    try:
+        from web.api.kalshi_grid_api import grid_health
+        return await grid_health()
+    except Exception as exc:
+        logger.warning(f"Kalshi health delegation failed: {exc}")
+        return {
+            "status": "unknown",
+            "issues": [str(exc)],
+            "catalog": {"market_count": 0, "last_refresh": None, "categories": 0},
+            "ws": {"running": False, "events_forwarded": 0, "subscribed_tickers": 0},
+            "rate_limits": {"orders_this_minute": 0, "max_per_minute": 30, "orders_this_hour": 0, "max_per_hour": 600},
+            "risk": {"kill_switch": False, "daily_pnl": 0.0, "drawdown_pct": 0.0},
+            "venue": {},
+            "session": {},
+            "metrics": {},
+        }
+
+
 # ── Catalog ──────────────────────────────────────────────────────────────
 
 @router.get("/catalog")
@@ -549,8 +846,8 @@ def _load_categories() -> Dict[str, str]:
             stored = _json.loads(_CATEGORIES_FILE.read_text())
             if isinstance(stored, dict):
                 return {**_DEFAULT_CATEGORIES, **stored}
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("_load_categories: file read failed, using defaults: %s", _e)
     return dict(_DEFAULT_CATEGORIES)
 
 
@@ -777,9 +1074,360 @@ async def get_balance() -> Dict[str, Any]:
     return {"usd": 0, "locked": 0, "available": 0, "error": "No Kalshi client configured"}
 
 
+# ── New Portfolio & Risk Endpoints ──────────────────────────────────────
+
+@router.get("/portfolio/summary")
+async def get_portfolio_summary() -> Dict[str, Any]:
+    """Get comprehensive portfolio summary with balance + positions.
+
+    Returns:
+        balance, portfolio_value, and per-event exposure breakdown.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.get_portfolio_summary()
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(status_code=502, detail=str(result.error))
+
+        data = result.data
+        return {
+            "balance_usd": float(data["balance"]),
+            "portfolio_value_usd": float(data["portfolio_value"]),
+            "by_event": {
+                et: {
+                    "exposure_usd": float(stats["exposure"]),
+                    "realized_pnl_usd": float(stats["realized_pnl"]),
+                    "fees_usd": float(stats["fees"]),
+                }
+                for et, stats in data["by_event"].items()
+            },
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Portfolio summary failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/portfolio/risk")
+async def get_portfolio_risk(
+    nonzero: bool = Query(True, description="Only include positions with non-zero exposure"),
+) -> Dict[str, Any]:
+    """Calculate portfolio risk metrics (VaR-style exposure, PnL, fees).
+
+    Returns:
+        Total exposure, realized PnL, fees, and per-event breakdown.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Kalshi client not configured")
+
+    try:
+        await client.connect()
+        filters = {"nonzero": "position"} if nonzero else {}
+        result = await client.compute_portfolio_risk(filters)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(status_code=502, detail=str(result.error))
+
+        data = result.data
+        return {
+            "total_exposure_cents": float(data["total_exposure"]),
+            "total_exposure_usd": float(data["total_exposure"]) / 100,
+            "total_realized_pnl_usd": float(data["total_realized_pnl"]) / 100,
+            "total_fees_usd": float(data["total_fees"]) / 100,
+            "net_realized_pnl_usd": float(data["net_realized_pnl"]) / 100,
+            "event_count": data["event_count"],
+            "by_event": {
+                et: {
+                    "exposure_usd": float(risk["exposure"]) / 100,
+                    "realized_pnl_usd": float(risk["realized_pnl"]) / 100,
+                    "fees_usd": float(risk["fees"]) / 100,
+                }
+                for et, risk in data["by_event"].items()
+            },
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Portfolio risk calculation failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/portfolio/var")
+async def get_portfolio_var(
+    alpha: float = Query(0.1, ge=0.01, le=1.0, description="VaR shock fraction (e.g., 0.1 = 10%)"),
+) -> Dict[str, Any]:
+    """Compute simple delta-style Value at Risk.
+
+    Uses per-event exposure multiplied by shock fraction (alpha).
+    This is a simplified VaR approximation.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.compute_var(alpha=alpha)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(status_code=502, detail=str(result.error))
+
+        data = result.data
+        return {
+            "alpha": data["alpha"],
+            "portfolio_var_usd": float(data["portfolio_var_usd"]),
+            "portfolio_var_cents": float(data["portfolio_var_cents"]),
+            "var_by_event_usd": {
+                et: float(var_cents) / 100
+                for et, var_cents in data["var_by_event_cents"].items()
+            },
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"VaR calculation failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/portfolio/pnl")
+async def get_portfolio_pnl(
+    tickers: Optional[List[str]] = Query(None, description="Filter by specific tickers"),
+) -> Dict[str, Any]:
+    """Calculate mark-to-market PnL using current market prices.
+
+    Returns:
+        Total PnL and per-market breakdown.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.compute_market_pnl(tickers=tickers)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(status_code=502, detail=str(result.error))
+
+        data = result.data
+        return {
+            "total_pnl_usd": float(data["total_pnl_usd"]),
+            "total_pnl_cents": float(data["total_pnl_cents"]),
+            "pnl_by_market_usd": {
+                t: float(pnl) / 100
+                for t, pnl in data["pnl_by_market_cents"].items()
+            },
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"PnL calculation failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/portfolio/subaccounts")
+async def get_subaccount_breakdown() -> Dict[str, Any]:
+    """Get aggregated positions by subaccount.
+
+    Returns:
+        Per-subaccount exposure, cost, PnL, and fees.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.aggregate_positions_by_subaccount()
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(status_code=502, detail=str(result.error))
+
+        data = result.data
+        return {
+            "subaccounts": {
+                sub: {
+                    "event_exposure_usd": float(stats["event_exposure"]) / 100,
+                    "total_cost_usd": float(stats["total_cost"]) / 100,
+                    "realized_pnl_usd": float(stats["realized_pnl"]) / 100,
+                    "fees_paid_usd": float(stats["fees_paid"]) / 100,
+                    "market_count": stats["market_count"],
+                    "event_count": stats["event_count"],
+                }
+                for sub, stats in data.items()
+            },
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Subaccount aggregation failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/portfolio/fills")
+async def get_portfolio_fills(
+    limit: int = Query(200, ge=1, le=500),
+    since_ts: Optional[int] = Query(None, description="Minimum timestamp filter"),
+) -> Dict[str, Any]:
+    """Get paginated fills with optional time filter."""
+    client = _get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.get_fills(limit=limit, since_ts=since_ts)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(status_code=502, detail=str(result.error))
+
+        fills = result.data
+        return {
+            "count": len(fills),
+            "fills": [
+                {
+                    "fill_id": f.get("fill_id", f.get("trade_id", "")),
+                    "ticker": f.get("market_ticker", f.get("ticker", "")),
+                    "side": f.get("side", ""),
+                    "contracts": f.get("contracts", f.get("count", 0)),
+                    "price_cents": f.get("price", 0),
+                    "price_usd": f.get("price", 0) / 100.0,
+                    "fee_usd": f.get("fee", 0) / 100.0,
+                    "timestamp": f.get("created_at", f.get("timestamp", "")),
+                }
+                for f in fills
+            ],
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Fills fetch failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/portfolio/history")
+async def get_portfolio_history(
+    limit: int = Query(200, ge=1, le=1000),
+) -> Dict[str, Any]:
+    """Get portfolio history with PnL aggregation.
+
+    Returns:
+        Aggregated realized PnL, fees, and net PnL.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.get_portfolio_history(limit=limit)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(status_code=502, detail=str(result.error))
+
+        data = result.data
+        return {
+            "entries_count": data["entries_count"],
+            "realized_pnl_usd": float(data["realized_pnl"]) / 100,
+            "fees_paid_usd": float(data["fees_paid"]) / 100,
+            "net_pnl_usd": float(data["net_pnl"]) / 100,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Portfolio history failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/client/metrics")
+async def get_client_metrics() -> Dict[str, Any]:
+    """Get Kalshi client internal metrics.
+
+    Returns:
+        Circuit breaker status, rate limiter state, and request stats.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Kalshi client not configured")
+
+    try:
+        circuit_status = client.get_circuit_status()
+
+        # Use public rate limiter accessor if available, fall back gracefully
+        if hasattr(client, 'get_rate_limiter_status'):
+            rl_status = client.get_rate_limiter_status()
+        elif hasattr(client, 'rate_limiter'):
+            rl = client.rate_limiter
+            rl_status = {
+                "tier": getattr(rl, "tier", "unknown"),
+                "read_tokens_available": getattr(rl, "read_tokens_available", 0),
+                "write_tokens_available": getattr(rl, "write_tokens_available", 0),
+                "read_rate": getattr(rl, "read_rate", 0),
+                "write_rate": getattr(rl, "write_rate", 0),
+            }
+        else:
+            rl = getattr(client, "_rate_limiter", None)
+            rl_status = {
+                "tier": getattr(rl, "tier", "unknown"),
+                "read_tokens_available": getattr(rl, "read_tokens_available", 0),
+                "write_tokens_available": getattr(rl, "write_tokens_available", 0),
+                "read_rate": getattr(rl, "read_rate", 0),
+                "write_rate": getattr(rl, "write_rate", 0),
+            } if rl else {}
+
+        import os as _os
+        concurrency_limit = int(_os.getenv("KALSHI_MAX_CONCURRENT_REQUESTS", "10"))
+
+        return {
+            "circuit_breaker": circuit_status,
+            "rate_limiter": rl_status,
+            "concurrency_limit": concurrency_limit,
+        }
+    except Exception as exc:
+        logger.error(f"Metrics fetch failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ── Order placement ──────────────────────────────────────────────────────
 
-@router.post("/orders")
+def _get_default_order_mode() -> str:
+    """Get the default order mode from settings."""
+    try:
+        from merid.settings import settings
+        if settings.MERID_PM_LIVE_ENABLED and settings.MERID_PM_TRADING_MODE == "live":
+            return "live"
+        return settings.MERID_PM_TRADING_MODE or "paper"
+    except Exception:
+        return "paper"
+
+
+@router.post("/orders",
+    summary="Place Kalshi Order",
+    description="Place a Kalshi order through MERID. Runs risk pre-check, then routes to KalshiVenueClient. In paper mode, returns a simulated fill without hitting Kalshi.",
+    response_description="Order placement result with fill info",
+    tags=["kalshi", "orders"],
+)
 async def place_order(
     ticker: str,
     side: str,            # "yes" or "no"
@@ -788,13 +1436,18 @@ async def place_order(
     price_cents: int,
     order_type: str = "limit",
     time_in_force: str = "gtc",
-    mode: str = "paper",  # "paper" or "live"
+    mode: Optional[str] = None,  # "paper" or "live" — defaults to MERID_PM_TRADING_MODE from settings
 ) -> Dict[str, Any]:
     """Place a Kalshi order through MERID.
 
     Runs risk pre-check, then routes to KalshiVenueClient.
     In paper mode, returns a simulated fill without hitting Kalshi.
+    Defaults to MERID_PM_TRADING_MODE from settings (paper if not configured).
     """
+    # Use configured default if not explicitly provided
+    if mode is None:
+        mode = _get_default_order_mode()
+        logger.info(f"Using default order mode from settings: {mode}")
     # Validate inputs
     if side not in ("yes", "no"):
         raise HTTPException(400, f"Invalid side: {side!r}, must be 'yes' or 'no'")
@@ -961,7 +1614,510 @@ async def batch_cancel_orders(
         raise HTTPException(500, f"Batch cancel failed: {exc}")
 
 
-# ── PnL ──────────────────────────────────────────────────────────────────
+@router.post("/orders/batch",
+    summary="Batch Place Orders",
+    description="Batch place up to 20 orders in a single API call. More efficient than individual orders and reduces rate limit pressure.",
+    response_description="Batch order results with placed orders and latency",
+    tags=["kalshi", "orders"],
+)
+async def batch_place_orders(
+    orders: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Batch place up to 20 orders in a single API call.
+
+    Each order dict must contain:
+      - ticker: Market ticker (required)
+      - side: "yes" or "no" (required)
+      - action: "buy" or "sell" (default: "buy")
+      - count: Number of contracts (required)
+      - yes_price or no_price: Price in cents (required for limit orders)
+      - type: "limit" or "market" (default: "limit")
+
+    Optional fields:
+      - time_in_force: "gtc", "ioc", or "fok" (default: "gtc")
+      - subaccount: Subaccount number
+      - post_only: bool
+      - reduce_only: bool
+      - client_order_id: Custom order ID
+    """
+    if not orders:
+        raise HTTPException(400, "No orders provided")
+
+    if len(orders) > 20:
+        raise HTTPException(400, f"Max 20 orders per batch, received {len(orders)}")
+
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.batch_place_orders(order_specs=orders)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        placed_orders = result.data
+        return {
+            "status": "success",
+            "count": len(placed_orders),
+            "orders": placed_orders,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        logger.error(f"Batch place orders failed: {exc}")
+        raise HTTPException(500, f"Batch place failed: {exc}")
+
+
+@router.patch("/orders/{order_id}/amend")
+async def amend_order_endpoint(
+    order_id: str,
+    yes_price: Optional[int] = None,
+    no_price: Optional[int] = None,
+    count: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Amend a resting order's price and/or quantity.
+
+    Uses Kalshi's amend endpoint: POST /portfolio/orders/{order_id}/amend
+    Only resting orders can be amended.
+    """
+    if yes_price is None and no_price is None and count is None:
+        raise HTTPException(400, "Must provide yes_price, no_price, or count to amend")
+
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.amend_order(
+            order_id=order_id,
+            yes_price=yes_price,
+            no_price=no_price,
+            new_count=count,
+        )
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        return {
+            "status": "amended",
+            "order_id": order_id,
+            "order": result.data,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        logger.error(f"Amend order {order_id} failed: {exc}")
+        raise HTTPException(500, f"Amend failed: {exc}")
+
+
+@router.post("/orders/{order_id}/decrease")
+async def decrease_order_endpoint(
+    order_id: str,
+    reduce_by: Optional[int] = None,
+    reduce_to: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Decrease a resting order's contract count.
+
+    Uses Kalshi's decrease endpoint: POST /portfolio/orders/{order_id}/decrease
+    Reduces contracts by reduce_by or to reduce_to (mutually exclusive).
+    """
+    if reduce_by is None and reduce_to is None:
+        raise HTTPException(400, "Must provide reduce_by or reduce_to")
+    if reduce_by is not None and reduce_to is not None:
+        raise HTTPException(400, "Cannot specify both reduce_by and reduce_to - choose one")
+
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.decrease_order(
+            order_id=order_id,
+            reduce_by=reduce_by,
+            reduce_to=reduce_to,
+        )
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        return {
+            "status": "decreased",
+            "order_id": order_id,
+            "order": result.data,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        logger.error(f"Decrease order {order_id} failed: {exc}")
+        raise HTTPException(500, f"Decrease failed: {exc}")
+
+
+# ── Order Groups ─────────────────────────────────────────────────────────
+
+@router.post("/order-groups")
+async def create_order_group_endpoint(
+    name: str,
+    max_cost_cents: int,
+) -> Dict[str, Any]:
+    """Create an order group for aggregate risk management.
+
+    Order groups allow setting aggregate limits and triggers across
+    multiple orders. Assign orders via order_group_id field.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.create_order_group(
+            name=name,
+            max_cost_cents=max_cost_cents,
+        )
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        return {
+            "status": "created",
+            "order_group_id": result.data,
+            "name": name,
+            "max_cost_cents": max_cost_cents,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Create order group failed: {exc}")
+        raise HTTPException(500, f"Create order group failed: {exc}")
+
+
+@router.put("/order-groups/{group_id}/limit")
+async def set_order_group_limit_endpoint(
+    group_id: str,
+    max_cost_cents: int,
+) -> Dict[str, Any]:
+    """Update the cost limit for an order group."""
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.set_order_group_limit(
+            group_id=group_id,
+            max_cost_cents=max_cost_cents,
+        )
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        return {
+            "status": "updated",
+            "order_group_id": group_id,
+            "max_cost_cents": max_cost_cents,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Set order group limit failed: {exc}")
+        raise HTTPException(500, f"Set order group limit failed: {exc}")
+
+
+@router.put("/order-groups/{group_id}/trigger")
+async def trigger_order_group_endpoint(
+    group_id: str,
+) -> Dict[str, Any]:
+    """Trigger an order group (e.g., for OCO or conditional orders)."""
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.trigger_order_group(
+            group_id=group_id,
+        )
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        return {
+            "status": "triggered",
+            "order_group_id": group_id,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Trigger order group failed: {exc}")
+        raise HTTPException(500, f"Trigger order group failed: {exc}")
+
+
+@router.get("/order-groups")
+async def get_order_groups_endpoint(
+    limit: int = Query(200, ge=1, le=1000, description="Max groups to return"),
+) -> Dict[str, Any]:
+    """List all order groups with pagination."""
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.get_order_groups(limit=limit)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        groups = result.data or []
+        return {
+            "groups": groups,
+            "count": len(groups),
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Get order groups failed: {exc}")
+        raise HTTPException(500, f"Get order groups failed: {exc}")
+
+
+@router.get("/order-groups/{group_id}")
+async def get_order_group_endpoint(group_id: str) -> Dict[str, Any]:
+    """Get a single order group by ID."""
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.get_order_group(group_id)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        return {
+            "group": result.data,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Get order group {group_id} failed: {exc}")
+        raise HTTPException(500, f"Get order group failed: {exc}")
+
+
+@router.put("/order-groups/{group_id}/reset")
+async def reset_order_group_endpoint(group_id: str) -> Dict[str, Any]:
+    """Reset an order group (clear matched contracts counter)."""
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.reset_order_group_endpoint(group_id)
+        await client.close()
+
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        return {
+            "status": "reset",
+            "order_group_id": group_id,
+            "latency_ms": result.latency_ms,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Reset order group {group_id} failed: {exc}")
+        raise HTTPException(500, f"Reset order group failed: {exc}")
+
+
+@router.delete("/order-groups/{group_id}")
+async def delete_order_group_endpoint(group_id: str) -> Dict[str, Any]:
+    """Delete an order group and cancel all its orders."""
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+        result = await client.delete_order_group_and_sync(group_id)
+        await client.close()
+
+        if result.get("error"):
+            raise HTTPException(502, str(result["error"]))
+
+        return {
+            "status": "deleted" if result["deleted"] else "not_found",
+            "order_group_id": group_id,
+            "orders_remaining": len(result.get("orders", [])),
+            "positions": len(result.get("positions", [])),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Delete order group {group_id} failed: {exc}")
+        raise HTTPException(500, f"Delete order group failed: {exc}")
+
+
+@router.get("/order-groups/dashboard")
+async def get_order_groups_dashboard() -> Dict[str, Any]:
+    """Get comprehensive order groups dashboard data.
+
+    Returns aggregated status, usage statistics, and alerts for all order groups.
+    Suitable for real-time monitoring UI.
+    """
+    client = _get_client()
+    if not client:
+        raise HTTPException(503, "Kalshi client not configured")
+
+    try:
+        await client.connect()
+
+        # Fetch all order groups
+        result = await client.get_order_groups(limit=200)
+        if not result.success:
+            raise HTTPException(502, str(result.error))
+
+        groups = result.data or []
+
+        # Aggregate statistics
+        total_groups = len(groups)
+        active_groups = 0
+        triggered_groups = 0
+        canceled_groups = 0
+        pending_groups = 0
+
+        # Calculate total usage
+        total_contracts_limit = 0
+        total_matched_contracts = 0
+        total_used_contracts = 0
+        total_filled_cost = 0
+        total_remaining_cost = 0
+
+        # Build enriched group list
+        enriched_groups = []
+        alerts = []
+
+        for og in groups:
+            og_id = og.get("order_group_id") or og.get("id", "unknown")
+            status = og.get("status", "unknown")
+            contracts_limit = og.get("contracts_limit", 0)
+            matched = og.get("matched_contracts", 0)
+            used = og.get("used_contracts", 0)
+            filled_cost = og.get("filled_cost", 0)
+            remaining_cost = og.get("remaining_cost", 0)
+
+            # Count by status
+            if status == "active":
+                active_groups += 1
+            elif status == "triggered":
+                triggered_groups += 1
+            elif status == "canceled":
+                canceled_groups += 1
+            elif status == "pending":
+                pending_groups += 1
+
+            # Sum totals
+            total_contracts_limit += contracts_limit
+            total_matched_contracts += matched
+            total_used_contracts += used
+            total_filled_cost += filled_cost
+            total_remaining_cost += remaining_cost
+
+            # Calculate utilization
+            utilization_pct = 0.0
+            if contracts_limit > 0:
+                utilization_pct = round((used / contracts_limit) * 100, 2)
+
+            # Build enriched group entry
+            enriched_groups.append({
+                "order_group_id": og_id,
+                "name": og.get("name", ""),
+                "status": status,
+                "subaccount": og.get("subaccount", 0),
+                "contracts_limit": contracts_limit,
+                "matched_contracts": matched,
+                "used_contracts": used,
+                "remaining_contracts": max(0, contracts_limit - used),
+                "utilization_pct": utilization_pct,
+                "filled_cost": filled_cost,
+                "remaining_cost": remaining_cost,
+                "max_cost": og.get("max_cost", 0),
+            })
+
+            # Generate alerts for high utilization or triggered groups
+            if status == "triggered":
+                alerts.append({
+                    "level": "warning",
+                    "type": "group_triggered",
+                    "order_group_id": og_id,
+                    "message": f"Order group {og_id} triggered - orders auto-canceled",
+                })
+            elif contracts_limit > 0 and utilization_pct >= 90:
+                alerts.append({
+                    "level": "warning",
+                    "type": "high_utilization",
+                    "order_group_id": og_id,
+                    "message": f"Order group {og_id} at {utilization_pct}% utilization",
+                })
+
+        await client.close()
+
+        return {
+            "summary": {
+                "total_groups": total_groups,
+                "active": active_groups,
+                "triggered": triggered_groups,
+                "canceled": canceled_groups,
+                "pending": pending_groups,
+            },
+            "usage": {
+                "total_contracts_limit": total_contracts_limit,
+                "total_matched_contracts": total_matched_contracts,
+                "total_used_contracts": total_used_contracts,
+                "total_filled_cost": total_filled_cost,
+                "total_remaining_cost": total_remaining_cost,
+                "overall_utilization_pct": round(
+                    (total_used_contracts / total_contracts_limit) * 100, 2
+                ) if total_contracts_limit > 0 else 0.0,
+            },
+            "groups": enriched_groups,
+            "alerts": alerts,
+            "latency_ms": result.latency_ms,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Order groups dashboard failed: {exc}")
+        raise HTTPException(500, f"Order groups dashboard failed: {exc}")
+
 
 @router.get("/pnl")
 async def get_pnl() -> Dict[str, Any]:
@@ -975,11 +2131,11 @@ async def get_pnl() -> Dict[str, Any]:
             try:
                 from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
                 tracker = get_agent_performance_tracker()
-                for agent_id, metrics in tracker._agent_metrics.items():
+                for agent_id, m in tracker.get_all_metrics().items():
                     cat = agent_id.split("_")[0] if "_" in agent_id else agent_id
-                    category_pnl[cat] = category_pnl.get(cat, 0.0) + float(metrics.total_pnl_usd)
-            except Exception:
-                pass
+                    category_pnl[cat] = category_pnl.get(cat, 0.0) + float(m.total_pnl_usd)
+            except Exception as _e:
+                logger.debug("category_pnl tracker skipped: %s", _e)
             return {
                 "daily_pnl_usd": round(state.daily_pnl_usd, 2),
                 "total_notional_usd": round(state.total_notional_usd, 2),
@@ -1019,6 +2175,21 @@ async def get_risk() -> Dict[str, Any]:
         except Exception as exc:
             logger.warning(f"Risk summary failed: {exc}")
 
+    # Overlay global risk_controller state (authoritative kill-switch + daily PnL)
+    try:
+        from merid.risk.kill_switches import risk_controller as _rc
+        _rc_status = _rc.get_status()
+        if not _rc_status.get("can_trade", True):
+            base["kill_switch_active"] = True
+            base["kill_switch_reason"] = _rc_status.get("kill_reason")
+        _rc_pnl = float(_rc_status.get("daily_pnl", 0.0))
+        if _rc_pnl != 0.0:
+            base["daily_pnl_usd"] = _rc_pnl
+            base["daily_realized_pnl_usd"] = _rc_pnl
+            base["daily_total_pnl_usd"] = _rc_pnl
+    except Exception as _e:
+        logger.debug("risk_controller pnl supplement skipped: %s", _e)
+
     # Supplement always-zero perf metrics from AgentPerformanceTracker
     if base.get("win_rate_pct", 0) == 0 or base.get("daily_trades", 0) == 0:
         try:
@@ -1037,8 +2208,25 @@ async def get_risk() -> Dict[str, Any]:
                     re = top[0].get("avg_realized_edge", 0)
                     pe = max(top[0].get("avg_predicted_edge", 0.001), 0.001)
                     base["profit_factor"] = round(re / pe, 2)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("perf tracker supplement skipped: %s", _e)
+
+    # Add ExecutionGateStrip field aliases so the component's near-limit
+    # calculations work: total_exposure, max_exposure, daily_pnl, max_daily_loss
+    base.setdefault("total_exposure", base.get("total_notional_usd", 0))
+    base.setdefault("max_exposure", base.get("limits", {}).get("max_notional_usd", 10000))
+    base.setdefault("daily_pnl", base.get("daily_pnl_usd", 0))
+    _max_daily_loss = base.get("limits", {}).get("daily_loss_limit", 0.0)
+    if not _max_daily_loss:
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_r
+            _max_daily_loss = float(_gkr_r().config.max_daily_loss_usd)
+        except Exception as _e:
+            logger.debug("max_daily_loss lookup skipped: %s", _e)
+            _max_daily_loss = 0.0
+    base.setdefault("max_daily_loss", _max_daily_loss)
+    base.setdefault("position_count", base.get("open_market_count", 0))
+    base.setdefault("max_positions", base.get("limits", {}).get("max_open_markets", 20))
 
     return base
 
@@ -1050,11 +2238,19 @@ async def toggle_kill_switch(activate: bool = True) -> Dict[str, Any]:
     if not risk:
         return {"kill_switch": False, "action": "unavailable", "error": "Risk manager not available"}
     if activate:
-        risk._activate_kill_switch("Manual operator activation")
-        return {"kill_switch": True, "action": "activated"}
+        risk.fire_kill_switch("Manual operator activation")
     else:
         risk.reset_kill_switch()
-        return {"kill_switch": False, "action": "reset"}
+    # Also sync global risk_controller
+    try:
+        from merid.risk.kill_switches import risk_controller as _rc
+        if activate:
+            _rc.emergency_stop("Manual operator activation via API")
+        else:
+            _rc.reset(operator="api")
+    except Exception as _e:
+        logger.warning("kill_switch toggle failed: %s", _e)
+    return {"kill_switch": activate, "action": "activated" if activate else "reset"}
 
 
 # ── WebSocket bridge ─────────────────────────────────────────────────────
@@ -1073,7 +2269,12 @@ async def ws_status() -> Dict[str, Any]:
 
 # ── Health ───────────────────────────────────────────────────────────────
 
-@router.get("/health")
+@router.get("/health",
+    summary="Kalshi Integration Health Check",
+    description="Comprehensive health check covering catalog freshness, risk manager state, WebSocket bridge connectivity, REST client connectivity, and rate limit headroom.",
+    response_description="Health status, issues list, and component states",
+    tags=["kalshi", "health"],
+)
 async def health_check() -> Dict[str, Any]:
     """Comprehensive Kalshi integration health check.
 
@@ -1097,8 +2298,8 @@ async def health_check() -> Dict[str, Any]:
                 "last_refresh": cs.get("last_refresh"),
                 "categories": len(cs.get("categories", {})),
             }
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("catalog summary skipped: %s", _e)
     if catalog_data["market_count"] == 0:
         issues.append("catalog_empty")
 
@@ -1114,8 +2315,8 @@ async def health_check() -> Dict[str, Any]:
                 "daily_pnl": float(risk_summary.get("daily_pnl_usd", risk_summary.get("daily_total_pnl_usd", 0))),
                 "drawdown_pct": float(risk_summary.get("drawdown_pct", 0)),
             }
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("risk summary skipped: %s", _e)
     if risk_data["kill_switch"]:
         issues.append("kill_switch_active")
 
@@ -1125,8 +2326,8 @@ async def health_check() -> Dict[str, Any]:
     if bridge:
         try:
             ws_data = bridge.summary()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("ws_bridge summary skipped: %s", _e)
     # WS not running is just informational, not an error
     # Real-time updates still work via HTTP polling
 
@@ -1163,8 +2364,8 @@ async def health_check() -> Dict[str, Any]:
         if risk:
             max_per_minute = risk.config.max_orders_per_minute
             max_per_hour = risk.config.max_orders_per_hour
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("rate limit config lookup skipped: %s", _e)
     if orders_this_minute >= max_per_minute * 0.8:
         issues.append("rate_limit_warning")
 
@@ -1460,7 +2661,8 @@ async def sizing_metrics_endpoint() -> Dict[str, Any]:
         atr_val = sizer.atr_value
         atr_frac = sizer.atr_fraction
         kelly_util = sizer.kelly_utilization_pct
-    except Exception:
+    except Exception as _e:
+        logger.debug("position sizer metrics skipped, using live risk fallback: %s", _e)
         # Fallback: derive from live risk state instead of paper hardcodes
         live_equity = risk_summary.get("current_equity_usd", 0)
         live_notional = risk_summary.get("total_notional_usd", 0)
@@ -1496,8 +2698,8 @@ async def sizing_metrics_endpoint() -> Dict[str, Any]:
                 sharpe = top[0].get("sharpe_ratio", 0)
             if top and pf == 0:
                 pf = top[0].get("avg_realized_edge", 0) / max(top[0].get("avg_predicted_edge", 1), 0.001)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("perf tracker risk supplement skipped: %s", _e)
 
     return {
         "kelly_fraction": round(kelly_f, 4),
@@ -1608,7 +2810,8 @@ async def edge_signals_endpoint(
         try:
             all_markets = catalog.get_all_markets()
             ticker_list = [m.market.market_id for m in all_markets if m.market.active][:200]
-        except Exception:
+        except Exception as _e:
+            logger.debug("catalog ticker_list skipped: %s", _e)
             ticker_list = []
     else:
         ticker_list = []
@@ -1618,7 +2821,8 @@ async def edge_signals_endpoint(
         sizer = _get_position_sizer()
         base_kelly = sizer.kelly_fraction
         effective = sizer.effective_fraction
-    except Exception:
+    except Exception as _e:
+        logger.debug("position sizer kelly lookup skipped: %s", _e)
         base_kelly = 0.10
         effective = 0.01
 
@@ -1733,49 +2937,74 @@ async def risk_events_endpoint(
             "detail": "All trading halted. Reset from portfolio Risk tab.",
         })
 
-    # Drawdown tier events
+    # Drawdown tier events — thresholds from risk config
     dd = summary.get("drawdown_pct", 0)
-    if dd >= 10:
+    _dd_warn = 5.0
+    _dd_down = 10.0
+    _dd_halt = 15.0
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_ev
+        _krc = _gkr_ev().config
+        _dd_halt = round(float(_krc.drawdown_halt_pct) * 100, 1)
+        _dd_down = round(_dd_halt * 0.667, 1)
+        _dd_warn = round(_dd_halt * 0.333, 1)
+    except Exception as _e:
+        logger.debug("drawdown thresholds lookup skipped: %s", _e)
+    if dd >= _dd_down:
         events.append({
             "id": "dd-critical",
             "ts": ts,
             "severity": "critical",
             "category": "drawdown",
             "title": f"Drawdown at {dd:.1f}% — DOWNSIZE tier",
-            "detail": "Position sizes automatically reduced. Halt at 15%.",
+            "detail": f"Position sizes automatically reduced. Halt at {_dd_halt:.1f}%.",
         })
-    elif dd >= 5:
+    elif dd >= _dd_warn:
         events.append({
             "id": "dd-warning",
             "ts": ts,
             "severity": "warning",
             "category": "drawdown",
             "title": f"Drawdown at {dd:.1f}% — WARNING tier",
-            "detail": "Approaching downsize threshold (10%). Monitor closely.",
+            "detail": f"Approaching downsize threshold ({_dd_down:.1f}%). Monitor closely.",
         })
 
-    # Rate limit proximity
+    # Rate limit proximity — limits from risk config
     rate_min = summary.get("orders_this_minute", 0)
-    if rate_min >= 25:
+    _rate_limit = 30
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_rl
+        _rate_limit = int(_gkr_rl().config.max_orders_per_minute)
+    except Exception as _e:
+        logger.debug("rate_limit config lookup skipped: %s", _e)
+    _rate_crit = int(_rate_limit * 0.833)
+    _rate_warn = int(_rate_limit * 0.667)
+    if rate_min >= _rate_crit:
         events.append({
             "id": "rate-critical",
             "ts": ts,
             "severity": "critical",
             "category": "rate_limit",
-            "title": f"Rate limit critical: {rate_min}/30 orders this minute",
+            "title": f"Rate limit critical: {rate_min}/{_rate_limit} orders this minute",
         })
-    elif rate_min >= 20:
+    elif rate_min >= _rate_warn:
         events.append({
             "id": "rate-warning",
             "ts": ts,
             "severity": "warning",
             "category": "rate_limit",
-            "title": f"Rate limit approaching: {rate_min}/30 orders this minute",
+            "title": f"Rate limit approaching: {rate_min}/{_rate_limit} orders this minute",
         })
 
     # Daily loss cap check
     daily_pnl = summary.get("daily_pnl_usd", 0)
-    max_loss = summary.get("limits", {}).get("max_daily_loss_usd", 50)
+    _max_loss_fallback = 0.0
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_ml
+        _max_loss_fallback = float(_gkr_ml().config.max_daily_loss_usd)
+    except Exception as _e:
+        logger.debug("max_daily_loss_fallback lookup skipped: %s", _e)
+    max_loss = summary.get("limits", {}).get("max_daily_loss_usd") or _max_loss_fallback
     if daily_pnl < 0 and abs(daily_pnl) >= max_loss * 0.8:
         events.append({
             "id": "loss-cap",
@@ -1809,10 +3038,517 @@ async def risk_events_endpoint(
                     detail=evt.get("detail"),
                     extra={"event_id": evt.get("id")},
                 )
-            except Exception:
-                pass  # WS broadcast is best-effort
+            except Exception as _e:
+                logger.debug("WS broadcast skipped (best-effort): %s", _e)
 
     return {"events": events[:limit]}
+
+
+# ── BTC 15m risk singleton ────────────────────────────────────────────────
+# Shared across all /risk/btc15m/* endpoints so daily PnL, open exposure,
+# and phase promotion state persist across requests.
+_btc15m_risk_manager = None
+
+def _get_btc15m_risk_manager():
+    """Return the module-level CryptoSwarmRiskBTC15m singleton, creating it on first call."""
+    global _btc15m_risk_manager
+    if _btc15m_risk_manager is None:
+        try:
+            from merid.risk.crypto_swarm_risk_btc15m import CryptoSwarmRiskBTC15m, RiskPhase
+            _initial_equity = 0.0
+            try:
+                from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_btc
+                _initial_equity = float(_gkr_btc().state.current_equity_usd or 0)
+            except Exception as _e:
+                logger.debug("initial_equity from kalshi_risk skipped: %s", _e)
+            if _initial_equity <= 0:
+                try:
+                    from merid.settings import settings as _s_btc
+                    _initial_equity = float(getattr(_s_btc, 'PAPER_STARTING_BALANCE', 0))
+                except Exception:
+                    _initial_equity = 0.0
+            _btc15m_risk_manager = CryptoSwarmRiskBTC15m(
+                current_equity=_initial_equity,
+                phase=RiskPhase.PHASE_0,
+            )
+        except Exception as exc:
+            logger.error(f"Failed to initialise BTC15m risk singleton: {exc}")
+            raise
+    return _btc15m_risk_manager
+
+
+@router.post("/risk/btc15m/evaluate")
+async def btc15m_risk_evaluate_endpoint(
+    proposal: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Evaluate a trade proposal through the BTC 15m risk layer.
+    
+    This is the single entry point for agent trade proposals. It routes
+    proposals through the CryptoSwarmRiskBTC15m layer which implements:
+    - Live vs Paper routing (Phase 0: only BTC 15m goes live)
+    - Per-trade cost caps (0.25 base, 0.30 hard)
+    - Daily loss limits (-0.50 soft, -1.00 hard)
+    - Max open exposure (0.50 live)
+    - Fear/greed size multipliers
+    - BTC 15m microstructure filters
+    
+    Request body:
+        {
+            "asset": "BTC",
+            "timeframe": "15m",
+            "side": "yes",
+            "price_cents": 35,
+            "intent_risk": 0.25,
+            "tags": ["trending", "volatile"],
+            "fear_greed": 72,
+            "spread_ticks": 3,
+            "volume_24h": 50000,
+            "minutes_to_expiry": 10,
+            "session_stable": true
+        }
+    
+    Returns:
+        {
+            "mode": "live" | "paper" | "blocked",
+            "final_size": 0.25,
+            "reason": "Approved live: size=$0.25",
+            "adjustments": {...},
+            "blocked_reason": null
+        }
+    """
+    try:
+        from merid.risk.crypto_swarm_risk_btc15m import TradeProposal, TradeMode
+        risk_manager = _get_btc15m_risk_manager()
+        
+        # Update fear/greed if provided
+        if "fear_greed" in proposal:
+            risk_manager.update_fear_greed(proposal["fear_greed"])
+        
+        # Build trade proposal
+        trade_proposal = TradeProposal(
+            asset=proposal.get("asset", ""),
+            timeframe=proposal.get("timeframe", ""),
+            side=proposal.get("side", "yes"),
+            price_cents=proposal.get("price_cents", 50),
+            intent_risk=proposal.get("intent_risk", 0.25),
+            tags=proposal.get("tags", []),
+            fear_greed=proposal.get("fear_greed"),
+            spread_ticks=proposal.get("spread_ticks"),
+            volume_24h=proposal.get("volume_24h"),
+            minutes_to_expiry=proposal.get("minutes_to_expiry"),
+            session_stable=proposal.get("session_stable", True),
+        )
+        
+        # Evaluate through risk layer
+        decision = risk_manager.evaluate_proposal(trade_proposal)
+        
+        return {
+            "mode": decision.mode.value,
+            "final_size": decision.final_size,
+            "reason": decision.reason,
+            "adjustments": decision.adjustments,
+            "blocked_reason": decision.blocked_reason,
+            "risk_status": risk_manager.get_status_summary(),
+        }
+    except Exception as exc:
+        logger.error(f"BTC 15m risk evaluation failed: {exc}")
+        raise HTTPException(500, f"Risk evaluation failed: {exc}")
+
+
+@router.get("/risk/btc15m/status")
+async def btc15m_risk_status_endpoint() -> Dict[str, Any]:
+    """Get current BTC 15m risk layer status.
+    
+    Returns the complete risk state including:
+    - Current phase and equity
+    - Daily PnL and loss limit status
+    - Open exposure and position count
+    - Fear/greed reading
+    - Phase promotion eligibility
+    """
+    try:
+        risk_manager = _get_btc15m_risk_manager()
+        return risk_manager.get_status_summary()
+    except Exception as exc:
+        logger.error(f"BTC 15m risk status failed: {exc}")
+        return {
+            "error": str(exc),
+            "phase": "unknown",
+            "equity": 0,
+        }
+
+
+# ── Multi-TF Drawdown Guard ────────────────────────────────────────────
+
+@router.get("/risk/dd-guard")
+async def get_dd_guard_status() -> Dict[str, Any]:
+    """
+    Return per-timeframe and global drawdown brake state.
+
+    Fields per key (e.g. 'BTC:15m', 'GLOBAL'):
+      equity, peak, drawdown (0..1), limit (0..1), allowed (bool)
+
+    Use this endpoint to surface drawdown brake status in the UI and
+    to alert when a lane is approaching its DD limit.
+    """
+    try:
+        from merid.risk.multi_tf_drawdown import get_multi_tf_drawdown_guard
+        guard = get_multi_tf_drawdown_guard()
+        status = guard.get_status()
+        return {
+            "ok": True,
+            "lanes": status,
+            "global_allowed": guard.global_allowed(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.warning("dd-guard status failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ── Market Mood Bus ────────────────────────────────────────────────────
+
+def _fg_regime_str(fg_index: int) -> str:
+    """Map a 0-100 fear/greed index to a regime string."""
+    if fg_index <= 20:
+        return "extreme_fear"
+    if fg_index <= 40:
+        return "fear"
+    if fg_index <= 60:
+        return "neutral"
+    if fg_index <= 80:
+        return "greed"
+    return "extreme_greed"
+
+
+@router.get("/mood/{asset}/{timeframe}")
+async def get_market_mood(
+    asset: str,
+    timeframe: str,
+) -> Dict[str, Any]:
+    """Get unified market mood context for an asset/timeframe.
+    
+    Returns the SentimentContext with fear/greed, social/news sentiment,
+    trend scores, volatility regime, and Kalshi market data.
+    """
+    try:
+        from merid.swarm.market_mood_bus import get_market_mood_bus
+        bus = get_market_mood_bus()
+        context = bus.get_context(asset, timeframe)
+        
+        if not context:
+            return {
+                "asset": asset,
+                "timeframe": timeframe,
+                "error": "No context available",
+            }
+        
+        return {
+            "asset": context.asset,
+            "timeframe": context.timeframe,
+            "timestamp": context.timestamp.isoformat(),
+            "fg_index": context.fg_index,
+            "social_sentiment": context.social_sentiment,
+            "news_sentiment": context.news_sentiment,
+            "kalshi_sentiment": context.kalshi_sentiment,
+            "sentiment_confidence": context.sentiment_confidence.value,
+            "trend_score": context.trend_score,
+            "volatility_regime": context.volatility_regime.value,
+            "price_momentum_1h": context.price_momentum_1h,
+            "kalshi_price": context.kalshi_price,
+            "kalshi_spread_bps": context.kalshi_spread_bps,
+            "tags": context.tags,
+            "swarm_consensus": {
+                "prob": context.swarm_consensus_prob,
+                "direction": context.swarm_consensus_direction,
+                "confidence": context.swarm_confidence,
+                "agents_voting": context.swarm_agents_voting,
+            } if context.swarm_consensus_prob else None,
+            "risk_status": {
+                "regime": context.risk_regime,
+                "daily_pnl": context.daily_pnl_usd,
+                "open_exposure": context.open_exposure_usd,
+            },
+        }
+    except Exception as exc:
+        logger.error(f"Market mood fetch failed: {exc}")
+        return {"error": str(exc), "asset": asset, "timeframe": timeframe}
+
+
+@router.get("/mood/all")
+async def get_all_market_moods() -> Dict[str, Any]:
+    """Get all current market mood contexts."""
+    try:
+        from merid.swarm.market_mood_bus import get_market_mood_bus
+        bus = get_market_mood_bus()
+        contexts = bus.get_all_contexts()
+        
+        return {
+            "count": len(contexts),
+            "moods": {
+                key: {
+                    "asset": ctx.asset,
+                    "timeframe": ctx.timeframe,
+                    "fg_index": ctx.fg_index,
+                    "social_sentiment": ctx.social_sentiment,
+                    "volatility_regime": ctx.volatility_regime.value,
+                    "tags": ctx.tags,
+                }
+                for key, ctx in contexts.items()
+            },
+        }
+    except Exception as exc:
+        logger.error(f"All market moods fetch failed: {exc}")
+        return {"error": str(exc)}
+
+
+@router.get("/mood/fear-greed/{asset}")
+async def get_mood_fear_greed(asset: str) -> Dict[str, Any]:
+    """Get current fear/greed index for an asset from the MarketMoodBus."""
+    try:
+        from merid.swarm.market_mood_bus import get_market_mood_bus
+        bus = get_market_mood_bus()
+        ctx = bus.get_context(asset.upper(), "15m")
+        if ctx:
+            return {
+                "asset": asset.upper(),
+                "fg_index": ctx.fg_index,
+                "regime": _fg_regime_str(ctx.fg_index),
+                "social_sentiment": ctx.social_sentiment,
+                "volatility_regime": ctx.volatility_regime.value,
+                "tags": ctx.tags,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        # Fallback to CFGI if no mood bus context
+        from merid.sentiment.cfgi_client import get_cfgi_client
+        data = get_cfgi_client().get_fear_greed(asset.upper())
+        return {
+            "asset": data.asset,
+            "fg_index": data.fgi,
+            "regime": data.classification.value,
+            "is_synthetic": data.is_synthetic,
+            "timestamp": data.timestamp.isoformat(),
+        }
+    except Exception as exc:
+        logger.warning(f"mood/fear-greed GET failed for {asset}: {exc}")
+        return {"asset": asset.upper(), "fg_index": 50, "regime": "neutral", "error": str(exc)}
+
+
+@router.post("/mood/fear-greed/{asset}")
+async def update_fear_greed(
+    asset: str,
+    value: int = Query(..., ge=0, le=100),
+) -> Dict[str, Any]:
+    """Update fear/greed index for an asset."""
+    try:
+        from merid.swarm.market_mood_bus import get_market_mood_bus
+        bus = get_market_mood_bus()
+        bus.update_fear_greed(asset, value)
+        return {"updated": True, "asset": asset, "fg_index": value}
+    except Exception as exc:
+        logger.error(f"Fear/greed update failed: {exc}")
+        raise HTTPException(500, str(exc))
+
+
+# ── Swarm Consensus ─────────────────────────────────────────────────────
+
+@router.get("/consensus/{asset}/{timeframe}")
+async def get_swarm_consensus(
+    asset: str,
+    timeframe: str,
+) -> Dict[str, Any]:
+    """Get swarm consensus for an asset/timeframe.
+    
+    Returns the aggregated consensus view including direction,
+    probability, confidence, size band, and agent breakdown.
+    """
+    try:
+        from merid.swarm.consensus_aggregator import get_consensus_aggregator
+        aggregator = get_consensus_aggregator()
+        consensus = aggregator.get_consensus(asset, timeframe)
+        
+        if not consensus:
+            return {
+                "asset": asset,
+                "timeframe": timeframe,
+                "status": "no_consensus",
+            }
+        
+        return {
+            "asset": consensus.asset,
+            "timeframe": consensus.timeframe,
+            "timestamp": consensus.timestamp.isoformat(),
+            "status": consensus.status.value,
+            "consensus_direction": consensus.consensus_direction,
+            "consensus_probability": consensus.consensus_probability,
+            "consensus_confidence": consensus.consensus_confidence,
+            "total_agents": consensus.total_agents,
+            "voting_agents": consensus.voting_agents,
+            "direction_breakdown": consensus.direction_breakdown,
+            "size_band": consensus.size_band,
+            "size_rationale": consensus.size_rationale,
+            "confidence_factors": consensus.confidence_factors,
+            "disagreement_flags": consensus.disagreement_flags,
+        }
+    except Exception as exc:
+        logger.error(f"Consensus fetch failed: {exc}")
+        return {"error": str(exc), "asset": asset, "timeframe": timeframe}
+
+
+@router.get("/consensus/all")
+async def get_all_consensus() -> Dict[str, Any]:
+    """Get all current swarm consensus views.
+
+    Returns a flat ``{key: ConsensusView}`` dict so the frontend can
+    consume it directly as ``Record<string, ConsensusView>``.
+    """
+    try:
+        from merid.swarm.consensus_aggregator import get_consensus_aggregator
+        aggregator = get_consensus_aggregator()
+        views = aggregator.get_all_consensus()
+
+        def _serialize(v) -> Dict[str, Any]:
+            return {
+                "asset": v.asset,
+                "timeframe": v.timeframe,
+                "timestamp": v.timestamp.isoformat() if hasattr(v.timestamp, "isoformat") else str(v.timestamp),
+                "status": v.status.value if hasattr(v.status, "value") else str(v.status),
+                "consensus_direction": v.consensus_direction,
+                "consensus_probability": v.consensus_probability,
+                "consensus_confidence": v.consensus_confidence,
+                "total_agents": v.total_agents,
+                "voting_agents": v.voting_agents,
+                "direction_breakdown": dict(v.direction_breakdown) if v.direction_breakdown else {},
+                "size_band": v.size_band,
+                "size_rationale": v.size_rationale,
+                "confidence_factors": list(v.confidence_factors) if v.confidence_factors else [],
+                "disagreement_flags": list(v.disagreement_flags) if v.disagreement_flags else [],
+                "raw_proposals": [
+                    {
+                        "agent_id": p.agent_id,
+                        "asset": p.asset,
+                        "timeframe": p.timeframe,
+                        "direction": p.direction,
+                        "probability": p.probability,
+                        "confidence": p.confidence,
+                        "size_preference": p.size_preference,
+                        "rationale": p.rationale,
+                        "edge_estimate": p.edge_estimate,
+                        "agent_archetype": p.agent_archetype,
+                        "agent_track_record": p.agent_track_record,
+                    }
+                    for p in (v.raw_proposals or [])
+                ],
+            }
+
+        return {
+            key: _serialize(v)
+            for key, v in views.items()
+        }
+    except Exception as exc:
+        logger.error(f"All consensus fetch failed: {exc}")
+        return {"error": str(exc)}
+
+
+# ── Insights / Swarm Journal ────────────────────────────────────────────
+
+@router.get("/insights")
+async def get_swarm_insights(
+    asset: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+) -> Dict[str, Any]:
+    """Get recent swarm insights for the journal.
+    
+    Returns InsightObjects showing what the swarm believed,
+    market context at decision time, and outcomes.
+    """
+    try:
+        from merid.swarm.market_mood_bus import get_market_mood_bus
+        bus = get_market_mood_bus()
+        insights = bus.get_recent_insights(
+            asset=asset,
+            timeframe=timeframe,
+            limit=limit,
+        )
+        
+        return {
+            "count": len(insights),
+            "insights": [
+                {
+                    "id": i.insight_id,
+                    "timestamp": i.timestamp.isoformat(),
+                    "asset": i.asset,
+                    "timeframe": i.timeframe,
+                    "swarm_direction": i.swarm_direction,
+                    "swarm_probability": i.swarm_probability,
+                    "swarm_confidence": i.swarm_confidence,
+                    "size_band": i.swarm_size_band,
+                    "headline": i.headline,
+                    "rationale": i.rationale,
+                    "key_factors": i.key_factors,
+                    "final_mode": i.final_mode,
+                    "trade_executed": i.trade_executed,
+                    "entry_price": i.entry_price,
+                    "realized_pnl": i.realized_pnl,
+                    "prediction_correct": i.prediction_correct,
+                    "lessons": i.lessons,
+                }
+                for i in insights
+            ],
+        }
+    except Exception as exc:
+        logger.error(f"Insights fetch failed: {exc}")
+        return {"error": str(exc)}
+
+
+@router.post("/risk/btc15m/fear-greed")
+async def btc15m_update_fear_greed(
+    value: int = Query(..., ge=0, le=100, description="Fear/greed index 0-100"),
+) -> Dict[str, Any]:
+    """Update the cached fear/greed reading."""
+    try:
+        risk_manager = _get_btc15m_risk_manager()
+        risk_manager.update_fear_greed(value)
+        
+        return {
+            "updated": True,
+            "value": value,
+            "zone": risk_manager.fear_greed_cache.zone if risk_manager.fear_greed_cache else None,
+        }
+    except Exception as exc:
+        logger.error(f"Fear/greed update failed: {exc}")
+        raise HTTPException(500, f"Update failed: {exc}")
+
+
+@router.post("/risk/btc15m/record-result")
+async def btc15m_record_result(
+    ticker: str = Query(...),
+    realized_pnl: float = Query(..., description="Realized PnL for the trade"),
+    mode: str = Query(..., description="Trade mode: live or paper"),
+) -> Dict[str, Any]:
+    """Record a trade result for daily tracking."""
+    try:
+        from merid.risk.crypto_swarm_risk_btc15m import TradeMode
+        risk_manager = _get_btc15m_risk_manager()
+        trade_mode = TradeMode.LIVE if mode == "live" else TradeMode.PAPER
+        risk_manager.record_trade_result(ticker, realized_pnl, trade_mode)
+        
+        return {
+            "recorded": True,
+            "ticker": ticker,
+            "realized_pnl": realized_pnl,
+            "mode": mode,
+            "daily_state": {
+                "realized_pnl": risk_manager.daily_state.realized_pnl,
+                "trades_today": risk_manager.daily_state.trades_today,
+                "soft_stop_triggered": risk_manager.daily_state.soft_stop_triggered,
+                "hard_stop_triggered": risk_manager.daily_state.hard_stop_triggered,
+            },
+        }
+    except Exception as exc:
+        logger.error(f"Record result failed: {exc}")
+        raise HTTPException(500, f"Failed: {exc}")
 
 
 @router.post("/risk/downsize")
@@ -1848,8 +3584,7 @@ async def risk_downsize_endpoint(
 @router.get("/risk/insights")
 async def risk_insights_endpoint() -> Dict[str, Any]:
     """AI-generated risk insights from live risk state, agent performance, and swarm consensus."""
-    import datetime as _dt
-    now_ts = _dt.datetime.utcnow().isoformat()
+    now_ts = datetime.now(timezone.utc).isoformat()
 
     risk = _get_risk()
     risk_summary = risk.summary() if risk else {}
@@ -1933,23 +3668,23 @@ async def risk_insights_endpoint() -> Dict[str, Any]:
                      title=f"Agent {worst['agent_id']} losing ${abs(float(worst['total_pnl_usd'])):.2f}",
                      body="This agent is dragging overall PnL. Consider pausing or reducing its size factor.",
                      action_label="Pause agent")
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("insight agent performance probe skipped: %s", _e)
 
     # ── 4. PositionSizer vol overshoot ────────────────────────────────────
     try:
         from merid.event_venues.kalshi.position_sizer import get_position_sizer
         sizer = get_position_sizer()
-        state = sizer._vol_state
-        rvol = float(getattr(state, "realized_vol", 0))
-        tvol = float(getattr(state, "target_vol", 0.15))
+        state = sizer.vol_state if hasattr(sizer, 'vol_state') else getattr(sizer, '_vol_state', None)
+        rvol = float(getattr(state, "realized_vol", 0)) if state else 0.0
+        tvol = float(getattr(state, "target_vol", 0.15)) if state else 0.15
         if rvol > 0 and tvol > 0 and rvol > tvol * 1.5:
             _ins(kind="warning", insight_type="risk", severity="warning",
                  title=f"Realized vol {rvol*100:.1f}% exceeds target {tvol*100:.1f}%",
                  body="Vol scaling will auto-reduce position sizes. No action needed unless persistent.",
                  details=f"Realized: {rvol*100:.1f}%. Target: {tvol*100:.1f}%. Scale factor will be reduced.")
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("insight vol overshoot probe skipped: %s", _e)
 
     # ── 5. Consensus engine — high-confidence signals ─────────────────────
     try:
@@ -1965,8 +3700,8 @@ async def risk_insights_endpoint() -> Dict[str, Any]:
                  title=f"{len(high_conf)} high-confidence swarm signal{'s' if len(high_conf) > 1 else ''}",
                  body=f"Tickers: {', '.join(tickers[:3])}. Confidence ≥80%. Swarm is aligned.",
                  link_view="kalshi-vol-dashboard")
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("insight consensus signals probe skipped: %s", _e)
 
     # ── 6. Rate limit proximity ───────────────────────────────────────────
     rate_min = risk_summary.get("orders_this_minute", 0)
@@ -1996,8 +3731,8 @@ async def risk_insights_endpoint() -> Dict[str, Any]:
                  title=f"{len(good_markets)} tight-spread markets available",
                  body=f"Top: {good_markets[0].get('ticker', '')} spread={good_markets[0].get('spread_pct', 0)*100:.1f}%",
                  link_view="kalshi-terminal")
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("insight liquidity probe skipped: %s", _e)
 
     return {"insights": insights}
 
@@ -2079,7 +3814,9 @@ async def trigger_pipeline_insight(
             open_interest=0,
             tags=CATEGORY_TAGS.get(category, ["#Kalshi"]),
         )
-        await pipeline._dispatch(insight)
+        _dispatch = getattr(pipeline, 'dispatch', None) or getattr(pipeline, '_dispatch', None)
+        if _dispatch:
+            await _dispatch(insight)
         return {"ok": True, "ticker": ticker, "category": category}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -2094,8 +3831,8 @@ def _load_favorites() -> List[str]:
     try:
         if _FAVORITES_FILE.exists():
             return _json.loads(_FAVORITES_FILE.read_text())
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("_load_favorites: file read failed: %s", _e)
     return []
 
 
@@ -2306,3 +4043,1017 @@ async def toggle_favorite(
         action = "added"
     _save_favorites(favs)
     return {"ticker": ticker, "action": action, "favorites": favs, "count": len(favs)}
+
+
+# ── FIX API ─────────────────────────────────────────────────────────────
+
+_fix_client: Optional[Any] = None
+
+def _get_fix_client() -> Optional[Any]:
+    """Get or create FIX client singleton."""
+    global _fix_client
+    if _fix_client is None:
+        try:
+            from merid.event_venues.kalshi.fix_client import KalshiFIXClient
+            from merid.settings import settings
+            sender_comp_id = getattr(settings, 'KALSHI_FIX_SENDER_COMP_ID', 'MERID')
+            _fix_client = KalshiFIXClient(
+                sender_comp_id=sender_comp_id,
+                host=getattr(settings, 'KALSHI_FIX_HOST', '127.0.0.1'),
+                port=getattr(settings, 'KALSHI_FIX_PORT', 98228),
+            )
+        except Exception as exc:
+            logger.warning(f"FIX client initialization failed: {exc}")
+            return None
+    return _fix_client
+
+
+@router.get("/fix/status")
+async def fix_status() -> Dict[str, Any]:
+    """Get FIX connection status."""
+    fix = _get_fix_client()
+    if not fix:
+        return {"connected": False, "logged_on": False, "error": "FIX client not configured"}
+    
+    return {
+        "connected": fix.is_connected,
+        "logged_on": fix._logged_on if hasattr(fix, '_logged_on') else False,
+        "pending_orders": len(fix.get_pending_orders()) if hasattr(fix, 'get_pending_orders') else 0,
+        "sender_comp_id": fix.sender_comp_id if hasattr(fix, 'sender_comp_id') else None,
+    }
+
+
+@router.post("/fix/connect")
+async def fix_connect() -> Dict[str, Any]:
+    """Connect and logon to FIX session."""
+    fix = _get_fix_client()
+    if not fix:
+        raise HTTPException(503, "FIX client not configured")
+    
+    try:
+        success = await fix.connect()
+        return {
+            "connected": success,
+            "status": "logged_on" if success else "failed",
+        }
+    except Exception as exc:
+        logger.error(f"FIX connect failed: {exc}")
+        raise HTTPException(500, f"FIX connection failed: {exc}")
+
+
+@router.post("/fix/disconnect")
+async def fix_disconnect() -> Dict[str, Any]:
+    """Logout and disconnect from FIX session."""
+    fix = _get_fix_client()
+    if not fix:
+        return {"disconnected": True, "was_connected": False}
+    
+    try:
+        was_connected = fix.is_connected
+        await fix.disconnect()
+        return {
+            "disconnected": True,
+            "was_connected": was_connected,
+        }
+    except Exception as exc:
+        logger.error(f"FIX disconnect error: {exc}")
+        raise HTTPException(500, f"FIX disconnect failed: {exc}")
+
+
+@router.post("/fix/orders")
+async def fix_submit_order(
+    ticker: str,
+    side: str,  # "buy" or "sell"
+    quantity: int,
+    price: Optional[int] = None,
+    ord_type: str = "limit",
+    time_in_force: str = "gtc",
+) -> Dict[str, Any]:
+    """Submit order via FIX protocol.
+    
+    Args:
+        ticker: Market ticker symbol
+        side: "buy" or "sell"
+        quantity: Number of contracts
+        price: Price in cents (required for limit orders)
+        ord_type: "limit" or "market"
+        time_in_force: "gtc", "day", "ioc", or "fok"
+    """
+    fix = _get_fix_client()
+    if not fix:
+        raise HTTPException(503, "FIX client not configured")
+    
+    if not fix.is_connected:
+        raise HTTPException(503, "FIX not connected - connect first via POST /fix/connect")
+    
+    try:
+        cl_ord_id = await fix.submit_order(
+            ticker=ticker,
+            side=side,
+            quantity=quantity,
+            price=price,
+            ord_type=ord_type,
+            time_in_force=time_in_force,
+        )
+        return {
+            "status": "submitted",
+            "cl_ord_id": cl_ord_id,
+            "ticker": ticker,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+        }
+    except Exception as exc:
+        logger.error(f"FIX order submission failed: {exc}")
+        raise HTTPException(500, f"Order submission failed: {exc}")
+
+
+@router.delete("/fix/orders/{cl_ord_id}")
+async def fix_cancel_order(cl_ord_id: str) -> Dict[str, Any]:
+    """Cancel an order via FIX."""
+    fix = _get_fix_client()
+    if not fix:
+        raise HTTPException(503, "FIX client not configured")
+    
+    if not fix.is_connected:
+        raise HTTPException(503, "FIX not connected")
+    
+    try:
+        await fix.cancel_order(cl_ord_id)
+        return {
+            "status": "cancel_requested",
+            "cl_ord_id": cl_ord_id,
+        }
+    except Exception as exc:
+        logger.error(f"FIX cancel failed: {exc}")
+        raise HTTPException(500, f"Cancel failed: {exc}")
+
+
+@router.get("/fix/executions")
+async def fix_executions(
+    limit: int = Query(100, ge=1, le=500),
+    cl_ord_id: Optional[str] = Query(None, description="Filter by client order ID"),
+) -> Dict[str, Any]:
+    """Get FIX execution report history."""
+    fix = _get_fix_client()
+    if not fix:
+        raise HTTPException(503, "FIX client not configured")
+    
+    try:
+        history = fix.get_exec_history(limit=limit)
+        
+        # Filter by cl_ord_id if provided
+        if cl_ord_id:
+            history = [e for e in history if getattr(e, 'cl_ord_id', '') == cl_ord_id]
+        
+        return {
+            "count": len(history),
+            "executions": [
+                {
+                    "order_id": e.order_id,
+                    "cl_ord_id": e.cl_ord_id,
+                    "exec_id": e.exec_id,
+                    "exec_type": e.exec_type,
+                    "ord_status": e.ord_status,
+                    "price": e.price,
+                    "quantity": e.quantity,
+                    "leaves_qty": e.leaves_qty,
+                    "cum_qty": e.cum_qty,
+                    "last_qty": e.last_qty,
+                    "last_px": e.last_px,
+                    "text": e.text,
+                    "timestamp": e.timestamp,
+                }
+                for e in history
+            ],
+        }
+    except Exception as exc:
+        logger.error(f"FIX executions fetch failed: {exc}")
+        raise HTTPException(500, f"Failed to fetch executions: {exc}")
+
+
+@router.get("/fix/pending")
+async def fix_pending_orders() -> Dict[str, Any]:
+    """Get list of pending orders in FIX."""
+    fix = _get_fix_client()
+    if not fix:
+        raise HTTPException(503, "FIX client not configured")
+    
+    try:
+        pending = fix.get_pending_orders()
+        return {
+            "count": len(pending),
+            "orders": [
+                {
+                    "cl_ord_id": o.cl_ord_id,
+                    "ticker": o.ticker,
+                    "side": "buy" if o.side == "1" else "sell" if o.side == "2" else o.side,
+                    "ord_type": "limit" if o.ord_type == "2" else "market" if o.ord_type == "1" else o.ord_type,
+                    "price": o.price,
+                    "quantity": o.quantity,
+                }
+                for o in pending
+            ],
+        }
+    except Exception as exc:
+        logger.error(f"FIX pending orders fetch failed: {exc}")
+        raise HTTPException(500, f"Failed to fetch pending orders: {exc}")
+
+
+# ── Lane Sentiment Snapshot ───────────────────────────────────────────
+
+@router.get("/sentiment/lane-snapshot")
+async def get_lane_sentiment_snapshot() -> Dict[str, Any]:
+    """
+    Return the BTC15m lane's live cached_sentiment dict — the exact signal
+    that drives every risk decision in the current cycle.
+
+    Fields returned (all from lane._cached_sentiment + computed extras):
+      twitter, reddit, fg_index, fg_regime, fg_is_synthetic,
+      combined_raw, combined_fib, combined_smoothed, confidence,
+      vader_signal, kalshi_prob_adj, kalman_gain, timestamp,
+      sentiment_age_seconds, sentiment_stale,
+      fg_clamp_breakdown (rules_fired, sizing_multiplier, fg_filter_blocked)
+
+    Use this endpoint to power the BTC15m sentiment strip in the UI.
+    """
+    try:
+        from merid.lanes.btc15m_lane import get_btc15m_lane
+        lane = get_btc15m_lane()
+        status = lane.get_status()
+        cached = status.get("cached_sentiment") or {}
+        age = status.get("sentiment_age_seconds")
+        stale = status.get("sentiment_stale", True)
+        fg_synthetic = status.get("fg_is_synthetic", False)
+    except Exception as exc:
+        logger.warning("sentiment/lane-snapshot: lane unavailable — %s", exc)
+        cached = {}
+        age = None
+        stale = True
+        fg_synthetic = False
+
+    # Compute FG clamp breakdown for UI display
+    fg_breakdown: Dict[str, Any] = {}
+    try:
+        from merid.sentiment.btc_risk_dial import FGState, fg_clamp_breakdown
+        equity = 0.0
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_fg
+            equity = float(_gkr_fg().state.current_equity_usd or 0)
+        except Exception as _e:
+            logger.debug("fg_equity from kalshi_risk skipped: %s", _e)
+        if equity <= 0:
+            try:
+                from merid.settings import settings as _s_fg
+                equity = float(getattr(_s_fg, "PAPER_STARTING_BALANCE", 0) or 0)
+            except Exception:
+                equity = 0.0
+        fg = FGState(
+            value=int(cached.get("fg_index", 50)),
+            combined=cached.get("combined_smoothed", 0.0),
+            confidence=cached.get("confidence", 0.5),
+            is_synthetic=fg_synthetic,
+        )
+        fg_breakdown = fg_clamp_breakdown(equity, fg)
+    except Exception as exc:
+        logger.debug("fg_clamp_breakdown unavailable: %s", exc)
+
+    return {
+        **cached,
+        "sentiment_age_seconds": age,
+        "sentiment_stale": stale,
+        "fg_is_synthetic": fg_synthetic,
+        "fg_clamp_breakdown": fg_breakdown,
+        "timestamp_fetched": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── CFGI Fear/Greed Sentiment API ────────────────────────────────────
+# NOTE: market-summary MUST be registered before /{asset} so FastAPI
+# does not capture the literal string "market-summary" as the {asset} param.
+
+@router.get("/sentiment/fear-greed/market-summary")
+async def get_cfgi_market_summary() -> Dict[str, Any]:
+    """Get CFGI fear/greed summary across major assets (BTC, ETH, SOL).
+
+    Response shape consumed by KALSHI_FEAR_GREED_SUMMARY constant:
+      timestamp, assets{fgi, classification, is_extreme, risk_multiplier},
+      average_fgi, extreme_count
+    """
+    try:
+        from merid.sentiment.cfgi_client import get_cfgi_client
+        return get_cfgi_client().get_market_summary()
+    except Exception as exc:
+        logger.warning(f"CFGI market summary failed: {exc}")
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "assets": {},
+            "average_fgi": 50,
+            "extreme_count": 0,
+            "error": str(exc),
+        }
+
+
+@router.get("/sentiment/fear-greed/{asset}")
+async def get_cfgi_fear_greed(asset: str) -> Dict[str, Any]:
+    """Get CFGI fear/greed index for an asset.
+
+    Primary source: CFGI API (requires CFGI_API_KEY env var).
+    Fallback: synthetic sin-wave value (marked is_synthetic=True).
+
+    Response shape consumed by KALSHI_FEAR_GREED constant:
+      asset, fgi, regime, classification, is_synthetic,
+      risk_multiplier, contrarian_signal, timestamp
+    """
+    try:
+        from merid.sentiment.cfgi_client import get_cfgi_client
+        data = get_cfgi_client().get_fear_greed(asset.upper())
+        return {
+            **data.to_dict(),
+            "regime": data.classification.value,
+            "risk_multiplier": data.get_risk_multiplier(),
+            "contrarian_signal": data.get_contrarian_signal(),
+            "is_extreme": data.is_extreme(),
+        }
+    except Exception as exc:
+        logger.warning(f"CFGI fear-greed fetch failed for {asset}: {exc}")
+        return {
+            "asset": asset.upper(),
+            "fgi": 50,
+            "regime": "neutral",
+            "classification": "neutral",
+            "is_synthetic": True,
+            "risk_multiplier": 1.0,
+            "contrarian_signal": "neutral",
+            "is_extreme": False,
+            "error": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+# ── Sentiment API ─────────────────────────────────────────────────────
+
+@router.get("/sentiment/twitter/{asset}")
+async def get_twitter_sentiment(
+    asset: str,
+    minutes: int = Query(15, ge=5, le=60, description="Lookback window in minutes"),
+) -> Dict[str, Any]:
+    """Get Twitter sentiment analysis for an asset.
+    
+    Args:
+        asset: Asset symbol (BTC, ETH, SOL, etc.)
+        minutes: Recent tweets window (5-60 min)
+    
+    Returns:
+        score: Sentiment score -1.0 to +1.0
+        confidence: 0.0 to 1.0 based on volume/engagement
+        volume: Number of tweets analyzed
+        avg_engagement: Average tweet engagement (likes+retweets)
+        timestamp: Analysis timestamp
+    """
+    try:
+        from merid.sentiment.twitter_fetcher import get_twitter_sentiment_service
+        service = get_twitter_sentiment_service()
+        result = service.get_sentiment(asset, minutes=minutes)
+        
+        return {
+            "asset": asset,
+            "score": round(result.score, 4),
+            "confidence": round(result.confidence, 3),
+            "volume": result.volume,
+            "avg_engagement": round(result.avg_engagement, 1),
+            "timestamp": result.timestamp.isoformat(),
+            "source": "twitter",
+            "window_minutes": minutes,
+        }
+    except Exception as exc:
+        logger.warning(f"Twitter sentiment fetch failed for {asset}: {exc}")
+        return {
+            "asset": asset,
+            "score": 0.0,
+            "confidence": 0.0,
+            "volume": 0,
+            "avg_engagement": 0.0,
+            "error": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "twitter",
+        }
+
+
+@router.get("/sentiment/reddit/{asset}")
+async def get_reddit_sentiment(
+    asset: str,
+    time_filter: str = Query("hour", description="hour, day, or week"),
+) -> Dict[str, Any]:
+    """Get Reddit sentiment analysis for an asset.
+    
+    Polls r/Bitcoin, r/CryptoCurrency, r/Kalshi and other relevant subs.
+    
+    Args:
+        asset: Asset symbol (BTC, ETH, SOL, etc.)
+        time_filter: Recent posts window (hour, day, week)
+    
+    Returns:
+        score: Sentiment score -1.0 to +1.0
+        confidence: 0.0 to 1.0 based on volume/engagement
+        volume: Number of posts analyzed
+        subreddit_breakdown: Per-subreddit stats
+        timestamp: Analysis timestamp
+    """
+    try:
+        from merid.sentiment.reddit_scraper import get_reddit_sentiment_service
+        service = get_reddit_sentiment_service()
+        result = service.get_sentiment(asset, time_filter=time_filter)
+        
+        return {
+            "asset": asset,
+            "score": round(result.score, 4),
+            "confidence": round(result.confidence, 3),
+            "volume": result.volume,
+            "avg_engagement": round(result.avg_engagement, 1),
+            "subreddit_breakdown": result.subreddit_breakdown,
+            "timestamp": result.timestamp.isoformat(),
+            "source": "reddit",
+            "time_filter": time_filter,
+        }
+    except Exception as exc:
+        logger.warning(f"Reddit sentiment fetch failed for {asset}: {exc}")
+        return {
+            "asset": asset,
+            "score": 0.0,
+            "confidence": 0.0,
+            "volume": 0,
+            "avg_engagement": 0.0,
+            "subreddit_breakdown": {},
+            "error": str(exc),
+        }
+
+
+@router.get("/sentiment/bundle/{asset}")
+async def get_sentiment_bundle_endpoint(
+    asset: str,
+) -> Dict[str, Any]:
+    """Get SentimentBundle for a single asset."""
+    try:
+        from merid.sentiment import get_bundle
+        bundle = get_bundle(asset.upper())
+        return {
+            "bundle": bundle.to_dict(),
+            "formatted": str(bundle),
+            "is_contrarian": getattr(bundle, 'is_contrarian', False),
+            "size_multiplier": getattr(bundle, 'size_multiplier', 1.0),
+        }
+    except Exception as exc:
+        logger.warning(f"SentimentBundle failed for {asset}: {exc}")
+        return {"error": str(exc), "asset": asset}
+
+
+@router.get("/sentiment/backtest")
+async def sentiment_backtest_endpoint(
+    asset: str = Query(..., description="Asset symbol e.g. BTC"),
+    days: int = Query(30, ge=7, le=90, description="Lookback days"),
+) -> Dict[str, Any]:
+    """Run a sentiment threshold backtest for an asset."""
+    try:
+        from merid.sentiment import run_backtest
+        result = run_backtest(asset.upper(), days=days)
+        return result
+    except Exception as exc:
+        logger.warning(f"Sentiment backtest failed for {asset}: {exc}")
+        return {
+            "asset": asset,
+            "days": days,
+            "error": str(exc),
+            "best": {"pos_th": 0.0, "neg_th": 0.0, "sharpe": 0.0, "max_drawdown": 0.0, "win_rate": 0.0, "trades": 0},
+            "top_5": [],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+@router.get("/sentiment/bundle-multi")
+async def get_multi_bundle_endpoint(
+    assets: str = Query(..., description="Comma-separated assets")
+) -> Dict[str, Any]:
+    """Get SentimentBundle for multiple assets."""
+    try:
+        from merid.sentiment import get_multi_bundle
+        asset_list = [a.strip().upper() for a in assets.split(",")]
+        bundles = get_multi_bundle(asset_list)
+        return {
+            "bundles": {asset: b.to_dict() for asset, b in bundles.items()},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@router.get("/sentiment/decide-btc-15m")
+async def decide_btc_15m_endpoint(
+    base_prob: float = Query(..., ge=0.01, le=0.99),
+) -> Dict[str, Any]:
+    """Get BTC 15m decision with sentiment."""
+    try:
+        from merid.sentiment import decide_btc_15m
+        result = decide_btc_15m(None, base_prob)
+        return result
+    except Exception as exc:
+        logger.error(f"BTC 15m decision failed: {exc}")
+        raise HTTPException(500, f"Decision failed: {exc}")
+
+
+# ── Threshold Optimizer API ──────────────────────────────────────────
+
+@router.get("/sentiment/thresholds/status")
+async def get_thresholds_status() -> Dict[str, Any]:
+    """Get current VADER threshold optimization status across all tracked assets."""
+    try:
+        from merid.sentiment import get_threshold_status
+        return get_threshold_status()
+    except Exception as exc:
+        logger.warning(f"Thresholds status unavailable: {exc}")
+        return {
+            "assets": {},
+            "last_optimized": None,
+            "error": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+@router.post("/sentiment/optimize-thresholds/{asset}")
+async def optimize_vader_thresholds(
+    asset: str,
+    days: int = Query(30, ge=7, le=90),
+) -> Dict[str, Any]:
+    """Optimize VADER thresholds for sentiment trading."""
+    try:
+        from merid.sentiment import run_threshold_optimization
+        result = run_threshold_optimization(asset, days)
+        return result
+    except Exception as exc:
+        logger.error(f"Threshold optimization failed: {exc}")
+        raise HTTPException(500, f"Optimization failed: {exc}")
+
+
+@router.get("/sentiment/unified/{asset}")
+async def get_unified_sentiment(
+    asset: str,
+) -> Dict[str, Any]:
+    """Get unified sentiment view combining Twitter + Reddit + Fear/Greed.
+    
+    This is the primary sentiment endpoint for agents and UI.
+    
+    Args:
+        asset: Asset symbol (BTC, ETH, SOL, etc.)
+    
+    Returns:
+        asset: Symbol
+        timestamp: ISO timestamp
+        twitter_score: Twitter sentiment (-1 to +1)
+        reddit_score: Reddit sentiment (-1 to +1)
+        combined_score: Weighted average
+        fear_greed: Fear/greed index (0-100)
+        trend_regime: extreme_fear/fear/neutral/greed/extreme_greed
+        should_reduce_size: Risk signal flag
+        contrarian_opportunity: Contrarian setup flag
+    """
+    try:
+        from merid.sentiment.sentiment_bus import get_social_context
+        context = get_social_context(asset)
+        
+        return {
+            "asset": context["asset"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "twitter_score": context["twitter"],
+            "reddit_score": context["reddit"],
+            "combined_score": context["social_sentiment"],
+            "fear_greed": context["fear_greed"],
+            "trend_regime": context["trend_regime"],
+            "confidence": context["confidence"],
+            "should_reduce_size": context["should_reduce_size"],
+            "contrarian_opportunity": context["contrarian_opportunity"],
+        }
+    except Exception as exc:
+        logger.warning(f"Unified sentiment fetch failed for {asset}: {exc}")
+        return {
+            "asset": asset,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "twitter_score": 0.0,
+            "reddit_score": 0.0,
+            "combined_score": 0.0,
+            "fear_greed": 50,
+            "trend_regime": "neutral",
+            "confidence": "low",
+            "should_reduce_size": False,
+            "contrarian_opportunity": False,
+            "error": str(exc),
+        }
+
+
+@router.get("/sentiment/multi")
+async def get_multi_sentiment(
+    assets: str = Query(..., description="Comma-separated assets (BTC,ETH,SOL)"),
+) -> Dict[str, Any]:
+    """Get unified sentiment for multiple assets at once.
+    
+    Args:
+        assets: Comma-separated list of symbols
+    
+    Returns:
+        results: Dict keyed by asset symbol
+    """
+    asset_list = [a.strip().upper() for a in assets.split(",")]
+    results = {}
+    
+    for asset in asset_list:
+        try:
+            from merid.sentiment.sentiment_bus import get_social_context
+            context = get_social_context(asset)
+            results[asset] = {
+                "combined_score": context["social_sentiment"],
+                "fear_greed": context["fear_greed"],
+                "trend_regime": context["trend_regime"],
+                "confidence": context["confidence"],
+            }
+        except Exception as exc:
+            logger.debug(f"Sentiment failed for {asset}: {exc}")
+            results[asset] = {"error": str(exc)}
+    
+    return {
+        "assets": asset_list,
+        "results": results,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.post("/sentiment/refresh/{asset}")
+async def refresh_sentiment(asset: str) -> Dict[str, Any]:
+    """Force immediate sentiment refresh for an asset.
+    
+    Bypasses cache and fetches fresh data from Twitter/Reddit.
+    """
+    try:
+        from merid.sentiment.sentiment_bus import get_sentiment_bus
+        bus = get_sentiment_bus()
+        success = bus.force_refresh(asset)
+        
+        return {
+            "asset": asset,
+            "refreshed": success,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.warning(f"Sentiment refresh failed for {asset}: {exc}")
+        raise HTTPException(500, f"Refresh failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Lane observability + control
+# ---------------------------------------------------------------------------
+
+@router.get("/lane/status")
+async def get_lane_status() -> Dict[str, Any]:
+    """
+    Return full status for all active BTC15MLane instances.
+
+    Includes: mode, lane_live, lifecycle state, equity, DD, FG, ATR regime,
+    loss streak, Kalman state, promotion phase, kill switch, and last sentiment.
+    """
+    try:
+        from merid.lanes.btc15m_lane import get_btc15m_lane
+        lane = get_btc15m_lane()
+        status = lane.get_status()
+    except Exception as exc:
+        logger.warning("lane/status: could not get lane — %s", exc)
+        status = {}
+
+    try:
+        from merid.risk.kill_switches import risk_controller
+        kill = {
+            "can_trade": risk_controller.can_trade(),
+            "state": risk_controller.get_state().value,
+            "reason": risk_controller.get_kill_reason() if not risk_controller.can_trade() else None,
+        }
+    except Exception:
+        kill = {"can_trade": True, "state": "unknown", "reason": None}
+
+    try:
+        from merid.trading.trade_mode import get_trade_mode
+        trade_mode = get_trade_mode().value
+    except Exception:
+        trade_mode = "unknown"
+
+    return {
+        "lane": status,
+        "kill_switch": kill,
+        "trade_mode": trade_mode,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# In-memory confirm tokens for destructive actions: {token: (action, expires_ts)}
+import hashlib as _hashlib
+import time as _time
+_CONFIRM_TOKENS: Dict[str, tuple] = {}
+_CONFIRM_TTL = 60.0  # seconds
+
+
+def _issue_confirm_token(action: str) -> str:
+    """Issue a short-lived confirmation token for a destructive action."""
+    import secrets
+    token = secrets.token_hex(8)
+    _CONFIRM_TOKENS[token] = (action, _time.monotonic() + _CONFIRM_TTL)
+    # Prune expired tokens
+    expired = [t for t, (_, exp) in _CONFIRM_TOKENS.items() if _time.monotonic() > exp]
+    for t in expired:
+        _CONFIRM_TOKENS.pop(t, None)
+    return token
+
+
+def _consume_confirm_token(token: str, action: str) -> bool:
+    """Validate and consume a confirmation token. Returns True if valid."""
+    entry = _CONFIRM_TOKENS.pop(token, None)
+    if entry is None:
+        return False
+    expected_action, expires = entry
+    if _time.monotonic() > expires:
+        return False
+    return expected_action == action
+
+
+# Actions that require a two-step confirm_token flow
+_DESTRUCTIVE_ACTIONS = {"set_trade_mode_live", "disable_paper"}
+
+
+@router.post("/lane/control")
+async def lane_control(body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Control the BTC15m lane and global risk state.
+
+    Supported actions (body.action):
+      - "start"             — start the lane if not running
+      - "stop"              — stop the lane
+      - "kill_switch_on"    — activate global kill switch
+      - "kill_switch_off"   — reset global kill switch
+      - "set_paper"         — force lane into paper mode (lane_live=False)
+      - "set_trade_mode"    — set global TradeMode (body.mode = "live"|"paper")
+
+    Two-step confirmation for destructive actions (set_trade_mode=live):
+      Step 1: POST {action: "set_trade_mode", mode: "live"}
+              → returns {ok: false, confirm_required: true, confirm_token: "<tok>"}
+      Step 2: POST {action: "set_trade_mode", mode: "live", confirm_token: "<tok>"}
+              → executes and returns {ok: true}
+      Token expires after 60 seconds.
+    """
+    action = body.get("action", "")
+    result: Dict[str, Any] = {"action": action, "ok": False, "detail": ""}
+
+    try:
+        if action == "start":
+            from merid.lanes.btc15m_lane import get_btc15m_lane
+            lane = get_btc15m_lane()
+            if not getattr(lane, 'running', getattr(lane, '_running', False)):
+                import asyncio
+                asyncio.create_task(lane.start())
+                result.update(ok=True, detail="lane start task created")
+            else:
+                result.update(ok=True, detail="lane already running")
+
+        elif action == "stop":
+            from merid.lanes.btc15m_lane import get_btc15m_lane
+            lane = get_btc15m_lane()
+            await lane.stop()
+            result.update(ok=True, detail="lane stopped")
+
+        elif action == "kill_switch_on":
+            from merid.risk.kill_switches import risk_controller
+            reason_str = body.get("reason", "operator_ui")
+            risk_controller.emergency_stop(reason_str)
+            logger.warning("KILL SWITCH ACTIVATED via API | reason=%s", reason_str)
+            result.update(ok=True, detail=f"kill switch activated: {reason_str}")
+
+        elif action == "kill_switch_off":
+            from merid.risk.kill_switches import risk_controller
+            risk_controller.reset()
+            logger.info("Kill switch RESET via API")
+            result.update(ok=True, detail="kill switch reset")
+
+        elif action == "set_paper":
+            from merid.lanes.btc15m_lane import get_btc15m_lane
+            lane = get_btc15m_lane()
+            lane.lane_live = False
+            lane.config.paper_mode = True
+            logger.warning("Lane forced to PAPER mode via API")
+            result.update(ok=True, detail="lane forced to paper mode")
+
+        elif action == "set_trade_mode":
+            mode_str = body.get("mode", "paper").lower()
+            if mode_str == "live":
+                # Two-step confirmation required
+                confirm_token = body.get("confirm_token", "")
+                if not confirm_token:
+                    token = _issue_confirm_token("set_trade_mode_live")
+                    result.update(
+                        ok=False,
+                        confirm_required=True,
+                        confirm_token=token,
+                        detail=(
+                            "Enabling LIVE mode requires confirmation. "
+                            f"Re-submit with confirm_token='{token}' within {int(_CONFIRM_TTL)}s."
+                        ),
+                    )
+                elif not _consume_confirm_token(confirm_token, "set_trade_mode_live"):
+                    result.update(
+                        ok=False,
+                        detail="Invalid or expired confirm_token. Request a new one.",
+                    )
+                else:
+                    from merid.trading.trade_mode import set_trade_mode, TradeMode
+                    set_trade_mode(TradeMode.LIVE)
+                    logger.warning("TradeMode set to LIVE via API (confirmed)")
+                    result.update(ok=True, detail="TradeMode set to live")
+            else:
+                from merid.trading.trade_mode import set_trade_mode, TradeMode
+                set_trade_mode(TradeMode.PAPER)
+                logger.info("TradeMode set to PAPER via API")
+                result.update(ok=True, detail="TradeMode set to paper")
+
+        else:
+            result.update(detail=f"unknown action: {action!r}")
+
+    except Exception as exc:
+        logger.error("lane/control error: %s", exc)
+        result.update(detail=str(exc))
+
+    result["timestamp"] = datetime.now(timezone.utc).isoformat()
+    return result
+
+
+@router.get("/lane/metrics")
+async def get_lane_metrics() -> Dict[str, Any]:
+    """
+    Return per-lane trading metrics: cycle counts, block rates, order counts,
+    avg/max size, latency, API error counts, and block-reason histogram.
+
+    Suitable for wiring into a Grafana dashboard or Telegram /status command.
+    """
+    try:
+        from merid.lanes.lane_metrics import all_lane_metrics
+        lanes = {lid: m.to_dict() for lid, m in all_lane_metrics().items()}
+    except Exception as exc:
+        logger.warning("lane/metrics unavailable: %s", exc)
+        lanes = {}
+
+    return {
+        "lanes": lanes,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/sentiment/compare")
+async def compare_sentiment_sources(
+    asset: str = Query(..., description="Asset to compare"),
+) -> Dict[str, Any]:
+    """Compare Twitter vs Reddit sentiment divergence for analysis.
+    
+    Useful for identifying when social sources disagree.
+    """
+    try:
+        from merid.sentiment.reddit_scraper import compare_sentiment_sources
+        comparison = compare_sentiment_sources(asset)
+        
+        return {
+            "asset": asset,
+            "twitter": comparison["twitter"],
+            "reddit": comparison["reddit"],
+            "difference": comparison["difference"],
+            "agreement": comparison["agreement"],
+            "interpretation": (
+                "High divergence - verify with other sources"
+                if comparison["difference"] > 0.5
+                else "Sources aligned"
+            ),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.warning(f"Sentiment comparison failed for {asset}: {exc}")
+        return {
+            "asset": asset,
+            "error": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+# ── Sentiment Context ────────────────────────────────────────────────────
+
+@router.get("/sentiment/context/{asset}")
+async def get_sentiment_context(asset: str) -> Dict[str, Any]:
+    """Full sentiment context for an asset from SentimentBusV2.
+
+    Returns combined scores, fear/greed, social, news, and confidence.
+    """
+    try:
+        from merid.sentiment.sentiment_bus_v2 import get_sentiment_bus
+        bus = get_sentiment_bus()
+        ctx = None
+        if hasattr(bus, "get_asset_context"):
+            ctx = bus.get_asset_context(asset)
+        if ctx is None:
+            return {"asset": asset, "context": None, "source": "sentiment_bus_v2"}
+        return {
+            "asset": asset,
+            "context": ctx if isinstance(ctx, dict) else (ctx.__dict__ if hasattr(ctx, "__dict__") else str(ctx)),
+            "source": "sentiment_bus_v2",
+        }
+    except Exception as exc:
+        logger.warning("sentiment/context/%s failed: %s", asset, exc)
+        return {"asset": asset, "context": None, "error": str(exc)}
+
+
+# ── VADER Signal ──────────────────────────────────────────────────────────
+
+@router.get("/sentiment/vader/signal")
+async def get_vader_signal(
+    compound: float = Query(..., ge=-1.0, le=1.0, description="VADER compound score"),
+    volume: int = Query(100, ge=0, description="Tweet/post volume for confidence"),
+) -> Dict[str, Any]:
+    """Compute VADER-based trading signal and confidence from a compound score."""
+    try:
+        from merid.sentiment.vader_utils import vader_signal, vader_confidence
+        signal = vader_signal(compound)
+        confidence = vader_confidence(compound, volume)
+        return {
+            "compound": compound,
+            "signal": signal,
+            "confidence": round(confidence, 4),
+            "volume": volume,
+        }
+    except Exception as exc:
+        logger.warning("vader/signal failed: %s", exc)
+        return {"compound": compound, "signal": "neutral", "confidence": 0.0, "error": str(exc)}
+
+
+@router.get("/sentiment/vader/kalshi-adjustment")
+async def get_vader_kalshi_adjustment(
+    compound: float = Query(..., ge=-1.0, le=1.0, description="VADER compound score"),
+    fg_index: int = Query(50, ge=0, le=100, description="Fear/Greed index (0-100)"),
+) -> Dict[str, Any]:
+    """Compute VADER-based Kalshi probability adjustment."""
+    try:
+        from merid.sentiment.vader_utils import vader_to_kalshi_adjustment
+        adjustment = vader_to_kalshi_adjustment(compound, fg_index)
+        return {
+            "compound": compound,
+            "fg_index": fg_index,
+            "adjustment": round(adjustment, 4),
+        }
+    except Exception as exc:
+        logger.warning("vader/kalshi-adjustment failed: %s", exc)
+        return {"compound": compound, "fg_index": fg_index, "adjustment": 0.0, "error": str(exc)}
+
+
+# ── Twitter Streaming ─────────────────────────────────────────────────────
+
+@router.post("/sentiment/twitter/stream/start")
+async def start_twitter_stream(
+    assets: str = Query("BTC,ETH,SOL", description="Comma-separated assets to track"),
+) -> Dict[str, Any]:
+    """Start the Twitter streaming handler for live sentiment."""
+    try:
+        from merid.sentiment.twitter_fetcher import get_twitter_stream_handler
+        handler = get_twitter_stream_handler()
+        asset_list = [a.strip().upper() for a in assets.split(",") if a.strip()]
+        handler.start(asset_list)
+        return {"started": True, "assets": asset_list}
+    except Exception as exc:
+        logger.warning("twitter/stream/start failed: %s", exc)
+        return {"started": False, "error": str(exc)}
+
+
+@router.post("/sentiment/twitter/stream/stop")
+async def stop_twitter_stream() -> Dict[str, Any]:
+    """Stop the Twitter streaming handler."""
+    try:
+        from merid.sentiment.twitter_fetcher import get_twitter_stream_handler
+        handler = get_twitter_stream_handler()
+        handler.stop()
+        return {"stopped": True}
+    except Exception as exc:
+        logger.warning("twitter/stream/stop failed: %s", exc)
+        return {"stopped": False, "error": str(exc)}
+
+
+@router.get("/sentiment/twitter/stream/rolling/{asset}")
+async def get_twitter_stream_rolling(
+    asset: str,
+    window: int = Query(50, ge=5, le=500, description="Rolling window size"),
+) -> Dict[str, Any]:
+    """Get rolling average sentiment from the Twitter stream for an asset."""
+    try:
+        from merid.sentiment.twitter_fetcher import get_twitter_stream_handler
+        handler = get_twitter_stream_handler()
+        return handler.get_rolling_sentiment(asset.upper(), window)
+    except Exception as exc:
+        logger.warning("twitter/stream/rolling/%s failed: %s", asset, exc)
+        return {"asset": asset, "count": 0, "rolling_compound": 0.0, "error": str(exc)}
+
+

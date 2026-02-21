@@ -6,7 +6,7 @@ REST API for running UI audits and managing audit results
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 import logging
 
@@ -76,7 +76,7 @@ async def run_ui_audit(request: AuditRequest, background_tasks: BackgroundTasks)
             ]
         
         # Create task ID
-        task_id = f"audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        task_id = f"audit_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         
         # Start background audit
         def run_audit_task():
@@ -89,7 +89,7 @@ async def run_ui_audit(request: AuditRequest, background_tasks: BackgroundTasks)
                 audit_results[task_id] = {
                     "status": "completed",
                     "report": report,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
                 
                 # Save report to file
@@ -102,7 +102,7 @@ async def run_ui_audit(request: AuditRequest, background_tasks: BackgroundTasks)
                 audit_results[task_id] = {
                     "status": "failed",
                     "error": str(e),
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
                 logger.error(f"UI audit failed: {task_id} - {e}")
         
@@ -139,7 +139,7 @@ async def run_quick_ui_audit(request: QuickAuditRequest, background_tasks: Backg
             ]
         
         # Create task ID
-        task_id = f"quick_audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        task_id = f"quick_audit_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         
         # Start background quick audit
         def run_quick_audit_task():
@@ -149,7 +149,7 @@ async def run_quick_ui_audit(request: QuickAuditRequest, background_tasks: Backg
                 audit_results[task_id] = {
                     "status": "completed",
                     "report": report,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
                 
                 logger.info(f"Quick UI audit completed: {task_id}")
@@ -158,7 +158,7 @@ async def run_quick_ui_audit(request: QuickAuditRequest, background_tasks: Backg
                 audit_results[task_id] = {
                     "status": "failed",
                     "error": str(e),
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }
                 logger.error(f"Quick UI audit failed: {task_id} - {e}")
         

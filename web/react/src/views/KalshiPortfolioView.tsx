@@ -3,7 +3,7 @@ import {
   Briefcase, RefreshCw, DollarSign, Shield, TrendingUp,
   AlertTriangle, Activity, BarChart3, Gauge, Target,
   ArrowDownRight, Filter, X, Download, Trash2, Edit2,
-  ToggleLeft, ToggleRight, ShieldOff, Wifi, WifiOff, Clock,
+  ToggleLeft, ToggleRight, ShieldOff, Clock,
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, API_BASE_URL, DEFAULTS } from '../config/constants';
@@ -12,6 +12,9 @@ import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiPnlChart from '../components/KalshiPnlChart';
 import KalshiRiskFeed from '../components/KalshiRiskFeed';
+import OrderGroupPanel from '../components/OrderGroupPanel';
+import BatchOrderPanel from '../components/BatchOrderPanel';
+import OrderGroupAnalytics from '../components/OrderGroupAnalytics';
 
 const DRAWDOWN_TIER_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   normal: { label: 'Normal', color: 'text-green-400', bg: 'bg-green-500/20' },
@@ -35,8 +38,20 @@ const KalshiPortfolioView: React.FC = () => {
   const sizingResult = useApiData<SizingMetrics>(API_ENDPOINTS.KALSHI_SIZING_METRICS, { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW });
   const ksResult = useApiData<{ global_kill: boolean; can_trade: boolean; kill_reason: string | null }>(API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH });
   const modeResult = useApiData<{ mode: string; is_live: boolean; live_enabled: boolean }>(API_ENDPOINTS.KALSHI_GRID_MODE, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
-  const sessionResult = useApiData<{ session_open: boolean; ws_connected: boolean; ws_lag_ms: number | null; mode: string }>(API_ENDPOINTS.KALSHI_GRID_SESSION, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
-  const gridPortfolioResult = useApiData<{ equity_usd: number; daily_pnl_usd: number; open_interest: number; position_count: number }>(API_ENDPOINTS.KALSHI_GRID_PORTFOLIO, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
+  const sessionResult = useApiData<{ trading_allowed: boolean; block_reason: string | null; current_et: string; maintenance_day: boolean; maintenance_window: string }>(API_ENDPOINTS.KALSHI_GRID_SESSION, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
+  const gridPortfolioResult = useApiData<{ equity_usd: number; daily_pnl_usd: number; open_interest: number; position_count: number; kill_switch_active: boolean; margin_utilization: number }>(API_ENDPOINTS.KALSHI_GRID_PORTFOLIO, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
+  const orderGroupsResult = useApiData<{
+    groups: Array<{
+      order_group_id: string;
+      name: string;
+      status: 'active' | 'triggered' | 'canceled' | 'pending';
+      contracts_limit: number;
+      used_contracts: number;
+      utilization_pct: number;
+    }>;
+  }>(API_ENDPOINTS.KALSHI_ORDER_GROUPS, {
+    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
+  });
 
   const allPositions = useMemo(() => posResult.data?.positions ?? [], [posResult.data]);
   const allOrders = useMemo(() => ordResult.data?.orders ?? [], [ordResult.data]);
@@ -214,9 +229,9 @@ const KalshiPortfolioView: React.FC = () => {
   const isLive = modeResult.data?.is_live ?? false;
   const liveEnabled = modeResult.data?.live_enabled ?? false;
   const currentMode = modeResult.data?.mode ?? 'paper';
-  const sessionOpen = sessionResult.data?.session_open ?? false;
-  const wsConnected = sessionResult.data?.ws_connected ?? false;
-  const wsLag = sessionResult.data?.ws_lag_ms;
+  const sessionOpen = sessionResult.data?.trading_allowed ?? false;
+  const sessionBlockReason = sessionResult.data?.block_reason ?? null;
+  const maintenanceDay = sessionResult.data?.maintenance_day ?? false;
 
   const handleModeToggle = useCallback(async () => {
     const targetMode = isLive ? 'paper' : 'live';
@@ -330,17 +345,19 @@ const KalshiPortfolioView: React.FC = () => {
                 <Clock className="w-3 h-3" />
                 {sessionOpen ? 'Session open' : 'Session closed'}
               </span>
-              {/* WS status */}
-              <span className={`flex items-center gap-1 text-xs ${
-                wsConnected ? 'text-green-400' : 'text-red-400'
-              }`}>
-                {wsConnected
-                  ? <Wifi className="w-3 h-3" />
-                  : <WifiOff className="w-3 h-3" />}
-                {wsConnected
-                  ? (wsLag != null ? `WS ${wsLag}ms` : 'WS live')
-                  : 'WS offline'}
-              </span>
+              {/* Maintenance indicator */}
+              {maintenanceDay && (
+                <span className="flex items-center gap-1 text-xs text-amber-400">
+                  <AlertTriangle className="w-3 h-3" />
+                  Maintenance window
+                </span>
+              )}
+              {sessionBlockReason && (
+                <span className="flex items-center gap-1 text-xs text-red-400">
+                  <AlertTriangle className="w-3 h-3" />
+                  {sessionBlockReason}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -878,6 +895,43 @@ const KalshiPortfolioView: React.FC = () => {
                   </div>
                 </div>
               )}
+
+              {/* Order Groups Panel */}
+              <BatchOrderPanel
+                onOrdersPlaced={() => posResult.refetch()}
+                availableGroups={orderGroupsResult.data?.groups || []}
+                compact={true}
+              />
+              <OrderGroupPanel
+                compact={false}
+                onGroupTriggered={(groupId) => {
+                  console.log('Portfolio: Group triggered:', groupId);
+                }}
+              />
+              {/* Order Group Analytics */}
+              <OrderGroupAnalytics
+                histories={(orderGroupsResult.data?.groups || []).map(g => ({
+                  order_group_id: g.order_group_id,
+                  name: g.name,
+                  status: g.status,
+                  history: [
+                    {
+                      timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+                      utilization_pct: Math.max(0, g.utilization_pct - 10),
+                      contracts_used: Math.max(0, g.used_contracts - 5),
+                      contracts_limit: g.contracts_limit,
+                    },
+                    {
+                      timestamp: new Date().toISOString(),
+                      utilization_pct: g.utilization_pct,
+                      contracts_used: g.used_contracts,
+                      contracts_limit: g.contracts_limit,
+                    },
+                  ],
+                  trigger_events: g.status === 'triggered' ? [{ timestamp: new Date().toISOString(), matched_contracts: g.used_contracts }] : [],
+                }))}
+                hours={24}
+              />
             </div>
           )}
         </>

@@ -165,6 +165,51 @@ class KalshiStrategy:
     # Position sizing (quarter-Kelly)
     # ------------------------------------------------------------------
 
+    def _kelly_size_with_sentiment(
+        self, edge: EdgeEstimate, phase: ExpiryPhase, snapshot: "MarketSnapshot"
+    ) -> int:
+        """Compute sentiment-adjusted position size.
+
+        Wraps _kelly_size() and applies additional sentiment-based adjustments
+        using fear/greed index and volatility regime from MarketSnapshot.
+
+        Args:
+            edge: Edge estimate
+            phase: Expiry phase
+            snapshot: Market snapshot with sentiment data
+
+        Returns:
+            Adjusted contract count
+        """
+        # Get base size from Kelly
+        base_size = self._kelly_size(edge, phase)
+
+        if base_size <= 0:
+            return 0
+
+        # Apply sentiment adjustments
+        sentiment_multiplier = 1.0
+
+        # Fear/Greed index adjustment
+        if snapshot.sentiment_global is not None:
+            fg_score = snapshot.sentiment_global
+            if fg_score <= 20 or fg_score >= 80:
+                # Extreme fear/greed: reduce size 50%
+                sentiment_multiplier *= 0.5
+            elif fg_score <= 30 or fg_score >= 70:
+                # Moderate fear/greed: reduce size 25%
+                sentiment_multiplier *= 0.75
+
+        # Volatility regime adjustment
+        if snapshot.sentiment_regime:
+            regime = snapshot.sentiment_regime.lower()
+            if "extreme" in regime:
+                # Extreme regime: further reduce size
+                sentiment_multiplier *= 0.7
+
+        adjusted_size = int(base_size * sentiment_multiplier)
+        return max(1, adjusted_size)  # Ensure at least 1 contract if non-zero
+
     def _kelly_size(self, edge: EdgeEstimate, phase: ExpiryPhase) -> int:
         """Compute position size via PositionSizer (fee-aware, adaptive Kelly).
 
@@ -200,8 +245,8 @@ class KalshiStrategy:
                 local_vol_pct=local_vol_pct,
             )
             return min(size, self.config.max_contracts_per_order)
-        except Exception:
-            pass
+        except Exception as _sze:
+            logger.debug("position sizer skipped, using fallback Kelly: %s", _sze)
 
         # Fallback: simple fractional Kelly (no fee/PF awareness)
         p = edge.model_prob
@@ -342,8 +387,8 @@ class KalshiStrategy:
                 reason=f"Confidence {best.confidence} below minimum {self.config.min_confidence}.",
             )
 
-        # 6. Size
-        size = self._kelly_size(best, phase)
+        # 6. Size (with sentiment adjustment)
+        size = self._kelly_size_with_sentiment(best, phase, snapshot)
         if size <= 0:
             return StrategySignal(
                 market_id=snapshot.market_id,

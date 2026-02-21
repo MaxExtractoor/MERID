@@ -167,11 +167,13 @@ class KalshiVenueAdapter:
             if order.filled_quantity <= 0:
                 continue
 
-            key = order.instrument_id
+            # Determine outcome from order side — BUY means long YES, SELL means long NO
+            outcome = "yes" if order.side.name == "BUY" else "no"
+            key = f"{order.instrument_id}:{outcome}"
             if key not in positions_map:
                 positions_map[key] = VenuePosition(
                     market_id=order.instrument_id,
-                    outcome_id=None,  # Kalshi: outcome is YES/NO, side determines long/short
+                    outcome_id=outcome,
                     size=Decimal("0"),
                     average_entry_price=Decimal("0"),
                     unrealized_pnl=Decimal("0"),
@@ -327,6 +329,23 @@ class KalshiVenueAdapter:
                 raise RuntimeError(f"Trading halted: {reason}")
         except ImportError:
             pass
+
+        # G10: VenueGate — block real orders in SIM/PAPER/MOCK mode
+        try:
+            from merid.prediction.venue_gate import get_venue_gate
+            _gate = get_venue_gate()
+            if _gate.should_simulate_fill():
+                raise RuntimeError(
+                    f"VenueGate blocked: mode={_gate.mode.value} (paper/sim — no real orders)"
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            # Fail-closed: if venue_gate is unavailable, block order for safety
+            raise RuntimeError(
+                f"VenueGate initialization failed - blocking order for safety: {exc}"
+            ) from exc
+
         try:
             await self.client.connect()
             placed = await self.client.place_order(order)

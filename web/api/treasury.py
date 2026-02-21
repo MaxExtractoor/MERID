@@ -521,7 +521,7 @@ async def get_treasury_overview() -> Dict[str, Any]:
             asset_map: Dict[str, Dict[str, float]] = {}
             for pos in portfolio.positions.values():
                 entry = asset_map.setdefault(pos.asset, {"size": 0.0, "pnl": 0.0})
-                pnl = engine._calculate_position_pnl(pos)
+                pnl = getattr(engine, 'calculate_position_pnl', lambda p: getattr(p, 'unrealized_pnl', 0.0))(pos)
                 entry["size"] += pos.size_usd
                 entry["pnl"] += pnl
 
@@ -542,7 +542,8 @@ async def get_treasury_overview() -> Dict[str, Any]:
     try:
         from merid.execution_guard import get_execution_guard
         guard = get_execution_guard()
-        for domain, cap in guard._domain_caps.items():
+        domain_caps = getattr(guard, 'domain_caps', None) or getattr(guard, '_domain_caps', {})
+        for domain, cap in domain_caps.items():
             remaining = cap.remaining_notional()
             allocated = cap.max_daily_notional_usd
             used = allocated - remaining
@@ -619,8 +620,8 @@ async def get_treasury_overview() -> Dict[str, Any]:
 
     # Default balances if none found
     if not balances:
-        balances.append({"currency": "USD", "amount": 10000.0, "value_usd": 10000.0})
-        total_value_usd = 10000.0
+        balances.append({"currency": "USD", "amount": 0.0, "value_usd": 0.0})
+        total_value_usd = 0.0
 
     return {
         "total_value_usd": round(total_value_usd, 2),

@@ -54,7 +54,7 @@ interface InsightsPanelProps {
 
 const KalshiInsightsPanel: React.FC<InsightsPanelProps> = ({ onNavigate }) => {
   const { data } = useApiData<{ insights: Insight[] }>(
-    `${API_ENDPOINTS.KALSHI_RISK}/insights`,
+    API_ENDPOINTS.KALSHI_INSIGHTS,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
   );
 

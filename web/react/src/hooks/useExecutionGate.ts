@@ -1,4 +1,5 @@
 import { useApiData } from './useApiData';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 export interface BlockReason {
   source: string;
@@ -24,8 +25,8 @@ interface ExecutionGateData {
  */
 export function useExecutionGate() {
   const { data } = useApiData<ExecutionGateData>(
-    '/api/v1/system/execution-gate',
-    { pollingInterval: 5000 },
+    API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
 
   const reasons = data?.reasons ?? [];

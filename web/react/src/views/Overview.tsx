@@ -38,7 +38,7 @@ interface OperatorKillSwitchState {
 interface GridStatusLite {
   running?: boolean;
   agent_count?: number;
-  session?: { trading_allowed?: boolean; reason?: string };
+  session?: { trading_allowed?: boolean; block_reason?: string | null };
 }
 interface CatalogResponseLite {
   market_count?: number;
@@ -123,7 +123,7 @@ function RebootControlPanel({
           <p className="text-[10px] text-slate-500 mt-1">{gridStatus?.agent_count ?? 0} agents</p>
           {gridStatus?.session && (
             <p className="text-[10px] text-slate-500 mt-0.5">
-              Session: {gridStatus.session.trading_allowed ? 'Open' : (gridStatus.session.reason ?? 'Closed')}
+              Session: {gridStatus.session.trading_allowed ? 'Open' : (gridStatus.session.block_reason ?? 'Closed')}
             </p>
           )}
         </div>

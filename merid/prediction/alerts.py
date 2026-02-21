@@ -203,3 +203,46 @@ class PredictionAlertManager:
             "recent": [a.to_dict() for a in self._history[-10:]],
             "sinks_registered": len(self._sinks),
         }
+
+
+# ── Singleton ─────────────────────────────────────────────────────────
+
+_alert_manager: Optional[PredictionAlertManager] = None
+
+
+def _make_telegram_sink() -> Optional[AlertSink]:
+    """Build a Telegram sink that fires async alerts via tg_send."""
+    try:
+        import asyncio as _aio
+        from merid.alerts.webhook_client import tg_send
+
+        def _sink(alert: PredictionAlert) -> None:
+            icon = {"info": "\u2139\ufe0f", "warning": "\u26a0\ufe0f", "critical": "\U0001f6a8"}.get(
+                alert.severity.value, "\U0001f4e2"
+            )
+            msg = (
+                f"{icon} [PM Alert] <b>{alert.title}</b>\n"
+                f"{alert.message}"
+            )
+            try:
+                _aio.get_running_loop().create_task(tg_send(msg))
+            except RuntimeError:
+                pass  # No running loop — Telegram skipped
+            except Exception as _tg_exc:
+                logger.debug("[pm_alerts] Telegram failed: %s", _tg_exc)
+
+        return _sink
+    except Exception as _sink_exc:
+        logger.debug("[pm_alerts] Telegram sink unavailable: %s", _sink_exc)
+        return None
+
+
+def get_alert_manager() -> PredictionAlertManager:
+    """Return the module-level PredictionAlertManager singleton."""
+    global _alert_manager
+    if _alert_manager is None:
+        _alert_manager = PredictionAlertManager()
+        sink = _make_telegram_sink()
+        if sink is not None:
+            _alert_manager.add_sink(sink)
+    return _alert_manager

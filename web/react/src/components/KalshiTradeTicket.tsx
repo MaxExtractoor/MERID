@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { useApiData } from '../hooks/useApiData';
+import { logUxEvent } from '../utils/uxTelemetry';
+import { SentimentBundleCard } from './SentimentBundleCard';
 
 interface Outcome {
   id: string;
@@ -36,6 +38,13 @@ interface TradeTicketProps {
   mode?: 'paper' | 'live';
   kellyFraction?: number;
   positionLimitPct?: number;
+  orderGroupId?: string; // Optional: assign order to a specific group
+  availableGroups?: Array<{
+    order_group_id: string;
+    name: string;
+    status: 'active' | 'triggered' | 'canceled' | 'pending';
+    utilization_pct: number;
+  }>; // Available order groups for selection
 }
 
 type Side = 'yes' | 'no';
@@ -60,10 +69,12 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   mode = 'live',
   kellyFraction,
   positionLimitPct,
+  orderGroupId: initialGroupId,
+  availableGroups = [],
 }) => {
   // Execution gate — prevent order submission when trading is halted
   const { data: gateData } = useApiData<{ blocked: boolean; safe_to_trade: boolean }>(
-    '/api/v1/system/execution-gate',
+    API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
   const executionBlocked = mode === 'live' && (gateData?.blocked ?? false);
@@ -77,6 +88,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string>(initialGroupId || '');
 
   const yesOutcome = outcomes.find(o => o.name.toLowerCase() === 'yes') ?? outcomes[0];
   const noOutcome = outcomes.find(o => o.name.toLowerCase() === 'no') ?? outcomes[1];
@@ -143,6 +155,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         price_cents: String(priceCents),
         order_type: useLimit ? 'limit' : 'market',
         mode,
+        ...(selectedGroupId ? { order_group_id: selectedGroupId } : {}),
       });
       const token = localStorage.getItem('merid-access');
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDERS}?${params}`, {
@@ -157,17 +170,31 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         throw new Error(data.detail || `Order failed (${res.status})`);
       }
       setSuccess(`Order placed: ${effectiveContracts} ${side.toUpperCase()} @ ${priceCents}¢`);
+      logUxEvent('trade_ticket_order', mode, {
+        ticker,
+        side,
+        contracts: effectiveContracts,
+        price_cents: priceCents,
+        order_group_id: selectedGroupId,
+      });
       onOrderPlaced?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Order submission failed');
     } finally {
       setSubmitting(false);
     }
-  }, [validate, ticker, side, effectiveContracts, priceCents, cost, netProfit, useLimit, mode, onOrderPlaced]);
+  }, [validate, ticker, side, effectiveContracts, priceCents, cost, netProfit, useLimit, mode, onOrderPlaced, selectedGroupId]);
 
   return (
     <div className="bg-slate-800 rounded-xl p-4 space-y-4">
       <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Trade Ticket</h3>
+
+      {/* Sentiment Indicator */}
+      {ticker.includes('BTC') && (
+        <div className="mb-4">
+          <SentimentBundleCard asset="BTC" compact />
+        </div>
+      )}
 
       {/* YES/NO Toggle */}
       <div className="flex rounded-lg overflow-hidden border border-slate-700">
@@ -289,6 +316,36 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
           </div>
         )}
       </div>
+
+      {/* Order Group Selector */}
+      {availableGroups.length > 0 && (
+        <div className="space-y-2">
+          <label htmlFor="order-group-select" className="text-xs text-gray-400">Order Group (optional)</label>
+          <select
+            id="order-group-select"
+            value={selectedGroupId}
+            onChange={(e) => setSelectedGroupId(e.target.value)}
+            className="w-full bg-slate-700 rounded-lg px-3 py-2 text-sm text-white border border-slate-600 focus:border-orange-500 focus:outline-none"
+          >
+            <option value="">— No Group —</option>
+            {availableGroups.map((group) => (
+              <option 
+                key={group.order_group_id} 
+                value={group.order_group_id}
+                disabled={group.status !== 'active'}
+              >
+                {group.name || group.order_group_id} 
+                {group.status === 'active' ? `(${group.utilization_pct}% used)` : `[${group.status}]`}
+              </option>
+            ))}
+          </select>
+          {selectedGroupId && (
+            <p className="text-[10px] text-gray-500">
+              Order will be assigned to group: {availableGroups.find(g => g.order_group_id === selectedGroupId)?.name || selectedGroupId}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Cost / Payout Summary */}
       <div className="bg-slate-900 rounded-lg p-3 space-y-2">

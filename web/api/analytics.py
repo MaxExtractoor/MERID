@@ -10,6 +10,9 @@ from fastapi import APIRouter, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["analytics"])
 

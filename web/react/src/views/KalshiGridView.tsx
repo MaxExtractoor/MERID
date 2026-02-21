@@ -95,7 +95,9 @@ interface GridStatus {
   };
   session: {
     trading_allowed: boolean;
-    reason: string;
+    block_reason: string | null;
+    maintenance_day: boolean;
+    maintenance_window: string;
   };
 }
 
@@ -413,7 +415,7 @@ export default function KalshiGridView() {
             session?.trading_allowed ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
           }`}>
             <Clock className="w-3 h-3" />
-            {session?.trading_allowed ? 'Trading Open' : session?.reason || 'Closed'}
+            {session?.trading_allowed ? 'Trading Open' : session?.block_reason || 'Closed'}
           </span>
 
           {/* Grid status */}
@@ -1118,6 +1120,7 @@ export default function KalshiGridView() {
           </div>
         )}
       </div>
+
       </> }
     </div>
   );

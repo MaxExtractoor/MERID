@@ -8,7 +8,7 @@ Integrates with MERID's core metrics system as the canonical probability accurac
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any, Union
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
@@ -99,7 +99,7 @@ async def record_forecast(request: ForecastRecord):
             "model_id": request.model_id,
             "market_id": request.market_id,
             "probability": request.probability,
-            "recorded_at": datetime.now().isoformat()
+            "recorded_at": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         logger.error(f"Failed to record forecast: {e}")
@@ -116,7 +116,7 @@ async def resolve_forecast(request: ForecastResolution):
             "success": True,
             "forecast_id": request.forecast_id,
             "outcome": request.outcome,
-            "resolved_at": datetime.now().isoformat()
+            "resolved_at": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         logger.error(f"Failed to resolve forecast {request.forecast_id}: {e}")
@@ -161,7 +161,7 @@ async def evaluate_predictions(request: BrierEvaluationRequest):
                 "n_events": len(y_true),
                 "calibration_method": request.calibration_method.value if request.calibration_method else None,
                 "n_bins": request.n_bins,
-                "evaluated_at": datetime.now().isoformat()
+                "evaluated_at": datetime.now(timezone.utc).isoformat()
             }
         }
     except HTTPException:
@@ -350,7 +350,7 @@ async def generate_reliability_diagram(request: BrierEvaluationRequest):
             "metadata": {
                 "n_events": len(y_true),
                 "n_bins": request.n_bins,
-                "generated_at": datetime.now().isoformat()
+                "generated_at": datetime.now(timezone.utc).isoformat()
             }
         }
     except HTTPException:
@@ -373,7 +373,7 @@ async def evaluate_promotion_eligibility(model_id: str,
         db = get_brier_db()
         
         # Get recent performance
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         
         with db.get_brier_db_connection() as conn:
             cursor = conn.cursor()
@@ -436,7 +436,7 @@ async def get_metrics_dashboard(days: int = Query(default=7, ge=1, le=30)):
     try:
         db = get_brier_db()
         
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
         
         with db.get_brier_db_connection() as conn:
             cursor = conn.cursor()
@@ -493,7 +493,7 @@ async def get_metrics_dashboard(days: int = Query(default=7, ge=1, le=30)):
             "success": True,
             "summary": summary_stats,
             "models": model_summary,
-            "generated_at": datetime.now().isoformat()
+            "generated_at": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         logger.error(f"Dashboard overview failed: {e}")
@@ -521,7 +521,7 @@ async def run_batch_calibration():
         for model_id in models:
             try:
                 # Get recent data for training
-                data_end = datetime.now()
+                data_end = datetime.now(timezone.utc)
                 data_start = data_end - timedelta(days=30)
                 
                 # Get training data

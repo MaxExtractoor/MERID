@@ -7,6 +7,9 @@ from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel, Field
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 from trading.agents.execution_agent import ExecutionAgent, OrderSide, OrderType
 from trading.adapters.registry import get_adapter

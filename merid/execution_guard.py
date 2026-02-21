@@ -335,6 +335,8 @@ class ExecutionGuard:
         size_usd: float,
         direction: str = "long",
         venue: str = "",
+        order_group_id: str = "",
+        order_contracts: int = 0,
         now: Optional[float] = None,
     ) -> TradeVerdict:
         """Run all safety checks before execution. Returns a TradeVerdict."""
@@ -490,6 +492,45 @@ class ExecutionGuard:
             self._log_verdict(plan_id, verdict)
             return verdict
         passed.append("cooldown")
+
+        # 7. Order group limit check (if assigned to a group)
+        if order_group_id and order_contracts > 0:
+            try:
+                from merid.event_venues.kalshi.order_group_manager import OrderGroupRiskManager
+                og_manager = OrderGroupRiskManager(None)  # Uses cached state
+                group = og_manager.get_group(order_group_id)
+                if group:
+                    if not group.is_active():
+                        verdict.allowed = False
+                        verdict.reason = f"order group {order_group_id} is {group.status}"
+                        verdict.adjusted_size_usd = 0
+                        failed.append("order_group_inactive")
+                    elif not group.can_add_contracts(order_contracts):
+                        remaining = group.contracts_limit - group.used_contracts
+                        verdict.reason = (
+                            f"order group {order_group_id} limit exceeded "
+                            f"(need {order_contracts}, remaining {remaining})"
+                        )
+                        # Allow but warn if we can fit some contracts
+                        if remaining > 0 and order_contracts > remaining:
+                            verdict.adjusted_size_usd = verdict.adjusted_size_usd * (remaining / order_contracts)
+                            passed.append("order_group_clamped")
+                        elif remaining <= 0:
+                            verdict.allowed = False
+                            verdict.adjusted_size_usd = 0
+                            failed.append("order_group_exhausted")
+                        else:
+                            passed.append("order_group_ok")
+                    else:
+                        passed.append("order_group_ok")
+                else:
+                    # Group not found — allow but log warning
+                    logger.warning(f"Order group {order_group_id} not found for trade check")
+                    passed.append("order_group_unknown")
+            except Exception as exc:
+                # Order group check failed — don't block execution, just log
+                logger.warning(f"Order group check failed (allowing trade): {exc}")
+                passed.append("order_group_check_failed")
 
         verdict.checks_passed = passed
         verdict.checks_failed = failed

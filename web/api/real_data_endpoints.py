@@ -68,6 +68,7 @@ def _get_live_prices() -> Dict[str, float]:
 def _get_live_price_details() -> Dict[str, Dict[str, Any]]:
     """Get latest prices with full detail dicts, keyed by bare symbol (BTC not BTC/USDT)."""
     try:
+        from data.live_price_feed import get_live_price_feed
         feed = get_live_price_feed()
         raw = feed.get_latest_prices()  # Dict[str, Dict[str, Any]]
         out: Dict[str, Dict[str, Any]] = {}
@@ -291,7 +292,7 @@ async def get_agents_real() -> List[Dict[str, Any]]:
                 "name": getattr(agent, "name", agent.agent_id),
                 "role": agent.role.value if hasattr(agent.role, "value") else str(agent.role),
                 "status": agent.status.value if hasattr(agent.status, "value") else str(getattr(agent, "status", "online")),
-                "confidence": metrics.get("confidence", 75),
+                "confidence": metrics.get("confidence", 0),
                 "pnl": metrics.get("pnl", 0),
                 "winRate": metrics.get("win_rate", 0),
                 "totalTrades": metrics.get("total_trades", 0),
@@ -406,7 +407,11 @@ async def get_wallet_balances_real() -> Dict[str, Any]:
                 })
 
         if total_usd == 0:
-            total_usd = 10000.0
+            try:
+                from merid.settings import settings as _s
+                total_usd = float(getattr(_s, 'PAPER_STARTING_BALANCE', 0))
+            except Exception:
+                total_usd = 0.0
 
         balances = [
             {"currency": "USD", "available": round(total_usd, 2), "locked": round(total_positions_value, 2), "total": round(total_usd + total_positions_value, 2)},
@@ -495,12 +500,18 @@ async def get_risk_metrics_real() -> Dict[str, Any]:
                 exposure_map[sym][side_key] += pos.size_usd
 
         if total_equity == 0:
-            total_equity = 10000.0
+            try:
+                from merid.settings import settings as _s2
+                total_equity = float(getattr(_s2, 'PAPER_STARTING_BALANCE', 0))
+            except Exception:
+                total_equity = 0.0
 
-        starting = 10000.0
+        starting = 0.0
         for uid, port in engine.portfolios.items():
             starting = port.starting_balance
             break
+        if starting == 0.0:
+            starting = total_equity or 1.0
 
         margin_used = sum(
             v["long"] + v["short"] for v in exposure_map.values()
@@ -509,19 +520,28 @@ async def get_risk_metrics_real() -> Dict[str, Any]:
         daily_dd = abs(min(0, total_pnl) / starting * 100) if starting else 0
         leverage = margin_used / total_equity if total_equity > 0 else 0
 
+        # Pull real risk limits for marginCallLevel
+        margin_call_level = 80.0
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr2
+            _krm2 = _gkr2()
+            margin_call_level = round(_krm2.config.drawdown_halt_pct * 100, 1)
+        except Exception as _e:
+            logger.debug("margin_call_level kalshi_risk skipped: %s", _e)
+
         return {
             "marginUsed": round(margin_used, 2),
             "marginAvailable": round(margin_avail, 2),
-            "marginCallLevel": 80.0,
+            "marginCallLevel": margin_call_level,
             "portfolioValue": round(total_equity, 2),
             "totalExposure": round(margin_used, 2),
-            "var95": round(-total_equity * 0.02, 2),
-            "var99": round(-total_equity * 0.04, 2),
+            "var95": 0.0,
+            "var99": 0.0,
             "sharpeRatio": 0.0,
             "leverage": round(leverage, 2),
             "totalPnL": round(total_pnl + total_unrealized, 2),
             "dailyDrawdown": round(daily_dd, 2),
-            "maxDrawdown": round(daily_dd * 1.5, 1),
+            "maxDrawdown": round(daily_dd, 1),
             "exposure": exposure_map if exposure_map else {},
             "alerts": [],
             "positionCount": position_count,
@@ -649,36 +669,78 @@ async def get_api_status() -> List[Dict[str, Any]]:
         ("Dev Swarm Tasks", "infrastructure", "/api/dev-swarm/tasks", "GET"),
         ("Telegram Comms", "comms", "/api/v1/telegram/messages", "GET"),
     ]
+    import asyncio
+    import aiohttp
+
+    async def _probe(session: aiohttp.ClientSession, endpoint: str, method: str) -> tuple:
+        if method == "WS":
+            return "online", 0
+        try:
+            import time as _t
+            t0 = _t.monotonic()
+            import os as _os
+            _api_base = _os.getenv("MERID_API_BASE", "http://127.0.0.1:8000")
+            async with session.request(
+                method, f"{_api_base}{endpoint}",
+                timeout=aiohttp.ClientTimeout(total=2),
+                allow_redirects=False,
+            ) as resp:
+                latency_ms = round((_t.monotonic() - t0) * 1000, 1)
+                status = "online" if resp.status < 500 else "degraded"
+                return status, latency_ms
+        except Exception:
+            return "offline", 0
+
     result = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            tasks = [_probe(session, ep, meth) for _, _, ep, meth in api_catalog]
+            probes = await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception:
+        probes = [("online", 0)] * len(api_catalog)
+
     for i, (name, category, endpoint, method) in enumerate(api_catalog):
+        probe = probes[i] if not isinstance(probes[i], Exception) else ("offline", 0)
+        status, latency = probe
         result.append({
             "id": f"api-{i+1}",
             "name": name,
             "category": category,
-            "status": "online",
+            "status": status,
             "lastCheck": now,
-            "latency": 0,
-            "errorRate": 0,
-            "uptime": 99.9,
+            "latency": latency,
+            "errorRate": 0 if status == "online" else 1,
+            "uptime": 99.9 if status == "online" else 0.0,
             "configCompleteness": 100,
             "endpoint": endpoint,
             "method": method,
-            "version": "1.0.0",
+            "version": __import__('os').getenv('MERID_VERSION', 'dev'),
         })
     return result
 
+
 @router.get("/api/v1/api/metrics")
 async def get_api_metrics() -> Dict[str, Any]:
-    """Get aggregate API metrics — matches ApiDashboard.tsx ApiMetrics interface."""
-    return {
-        "totalApis": 40,
-        "onlineApis": 40,
-        "offlineApis": 0,
-        "degradedApis": 0,
-        "avgLatency": 12,
-        "errorRate": 0,
-        "overallHealth": 100.0,
-    }
+    """Get aggregate API metrics derived from the real api/status probe."""
+    try:
+        statuses = await get_api_status()
+        total = len(statuses)
+        online = sum(1 for s in statuses if s["status"] == "online")
+        offline = sum(1 for s in statuses if s["status"] == "offline")
+        degraded = total - online - offline
+        latencies = [s["latency"] for s in statuses if s["latency"] > 0]
+        avg_lat = round(sum(latencies) / len(latencies), 1) if latencies else 0
+        return {
+            "totalApis": total,
+            "onlineApis": online,
+            "offlineApis": offline,
+            "degradedApis": degraded,
+            "avgLatency": avg_lat,
+            "errorRate": round(offline / max(total, 1) * 100, 1),
+            "overallHealth": round(online / max(total, 1) * 100, 1),
+        }
+    except Exception:
+        return {"totalApis": 0, "onlineApis": 0, "offlineApis": 0, "degradedApis": 0, "avgLatency": 0, "errorRate": 0, "overallHealth": 0}
 
 
 # ════════════════════════════════════════════════
@@ -731,7 +793,7 @@ async def get_dev_swarm_stats() -> Dict[str, Any]:
         "success_rate": 0.0,
         "avg_duration_seconds": 0.0,
         "daily_cost_usd": 0.0,
-        "cost_budget_remaining": 100.0,
+        "cost_budget_remaining": float(__import__('os').getenv('MERID_DAILY_COST_BUDGET', '100')),
     }
 
 
@@ -819,7 +881,7 @@ async def get_swarm_status_real() -> Dict[str, Any]:
                 "tasks_completed": 0,
                 "current_task": getattr(agent, "current_task", None),
                 "connections": [],
-                "confidence": 0.85,
+                "confidence": 0.0,
             })
     except Exception as exc:
         logger.debug("operation_suppressed", error=str(exc))
@@ -836,7 +898,7 @@ async def get_swarm_status_real() -> Dict[str, Any]:
                 "tasks_completed": 0,
                 "current_task": None,
                 "connections": [],
-                "confidence": 0.85,
+                "confidence": 0.0,
             })
 
     total = len(agents_list)
@@ -941,26 +1003,37 @@ async def get_risk_alerts_real() -> List[Dict[str, Any]]:
         engine = _get_paper_engine()
         alerts = []
 
+        # Pull real risk thresholds from Kalshi risk config
+        _loss_threshold = -500.0
+        _pos_threshold = 5
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_a
+            _krm_a = _gkr_a()
+            _loss_threshold = -abs(float(_krm_a.config.max_daily_loss_usd))
+            _pos_threshold = int(_krm_a.config.max_open_markets)
+        except Exception as _e:
+            logger.debug("alert thresholds kalshi_risk skipped: %s", _e)
+
         for uid, port in engine.portfolios.items():
             # Check for large losses
-            if port.total_pnl < -500:
+            if port.total_pnl < _loss_threshold:
                 alerts.append({
                     "id": f"alert-loss-{uid}",
                     "metric": "totalPnl",
                     "value": port.total_pnl,
-                    "threshold": -500,
+                    "threshold": _loss_threshold,
                     "severity": "WARNING",
                     "message": f"Portfolio {uid} has significant losses: ${port.total_pnl:.2f}",
                     "createdAt": datetime.now(timezone.utc).isoformat() + "Z",
                 })
 
             # Check for high position count
-            if len(port.positions) > 5:
+            if len(port.positions) > _pos_threshold:
                 alerts.append({
                     "id": f"alert-positions-{uid}",
                     "metric": "positionCount",
                     "value": len(port.positions),
-                    "threshold": 5,
+                    "threshold": _pos_threshold,
                     "severity": "INFO",
                     "message": f"Portfolio {uid} has {len(port.positions)} open positions",
                     "createdAt": datetime.now(timezone.utc).isoformat() + "Z",
@@ -1266,7 +1339,7 @@ async def get_audit_trail_real(limit: int = 20) -> Dict[str, Any]:
                     "operator": uid,
                     "action": f"ORDER_{order.status.value.upper()}",
                     "details": f"{order.side.upper()} {order.asset} ${order.size_usd:.2f}",
-                    "ip": "127.0.0.1",
+                    "ip": "internal",
                 })
         entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
         return {"entries": entries[:limit]}
@@ -1554,7 +1627,7 @@ async def get_codebase_drift() -> Dict[str, Any]:
         "passed": critical == 0,
         "drift_count": drift,
         "critical_count": critical,
-        "baseline_version": "1.0.0",
+        "baseline_version": __import__('os').getenv('MERID_VERSION', 'dev'),
         "items": items,
     }
 
@@ -1571,7 +1644,7 @@ async def get_user_profile() -> Dict[str, Any]:
         "username": "operator",
         "email": "operator@merid.io",
         "role": "admin",
-        "created_at": "2026-01-01T00:00:00Z",
+        "created_at": datetime.now(timezone.utc).isoformat() + "Z",
         "settings": {
             "theme": "dark",
             "notifications": True,
@@ -1721,12 +1794,6 @@ async def metrics_breach_log(limit: int = 20) -> Dict[str, Any]:
 async def metrics_latency(window: int = 300) -> Dict[str, Any]:
     """Endpoint latency stats for LatencyChart.tsx."""
     return {
-        "aggregate": {"p50": 12, "p95": 45, "p99": 120, "count": 0},
-        "by_endpoint": {
-            "/api/system/health": {"p50": 5, "p95": 15, "count": 0},
-            "/api/prices/live": {"p50": 18, "p95": 55, "count": 0},
-            "/api/v1/portfolio/summary": {"p50": 10, "p95": 35, "count": 0},
-            "/api/v1/consensus/status": {"p50": 8, "p95": 30, "count": 0},
-            "/api/agents/summary": {"p50": 15, "p95": 50, "count": 0},
-        },
+        "aggregate": {"p50": 0, "p95": 0, "p99": 0, "count": 0},
+        "by_endpoint": {},
     }

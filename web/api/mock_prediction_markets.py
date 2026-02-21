@@ -5,7 +5,7 @@ Provides mock endpoints for prediction markets functionality
 
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import random
 import json
 
@@ -102,7 +102,7 @@ def initialize_mock_data():
     
     # Calculate stats
     total_volume = sum(market['volume'] for market in mock_markets)
-    active_markets = len([m for m in mock_markets if datetime.fromisoformat(m['end_date'].replace('Z', '+00:00')) > datetime.now()])
+    active_markets = len([m for m in mock_markets if datetime.fromisoformat(m['end_date'].replace('Z', '+00:00')) > datetime.now(timezone.utc)])
     categories = len(set(market['category'] for market in mock_markets))
     
     mock_stats = {
@@ -110,7 +110,7 @@ def initialize_mock_data():
         'active_markets': active_markets,
         'total_volume': total_volume,
         'categories': categories,
-        'last_updated': datetime.now().isoformat()
+        'last_updated': datetime.now(timezone.utc).isoformat()
     }
 
 # Initialize data on module load
@@ -171,7 +171,7 @@ async def update_market(market_id: str, update_data: Dict[str, Any]):
     
     # Update stats
     mock_stats['total_volume'] = sum(m['volume'] for m in mock_markets)
-    mock_stats['last_updated'] = datetime.now().isoformat()
+    mock_stats['last_updated'] = datetime.now(timezone.utc).isoformat()
     
     return market
 
@@ -227,7 +227,7 @@ def generate_market_update():
             "yes_price": new_yes_price,
             "no_price": new_no_price,
             "volume": market['volume'] + random.randint(1000, 10000),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     }
 
@@ -237,6 +237,6 @@ def generate_stats_update():
         "type": "stats_updated",
         "payload": {
             **mock_stats,
-            "last_updated": datetime.now().isoformat()
+            "last_updated": datetime.now(timezone.utc).isoformat()
         }
     }

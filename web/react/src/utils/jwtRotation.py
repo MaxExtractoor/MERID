@@ -1,5 +1,6 @@
 import os
 import jwt
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
 # JWT rotation utilities for MERID backend
@@ -40,7 +41,7 @@ async def login(credentials: AuthCredentials):
     payload = {
         "sub": credentials.email,
         "role": "trader",
-        "exp": datetime.utcnow() + timedelta(minutes=15)  # Short-lived
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=15)  # Short-lived
     }
     access_token = sign_access(payload)
     refresh_token = create_refresh_token(payload)

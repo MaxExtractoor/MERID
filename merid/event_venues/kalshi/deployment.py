@@ -326,12 +326,23 @@ class DeploymentController:
     # ── Readiness check ──────────────────────────────────────────────
 
     def _check_readiness(self, readiness: Optional[Dict[str, Any]]) -> tuple[bool, str]:
-        """Validate readiness verdict against deployment gates."""
+        """Validate readiness verdict against deployment gates.
+
+        Accepts either a ReadinessVerdict dataclass or its ``to_dict()`` output.
+        """
         if readiness is None:
             return False, "No readiness verdict provided"
 
-        if not readiness.get("ready", False):
-            return False, f"Agent not ready: {readiness.get('details', {})}"
+        # Support both dict and dataclass
+        ready = getattr(readiness, "ready", None) or (readiness.get("ready") if isinstance(readiness, dict) else None)
+        checks = getattr(readiness, "checks", None) or (readiness.get("checks", {}) if isinstance(readiness, dict) else {})
+        details = getattr(readiness, "details", None) or (readiness.get("details", {}) if isinstance(readiness, dict) else {})
+
+        if not ready:
+            # Enumerate which checks failed for actionable diagnostics
+            failing = [k for k, v in (checks or {}).items() if not v]
+            detail_msgs = [f"{k}: {details.get(k, '?')}" for k in failing] if details else failing
+            return False, f"Agent not ready — failing: {', '.join(detail_msgs) or str(details)}"
 
         return True, "OK"
 
@@ -350,6 +361,21 @@ class DeploymentController:
         self._log.append(entry)
         if len(self._log) > self._MAX_LOG:
             self._log = self._log[-self._MAX_LOG:]
+
+        # Telegram alert for high-stakes transitions (LIVE promotions and rollbacks)
+        if to_mode in ("LIVE", "SHADOW") or from_mode in ("LIVE", "SHADOW"):
+            try:
+                import asyncio as _aio
+                from merid.alerts.webhook_client import tg_send
+                icon = "\U0001f7e2" if to_mode == "LIVE" else ("\U0001f7e1" if to_mode == "SHADOW" else "\U0001f534")
+                _aio.get_running_loop().create_task(tg_send(
+                    f"{icon} [DeploymentController] <b>{agent_name}</b>: "
+                    f"{from_mode} \u2192 {to_mode}\nReason: {reason}"
+                ))
+            except RuntimeError:
+                pass  # No running loop — Telegram notification skipped
+            except Exception as _tg_exc:
+                logger.debug("[deployment] Telegram notification failed: %s", _tg_exc)
 
     # ── Status ───────────────────────────────────────────────────────
 
@@ -377,3 +403,16 @@ class DeploymentController:
     @property
     def transition_log(self) -> List[Dict[str, Any]]:
         return [e.to_dict() for e in self._log]
+
+
+# ── Singleton ─────────────────────────────────────────────────────────
+
+_controller: Optional[DeploymentController] = None
+
+
+def get_deployment_controller() -> DeploymentController:
+    """Return the module-level DeploymentController singleton."""
+    global _controller
+    if _controller is None:
+        _controller = DeploymentController()
+    return _controller

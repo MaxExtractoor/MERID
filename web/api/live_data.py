@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query
 import httpx
 
@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/v1/live", tags=["live"])
 _price_cache: Dict[str, dict] = {}
 _news_cache: List[dict] = []
 _predictions_cache: List[dict] = []
-_last_update = datetime.now()
+_last_update = datetime.now(timezone.utc)
 _streaming_active = False
 
 
@@ -44,7 +44,7 @@ async def fetch_live_prices():
                 url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_param}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_market_cap=true"
                 return client.get(url)
         
-        response = await asyncio.get_event_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
         
         if response.status_code == 200:
             data = response.json()
@@ -64,10 +64,10 @@ async def fetch_live_prices():
                         'market_cap': coin_data.get('usd_market_cap', 0),
                         'high_24h': coin_data.get('usd', 0) * 1.02,
                         'low_24h': coin_data.get('usd', 0) * 0.98,
-                        'timestamp': datetime.now().isoformat()
+                        'timestamp': datetime.now(timezone.utc).isoformat()
                     }
             
-            _last_update = datetime.now()
+            _last_update = datetime.now(timezone.utc)
             logger.info(f"[LiveData] Updated {len(_price_cache)} assets from CoinGecko")
             return
         else:
@@ -76,7 +76,7 @@ async def fetch_live_prices():
         import traceback
         logger.error(f"[LiveData] Error fetching from CoinGecko: {type(e).__name__}: {str(e)}")
         logger.error(traceback.format_exc())
-        _last_update = datetime.now()
+        _last_update = datetime.now(timezone.utc)
 
 
 async def fetch_crypto_news():
@@ -96,7 +96,7 @@ async def fetch_crypto_news():
                         'description': item.get('description', '')[:200],
                         'url': item.get('url', ''),
                         'source': item.get('author', 'Unknown'),
-                        'timestamp': item.get('updated_at', datetime.now().isoformat())
+                        'timestamp': item.get('updated_at', datetime.now(timezone.utc).isoformat())
                     }
                     for item in data.get('data', [])[:10]
                 ]
@@ -144,7 +144,7 @@ async def get_live_prices(
 ):
     """Get current live prices for all tracked assets with filtering."""
     # Update if cache is stale (older than 10 seconds)
-    if not _price_cache or (datetime.now() - _last_update).total_seconds() > 10:
+    if not _price_cache or (datetime.now(timezone.utc) - _last_update).total_seconds() > 10:
         await fetch_live_prices()
     
     prices = dict(_price_cache)
@@ -347,7 +347,7 @@ async def get_market_overview():
             'assets_tracked': len(_price_cache),
             'top_gainers': [{'symbol': k, **v} for k, v in gainers],
             'top_losers': [{'symbol': k, **v} for k, v in losers],
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }
     }
 
@@ -365,5 +365,5 @@ async def refresh_all_data():
         'status': 'success',
         'message': 'All data refreshed',
         'assets_updated': len(_price_cache),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat()
     }

@@ -241,7 +241,73 @@ class FundingArbAgent(DomainAgent):
     async def generate_proposals(self) -> List[TradeProposal]:
         if not self._active:
             return []
-        return []
+        # W7: Fetch live funding rates from each configured venue and emit
+        # proposals when the spread between two venues exceeds the threshold.
+        try:
+            from trading.perp.adapters import (
+                BinancePerpAdapter, BybitPerpAdapter,
+                HyperliquidAdapter, DyDxPerpAdapter,
+            )
+            _ADAPTER_MAP = {
+                "binance": BinancePerpAdapter,
+                "bybit": BybitPerpAdapter,
+                "hyperliquid": HyperliquidAdapter,
+                "dydx": DyDxPerpAdapter,
+            }
+            rates: Dict[str, Dict[str, float]] = {}  # venue -> symbol -> rate
+            for venue in self.venues:
+                cls = _ADAPTER_MAP.get(venue)
+                if cls is None:
+                    continue
+                try:
+                    adapter = cls()
+                    snapshots = adapter.fetch_funding_rates()
+                    rates[venue] = {s.symbol: s.funding_rate for s in snapshots}
+                except Exception as _ve:
+                    logger.debug("FundingArbAgent: %s fetch skipped: %s", venue, _ve)
+
+            if len(rates) < 2:
+                return []
+
+            proposals: List[TradeProposal] = []
+            venue_list = list(rates.keys())
+            for i in range(len(venue_list)):
+                for j in range(i + 1, len(venue_list)):
+                    va, vb = venue_list[i], venue_list[j]
+                    common = set(rates[va]) & set(rates[vb])
+                    for sym in common:
+                        ra, rb = rates[va][sym], rates[vb][sym]
+                        spread = abs(ra - rb)
+                        if spread < float(self.min_funding_spread):
+                            continue
+                        long_venue = va if ra < rb else vb
+                        short_venue = vb if ra < rb else va
+                        proposals.append(
+                            TradeProposal(
+                                proposal_id=f"funding-arb-{sym}-{long_venue}-{short_venue}",
+                                domain=TradeDomain.CRYPTO,
+                                symbol=sym,
+                                side=OrderSide.BUY,
+                                quantity=Decimal("1"),
+                                order_type=OrderType.MARKET,
+                                strategy_id="funding_arb",
+                                rationale=(
+                                    f"Funding spread {spread:.4%}: long {long_venue} "
+                                    f"({ra:.4%}) / short {short_venue} ({rb:.4%})"
+                                ),
+                                metadata={
+                                    "long_venue": long_venue,
+                                    "short_venue": short_venue,
+                                    "funding_spread": spread,
+                                    "rate_a": ra,
+                                    "rate_b": rb,
+                                },
+                            )
+                        )
+            return proposals
+        except Exception as exc:
+            logger.warning("FundingArbAgent.generate_proposals error: %s", exc)
+            return []
 
 
 # ======================================================================

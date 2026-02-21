@@ -5,7 +5,7 @@ Provides mock endpoints for agent cohorts functionality
 
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import random
 
 router = APIRouter()
@@ -31,7 +31,7 @@ def initialize_mock_data():
             'efficiency': 0.78,
             'tasks_completed': 156,
             'status': 'active',
-            'last_activity': (datetime.now() - timedelta(hours=2)).isoformat(),
+            'last_activity': (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
             'created_at': '2024-01-01T00:00:00Z'
         },
         {
@@ -44,7 +44,7 @@ def initialize_mock_data():
             'efficiency': 0.88,
             'tasks_completed': 234,
             'status': 'active',
-            'last_activity': (datetime.now() - timedelta(minutes=30)).isoformat(),
+            'last_activity': (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
             'created_at': '2024-01-01T00:00:00Z'
         },
         {
@@ -57,7 +57,7 @@ def initialize_mock_data():
             'efficiency': 0.82,
             'tasks_completed': 89,
             'status': 'active',
-            'last_activity': (datetime.now() - timedelta(hours=1)).isoformat(),
+            'last_activity': (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
             'created_at': '2024-01-15T00:00:00Z'
         },
         {
@@ -70,7 +70,7 @@ def initialize_mock_data():
             'efficiency': 0.91,
             'tasks_completed': 67,
             'status': 'active',
-            'last_activity': (datetime.now() - timedelta(minutes=15)).isoformat(),
+            'last_activity': (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat(),
             'created_at': '2024-01-20T00:00:00Z'
         }
     ]
@@ -89,7 +89,7 @@ def initialize_mock_data():
             'uptime': 86400,  # 24 hours in seconds
             'success_rate': 0.92,
             'status': 'active',
-            'last_seen': (datetime.now() - timedelta(minutes=5)).isoformat(),
+            'last_seen': (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
             'created_at': '2024-01-01T00:00:00Z'
         },
         {
@@ -104,7 +104,7 @@ def initialize_mock_data():
             'uptime': 172800,  # 48 hours
             'success_rate': 0.95,
             'status': 'active',
-            'last_seen': (datetime.now() - timedelta(minutes=2)).isoformat(),
+            'last_seen': (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(),
             'created_at': '2024-01-01T00:00:00Z'
         },
         {
@@ -119,7 +119,7 @@ def initialize_mock_data():
             'uptime': 259200,  # 72 hours
             'success_rate': 0.87,
             'status': 'active',
-            'last_seen': (datetime.now() - timedelta(minutes=1)).isoformat(),
+            'last_seen': (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
             'created_at': '2024-01-01T00:00:00Z'
         },
         {
@@ -134,7 +134,7 @@ def initialize_mock_data():
             'uptime': 432000,  # 120 hours
             'success_rate': 0.91,
             'status': 'active',
-            'last_seen': (datetime.now() - timedelta(minutes=3)).isoformat(),
+            'last_seen': (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat(),
             'created_at': '2024-01-02T00:00:00Z'
         },
         {
@@ -149,7 +149,7 @@ def initialize_mock_data():
             'uptime': 86400,
             'success_rate': 0.88,
             'status': 'active',
-            'last_seen': (datetime.now() - timedelta(minutes=10)).isoformat(),
+            'last_seen': (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
             'created_at': '2024-01-15T00:00:00Z'
         },
         {
@@ -164,7 +164,7 @@ def initialize_mock_data():
             'uptime': 172800,
             'success_rate': 0.99,
             'status': 'active',
-            'last_seen': (datetime.now() - timedelta(minutes=1)).isoformat(),
+            'last_seen': (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
             'created_at': '2024-01-20T00:00:00Z'
         }
     ]
@@ -181,7 +181,7 @@ def initialize_mock_data():
         'active_agents': active_agents,
         'avg_performance': avg_performance,
         'total_tasks_completed': sum(a['tasks_completed'] for a in mock_agents),
-        'last_updated': datetime.now().isoformat()
+        'last_updated': datetime.now(timezone.utc).isoformat()
     }
 
 # Initialize data on module load
@@ -255,11 +255,11 @@ async def update_cohort(cohort_id: str, update_data: Dict[str, Any]):
     if 'tasks_completed' in update_data:
         cohort['tasks_completed'] += update_data['tasks_completed']
     
-    cohort['last_activity'] = datetime.now().isoformat()
+    cohort['last_activity'] = datetime.now(timezone.utc).isoformat()
     
     # Update stats
     mock_stats['total_tasks_completed'] = sum(a['tasks_completed'] for a in mock_agents)
-    mock_stats['last_updated'] = datetime.now().isoformat()
+    mock_stats['last_updated'] = datetime.now(timezone.utc).isoformat()
     
     return cohort
 
@@ -280,12 +280,12 @@ async def update_agent(agent_id: str, update_data: Dict[str, Any]):
     if 'uptime' in update_data:
         agent['uptime'] += update_data['uptime']
     
-    agent['last_seen'] = datetime.now().isoformat()
+    agent['last_seen'] = datetime.now(timezone.utc).isoformat()
     
     # Update stats
     mock_stats['total_tasks_completed'] = sum(a['tasks_completed'] for a in mock_agents)
     mock_stats['avg_performance'] = sum(a['performance'] for a in mock_agents) / len(mock_agents)
-    mock_stats['last_updated'] = datetime.now().isoformat()
+    mock_stats['last_updated'] = datetime.now(timezone.utc).isoformat()
     
     return agent
 
@@ -369,7 +369,7 @@ def generate_agent_update():
             "id": agent['id'],
             "performance": new_performance,
             "tasks_completed": agent['tasks_completed'] + random.randint(1, 5),
-            "last_seen": datetime.now().isoformat()
+            "last_seen": datetime.now(timezone.utc).isoformat()
         }
     }
 
@@ -386,6 +386,6 @@ def generate_cohort_update():
             "id": cohort['id'],
             "performance": max(0.0, min(1.0, cohort['performance'] + random.uniform(-0.01, 0.01))),
             "tasks_completed": cohort['tasks_completed'] + random.randint(1, 3),
-            "last_activity": datetime.now().isoformat()
+            "last_activity": datetime.now(timezone.utc).isoformat()
         }
     }

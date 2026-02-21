@@ -36,104 +36,41 @@ logger = get_logger("merid.agents.bootstrap")
 def bootstrap_canonical_agents() -> int:
     """Register all canonical agents into the global registry."""
     registry = get_canonical_registry()
-    
-    # Research agents
-    try:
-        pm_agent = WiredPredictionMarketAgent(agent_id="pm-research-live")
-        registry.register(pm_agent)
-    except Exception as e:
-        logger.warning(f"Failed to register PredictionMarketAgent: {e}")
-    
-    try:
-        crypto_agent = WiredCryptoSignalsAgent(agent_id="crypto-signals-live")
-        registry.register(crypto_agent)
-    except Exception as e:
-        logger.warning(f"Failed to register CryptoSignalsAgent: {e}")
-    
-    try:
-        equity_agent = WiredMarketResearchAgent(agent_id="market-research-live")
-        registry.register(equity_agent)
-    except Exception as e:
-        logger.warning(f"Failed to register MarketResearchAgent: {e}")
-    
-    # Strategy agents
-    try:
-        strategy_designer = StrategyDesignerAgent(agent_id="strategy-designer")
-        registry.register(strategy_designer)
-    except Exception as e:
-        logger.warning(f"Failed to register StrategyDesignerAgent: {e}")
-    
-    try:
-        arb_agent = ArbitrageAgent(agent_id="arbitrage-scanner")
-        registry.register(arb_agent)
-    except Exception as e:
-        logger.warning(f"Failed to register ArbitrageAgent: {e}")
-    
-    try:
-        exec_optimizer = ExecutionOptimizerAgent(agent_id="execution-optimizer")
-        registry.register(exec_optimizer)
-    except Exception as e:
-        logger.warning(f"Failed to register ExecutionOptimizerAgent: {e}")
-    
-    # Risk agents
-    try:
-        risk_agent = RiskManagerAgent(agent_id="risk-manager")
-        registry.register(risk_agent)
-    except Exception as e:
-        logger.warning(f"Failed to register RiskManagerAgent: {e}")
-    
-    try:
-        capital_allocator = CapitalAllocatorAgent(agent_id="capital-allocator")
-        registry.register(capital_allocator)
-    except Exception as e:
-        logger.warning(f"Failed to register CapitalAllocatorAgent: {e}")
-    
-    try:
-        anomaly_detector = AnomalyDetectorAgent(agent_id="anomaly-detector")
-        registry.register(anomaly_detector)
-    except Exception as e:
-        logger.warning(f"Failed to register AnomalyDetectorAgent: {e}")
-    
-    # Coordination agents
-    try:
-        consensus_coord = ConsensusCoordinatorAgent(agent_id="consensus-coordinator")
-        registry.register(consensus_coord)
-    except Exception as e:
-        logger.warning(f"Failed to register ConsensusCoordinatorAgent: {e}")
-    
-    try:
-        explainability = ExplainabilityAgent(agent_id="explainability")
-        registry.register(explainability)
-    except Exception as e:
-        logger.warning(f"Failed to register ExplainabilityAgent: {e}")
-    
-    try:
-        debate_coord = DebateCoordinatorAgent(agent_id="debate-coordinator")
-        registry.register(debate_coord)
-    except Exception as e:
-        logger.warning(f"Failed to register DebateCoordinatorAgent: {e}")
-    
-    try:
-        governance = GovernanceAgent(agent_id="governance")
-        registry.register(governance)
-    except Exception as e:
-        logger.warning(f"Failed to register GovernanceAgent: {e}")
-    
-    # Ops agents
-    try:
-        ops_runbook = OpsRunbookAgent(agent_id="ops-runbook")
-        registry.register(ops_runbook)
-    except Exception as e:
-        logger.warning(f"Failed to register OpsRunbookAgent: {e}")
-    
-    try:
-        backtest = BacktestAgent(agent_id="backtest")
-        registry.register(backtest)
-    except Exception as e:
-        logger.warning(f"Failed to register BacktestAgent: {e}")
-    
+
+    _specs = [
+        # (label, factory)
+        ("PredictionMarketAgent",    lambda: WiredPredictionMarketAgent(agent_id="pm-research-live")),
+        ("CryptoSignalsAgent",       lambda: WiredCryptoSignalsAgent(agent_id="crypto-signals-live")),
+        ("MarketResearchAgent",      lambda: WiredMarketResearchAgent(agent_id="market-research-live")),
+        ("StrategyDesignerAgent",    lambda: StrategyDesignerAgent(agent_id="strategy-designer")),
+        ("ArbitrageAgent",           lambda: ArbitrageAgent(agent_id="arbitrage-scanner")),
+        ("ExecutionOptimizerAgent",  lambda: ExecutionOptimizerAgent(agent_id="execution-optimizer")),
+        ("RiskManagerAgent",         lambda: RiskManagerAgent(agent_id="risk-manager")),
+        ("CapitalAllocatorAgent",    lambda: CapitalAllocatorAgent(agent_id="capital-allocator")),
+        ("AnomalyDetectorAgent",     lambda: AnomalyDetectorAgent(agent_id="anomaly-detector")),
+        ("ConsensusCoordinatorAgent",lambda: ConsensusCoordinatorAgent(agent_id="consensus-coordinator")),
+        ("ExplainabilityAgent",      lambda: ExplainabilityAgent(agent_id="explainability")),
+        ("DebateCoordinatorAgent",   lambda: DebateCoordinatorAgent(agent_id="debate-coordinator")),
+        ("GovernanceAgent",          lambda: GovernanceAgent(agent_id="governance")),
+        ("OpsRunbookAgent",          lambda: OpsRunbookAgent(agent_id="ops-runbook")),
+        ("BacktestAgent",            lambda: BacktestAgent(agent_id="backtest")),
+    ]
+
+    failed: list[str] = []
+    for label, factory in _specs:
+        try:
+            registry.register(factory())
+        except Exception as e:
+            logger.warning("Failed to register %s: %s", label, e)
+            failed.append(label)
+
     agent_count = registry.count()
-    logger.info(f"✅ Bootstrapped {agent_count} canonical agents into registry")
+    if failed:
+        logger.warning(
+            "bootstrap_canonical_agents: %d/%d agents failed to register: %s",
+            len(failed), len(_specs), ", ".join(failed),
+        )
+    logger.info("✅ Bootstrapped %d canonical agents into registry", agent_count)
     return agent_count
 
 

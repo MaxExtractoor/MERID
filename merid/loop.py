@@ -173,6 +173,14 @@ class MeridLoop:
         self._betting_refresh_interval = 120.0  # 2 minutes
         self._last_reflection_cycle = 0.0
         self._reflection_cycle_interval = 300.0  # 5 minutes — run after enough fills accumulate
+        self._last_liquidity_refresh = 0.0
+        self._liquidity_refresh_interval = 30.0  # 30 seconds — orderbook health sweep
+        self._last_config_reload = 0.0
+        self._config_reload_interval = 300.0  # 5 minutes — hot-reload risk limits / reality assertions
+
+        # W6: pre-initialise ws_bridge so _refresh_liquidity can safely reference it
+        # before run() is called (e.g. in tests or if tick() is called standalone).
+        self._ws_bridge = None
 
         # Initialize matching engines for domains that have them configured
         try:
@@ -231,6 +239,29 @@ class MeridLoop:
         from merid.betting.store import get_betting_store
         return get_betting_store()
 
+    def _order_group_lifecycle(self):
+        if not hasattr(self, '_og_lifecycle'):
+            from merid.event_venues.kalshi.order_group_lifecycle import OrderGroupLifecycleManager
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            self._og_lifecycle = OrderGroupLifecycleManager(get_kalshi_client())
+        return self._og_lifecycle
+
+    def _liquidity_monitor(self):
+        if not hasattr(self, '_liq_monitor'):
+            from merid.event_venues.kalshi.liquidity_monitor import LiquidityMonitor
+            self._liq_monitor = LiquidityMonitor()
+            # Log critical alerts so operators see them in the loop log
+            self._liq_monitor.on_alert(
+                lambda a: logger.warning(
+                    "liquidity_alert %s %s %s: %s",
+                    a.severity, a.kind, a.market_id, a.msg,
+                ) if a.severity == "critical" else logger.debug(
+                    "liquidity_alert %s %s %s: %s",
+                    a.severity, a.kind, a.market_id, a.msg,
+                )
+            )
+        return self._liq_monitor
+
     # ── Core tick ─────────────────────────────────────────────────────
 
     async def tick(self, now: Optional[float] = None) -> Dict[str, Any]:
@@ -268,6 +299,11 @@ class MeridLoop:
                 await self._run_arb_scan(now, summary)
                 self._last_arb_scan = now
 
+            # Step 4b: Liquidity monitor sweep
+            if now - self._last_liquidity_refresh >= self._liquidity_refresh_interval:
+                await self._refresh_liquidity(now, summary)
+                self._last_liquidity_refresh = now
+
             # Step 5: Execute approved plans
             if self.config.enable_execution:
                 await self._execute_plans(summary)
@@ -291,6 +327,15 @@ class MeridLoop:
             if self.config.enable_reconciliation and now - self._last_reconciliation >= self.config.reconciliation_interval:
                 await self._reconcile_positions(summary)
                 self._last_reconciliation = now
+
+            # Step 7b: Order group lifecycle sync (for prediction domain)
+            if "prediction" in self.config.active_domains:
+                await self._sync_order_groups(summary)
+
+            # Step 7c: Config hot-reload — re-register live assertions in RealityAuditor
+            if now - self._last_config_reload >= self._config_reload_interval:
+                await self._reload_config(summary)
+                self._last_config_reload = now
 
             # Step 8: Notify subscribers
             await self._notify("tick_complete", summary)
@@ -408,7 +453,7 @@ class MeridLoop:
             grid = get_agent_grid()
             
             # Check if grid is running
-            if not grid._running:
+            if not grid.is_running:
                 logger.debug("Kalshi agent grid not running, skipping agent cycle")
                 return
             
@@ -424,12 +469,55 @@ class MeridLoop:
             if signal_count > 0:
                 logger.info(f"Kalshi agents generated {signal_count} actionable signals this cycle")
                 summary["actions"].append(f"kalshi_agents:{signal_count}signals")
-            
-            # Future: Submit signals to consensus
-            # adapter = get_kalshi_consensus_adapter()
-            # for signal, market in collected_signals:
-            #     energy = adapter.signal_to_energy(signal, market, agent.config.agent_id)
-            #     vote_result = await core_orchestrator.run_cycle(energy)
+
+            # Submit actionable signals to TaCoConsensusCoordinator as AgentOpinions
+            opinions_submitted = 0
+            try:
+                from consensus.taco_consensus import (
+                    TaCoConsensusCoordinator,
+                    AgentOpinion,
+                    AgentRole,
+                )
+                import uuid as _uuid
+                coordinator = TaCoConsensusCoordinator.get_instance()
+                for agent in grid.agents:
+                    if not (agent.state.enabled and agent.state.signal_log):
+                        continue
+                    recent_signals = [
+                        s for s in agent.state.signal_log[-5:]
+                        if s.get("action") not in ("NO_ACTION", "HOLD")
+                    ]
+                    for sig in recent_signals:
+                        action = sig.get("action", "").lower()
+                        if action in ("buy", "yes", "long"):
+                            score = sig.get("edge", 0.05)
+                            stance = "bull"
+                        elif action in ("sell", "no", "short"):
+                            score = -(sig.get("edge", 0.05))
+                            stance = "bear"
+                        else:
+                            continue
+                        confidence = float(sig.get("confidence", sig.get("edge", 0.5)))
+                        confidence = max(0.1, min(1.0, confidence))
+                        opinion = AgentOpinion(
+                            opinion_id=f"op_{_uuid.uuid4().hex[:12]}",
+                            agent_id=agent.agent_id,
+                            role=AgentRole.TRADER.value,
+                            symbol=sig.get("market_id", sig.get("ticker", "KALSHI")),
+                            venue="kalshi",
+                            stance=stance,
+                            score=float(score),
+                            confidence=confidence,
+                            rationale=sig.get("reason", sig.get("signal_type", "kalshi_signal"))[:200],
+                            horizon="short",
+                        )
+                        await coordinator.submit_opinion(opinion)
+                        opinions_submitted += 1
+            except Exception as _ce:
+                logger.debug(f"Consensus opinion submission failed (non-fatal): {_ce}")
+
+            if opinions_submitted:
+                summary["actions"].append(f"consensus_opinions_submitted:{opinions_submitted}")
             
         except Exception as exc:
             logger.warning(f"Kalshi agent cycle failed (graceful degradation): {exc}")
@@ -490,13 +578,222 @@ class MeridLoop:
             logger.warning(f"Reflection cycle failed (graceful degradation): {exc}")
             summary["actions"].append(f"reflection_cycle:error:{exc}")
 
+    async def _reload_config(self, summary: Dict) -> None:
+        """Step 7c: Hot-reload config — re-register live assertions in RealityAuditor
+        and re-bootstrap PortfolioRebalancer targets so risk limit changes propagate
+        without a server restart.
+        """
+        reloaded: list = []
+
+        # 1. RealityAuditor hot-reload
+        try:
+            from core.reality_auditor import get_reality_auditor
+            auditor = get_reality_auditor()
+            ok = auditor.reload_from_persistent_store()
+            reloaded.append(f"reality_auditor:{'ok' if ok else 'noop'}")
+        except Exception as exc:
+            logger.debug("config_reload: reality_auditor skipped: %s", exc)
+
+        # 2. PortfolioRebalancer target re-bootstrap
+        try:
+            from merid.event_venues.kalshi.rebalancer import get_portfolio_rebalancer
+            rebalancer = get_portfolio_rebalancer()
+            rebalancer._bootstrap_targets()
+            reloaded.append("rebalancer:bootstrapped")
+        except Exception as exc:
+            logger.debug("config_reload: rebalancer bootstrap skipped: %s", exc)
+
+        # 3. RewardEngine — ensure singleton is alive (no-op if already running)
+        try:
+            from merid.rewards.engine import get_reward_engine
+            get_reward_engine()
+            reloaded.append("reward_engine:ok")
+        except Exception as exc:
+            logger.debug("config_reload: reward_engine skipped: %s", exc)
+
+        if reloaded:
+            summary["actions"].append("config_reload:" + ",".join(reloaded))
+            logger.debug("config_reload: %s", reloaded)
+
     async def _run_consensus(self, summary: Dict):
-        """Step 3: Run consensus for active symbols (decay-aware)."""
+        """Step 3: Run consensus for active symbols (decay-aware).
+
+        Prunes expired plans from _active_plans and forces a consensus
+        cycle for any symbol that has accumulated pending opinions since
+        the last tick but hasn't yet crossed the min_opinions threshold
+        (opinion-triggered cycles handle the normal path).
+        """
         coordinator = self._consensus_coordinator()
-        # Consensus is triggered by opinion submission, but we can
-        # also force a cycle for symbols with pending opinions
+
+        # Prune expired plans so _execute_plans never sees stale entries
+        # Use public prune_expired_plans() if available, else fall back to direct access
+        if hasattr(coordinator, 'prune_expired_plans'):
+            coordinator.prune_expired_plans()
+            expired_ids = []
+        else:
+            _active_plans = getattr(coordinator, '_active_plans', {})
+            expired_ids = [
+                pid for pid, plan in list(_active_plans.items())
+                if plan.is_expired()
+            ]
+            for pid in expired_ids:
+                _active_plans.pop(pid, None)
+
+        # Force a consensus cycle for any symbol with pending opinions
+        # that hasn't yet reached min_opinions (catches slow-accumulating symbols)
+        _opinions = getattr(coordinator, '_opinions', {})
+        pending_symbols = [
+            sym for sym, ops in _opinions.items()
+            if ops and len(ops) >= 1
+        ]
+        forced = 0
+        for sym in pending_symbols:
+            try:
+                plan = await coordinator._run_consensus_cycle(sym)
+                if plan:
+                    forced += 1
+            except Exception as _ce:
+                logger.debug(f"Consensus cycle error for {sym}: {_ce}")
+
         self.metrics.consensus_cycles_run += 1
-        summary["actions"].append("consensus_check")
+
+        # === Debate Protocol Integration ===
+        # For each forced consensus plan, open a DebateSession so agents can
+        # argue for/against before execution.  Close open debates whose symbol
+        # now has a fresh consensus probability.
+        debates_opened = 0
+        debates_closed = 0
+        try:
+            from merid.prediction.debate import get_debate_store, DebateSession
+            debate_store = get_debate_store()
+
+            # Open a debate for each freshly-forced plan (high-conviction only)
+            _active_plans = getattr(coordinator, '_active_plans', {})
+            for plan in list(_active_plans.values()):
+                prob = getattr(plan, 'consensus_probability', None) or getattr(plan, 'probability', None)
+                if prob is None:
+                    continue
+                # Only open debates for high-conviction signals (edge > 5%)
+                edge = abs(float(prob) - 0.5)
+                if edge < 0.05:
+                    continue
+                symbol = getattr(plan, 'symbol', None) or getattr(plan, 'market_id', None)
+                if not symbol:
+                    continue
+                # Avoid duplicate open debates for the same symbol
+                open_debates = debate_store.list_debates(symbol=symbol, status="open")
+                if open_debates:
+                    continue
+                session = DebateSession(
+                    symbol=symbol,
+                    pre_debate_prob=float(prob),
+                )
+                debate_store.create_debate(session)
+                debates_opened += 1
+                logger.debug("debate opened: %s pre_prob=%.3f", symbol, float(prob))
+
+            # Close open debates whose symbol has a fresh consensus probability
+            for debate in debate_store.list_debates(status="open", limit=50):
+                sym_opinions = _opinions.get(debate.symbol, [])
+                if not sym_opinions:
+                    continue
+                # Use latest opinion confidence as post-debate probability
+                latest = sym_opinions[-1]
+                post_prob = getattr(latest, 'probability', None) or getattr(latest, 'confidence', None)
+                if post_prob is None:
+                    continue
+                debate_store.close_debate(debate.id, float(post_prob))
+                debates_closed += 1
+                logger.debug("debate closed: %s post_prob=%.3f", debate.symbol, float(post_prob))
+
+        except Exception as _de:
+            logger.debug("debate integration skipped: %s", _de)
+
+        summary["actions"].append(
+            f"consensus_check:expired_pruned={len(expired_ids)},forced={forced},"
+            f"debates_opened={debates_opened},debates_closed={debates_closed}"
+        )
+
+    async def _refresh_liquidity(self, now: float, summary: Dict) -> None:
+        """Step 4b: Poll orderbook snapshots for active Kalshi markets.
+
+        Feeds each snapshot into LiquidityMonitor which emits alerts on
+        wide spreads, thin books, and sudden depth drops.  Critical alerts
+        are logged at WARNING level so operators see them immediately.
+        """
+        try:
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            from merid.event_venues.kalshi.liquidity_monitor import OrderBookSnapshot
+
+            monitor = self._liquidity_monitor()
+            client = get_kalshi_client()
+
+            # Collect active tickers from the agent grid
+            tickers: List[str] = []
+            try:
+                from merid.prediction.agent_grid import get_agent_grid
+                grid = get_agent_grid()
+                for agent in grid.agents:
+                    tickers.extend(agent.state.active_tickers)
+            except Exception as _age:
+                logger.debug("liquidity_sweep agent_grid skipped: %s", _age)
+
+            if not tickers:
+                summary["actions"].append("liquidity_sweep:no_active_tickers")
+                return
+
+            # Deduplicate
+            tickers = list(dict.fromkeys(tickers))[:20]  # cap at 20 markets per sweep
+
+            # D13: Subscribe WS bridge to any new tickers discovered this sweep
+            if getattr(self, '_ws_bridge', None) is not None:
+                try:
+                    await self._ws_bridge.subscribe(tickers)
+                except Exception as _wse:
+                    logger.debug("ws_bridge mid-session subscribe skipped: %s", _wse)
+
+            alerts_total = 0
+            for ticker in tickers:
+                try:
+                    ob = await client.get_orderbook(ticker)
+                    if not ob:
+                        continue
+                    bid = float(ob.bids[0][0]) if ob.bids else 0.0
+                    ask = float(ob.asks[0][0]) if ob.asks else 1.0
+                    bid_sz = int(ob.bids[0][1]) if ob.bids else 0
+                    ask_sz = int(ob.asks[0][1]) if ob.asks else 0
+                    snap = OrderBookSnapshot(
+                        market_id=ticker,
+                        best_bid=bid,
+                        best_ask=ask,
+                        bid_size=bid_sz,
+                        ask_size=ask_sz,
+                        ts=now,
+                    )
+                    alerts = monitor.process(snap)
+                    alerts_total += len(alerts)
+
+                    # D2: Push mid-price into agent TrackedPositions so
+                    # stop-loss price-invalidation rules see live prices
+                    mid_cents = int(round((bid + ask) / 2 * 100))
+                    if mid_cents > 0:
+                        try:
+                            from merid.prediction.agent_grid import get_agent_grid as _gg
+                            for _agent in _gg().agents:
+                                for _pos in _agent._tracked_positions.values():
+                                    if _pos.ticker == ticker:
+                                        _pos.current_price_cents = mid_cents
+                        except Exception as _pe:
+                            logger.debug("stop_loss price update skipped for %s: %s", ticker, _pe)
+
+                except Exception as _te:
+                    logger.debug("liquidity_sweep %s skipped: %s", ticker, _te)
+
+            summary["actions"].append(
+                f"liquidity_sweep:{len(tickers)}markets,{alerts_total}alerts"
+            )
+        except Exception as exc:
+            logger.debug("_refresh_liquidity skipped: %s", exc)
 
     async def _run_arb_scan(self, now: float, summary: Dict):
         """Step 4: Scan for cross-venue arbitrage/dislocations."""
@@ -545,11 +842,13 @@ class MeridLoop:
         # Build risk context once per tick for system-level sizing
         try:
             risk_ctx = self._risk_context()
-        except Exception:
+        except Exception as _rctx_exc:
+            logger.debug("_risk_context unavailable (using None): %s", _rctx_exc)
             risk_ctx = None
 
         coordinator = self._consensus_coordinator()
-        plans = list(coordinator._active_plans.values())
+        _active_plans = getattr(coordinator, '_active_plans', {})
+        plans = list(_active_plans.values())
         approved = [p for p in plans if p.status == "approved" and not p.is_expired()]
 
         for plan in approved:
@@ -597,6 +896,7 @@ class MeridLoop:
                     )
             except Exception as e:
                 logger.error(f"Plan execution failed {plan.plan_id}: {e}")
+                summary["actions"].append(f"plan_failed:{plan.plan_id}:{plan.symbol}:{e}")
 
     async def _execute_single_plan(self, plan) -> Optional[Dict]:
         """Bridge a TradePlan to a TradeRequest and submit to the adapter.
@@ -640,9 +940,12 @@ class MeridLoop:
             live=not is_paper_or_mock(),
         )
 
-        result = await asyncio.get_event_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             None, adapter.submit_order, request
         )
+        if result is None:
+            logger.warning("adapter.submit_order returned None for plan %s", plan.plan_id)
+            return None
         plan.status = "executed"
         return {"order_id": result.venue_order_id, "status": result.status}
 
@@ -662,7 +965,7 @@ class MeridLoop:
             plan_id=plan.plan_id,
         )
 
-        fill = await asyncio.get_event_loop().run_in_executor(
+        fill = await asyncio.get_running_loop().run_in_executor(
             None, engine.submit_order, order
         )
 
@@ -714,15 +1017,15 @@ class MeridLoop:
         guard = self._execution_guard()
         try:
             guard.sync_promotion_report()
-            n_eligible = len(guard._promotion_eligible_domains or set())
-            n_blocked = len(guard._promotion_blocked_agents or set())
+            n_eligible = len(getattr(guard, '_promotion_eligible_domains', None) or set())
+            n_blocked = len(getattr(guard, '_promotion_blocked_agents', None) or set())
             summary["actions"].append(
                 f"promotion_synced:{n_eligible}eligible,{n_blocked}blocked_agents"
             )
             summary["promotion_sync"] = {
                 "eligible_domains": n_eligible,
                 "blocked_agents": n_blocked,
-                "report_ts": guard._promotion_report_ts,
+                "report_ts": getattr(guard, '_promotion_report_ts', None),
             }
         except Exception as e:
             logger.warning(f"Promotion sync failed: {e}")
@@ -734,13 +1037,13 @@ class MeridLoop:
             client = self._betting_odds_client()
             store = self._betting_store()
 
-            events = await asyncio.get_event_loop().run_in_executor(
+            events = await asyncio.get_running_loop().run_in_executor(
                 None, client.fetch_events
             )
             for event in events:
                 store.upsert_event(event)
 
-            odds = await asyncio.get_event_loop().run_in_executor(
+            odds = await asyncio.get_running_loop().run_in_executor(
                 None, client.fetch_all_odds
             )
             for snapshot in odds:
@@ -791,9 +1094,9 @@ class MeridLoop:
                     if guard:
                         reason = f"{critical_count} critical discrepancies detected"
                         try:
-                            guard.block_domain("prediction", reason=reason)
-                        except Exception:
-                            pass
+                            guard.activate_domain_kill_switch("prediction", reason=reason)
+                        except Exception as _ks_exc:
+                            logger.debug("activate_domain_kill_switch failed: %s", _ks_exc)
 
                     summary["actions"].append(f"reconciliation:CRITICAL:blocked_prediction_domain")
                 elif warning_count > 0:
@@ -818,6 +1121,43 @@ class MeridLoop:
         except Exception as exc:
             logger.error(f"Reconciliation failed: {exc}")
             summary["actions"].append(f"reconciliation:failed:{exc}")
+
+    async def _sync_order_groups(self, summary: Dict):
+        """Step 7b: Sync order group lifecycle state for Kalshi.
+        
+        Ensures order groups are tracked, validates active groups,
+        and records fills for accurate utilization metrics.
+        """
+        try:
+            og_lifecycle = self._order_group_lifecycle()
+            
+            # Start lifecycle manager if not running
+            if not getattr(og_lifecycle, '_running', False):
+                await og_lifecycle.start()
+                summary["actions"].append("order_groups:lifecycle_started")
+            
+            # Get current state summary
+            state = og_lifecycle.get_lifecycle_state()
+            
+            # Add order group metrics to summary
+            summary["order_groups"] = {
+                "total_tracked": state.get("total_groups", 0),
+                "active": state.get("active_groups", 0),
+                "triggered_groups": len(state.get("triggered_groups", [])),
+                "recent_errors": len(state.get("recent_errors", [])),
+            }
+            
+            # Log status if there are triggered groups
+            triggered = state.get("triggered_groups", [])
+            if triggered:
+                logger.warning(f"Order groups triggered: {triggered}")
+                summary["actions"].append(f"order_groups:triggered:{len(triggered)}")
+            else:
+                summary["actions"].append("order_groups:synced")
+                
+        except Exception as exc:
+            logger.warning(f"Order group sync failed: {exc}")
+            summary["actions"].append(f"order_groups:sync_failed:{exc}")
 
     # ── Subscriber pattern ────────────────────────────────────────────
 
@@ -868,6 +1208,41 @@ class MeridLoop:
         from merid.tick_log import build_tick_record, get_tick_log
         tick_log = get_tick_log()
 
+        # Start HashtagMonitor for real-time hashtag + news sentiment ingestion
+        self._hashtag_monitor = None
+        try:
+            from merid.sentiment.hashtag_monitor import get_hashtag_monitor
+            self._hashtag_monitor = get_hashtag_monitor()
+            await self._hashtag_monitor.start()
+            logger.info("HashtagMonitor started alongside loop")
+        except Exception as _hme:
+            logger.warning("HashtagMonitor start skipped: %s", _hme)
+            self._hashtag_monitor = None
+
+        # Start Kalshi WebSocket bridge for push-based market updates
+        self._ws_bridge = None
+        if "prediction" in self.config.active_domains:
+            try:
+                from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
+                self._ws_bridge = KalshiWebSocketBridge()
+                # Collect initial tickers from agent grid (best-effort)
+                _ws_tickers: List[str] = []
+                try:
+                    from merid.prediction.agent_grid import get_agent_grid as _wsg
+                    for _a in _wsg().agents:
+                        _ws_tickers.extend(_a.state.active_tickers)
+                    _ws_tickers = list(dict.fromkeys(_ws_tickers))[:50]
+                except Exception as _wste:
+                    logger.debug("ws_bridge ticker collection skipped: %s", _wste)
+                await self._ws_bridge.start(tickers=_ws_tickers or None)
+                logger.info(
+                    "KalshiWebSocketBridge started alongside loop (%d tickers)",
+                    len(_ws_tickers),
+                )
+            except Exception as _wse:
+                logger.warning("KalshiWebSocketBridge start skipped: %s", _wse)
+                self._ws_bridge = None
+
         while self._running:
             summary = await self.tick()
             tick_count += 1
@@ -889,6 +1264,23 @@ class MeridLoop:
 
         self._running = False
         logger.info(f"MERID loop stopped after {tick_count} ticks")
+
+        # Stop WebSocket bridge on loop exit
+        if getattr(self, "_hashtag_monitor", None) is not None:
+            try:
+                await self._hashtag_monitor.stop()
+                logger.info("HashtagMonitor stopped")
+            except Exception as _hme:
+                logger.debug("HashtagMonitor stop error: %s", _hme)
+            self._hashtag_monitor = None
+
+        if self._ws_bridge is not None:
+            try:
+                await self._ws_bridge.stop()
+                logger.info("KalshiWebSocketBridge stopped")
+            except Exception as _wse:
+                logger.debug("KalshiWebSocketBridge stop error: %s", _wse)
+            self._ws_bridge = None
 
     def stop(self):
         """Signal the loop to stop after the current tick."""
@@ -918,7 +1310,12 @@ _loop: Optional[MeridLoop] = None
 def get_merid_loop() -> MeridLoop:
     global _loop
     if _loop is None:
-        _loop = MeridLoop()
+        try:
+            config = LoopConfig.from_paper_config()
+        except Exception as _cfg_exc:
+            logger.warning(f"LoopConfig.from_paper_config() failed, using defaults: {_cfg_exc}")
+            config = LoopConfig()
+        _loop = MeridLoop(config)
     return _loop
 
 

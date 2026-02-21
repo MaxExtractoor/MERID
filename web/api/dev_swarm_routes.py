@@ -7,7 +7,7 @@ REST API for MERID Dev Swarm task submission, management, and monitoring.
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 import time
 import uuid
@@ -245,7 +245,7 @@ async def get_stats() -> Dict[str, Any]:
         "success_rate": len(completed) / max(total, 1),
         "avg_duration_seconds": sum(durations) / max(len(durations), 1) if durations else 0,
         "daily_cost_usd": sum(t.get("cost_usd", 0) for t in tasks),
-        "cost_budget_remaining": 100.0,
+        "cost_budget_remaining": max(0.0, float(__import__('os').getenv('MERID_DAILY_COST_BUDGET', '100')) - sum(t.get("cost_usd", 0) for t in tasks)),
     }
 
 
@@ -256,7 +256,7 @@ async def health_check() -> Dict[str, Any]:
     active = sum(1 for t in _task_registry.values() if t["status"] == "running")
     checks = {
         "agents_registered": len(swarm.agents) > 0,
-        "not_shutdown": not swarm._shutdown,
+        "not_shutdown": not getattr(swarm, 'shutdown', getattr(swarm, '_shutdown', False)),
         "not_paused": not _is_paused,
     }
     status = "healthy" if all(checks.values()) else "degraded"
@@ -265,7 +265,7 @@ async def health_check() -> Dict[str, Any]:
         "active_tasks": active,
         "agents": len(swarm.agents),
         "checks": checks,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 

@@ -126,7 +126,8 @@ class MarketFilter:
     """Filter for listing markets."""
     active_only: bool = True
     category: Optional[str] = None
-    search: Optional[str] = None
+    search: Optional[str] = None  # For series_ticker filter
+    event_ticker: Optional[str] = None  # For event_ticker filter
     limit: int = 100
     offset: int = 0
     min_volume: Optional[Decimal] = None

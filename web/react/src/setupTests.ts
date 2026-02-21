@@ -4,7 +4,7 @@ import '@testing-library/jest-dom';
 jest.mock('./config/constants', () => ({
   API_BASE_URL: 'http://127.0.0.1:8000',
   WS_URL: 'ws://127.0.0.1:8000/ws/trades',
-  WS_PORTFOLIO_URL: 'ws://127.0.0.1:8000/ws/portfolio',
+  WS_PORTFOLIO_URL: 'ws://127.0.0.1:8000/ws/risk',
   AUTH_TOKEN_KEY: 'merid-access',
   API_ENDPOINTS: {
     SYSTEM_HEALTH: '/api/v1/system/health',
@@ -56,6 +56,16 @@ jest.mock('./config/constants', () => ({
     KALSHI_CATEGORIES: '/api/v1/kalshi/categories',
     KALSHI_ORDER_CANCEL: (orderId: string) => `/api/v1/kalshi/orders/${orderId}`,
     KALSHI_ORDERS_BATCH_CANCEL: '/api/v1/kalshi/orders',
+    KALSHI_ORDER_GROUPS: '/api/v1/kalshi/order-groups',
+    KALSHI_ORDER_GROUP_DETAIL: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}`,
+    KALSHI_ORDER_GROUP_CREATE: '/api/v1/kalshi/order-groups',
+    KALSHI_ORDER_GROUP_LIMIT: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}/limit`,
+    KALSHI_ORDER_GROUP_TRIGGER: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}/trigger`,
+    KALSHI_ORDER_GROUP_RESET: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}/reset`,
+    KALSHI_ORDER_GROUP_DELETE: (groupId: string) => `/api/v1/kalshi/order-groups/${groupId}`,
+    KALSHI_ORDER_GROUP_DASHBOARD: '/api/v1/kalshi/order-groups/dashboard',
+    KALSHI_ORDER_GROUP_STREAM: '/api/v1/kalshi/order-groups/stream',
+    KALSHI_BATCH_ORDERS: '/api/v1/kalshi/orders/batch',
   },
   STATUS_TYPES: {
     ONLINE: 'online',

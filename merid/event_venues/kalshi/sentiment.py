@@ -464,8 +464,8 @@ class KalshiSentimentService:
                     if book:
                         bid_depth = float(book.get("bid_depth", bid_depth))
                         ask_depth = float(book.get("ask_depth", ask_depth))
-                except Exception:
-                    pass
+                except Exception as _bde:
+                    logger.debug("orderbook depth lookup skipped for %s: %s", ticker, _bde)
 
                 self.update_market(
                     ticker,

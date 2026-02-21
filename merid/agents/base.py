@@ -133,6 +133,35 @@ class CanonicalAgent(ABC):
     async def _execute(self, context: Dict[str, Any]) -> AgentOutput:
         """Implement agent-specific logic. Must return AgentOutput."""
 
+    # ── AgentInterface contract (observe/analyze/vote/reflect) ────────
+    # Default implementations satisfy the interface contract without
+    # requiring all 47 concrete subclasses to override them.  Subclasses
+    # that participate in the structured debate loop should override these.
+
+    async def observe(self, market_state: Any) -> None:
+        """Ingest market state. Override in subclasses that use structured observe-analyze-vote."""
+        self.logger.debug("observe: default no-op for %s", self.agent_id)
+
+    async def analyze(self) -> Dict[str, Any]:
+        """Generate analysis. Override in subclasses that use structured observe-analyze-vote."""
+        self.logger.debug("analyze: default no-op for %s", self.agent_id)
+        return {}
+
+    async def vote(self, proposal: Any) -> Any:
+        """Cast vote on proposal. Override in subclasses that participate in voting."""
+        self.logger.debug("vote: default abstain for %s", self.agent_id)
+        from agents.interface import AgentVote, VoteDecision
+        return AgentVote(
+            agent_id=self.agent_id,
+            decision=VoteDecision.ABSTAIN,
+            confidence=0.0,
+            reasoning=f"{self.agent_id} has no vote implementation — abstaining",
+        )
+
+    async def reflect(self, outcome: Any) -> None:
+        """Update internal state from outcome. Override in subclasses that learn from outcomes."""
+        self.logger.debug("reflect: default no-op for %s", self.agent_id)
+
     # ── Summary ──────────────────────────────────────────────────────
 
     def summary(self) -> dict:

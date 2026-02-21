@@ -48,11 +48,11 @@ class WiredPredictionMarketAgent(PredictionMarketAgentV2):
         self._model = PredictionMarketModel()
 
     def _get_client(self):
-        """Lazy-init Kalshi client."""
+        """Lazy-init Kalshi client — uses the process-wide singleton."""
         if self._client is None:
             try:
-                from merid.event_venues.kalshi.client import KalshiVenueClient
-                self._client = KalshiVenueClient()
+                from merid.event_venues.kalshi.client import get_kalshi_client
+                self._client = get_kalshi_client()
             except Exception as exc:
                 logger.warning(f"KalshiVenueClient unavailable: {exc}")
         return self._client

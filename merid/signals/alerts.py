@@ -142,8 +142,8 @@ class AlertRouter:
             client = TelegramAlertClient(enabled=True)
             text = self._format_telegram(alert)
             return client.send_alert(text)
-        except Exception:
-            logger.debug("No Telegram sink available")
+        except Exception as _te:
+            logger.debug("No Telegram sink available: %s", _te)
             return False
 
     def _send_x(self, alert: Alert) -> bool:
@@ -163,8 +163,8 @@ class AlertRouter:
             agent = get_twitter_agent()
             text = self._format_x(alert)
             return agent.post_tweet(text) is not None
-        except Exception:
-            logger.debug("No X sink available")
+        except Exception as _xe:
+            logger.debug("No X sink available: %s", _xe)
             return False
 
     def _send_log(self, alert: Alert) -> bool:

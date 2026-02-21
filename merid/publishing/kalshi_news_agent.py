@@ -311,7 +311,7 @@ class KalshiNewsAgent:
             # Check if we should thread (reply to previous tweet on same ticker)
             reply_to = self._thread_ids.get(ins.ticker)
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             if reply_to:
                 tweet = await loop.run_in_executor(
                     None,
@@ -334,13 +334,13 @@ class KalshiNewsAgent:
         return {
             "recent_posts": [
                 {
-                    "ticker": r.ticker,
+                    "ticker":   r.ticker,
                     "category": r.category,
-                    "action": r.action,
+                    "action":   r.action,
                     "telegram": r.telegram_sent,
                     "tweet_id": r.x_tweet_id,
-                    "preview": r.text_preview,
-                    "ts": r.ts,
+                    "preview":  r.text_preview,
+                    "ts":       r.ts,
                 }
                 for r in self._post_history[-20:]
             ],

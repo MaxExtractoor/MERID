@@ -57,7 +57,8 @@ class VenueGate:
             try:
                 from merid.settings import settings
                 raw_mode_str = settings.MERID_PM_TRADING_MODE
-            except Exception:
+            except Exception as _se:
+                logger.debug("VenueGate: settings unavailable for mode, using env: %s", _se)
                 raw_mode_str = os.getenv("MERID_PM_TRADING_MODE", "mock")
             val = raw_mode_str.lower()
             if val == "sim":
@@ -78,7 +79,8 @@ class VenueGate:
             try:
                 from merid.settings import settings
                 self._live_enabled = settings.MERID_PM_LIVE_ENABLED
-            except Exception:
+            except Exception as _se:
+                logger.debug("VenueGate: settings unavailable for live_enabled, using env: %s", _se)
                 self._live_enabled = os.getenv(
                     "MERID_PM_LIVE_ENABLED", "false"
                 ).lower() == "true"
@@ -151,6 +153,27 @@ class VenueGate:
     def should_simulate_fill(self) -> bool:
         """Return True if fills should be simulated (SIM or PAPER mode)."""
         return self._mode in (TradingMode.MOCK, TradingMode.PAPER)
+
+    def reload(self) -> None:
+        """Re-read mode and live_enabled from settings/env.
+
+        Call this after a runtime mode change (e.g. via API) so the singleton
+        reflects the new configuration without a process restart.
+        """
+        try:
+            from merid.settings import settings
+            raw = settings.MERID_PM_TRADING_MODE.lower()
+            if raw == "sim":
+                raw = "mock"
+            self._mode = TradingMode(raw)
+            self._live_enabled = settings.MERID_PM_LIVE_ENABLED
+        except Exception as _se:
+            raw = os.getenv("MERID_PM_TRADING_MODE", "mock").lower()
+            if raw == "sim":
+                raw = "mock"
+            self._mode = TradingMode(raw)
+            self._live_enabled = os.getenv("MERID_PM_LIVE_ENABLED", "false").lower() == "true"
+        logger.info("VenueGate reloaded: mode=%s live_enabled=%s", self._mode.value, self._live_enabled)
 
     def summary(self) -> dict:
         """Return a JSON-serialisable summary for dashboards."""

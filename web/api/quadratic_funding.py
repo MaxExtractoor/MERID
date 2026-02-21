@@ -5,6 +5,9 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 from governance.quadratic_funding import (
     Contribution,

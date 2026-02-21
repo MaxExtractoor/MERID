@@ -120,7 +120,14 @@ async def set_trading_mode(request: ModeChangeRequest) -> Dict[str, Any]:
     
     if not success:
         raise HTTPException(status_code=400, detail="Failed to change mode")
-    
+
+    # L2: Reload VenueGate singleton so prediction market order path reflects new mode
+    try:
+        from merid.prediction.venue_gate import get_venue_gate
+        get_venue_gate().reload()
+    except Exception as _vge:
+        logger.warning("VenueGate reload after mode change failed (non-fatal): %s", _vge)
+
     return {
         "status": "success",
         "mode": controller.mode_name,

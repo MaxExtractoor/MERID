@@ -205,7 +205,8 @@ class BenchmarkCollector:
                 target=f"P95 ≤{self.targets.loop_cycle_max_ms}ms",
                 detail=f"{len(durations)} recent cycles sampled",
             )
-        except Exception:
+        except Exception as _e:
+            logger.debug("loop_cycle_time probe failed: %s", _e)
             return BenchmarkResult(
                 name="loop_cycle_time", category="latency",
                 status=BenchmarkStatus.NO_DATA, value=None,
@@ -218,7 +219,8 @@ class BenchmarkCollector:
             from agents.agent_framework import get_agent_registry
             registry = get_agent_registry()
             all_metrics = registry.get_all_metrics()
-        except Exception:
+        except Exception as _e:
+            logger.debug("agent_latency probe failed: %s", _e)
             return [BenchmarkResult(
                 name="agent_latency_p95", category="latency",
                 status=BenchmarkStatus.NO_DATA, value=None,
@@ -277,7 +279,8 @@ class BenchmarkCollector:
         try:
             from web.api.live_stream import get_channel_freshness
             freshness = get_channel_freshness()
-        except Exception:
+        except Exception as _e:
+            logger.debug("ws_channel_freshness probe failed: %s", _e)
             return BenchmarkResult(
                 name="ws_channel_freshness", category="data_quality",
                 status=BenchmarkStatus.NO_DATA, value=None,
@@ -317,7 +320,8 @@ class BenchmarkCollector:
         try:
             from merid.reconciliation import get_last_reconciliation_ts
             last_ts = get_last_reconciliation_ts()
-        except Exception:
+        except Exception as _e:
+            logger.debug("reconciliation_freshness probe failed: %s", _e)
             return BenchmarkResult(
                 name="reconciliation_freshness", category="data_quality",
                 status=BenchmarkStatus.NO_DATA, value=None,
@@ -358,7 +362,8 @@ class BenchmarkCollector:
             guard = get_execution_guard()
             summary = guard.summary()
             venue_caps = summary.get("venue_caps", {})
-        except Exception:
+        except Exception as _e:
+            logger.debug("venue_exposure probe failed: %s", _e)
             return BenchmarkResult(
                 name="venue_exposure", category="risk",
                 status=BenchmarkStatus.NO_DATA, value=None,
@@ -404,7 +409,8 @@ class BenchmarkCollector:
             engine = get_paper_engine()
             stats = engine.get_global_stats()
             equity_series = engine.get_equity_series()
-        except Exception:
+        except Exception as _e:
+            logger.debug("max_drawdown probe failed: %s", _e)
             return BenchmarkResult(
                 name="max_drawdown", category="risk",
                 status=BenchmarkStatus.NO_DATA, value=None,
@@ -448,15 +454,12 @@ class BenchmarkCollector:
             from web.api.system_observability import ALERT_RULES
             firing = []
             for rule in ALERT_RULES:
-                try:
-                    result = rule.evaluate()
-                    if result.get("firing"):
-                        firing.append({
-                            "name": result.get("name", "unknown"),
-                            "severity": result.get("severity", "unknown"),
-                        })
-                except Exception:
-                    pass
+                result = rule.safe_evaluate()
+                if result.get("firing"):
+                    firing.append({
+                        "name": result.get("name", "unknown"),
+                        "severity": result.get("severity", "unknown"),
+                    })
 
             # During warmup, filter out known cold-start alerts
             if self._in_warmup:
@@ -480,7 +483,8 @@ class BenchmarkCollector:
                 target=f"≤{self.targets.max_firing_alerts} alerts firing in normal operation",
                 detail=(f"{count} alert(s) currently firing{warmup_note}" if count else f"All quiet{warmup_note}"),
             ))
-        except Exception:
+        except Exception as _e:
+            logger.debug("alert_hygiene probe failed: %s", _e)
             results.append(BenchmarkResult(
                 name="alert_hygiene", category="alerts",
                 status=BenchmarkStatus.NO_DATA, value=None,
@@ -504,7 +508,8 @@ class BenchmarkCollector:
             stats = registry.get_statistics()
             active = stats.get("agents_by_status", {}).get("active", 0)
             total = stats.get("total_agents", 0)
-        except Exception:
+        except Exception as _e:
+            logger.debug("active_agents probe failed: %s", _e)
             return BenchmarkResult(
                 name="active_agents", category="swarm",
                 status=BenchmarkStatus.NO_DATA, value=None,
@@ -535,7 +540,8 @@ class BenchmarkCollector:
             from merid.agents.orchestrator import AgentOrchestrator
             orch = AgentOrchestrator()
             history = orch.get_history()
-        except Exception:
+        except Exception as _e:
+            logger.debug("consensus_rate probe failed: %s", _e)
             return BenchmarkResult(
                 name="consensus_rate", category="swarm",
                 status=BenchmarkStatus.NO_DATA, value=None,

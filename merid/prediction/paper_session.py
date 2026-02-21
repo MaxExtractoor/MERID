@@ -334,6 +334,11 @@ class PaperSession:
         return self._session_id
 
     @property
+    def session_id(self) -> Optional[str]:
+        """Public accessor for the current session ID."""
+        return self._session_id
+
+    @property
     def session_hours(self) -> float:
         if self._session_start is None:
             return 0.0
@@ -759,6 +764,19 @@ class PaperSession:
         self._live_promoted.add(agent_name)
         self._save_state()
 
+        # G5: Delegate actual mode change to DeploymentController (single source of truth)
+        try:
+            from merid.event_venues.kalshi.deployment import get_deployment_controller
+            _dc = get_deployment_controller()
+            _ok, _reason = _dc.promote_to_live(agent_name, readiness=None)
+            if not _ok:
+                logger.warning(
+                    "[paper-session] DeploymentController rejected promotion for %s: %s",
+                    agent_name, _reason,
+                )
+        except Exception as _dce:
+            logger.debug("[paper-session] DeploymentController promote skipped: %s", _dce)
+
         logger.info(f"[paper-session] PROMOTED {agent_name} to LIVE (force={force})")
         return {
             "promoted": True,
@@ -771,6 +789,14 @@ class PaperSession:
         """Demote an agent back to paper mode."""
         self._live_promoted.discard(agent_name)
         self._save_state()
+
+        # G5: Sync rollback to DeploymentController
+        try:
+            from merid.event_venues.kalshi.deployment import get_deployment_controller
+            get_deployment_controller().rollback(agent_name, reason="paper-session-demote")
+        except Exception as _dce:
+            logger.debug("[paper-session] DeploymentController rollback skipped: %s", _dce)
+
         logger.info(f"[paper-session] DEMOTED {agent_name} back to PAPER")
         return {"demoted": True, "agent": agent_name, "mode": "paper"}
 

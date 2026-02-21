@@ -176,7 +176,8 @@ class PredictionMarketAgentV2(CanonicalAgent):
         try:
             from merid.prediction.consensus import get_prediction_consensus_store
             store = get_prediction_consensus_store()
-        except Exception:
+        except Exception as _e:
+            logger.debug("_scan_opportunities: consensus store unavailable: %s", _e)
             return []
 
         instruments = store.list_instruments(status="active", limit=50)
@@ -222,7 +223,8 @@ class PredictionMarketAgentV2(CanonicalAgent):
                 PredictionOpinion,
             )
             store = get_prediction_consensus_store()
-        except Exception:
+        except Exception as _e:
+            logger.debug("_submit_opinions: consensus store unavailable: %s", _e)
             return 0
 
         count = 0

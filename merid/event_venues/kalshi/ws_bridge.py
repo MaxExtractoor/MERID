@@ -185,6 +185,15 @@ class KalshiWebSocketBridge:
                 pass
             self._queue.put_nowait(event)
             self._events_dropped += 1
+            # Log every 100 drops so operators see the problem
+            if self._events_dropped % 100 == 1:
+                logger.warning(
+                    "WS bridge queue overflow — %d events dropped total "
+                    "(queue_size=%d, forwarded=%d)",
+                    self._events_dropped,
+                    _BRIDGE_QUEUE_SIZE,
+                    self._events_forwarded,
+                )
 
     # ── Forward loop (drains queue → event bus) ──────────────────────────
 
@@ -221,8 +230,40 @@ class KalshiWebSocketBridge:
                 self._events_forwarded += 1
                 self._type_counts["price_update"] += 1
 
+                # Bridge into streaming_bus.MARKET_DATA so AgentMesh streaming agents
+                # (MarketAnalystAgent, RiskAgent, StrategyAgent, ArchivistAgent) receive
+                # Kalshi price ticks alongside Coinbase prices
+                try:
+                    from core.streaming_bus import streaming_bus, StreamEvent, EventChannel
+                    _mkt_event = StreamEvent(
+                        channel=EventChannel.MARKET_DATA,
+                        event_type="ticker",
+                        data={
+                            "symbol": event.market_id,
+                            "price": float(event.last_price) if event.last_price else None,
+                            "bid": float(event.bid_price) if event.bid_price else None,
+                            "ask": float(event.ask_price) if event.ask_price else None,
+                            "volume": float(event.volume) if event.volume else None,
+                            "venue": "kalshi",
+                        },
+                        source="kalshi_ws_bridge",
+                    )
+                    asyncio.create_task(streaming_bus.publish(_mkt_event))
+                except Exception as _exc:
+                    logger.debug(f"streaming_bus MARKET_DATA bridge error (non-fatal): {_exc}")
+
                 # Buffer latest state per market for UI coalescing
                 self._coalesce_buffer[event.market_id] = payload
+
+                # Update position cache unrealized PnL with latest price
+                try:
+                    from merid.event_venues.kalshi.position_cache import get_position_cache
+                    cache = get_position_cache()
+                    if event.last_price:
+                        price_cents = int(round(float(event.last_price) * 100)) if float(event.last_price) <= 1.0 else int(round(float(event.last_price)))
+                        cache.on_price_update(event.market_id, price_cents)
+                except Exception as _exc:
+                    logger.debug(f"Position cache price update error (ignored): {_exc}")
 
             elif isinstance(event, VenueTrade):
                 trade_payload = {
@@ -238,6 +279,38 @@ class KalshiWebSocketBridge:
                 await self._publish_to_bus("kalshi:trade", trade_payload)
                 self._events_forwarded += 1
                 self._type_counts["trade"] += 1
+
+                # Emit order fill event for real-time updates
+                # (OrderManager and SocialBroadcaster listen for this)
+                price_cents = int(round(float(event.price) * 100)) if float(event.price) <= 1.0 else int(round(float(event.price)))
+                fill_payload = {
+                    "order_id": event.order_id,
+                    "market_id": event.market_id,
+                    "side": event.side,
+                    "action": "buy" if event.side == "buy" else "sell",
+                    "contracts": int(event.size),
+                    "price_cents": price_cents,
+                    "fee_cents": int(round(float(event.fee) * 100)),
+                    "simulated": False,  # WebSocket trades are always live
+                    "agent": "kalshi_ws",  # Agent ID unknown from WS, use placeholder
+                    "timestamp": event.timestamp.isoformat(),
+                }
+                await self._publish_to_bus("kalshi:order_filled", fill_payload)
+                self._type_counts["order_filled"] = self._type_counts.get("order_filled", 0) + 1
+
+                # Update position cache with fill
+                try:
+                    from merid.event_venues.kalshi.position_cache import get_position_cache
+                    cache = get_position_cache()
+                    cache.on_fill(
+                        market_id=event.market_id,
+                        contracts=int(event.size),
+                        price_cents=price_cents,
+                        fee_cents=int(round(float(event.fee) * 100)),
+                        side=event.side,
+                    )
+                except Exception as _exc:
+                    logger.debug(f"Position cache update error (ignored): {_exc}")
 
                 # Wire live fills to AgentPerformanceTracker.record_close so
                 # calibration metrics update from real Kalshi trade events.
@@ -266,6 +339,36 @@ class KalshiWebSocketBridge:
                 await self._publish_to_bus(f"kalshi:{event_type}", dict(event))
                 self._events_forwarded += 1
                 self._type_counts[event_type] += 1
+
+            elif isinstance(event, dict) and event.get("type") == "order_group_update":
+                # Forward order group real-time updates
+                group_data = event.get("data", {})
+                group_id = group_data.get("order_group_id") or group_data.get("id")
+
+                if group_id:
+                    payload = {
+                        "order_group_id": group_id,
+                        "status": group_data.get("status"),
+                        "filled_cost_cents": group_data.get("filled_cost", 0),
+                        "remaining_cost_cents": group_data.get("remaining_cost", 0),
+                        "limit_cents": group_data.get("limit", 0),
+                        "contracts_used": group_data.get("contracts_used", 0),
+                        "contracts_remaining": group_data.get("contracts_remaining", 0),
+                        "timestamp": event.get("timestamp"),
+                    }
+                    await self._publish_to_bus("kalshi:order_group_update", payload)
+                    self._events_forwarded += 1
+                    self._type_counts["order_group_update"] = self._type_counts.get("order_group_update", 0) + 1
+
+                    # Update order group manager cache
+                    try:
+                        from merid.event_venues.kalshi.order_group_manager import get_order_group_manager
+                        manager = get_order_group_manager()
+                        # Update the manager's cache with latest state
+                        if hasattr(manager, "update_from_ws"):
+                            manager.update_from_ws(group_id, group_data)
+                    except Exception as _exc:
+                        logger.debug(f"Order group manager update error (ignored): {_exc}")
 
             else:
                 await self._publish_to_bus("kalshi:ws_event", {"raw": str(event)})

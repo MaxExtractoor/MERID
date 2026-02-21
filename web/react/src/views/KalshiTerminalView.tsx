@@ -115,7 +115,7 @@ export default function KalshiTerminalView() {
     if (!selectedMarket) return '';
     return selectedMarket.ticker.split('-')[0] ?? '';
   }, [selectedMarket]);
-  const eventResult = useApiData<{ ticker: string; title: string; category: string; market_count: number; status: string }>(
+  const eventResult = useApiData<{ event_ticker: string; market_count: number; markets: { ticker: string; question: string; category: string; asset: string; volume: number; active: boolean }[] }>(
     eventTicker ? API_ENDPOINTS.KALSHI_EVENT(eventTicker) : '',
     { pollingInterval: eventTicker ? DEFAULTS.POLLING_INTERVALS.SLOW : 0 }
   );
@@ -450,12 +450,13 @@ export default function KalshiTerminalView() {
                 {eventResult.data && (
                   <div className="flex items-center gap-2 text-[10px] bg-slate-900/60 rounded px-2 py-1">
                     <span className="text-gray-500">Event:</span>
-                    <span className="font-mono text-orange-300">{eventResult.data.ticker}</span>
-                    <span className="text-gray-400 truncate">{eventResult.data.title}</span>
-                    <span className="ml-auto text-gray-600">{eventResult.data.market_count}mkt</span>
-                    <span className={`px-1 py-0.5 rounded ${eventResult.data.status === 'open' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700 text-gray-400'}`}>
-                      {eventResult.data.status}
-                    </span>
+                    <span className="font-mono text-orange-300">{eventResult.data.event_ticker}</span>
+                    <span className="ml-auto text-gray-600">{eventResult.data.market_count} mkts</span>
+                    {eventResult.data.markets[0]?.category && (
+                      <span className={`px-1 py-0.5 rounded ${CAT_COLOR[eventResult.data.markets[0].category] ?? 'text-gray-400 bg-slate-800'}`}>
+                        {eventResult.data.markets[0].category}
+                      </span>
+                    )}
                   </div>
                 )}
 

@@ -39,8 +39,80 @@ def _get_paper_engine():
         return None
 
 
+def _get_kalshi_risk():
+    """Get KalshiRiskManager for live PnL data."""
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+        return get_kalshi_risk()
+    except Exception:
+        return None
+
+
+def _get_kalshi_grid():
+    """Get AgentGrid for live trading summary."""
+    try:
+        from merid.prediction.agent_grid import get_agent_grid
+        return get_agent_grid()
+    except Exception:
+        return None
+
+
+def _kalshi_pnl() -> Dict[str, Any]:
+    """P&L from Kalshi live risk manager."""
+    risk = _get_kalshi_risk()
+    if risk is None:
+        return _zero_pnl()
+    try:
+        state = risk.state
+        daily_pnl = state.daily_pnl_usd
+        equity = state.current_equity_usd or state.peak_equity_usd or 10000.0
+        peak = state.peak_equity_usd or equity
+        drawdown = (peak - equity) / peak if peak > 0 else 0.0
+
+        return {
+            "today_pnl": round(daily_pnl, 2),
+            "today_pnl_pct": round(daily_pnl / equity * 100, 2) if equity else 0.0,
+            "mtm_pnl": round(daily_pnl, 2),
+            "max_drawdown": round(peak - equity, 2),
+            "max_drawdown_pct": round(drawdown * 100, 2),
+            "limit_daily_loss": risk.config.max_daily_loss_usd,
+            "limit_utilization_pct": round(abs(daily_pnl) / risk.config.max_daily_loss_usd * 100, 1) if risk.config.max_daily_loss_usd else 0.0,
+            "total_pnl": round(daily_pnl, 2),
+            "daily_pnl": round(daily_pnl, 2),
+            "weekly_pnl": round(daily_pnl, 2),  # Will be enhanced with history
+            "monthly_pnl": round(daily_pnl, 2),
+            "unrealized_pnl": 0.0,  # Kalshi has no unrealized
+            "realized_pnl": round(daily_pnl, 2),
+            "win_rate": 0.0,  # From performance tracker
+            "profit_factor": 0.0,
+            "sharpe_ratio": 0.0,
+        }
+    except Exception:
+        return _zero_pnl()
+
+
+def _get_daily_loss_limit() -> float:
+    """Return the configured daily loss limit from KalshiRiskConfig or risk_controller."""
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+        return float(get_kalshi_risk().config.max_daily_loss_usd)
+    except Exception as _e:
+        logger.debug("_get_daily_loss_limit kalshi_risk skipped: %s", _e)
+    try:
+        from merid.risk.kill_switches import risk_controller
+        return float(risk_controller.daily_loss_limit)
+    except Exception:
+        return 1000.0  # conservative safe default
+
+
 def _real_pnl() -> Dict[str, Any]:
-    """P&L from paper trading engine."""
+    """P&L from appropriate source based on trading mode."""
+    # In Kalshi mode, use Kalshi risk manager
+    from merid.settings import settings
+    if settings.KALSHI_ONLY:
+        return _kalshi_pnl()
+
+    # Fallback to paper engine for non-Kalshi modes
     engine = _get_paper_engine()
     if engine is None:
         return _zero_pnl()
@@ -55,8 +127,8 @@ def _real_pnl() -> Dict[str, Any]:
             "mtm_pnl": round(port.get("unrealized_pnl", 0.0), 2),
             "max_drawdown": round(port.get("max_drawdown", 0.0), 2),
             "max_drawdown_pct": round(port.get("max_drawdown_pct", 0.0), 2),
-            "limit_daily_loss": 10000,
-            "limit_utilization_pct": round(abs(total_pnl) / 10000 * 100, 1),
+            "limit_daily_loss": _get_daily_loss_limit(),
+            "limit_utilization_pct": round(abs(total_pnl) / max(_get_daily_loss_limit(), 1) * 100, 1),
             "total_pnl": round(total_pnl, 2),
             "daily_pnl": round(total_pnl, 2),
             "weekly_pnl": round(total_pnl, 2),
@@ -82,7 +154,39 @@ def _zero_pnl() -> Dict[str, Any]:
 
 
 def _real_trading_summary() -> Dict[str, Any]:
-    """Trading summary from paper engine + runtime config."""
+    """Trading summary from appropriate source based on trading mode."""
+    from merid.settings import settings
+
+    # In Kalshi mode, use Kalshi grid data
+    if settings.KALSHI_ONLY:
+        grid = _get_kalshi_grid()
+        agent_count = len(grid.agents) if grid else 0
+        summary = grid.summary() if grid else {}
+        portfolio = summary.get("portfolio_risk", {})
+        metrics = summary.get("metrics", {})
+
+        return {
+            "active_strategies": agent_count,
+            "paused_strategies": 0,
+            "venues_connected": 1,
+            "venues": ["Kalshi"],
+            "notional_deployed": round(portfolio.get("total_notional_usd", 0), 2),
+            "notional_capacity": settings.MERID_MAX_POSITION_SIZE_USD * 10,
+            "utilization_pct": round(portfolio.get("total_notional_usd", 0) / (settings.MERID_MAX_POSITION_SIZE_USD * 10) * 100, 1),
+            "active_orders": metrics.get("total_orders", 0),
+            "pending_orders": 0,
+            "filled_orders_today": metrics.get("total_fills", 0),
+            "total_volume_24h": 0.0,
+            "average_trade_size": 0.0,
+            "active_positions": len(portfolio.get("category_notional", {})),
+            "total_positions_value": round(portfolio.get("total_notional_usd", 0), 2),
+            "margin_used": 0.0,
+            "margin_available": round(settings.MERID_MAX_POSITION_SIZE_USD * 10 - portfolio.get("total_notional_usd", 0), 2),
+            "leverage": 1.0,
+            "mode": settings.MERID_PM_TRADING_MODE,
+        }
+
+    # Fallback to paper engine for non-Kalshi modes
     engine = _get_paper_engine()
     positions = 0
     orders = 0
@@ -104,14 +208,15 @@ def _real_trading_summary() -> Dict[str, Any]:
     except Exception:
         mode = "offline"
 
+    _capacity = float(os.getenv("MERID_NOTIONAL_CAPACITY_USD", "500000"))
     return {
         "active_strategies": 0,
         "paused_strategies": 0,
-        "venues_connected": 4,
-        "venues": ["Kraken", "Coinbase", "Alpaca", "Paper"],
+        "venues_connected": 1,
+        "venues": ["Paper"],
         "notional_deployed": round(total_value, 2),
-        "notional_capacity": 500000,
-        "utilization_pct": round(total_value / 500000 * 100, 1) if total_value else 0.0,
+        "notional_capacity": _capacity,
+        "utilization_pct": round(total_value / _capacity * 100, 1) if total_value else 0.0,
         "active_orders": orders,
         "pending_orders": 0,
         "filled_orders_today": 0,
@@ -131,7 +236,15 @@ def _real_prime_status() -> Dict[str, Any]:
     try:
         from data.live_price_feed import get_live_price_feed
         feed = get_live_price_feed()
-        cached = len(feed.price_cache) if feed else 0
+        if feed:
+            if hasattr(feed, 'get_cached_symbols'):
+                cached = len(feed.get_cached_symbols())
+            elif hasattr(feed, 'cached_symbols'):
+                cached = len(feed.cached_symbols)
+            else:
+                cached = len(feed._price_cache) if hasattr(feed, '_price_cache') else 0
+        else:
+            cached = 0
         running = getattr(feed, "running", False) if feed else False
     except Exception:
         cached = 0
@@ -152,8 +265,8 @@ def _real_prime_status() -> Dict[str, Any]:
         "data_feeds": {
             "kraken": {"connected": running, "latency_ms": 0},
             "coinbase": {"connected": running, "latency_ms": 0},
-            "alpaca": {"connected": True, "latency_ms": 0},
-            "news": {"connected": True, "latency_ms": 0},
+            "alpaca": {"connected": running, "latency_ms": 0},
+            "news": {"connected": running, "latency_ms": 0},
         },
         "confidence": 0.0,
         "active_strategies": 0,
@@ -220,7 +333,7 @@ def _real_risk_protections() -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat() + "Z"
     pnl = _real_pnl()
     daily_pnl = pnl.get("today_pnl", 0.0)
-    max_daily_loss = 10000
+    max_daily_loss = _get_daily_loss_limit()
 
     try:
         from trading.config.runtime import get_trading_runtime_config
@@ -232,39 +345,110 @@ def _real_risk_protections() -> Dict[str, Any]:
         mode = "offline"
         spectator = True
 
+    # Real circuit breaker state from risk_controller
+    cb_state = "CLOSED"
+    cb_color = "green"
+    cb_error_count = 0
+    cb_opened_at = None
+    _rc_st: Dict[str, Any] = {}
+    try:
+        from merid.risk.kill_switches import risk_controller as _rc
+        _rc_st = _rc.get_status()
+        if not _rc_st.get("can_trade", True):
+            cb_state = "OPEN"
+            cb_color = "red"
+            cb_opened_at = _rc_st.get("kill_timestamp")
+        cb_error_count = _rc_st.get("error_count", 0)
+    except Exception as _e:
+        logger.debug("circuit_breaker risk_controller status skipped: %s", _e)
+
+    # Real per-symbol cap and order limits from KalshiRiskConfig
+    max_per_symbol = 5000.0
+    max_open_orders = 30
+    current_open_orders = 0
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr
+        _krm = _gkr()
+        max_per_symbol = float(_krm.config.max_single_order_notional_usd)
+        max_open_orders = int(_krm.config.max_orders_per_minute)
+        current_open_orders = int(_krm.state.orders_this_minute)
+    except Exception as _e:
+        logger.debug("kalshi_risk order limits skipped: %s", _e)
+
     return {
         "timestamp": now,
         "circuit_breaker": {
-            "state": "CLOSED",
-            "state_color": "green",
-            "error_count": 0,
-            "window_seconds": 300,
-            "threshold": 5,
+            "state": cb_state,
+            "state_color": cb_color,
+            "error_count": cb_error_count,
+            "window_seconds": int(os.getenv("MERID_CB_WINDOW_SECONDS", "300")),
+            "threshold": _rc_st.get("error_threshold", int(os.getenv("MERID_CB_THRESHOLD", "5"))),
             "last_error_at": None,
-            "opened_at": None,
-            "cooldown_seconds": 60,
+            "opened_at": cb_opened_at,
+            "cooldown_seconds": int(os.getenv("MERID_CB_COOLDOWN_SECONDS", "60")),
             "half_open_successes": 0,
         },
         "lockdown": {
-            "trading_suite_enabled": True,
+            "trading_suite_enabled": cb_state == "CLOSED",
             "global_mode": mode,
             "spectator_mode": spectator,
-            "lockdown_reason": None,
+            "lockdown_reason": None if cb_state == "CLOSED" else "Kill switch active",
         },
         "risk_limits": {
             "max_daily_loss_usd": max_daily_loss,
             "current_daily_pnl": daily_pnl,
-            "daily_loss_utilization_pct": round(abs(daily_pnl) / max_daily_loss * 100, 1) if max_daily_loss else 0.0,
-            "max_per_symbol_exposure_usd": 50000,
-            "max_open_orders": 20,
-            "current_open_orders": 0,
+            "daily_loss_utilization_pct": round(abs(daily_pnl) / max(max_daily_loss, 1) * 100, 1),
+            "max_per_symbol_exposure_usd": max_per_symbol,
+            "max_open_orders": max_open_orders,
+            "current_open_orders": current_open_orders,
         },
         "recent_events": [],
     }
 
 
 def _real_risk_exposure() -> Dict[str, Any]:
-    """Risk exposure from paper engine positions."""
+    """Risk exposure from appropriate source based on trading mode."""
+    from merid.settings import settings
+
+    # In Kalshi mode, use Kalshi risk manager
+    if settings.KALSHI_ONLY:
+        risk = _get_kalshi_risk()
+        if risk:
+            try:
+                state = risk.state
+                summary = risk.summary()
+                category_exp = []
+                for cat, notional in state.category_notional.items():
+                    category_exp.append({
+                        "symbol": cat,
+                        "exposure": round(notional, 2),
+                        "pct_of_equity": round(notional / max(state.current_equity_usd, 1) * 100, 2),
+                    })
+                total_exp = state.total_notional_usd
+                equity = max(state.current_equity_usd, 10000.0)
+
+                return {
+                    "total_exposure": round(total_exp, 2),
+                    "total_exposure_pct": round(total_exp / equity * 100, 2),
+                    "buying_power": round(equity - total_exp, 2),
+                    "open_orders_count": state.orders_this_hour,
+                    "by_symbol": category_exp,
+                    "long_exposure": round(total_exp, 2),
+                    "short_exposure": 0.0,
+                    "net_exposure": round(total_exp, 2),
+                    "gross_exposure": round(total_exp, 2),
+                    "leverage": 1.0,
+                    "var_95": 0.0,
+                    "var_99": 0.0,
+                    "expected_shortfall": 0.0,
+                    "beta": 1.0,
+                    "correlation_to_market": 0.0,
+                    "sector_exposure": {cat: 100.0 for cat in state.category_notional.keys()} or {"prediction_markets": 100.0},
+                }
+            except Exception as _e:
+                logger.debug("kalshi position exposure build skipped: %s", _e)
+
+    # Fallback to paper engine for non-Kalshi modes
     engine = _get_paper_engine()
     equity = 10000.0
     positions_by_sym: List[Dict[str, Any]] = []
@@ -308,26 +492,43 @@ def _real_risk_exposure() -> Dict[str, Any]:
 
 @router.get("/api/system/health")
 async def get_system_health() -> Dict[str, Any]:
-    """Get system health status."""
+    """Get system health status — real checks per subsystem."""
+    import os
     uptime_seconds = time.time() - _server_start_time
-    uptime_hours = uptime_seconds / 3600
-    
     now = time.time()
+
+    def _svc(check_fn) -> Dict[str, Any]:
+        try:
+            ok = check_fn()
+            return {"status": "healthy" if ok else "degraded", "last_check": now}
+        except Exception as exc:
+            return {"status": "unavailable", "last_check": now, "error": str(exc)}
+
+    services = {
+        "api_gateway": {"status": "healthy", "last_check": now},
+        "risk_engine": _svc(lambda: __import__(
+            "merid.risk.kill_switches", fromlist=["risk_controller"]
+        ).risk_controller.can_trade() is not None),
+        "agent_grid": _svc(lambda: __import__(
+            "merid.prediction.agent_grid", fromlist=["get_agent_grid"]
+        ).get_agent_grid() is not None),
+        "audit_trail": _svc(lambda: __import__(
+            "core.audit_trail", fromlist=["AuditTrail"]
+        ).AuditTrail().entries is not None),
+        "event_bus": _svc(lambda: __import__(
+            "core.event_bus", fromlist=["get_event_bus"]
+        ).get_event_bus() is not None),
+    }
+    all_ok = all(s["status"] == "healthy" for s in services.values())
     return {
-        "status": "healthy",
+        "status": "healthy" if all_ok else "degraded",
         "uptime_seconds": int(uptime_seconds),
-        "uptime_hours": round(uptime_hours, 2),
+        "uptime_hours": round(uptime_seconds / 3600, 2),
         "timestamp": now,
-        "environment": "development",
-        "incident_flag": False,
-        "services": {
-            "database": {"status": "healthy", "last_check": now},
-            "websocket": {"status": "healthy", "last_check": now},
-            "publishers": {"status": "healthy", "last_check": now},
-            "event_stream": {"status": "healthy", "last_check": now},
-            "api_gateway": {"status": "healthy", "last_check": now},
-        },
-        "metrics": _real_system_metrics()
+        "environment": os.getenv("MERID_ENV", "development"),
+        "incident_flag": not all_ok,
+        "services": services,
+        "metrics": _real_system_metrics(),
     }
 
 
@@ -374,82 +575,158 @@ async def get_risk_exposure() -> Dict[str, Any]:
 
 @router.get("/api/v1/system/health")
 async def get_system_health_v1() -> Dict[str, Any]:
-    """Legacy system health check endpoint."""
+    """System health check — real status from grid and risk controller."""
+    services: Dict[str, str] = {"api": "running"}
+    try:
+        from merid.prediction.agent_grid import get_agent_grid
+        grid = get_agent_grid()
+        services["prediction_markets"] = "running" if grid.is_running else "stopped"
+    except Exception:
+        services["prediction_markets"] = "unavailable"
+    try:
+        from merid.prediction.paper_session import get_paper_session
+        sess = get_paper_session()
+        services["paper_trading"] = "active" if sess.is_active else "idle"
+    except Exception:
+        services["paper_trading"] = "unavailable"
+    try:
+        from merid.risk.kill_switches import risk_controller
+        services["risk"] = "halted" if not risk_controller.can_trade() else "running"
+    except Exception:
+        services["risk"] = "unavailable"
+    all_ok = all(v in ("running", "active", "idle") for v in services.values())
+    _ver = os.getenv("MERID_VERSION", "")
+    if not _ver:
+        try:
+            from importlib.metadata import version as _pkg_ver
+            _ver = _pkg_ver("merid")
+        except Exception:
+            _ver = "dev"
     return {
-        "status": "healthy",
+        "status": "healthy" if all_ok else "degraded",
         "timestamp": time.time(),
-        "version": "1.0.0",
-        "services": {
-            "api": "running",
-            "prediction_markets": "running",
-            "paper_trading": "configured"
-        }
+        "version": _ver,
+        "services": services,
     }
 
 
 @router.get("/api/system/version")
 async def get_system_version() -> Dict[str, Any]:
-    """System version and build info."""
+    """System version and build info from env and package metadata."""
     import os
+    version = os.getenv("MERID_VERSION", "")
+    if not version:
+        try:
+            from importlib.metadata import version as pkg_version
+            version = pkg_version("merid")
+        except Exception:
+            version = "dev"
+    build = os.getenv("MERID_BUILD_DATE", os.getenv("BUILD_DATE", ""))
     return {
-        "version": "2.0.0",
-        "build": "2025.01.31",
-        "git_sha": os.getenv("GIT_SHA", "abc1234"),
+        "version": version,
+        "build": build or "unknown",
+        "git_sha": os.getenv("GIT_SHA", os.getenv("COMMIT_SHA", "unknown")),
         "environment": os.getenv("MERID_ENV", "development"),
-        "openapi_url": "/openapi.json"
+        "openapi_url": "/openapi.json",
     }
 
 
 @router.get("/api/system/components")
 async def get_system_components() -> Dict[str, Any]:
-    """System component statuses."""
-    return {
-        "components": [
-            {"name": "API Gateway", "status": "operational", "version": "2.0.0"},
-            {"name": "Risk Engine", "status": "operational", "version": "2.0.0"},
-            {"name": "Order Router", "status": "operational", "version": "2.0.0"},
-            {"name": "Data Ingestion", "status": "operational", "version": "2.0.0"},
-            {"name": "Agent Manager", "status": "operational", "version": "2.0.0"},
-        ]
-    }
+    """Real system component statuses — checks each subsystem."""
+    def _check(name: str, fn) -> Dict[str, Any]:
+        try:
+            status = fn()
+            return {"name": name, "status": "operational" if status else "degraded"}
+        except Exception as exc:
+            return {"name": name, "status": "unavailable", "error": str(exc)}
+
+    components = [
+        _check("API Gateway", lambda: True),
+        _check("Risk Engine", lambda: __import__(
+            "merid.risk.kill_switches", fromlist=["risk_controller"]
+        ).risk_controller.can_trade() is not None),
+        _check("Agent Manager", lambda: __import__(
+            "merid.prediction.agent_grid", fromlist=["get_agent_grid"]
+        ).get_agent_grid() is not None),
+        _check("Paper Session", lambda: __import__(
+            "merid.prediction.paper_session", fromlist=["get_paper_session"]
+        ).get_paper_session() is not None),
+        _check("Market Catalog", lambda: __import__(
+            "merid.event_venues.kalshi.market_catalog", fromlist=["get_market_catalog"]
+        ).get_market_catalog() is not None),
+    ]
+    return {"components": components}
 
 
 @router.get("/api/risk/limits")
 async def get_risk_limits() -> Dict[str, Any]:
-    """Risk limits configuration."""
-    return {
-        "max_daily_loss": 50000.00,
-        "max_position_pct": 0.20,
-        "max_leverage": 2.0,
-        "max_orders_per_minute": 100,
-        "max_notional_per_trade": 100000.00,
-        "circuit_breaker_threshold": 0.15
-    }
+    """Risk limits from live KalshiRiskConfig and global risk_controller."""
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+        krm = get_kalshi_risk()
+        cfg = krm.config
+        return {
+            "max_daily_loss": float(cfg.max_daily_loss_usd),
+            "max_position_pct": float(cfg.max_total_notional_usd),
+            "max_leverage": 1.0,
+            "max_orders_per_minute": int(cfg.max_orders_per_minute),
+            "max_notional_per_trade": float(cfg.max_single_order_notional_usd),
+            "max_contracts_per_order": int(cfg.max_single_order_contracts),
+            "drawdown_halt_pct": float(cfg.drawdown_halt_pct),
+        }
+    except Exception as exc:
+        logger.debug(f"Risk limits from config unavailable: {exc}")
+        try:
+            from merid.risk.kill_switches import risk_controller
+            return {
+                "max_daily_loss": float(risk_controller.daily_loss_limit),
+                "max_leverage": 1.0,
+            }
+        except Exception:
+            return {"error": "Risk config unavailable"}
 
 
 @router.post("/api/risk/circuit-breaker/reset")
 async def reset_circuit_breaker() -> Dict[str, Any]:
-    """Reset the circuit breaker to CLOSED state."""
-    return {
-        "success": True,
-        "state": "CLOSED",
-        "message": "Circuit breaker reset to CLOSED",
-        "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
-    }
+    """Reset the circuit breaker — delegates to risk_controller.reset()."""
+    try:
+        from merid.risk.kill_switches import risk_controller
+        risk_controller.reset()
+        return {
+            "success": True,
+            "state": "CLOSED",
+            "can_trade": risk_controller.can_trade(),
+            "message": "Kill switch reset — trading re-enabled",
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+        }
+    except Exception as exc:
+        logger.error(f"Circuit breaker reset failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/api/risk/kill-switch/{action}")
 async def toggle_kill_switch(action: str) -> Dict[str, Any]:
-    """Enable or disable the trading kill switch."""
+    """Enable or disable the trading kill switch via risk_controller."""
     if action not in ("enable", "disable"):
         raise HTTPException(status_code=400, detail="Action must be 'enable' or 'disable'")
-    enabled = action == "enable"
-    return {
-        "success": True,
-        "kill_switch_enabled": enabled,
-        "message": f"Kill switch {'enabled' if enabled else 'disabled'}",
-        "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
-    }
+    try:
+        from merid.risk.kill_switches import risk_controller
+        if action == "enable":
+            risk_controller.emergency_stop("operator via kill-switch API")
+        else:
+            risk_controller.reset()
+        can_trade = risk_controller.can_trade()
+        return {
+            "success": True,
+            "kill_switch_enabled": action == "enable",
+            "can_trade": can_trade,
+            "message": f"Kill switch {'activated' if action == 'enable' else 'reset'}",
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+        }
+    except Exception as exc:
+        logger.error(f"Kill switch toggle failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ── Reconciliation & Audit Trail ──────────────────────────────────────
@@ -609,7 +886,8 @@ async def get_pnl_consistency() -> Dict[str, Any]:
         for _uid, portfolio in engine.portfolios.items():
             total_pnl += portfolio.total_pnl
             for _pk, pos in portfolio.positions.items():
-                unrealized += engine._calculate_position_pnl(pos)
+                _calc = getattr(engine, 'calculate_position_pnl', None) or getattr(engine, '_calculate_position_pnl', None)
+                unrealized += _calc(pos) if _calc else getattr(pos, 'unrealized_pnl', 0.0)
         sources["paper_engine"] = {
             "realized_pnl": round(total_pnl, 2),
             "unrealized_pnl": round(unrealized, 2),
@@ -622,7 +900,7 @@ async def get_pnl_consistency() -> Dict[str, Any]:
     try:
         from merid.risk.kill_switches import risk_controller
         sources["risk_controller"] = {
-            "daily_pnl": round(risk_controller._daily_pnl, 2),
+            "daily_pnl": round(risk_controller.get_status().get("daily_pnl", 0.0), 2),
         }
     except Exception as exc:
         sources["risk_controller"] = {"error": str(exc)}
@@ -698,12 +976,13 @@ async def get_mode_safety() -> Dict[str, Any]:
     # Kill switch
     try:
         from merid.risk.kill_switches import risk_controller
+        _rc_st = risk_controller.get_status()
         result["kill_switch"] = {
-            "active": risk_controller._global_kill,
-            "reason": risk_controller._kill_reason,
-            "timestamp": risk_controller._kill_timestamp,
-            "daily_pnl": risk_controller._daily_pnl,
-            "daily_loss_limit": risk_controller._daily_loss_limit,
+            "active": not _rc_st.get("can_trade", True),
+            "reason": _rc_st.get("kill_reason"),
+            "timestamp": _rc_st.get("kill_timestamp"),
+            "daily_pnl": _rc_st.get("daily_pnl", 0.0),
+            "daily_loss_limit": _rc_st.get("daily_loss_limit", 500.0),
         }
     except Exception:
         result["kill_switch"] = {"active": False, "reason": None}
@@ -749,8 +1028,18 @@ async def get_mode_safety() -> Dict[str, Any]:
     try:
         from data.live_price_feed import get_live_feed
         feed = get_live_feed()
-        cached = len(feed._price_cache) if hasattr(feed, '_price_cache') else 0
-        total = len(feed._symbols) if hasattr(feed, '_symbols') else 0
+        if hasattr(feed, 'get_cached_symbols'):
+            cached = len(feed.get_cached_symbols())
+        elif hasattr(feed, 'cached_symbols'):
+            cached = len(feed.cached_symbols)
+        else:
+            cached = len(feed._price_cache) if hasattr(feed, '_price_cache') else 0
+        if hasattr(feed, 'get_all_symbols'):
+            total = len(feed.get_all_symbols())
+        elif hasattr(feed, 'symbols'):
+            total = len(feed.symbols)
+        else:
+            total = len(feed._symbols) if hasattr(feed, '_symbols') else 0
         result["feed_health"] = {
             "symbols_cached": cached,
             "symbols_total": total,
@@ -805,3 +1094,64 @@ async def get_symbol_status_endpoint() -> Dict[str, Any]:
     """
     from core.symbol_status import get_symbol_status
     return get_symbol_status()
+
+
+@router.post("/api/v1/system/config-reload")
+async def trigger_config_reload() -> Dict[str, Any]:
+    """Operator-triggered hot-reload of live config without server restart.
+
+    Re-registers RealityAuditor assertions from live subsystems (KalshiRisk,
+    ExecutionGuard, paper_config, agent grid), re-bootstraps PortfolioRebalancer
+    targets, and ensures the RewardEngine singleton is alive.
+
+    Returns a summary of what was reloaded and any errors encountered.
+    """
+    results: Dict[str, Any] = {"reloaded": [], "errors": [], "ts": time.time()}
+
+    # 1. RealityAuditor
+    try:
+        from core.reality_auditor import get_reality_auditor
+        ok = get_reality_auditor().reload_from_persistent_store()
+        results["reloaded"].append({"subsystem": "reality_auditor", "ok": ok})
+    except Exception as exc:
+        results["errors"].append({"subsystem": "reality_auditor", "error": str(exc)})
+        logger.warning("config-reload: reality_auditor failed: %s", exc)
+
+    # 2. PortfolioRebalancer
+    try:
+        from merid.event_venues.kalshi.rebalancer import get_portfolio_rebalancer
+        rebalancer = get_portfolio_rebalancer()
+        rebalancer._bootstrap_targets()
+        results["reloaded"].append({"subsystem": "portfolio_rebalancer", "ok": True})
+    except Exception as exc:
+        results["errors"].append({"subsystem": "portfolio_rebalancer", "error": str(exc)})
+        logger.warning("config-reload: portfolio_rebalancer failed: %s", exc)
+
+    # 3. RewardEngine
+    try:
+        from merid.rewards.engine import get_reward_engine
+        get_reward_engine()
+        results["reloaded"].append({"subsystem": "reward_engine", "ok": True})
+    except Exception as exc:
+        results["errors"].append({"subsystem": "reward_engine", "error": str(exc)})
+        logger.warning("config-reload: reward_engine failed: %s", exc)
+
+    # 4. MeridLoop config-reload step (fires _reload_config immediately)
+    try:
+        from merid.loop import get_merid_loop
+        loop = get_merid_loop()
+        import asyncio
+        summary: Dict[str, Any] = {}
+        await loop._reload_config(summary)
+        results["reloaded"].append({"subsystem": "merid_loop", "ok": True, "detail": summary.get("actions", [])})
+    except Exception as exc:
+        results["errors"].append({"subsystem": "merid_loop", "error": str(exc)})
+        logger.warning("config-reload: merid_loop failed: %s", exc)
+
+    results["success"] = len(results["errors"]) == 0
+    results["reloaded_count"] = len(results["reloaded"])
+    logger.info(
+        "config-reload triggered: %d reloaded, %d errors",
+        results["reloaded_count"], len(results["errors"]),
+    )
+    return results
