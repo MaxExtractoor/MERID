@@ -206,6 +206,9 @@ class PortfolioRiskAgent:
         # 3c. Update PositionSizer realized vol from rolling PnL series.
         self._sync_to_position_sizer()
 
+        # 3d. Sprint H: Publish RiskView message to streaming bus
+        await self._publish_risk_view(snapshot, breaches)
+
         # 4. Enforce breaches
         if breaches:
             logger.warning(f"Portfolio risk breaches: {breaches}")
@@ -339,6 +342,32 @@ class PortfolioRiskAgent:
                     if agent.config.name not in self._paused_agents:
                         self._paused_agents.append(agent.config.name)
                     logger.warning(f"Paused {agent.config.name} due to breach: {breach}")
+
+    async def _publish_risk_view(self, snapshot: PortfolioSnapshot, breaches: List[str]) -> None:
+        """Sprint H: Publish a RiskView message to the streaming bus."""
+        try:
+            from merid.swarm.messages import RiskView, publish_risk_view
+            risk_level = "low"
+            if breaches:
+                risk_level = "critical" if any("Daily loss" in b or "Total notional" in b for b in breaches) else "high"
+            elif snapshot.margin_utilization_pct > 70:
+                risk_level = "medium"
+
+            rv = RiskView(
+                risk_agent_id="portfolio_risk_agent",
+                market_id="",  # Portfolio-level
+                asset="ALL",
+                risk_level=risk_level,
+                max_size_contracts=0,
+                kelly_fraction=0.0,
+                edge_threshold_met=False,
+                correlation_factor=1.0,
+                exposure_pct=float(snapshot.margin_utilization_pct),
+                flags=breaches,
+            )
+            await publish_risk_view(rv)
+        except Exception as exc:
+            logger.debug(f"RiskView publish failed: {exc}")
 
     def _check_agent_auto_rollback(self, snapshot: PortfolioSnapshot) -> None:
         """Check each live agent for auto-rollback conditions using DeploymentController."""

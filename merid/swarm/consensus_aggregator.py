@@ -227,6 +227,34 @@ class SwarmConsensusAggregator:
                 bus.publish_insight(insight)
         except Exception as exc:
             logger.debug(f"MarketMoodBus publish error: {exc}")
+
+        # Sprint H: Publish typed Decision message when consensus is READY
+        try:
+            from merid.swarm.messages import Decision, publish_decision
+            from merid.swarm.consensus_aggregator import ConsensusStatus as _CS
+            if consensus.status == _CS.READY:
+                import asyncio as _aio
+                decision = Decision(
+                    decision_id=f"dec-{key}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}",
+                    market_id=consensus.asset,
+                    action=consensus.consensus_direction,
+                    side="yes" if "yes" in consensus.consensus_direction else "no",
+                    size_contracts=0,  # Sizing determined downstream
+                    limit_price_cents=0,
+                    p_consensus=consensus.consensus_probability,
+                    consensus_confidence=consensus.consensus_confidence,
+                    size_band=consensus.size_band,
+                    contributing_forecasters=[p.agent_id for p in proposals],
+                    risk_approved=False,  # Risk agent approves separately
+                    rationale="; ".join(consensus.confidence_factors),
+                )
+                try:
+                    loop = _aio.get_running_loop()
+                    loop.create_task(publish_decision(decision))
+                except RuntimeError:
+                    pass  # No running event loop
+        except Exception as exc:
+            logger.debug(f"Decision publish error: {exc}")
     
     def _aggregate_proposals(
         self,

@@ -212,14 +212,14 @@ class ForecasterRegistry:
             from merid.swarm.messages import Forecast, publish_forecast
             msg = Forecast(
                 forecaster_id=result.forecaster_id,
-                model_type=result.model_type,
+                model_type=getattr(result, "model_type", "unknown"),
                 market_id=market_id,
                 asset=asset or "",
                 category=category or "",
                 timeframe=timeframe or "",
                 p_model=result.p_model,
                 confidence=result.confidence,
-                edge_estimate=result.edge_estimate,
+                edge_estimate=result.components.get("edge_estimate", 0.0),
                 components=result.components,
             )
             try:
@@ -249,5 +249,11 @@ def get_forecaster_registry() -> ForecasterRegistry:
     """Get or create the singleton ForecasterRegistry."""
     global _registry
     if _registry is None:
+        from merid.prediction.forecasters.momentum import MomentumForecaster
+        from merid.prediction.forecasters.mean_reversion import MeanReversionForecaster
+        from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
         _registry = ForecasterRegistry()
+        _registry.register(MomentumForecaster())
+        _registry.register(MeanReversionForecaster())
+        _registry.register(MacroRegimeForecaster())
     return _registry
