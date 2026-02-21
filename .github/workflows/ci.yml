@@ -1,6 +1,7 @@
 name: MERID CI
-# Single active CI workflow — all legacy workflows set to workflow_dispatch
-# Actions permissions fixed 2026-02-09
+# Primary CI workflow — 15 legacy workflows removed 2026-02-21
+# Remaining active: ci.yml, autonomous-dev-swarm.yml, cross-browser-tests.yml,
+#   fast_safety.yml, nightly-soak.yml, prompt-eval.yml, reality_enforcement.yml
 
 on:
   push:

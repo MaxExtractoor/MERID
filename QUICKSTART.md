@@ -31,7 +31,7 @@ make preflight                  # Tests + readiness + drift audit + risk context
 
 ## What You'll See
 
-Open **http://localhost:5173** to see the operator dashboard with 14 views:
+Open **http://localhost:5173** to see the operator dashboard with 17 views:
 
 - **Overview** — System health, balance, PnL
 - **Markets** — Browse Kalshi markets, edge signals, trade ticket
@@ -95,6 +95,6 @@ MERID_PM_TRADING_MODE=paper
 ## Next
 
 - [README.md](README.md) — Full project overview
-- [docs/ui/kalshi_workflow.md](docs/ui/kalshi_workflow.md) — Operator workflow (8 steps, 14 views)
+- [docs/ui/kalshi_workflow.md](docs/ui/kalshi_workflow.md) — Operator workflow (8 steps, 17 views)
 - [ENV_SETUP.md](ENV_SETUP.md) — Environment configuration
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — Detailed onboarding
