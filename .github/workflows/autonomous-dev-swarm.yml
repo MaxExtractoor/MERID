@@ -1,10 +1,9 @@
 name: Autonomous Dev Swarm
 
 on:
-  schedule:
-    # Run daily at 2 AM UTC
-    - cron: '0 2 * * *'
   workflow_dispatch:
+# Disabled schedule trigger — coverage fix scripts not yet implemented
+# Re-enable cron once autonomous_coverage_fix.py is wired up
     inputs:
       target_modules:
         description: 'Comma-separated list of modules to fix'
