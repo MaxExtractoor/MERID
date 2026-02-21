@@ -28,6 +28,13 @@ pytest tests/ -v --tb=short   # run tests directly
 | Unified Pipeline | `tests/test_unified_pipeline.py` | 75 |
 | Canonical Agents | `tests/test_canonical_agents.py` | 73 |
 | Hardening | `tests/test_hardening.py` | 84 |
+| Forecasters | `tests/test_forecasters.py` | 22 |
+| Sprint D–G | `tests/test_sprint_d_g.py` | 53 |
+| Sprint H–I | `tests/test_sprint_h_i.py` | 44 |
+| Sprint M | `tests/test_sprint_m.py` | 55 |
+| Sprint N–O | `tests/test_sprint_n_o.py` | 46 |
+| Sprint Q–R | `tests/test_sprint_q_r.py` | 36 |
+| Sidebar Wiring | `tests/test_sidebar_wiring.py` | 36 |
 
 ---
 
@@ -63,7 +70,7 @@ Full interactive API explorer at [http://localhost:8000/docs](http://localhost:8
 
 Start the dashboard (`cd web/react && npm run dev`) and verify:
 
-1. **All 14 views load** — Click through every sidebar item
+1. **All 17 views load** — Click through every sidebar item
 2. **No console errors** — Open DevTools → Console
 3. **API polling works** — Network tab shows periodic requests
 4. **Kill switch responds** — Toggle in Kill Switch view
@@ -72,12 +79,15 @@ Start the dashboard (`cd web/react && npm run dev`) and verify:
 ### Frozen View Checklist
 
 - [ ] Overview
-- [ ] Markets (KalshiDashboard)
 - [ ] Terminal (KalshiTerminal)
+- [ ] Markets (KalshiDashboard)
 - [ ] Portfolio (KalshiPortfolio)
+- [ ] Positions (deep-link to Portfolio)
+- [ ] Orders (deep-link to Portfolio)
 - [ ] Agent Grid (KalshiGrid)
 - [ ] Swarm Matrix (SwarmConsensus)
 - [ ] Performance (KalshiPerformance)
+- [ ] Calibration (CalibrationDashboard)
 - [ ] Lane Control
 - [ ] Fear/Greed (KalshiSentiment)
 - [ ] Vol & Sizing (KalshiVolDashboard)

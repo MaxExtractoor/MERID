@@ -37,16 +37,18 @@ DISCOVER → ANALYZE → CONSENSUS → SIZE → EXECUTE → MONITOR → PROMOTE 
 
 ## UI
 
-14 views organized into 5 workflow-aligned groups:
+17 views organized into 5 workflow-aligned groups:
 
 ```text
-TRADING                    SWARM INTELLIGENCE
+LIVE TRADING               SWARM INTELLIGENCE
   Overview                   Agent Grid
   Terminal                   Swarm Matrix
   Markets                    Performance
-  Portfolio                  Lane Control
+  Portfolio                  Calibration
+  Positions                  Lane Control
+  Orders
 
-ANALYTICS                  OPERATOR
+ANALYTICS                  COMMAND CENTER
   Fear / Greed               Operator
   Vol & Sizing               Kill Switch
 
@@ -61,9 +63,12 @@ SYSTEM
 | **Terminal** | Execution cockpit — orderbook, trade ticket, Kelly sizing, focused market |
 | **Markets** | Market discovery — search, filter, favorites, edge signals, trade ticket |
 | **Portfolio** | Positions, orders, fills, risk metrics, order groups, batch operations, PnL chart |
+| **Positions** | Deep-link into Portfolio positions tab — open positions with PnL |
+| **Orders** | Deep-link into Portfolio orders tab — open/filled/cancelled orders |
 | **Agent Grid** | 5 assets × 4 timeframes agent matrix — start/stop/pause, fills, paper ladder |
 | **Swarm Matrix** | Multi-agent consensus — direction, probability, confidence per cell |
 | **Performance** | Agent leaderboard — win rate, Sharpe, calibration, edge accuracy |
+| **Calibration** | Forecaster Brier scores, weight correlation matrix, resolver accuracy |
 | **Lane Control** | Cross-timeframe signals, deployment phases (paper → shadow → live), auto-promoter |
 | **Fear/Greed** | Sentiment gauge (0–100), per-category breakdown, component scores |
 | **Vol & Sizing** | Vol targeting, Kelly metrics, risk limit gauges, volume alerts, AI insights |
@@ -135,12 +140,12 @@ MERID/
 ├── web/
 │   ├── main.py                     # FastAPI app factory
 │   ├── api/                        # REST + WebSocket endpoints
-│   └── react/                      # React dashboard (14 views)
+│   └── react/                      # React dashboard (17 views)
 │       └── src/
-│           ├── views/              # 14 active views
+│           ├── views/              # 17 active views
 │           ├── components/         # 46 shared components
 │           ├── hooks/              # 12 data hooks
-│           ├── config/constants.ts # 140+ API endpoint constants
+│           ├── config/constants.ts # 160+ API endpoint constants
 │           └── types/              # TypeScript types (views, kalshi, api)
 ├── merid/
 │   ├── settings.py                 # Pydantic Settings (env config)
@@ -152,7 +157,9 @@ MERID/
 │   │   ├── risk_manager.py         # GlobalRiskManager (pre-trade checks)
 │   │   ├── risk_context.py         # RiskContext (system state → sizing)
 │   │   └── mode_manager.py         # SIM/PAPER/LIVE gating
-│   ├── prediction/                 # Prediction market model + strategy
+│   ├── prediction/                 # Prediction market model, forecasters, strategy
+│   │   └── forecasters/            # 6 heterogeneous forecasters + registry
+│   ├── swarm/                      # Consensus aggregator, critic, auction resolver
 │   ├── agents/                     # AI agents + consensus coordination
 │   ├── signals/                    # Signal layer (features, drift, CQI)
 │   └── event_venues/kalshi/        # Kalshi client, models, trading, WebSocket

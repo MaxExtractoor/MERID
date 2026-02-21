@@ -450,3 +450,65 @@ New `KalshiModeCompare` component — compact 4-column metrics strip:
 | `web/react/src/views/KalshiDashboardView.tsx` | Modified — sizing hint, `sizingHint` state |
 | `web/react/src/components/__tests__/KalshiPnlChart.test.tsx` | Modified — `ReferenceArea` mock |
 | `docs/KALSHI_UI_CHANGELOG.md` | Modified — Sprint 6 appended |
+
+---
+
+## Sprint 7 — UI Audit & Sidebar Sync (2026-02-21)
+
+### 30. Sidebar Restructure — 5 Sources of Truth Synchronized
+
+Identified 23 sidebar wiring test failures caused by drift between 5 independent sources of truth. All fixed:
+
+**Sources synchronized:**
+1. `views.ts` — View type union (14→17 members)
+2. `App.tsx` — Route map (14→17 routes)
+3. `Sidebar.tsx` — Hardcoded sidebar items
+4. `sidebarManifest.ts` — Frontend sidebar config
+5. `sidebar_config.py` — Backend canonical sidebar config
+
+**Structural changes:**
+- Sections: 3 → 5 (Live Trading, Swarm Intelligence, Analytics, Command Center, System)
+- Items: 14 → 17 (added `positions`, `orders` as deep-links, `calibration-dashboard` promoted to sidebar)
+- `swarm-consensus` and `lane-control` added to backend sidebar config (were only in frontend)
+
+### 31. Positions & Orders — Deep-Link Views
+
+- **`positions`** view routes to `KalshiPortfolioView` with `initialTab="positions"`
+- **`orders`** view routes to `KalshiPortfolioView` with `initialTab="orders"`
+- Added `KalshiPortfolioProps` interface with optional `initialTab?: Tab` prop
+- Sidebar shows Positions (TrendingUp icon) and Orders (ClipboardList icon) in Live Trading section
+
+### 32. Frontend Constants — 11 New Endpoints
+
+Added missing API endpoint constants to `constants.ts`:
+- `PORTFOLIO_SUMMARY`, `RISK_EXPOSURE`, `ORCHESTRATOR_SUMMARY`
+- `TRADE_MODE`, `RECONCILIATION_RUN`, `RECONCILIATION_STATUS`
+- `AUDIT_TRAIL_SUMMARY`, `AUDIT_TRAIL_ENTRIES`
+- `UI_SIDEBAR`, `UI_MODE_INDICATOR`, `UI_WORKFLOW`
+
+### 33. Workflow Phases Updated
+
+`sidebar_config.py` workflow phases updated to include new views:
+- **Strategy phase**: Added `swarm-consensus`, `calibration-dashboard`, `lane-control`
+- **Endpoint path fix**: `/api/system/health` → `/api/v1/system/health`
+
+### 34. Tests
+
+- **36/36 sidebar wiring tests passing** (was 13/36)
+- **256/256 combined sprint tests passing** (zero regressions)
+- **Vite build**: SUCCESS (2138 modules)
+- Updated `test_sidebar_wiring.py`: replaced legacy `TestPaperSessionWiring` with `TestExecutionInfrastructureWiring`, replaced `TestAnalyticsResearchConsolidation` with `TestAnalyticsSectionExists`, updated section count 6→5, item count 25→17
+
+### Sprint 7 File Index
+
+| Path | Action |
+|------|--------|
+| `web/react/src/types/views.ts` | Modified — added `positions`, `orders` to View type |
+| `web/react/src/App.tsx` | Modified — added positions/orders routes |
+| `web/react/src/views/KalshiPortfolioView.tsx` | Modified — added `initialTab` prop |
+| `web/react/src/config/sidebarManifest.ts` | Modified — restructured 3→5 sections |
+| `web/react/src/components/Sidebar.tsx` | Modified — added positions/orders items + icons |
+| `web/react/src/config/constants.ts` | Modified — +11 endpoint constants |
+| `web/api/sidebar_config.py` | Modified — restructured 3→5 sections, added views, fixed endpoint |
+| `tests/test_sidebar_wiring.py` | Modified — updated legacy test expectations |
+| `docs/KALSHI_UI_CHANGELOG.md` | Modified — Sprint 7 appended |

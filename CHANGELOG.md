@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ---
 
+## [3.1.0] - 2026-02-21
+
+### Kalshi Swarm Gap Closure + UI Audit
+
+All 62 Kalshi swarm workflow gaps closed (A+ across all 6 categories).
+UI sidebar restructured with 5 sources of truth fully synchronized.
+
+### Added
+
+- **TimeSeriesForecaster** — AR(2) autoregressive model, EWMA volatility, OU half-life, Hurst exponent (Sprint Q)
+- **ExternalSentimentForecaster** — Pluggable news/X feed providers, MarketMoodBus, fear/greed contrarian (Sprint Q)
+- **AuctionConsensusResolver** — Multi-round escalation bidding with calibration weights for CONFLICTED consensus (Sprint R)
+- **MCPMarketFeed** — Async MCP server client with aiohttp/urllib fallback, env-configurable (Sprint R)
+- **Positions view** — Deep-link to Portfolio positions tab via `initialTab` prop
+- **Orders view** — Deep-link to Portfolio orders tab via `initialTab` prop
+- **Calibration view** — Forecaster Brier scores, weight matrix, resolver accuracy (existing, now in sidebar)
+
+### Changed
+
+- **UI** — Expanded from 14 to 17 views across 5 sidebar sections
+- **Sidebar** — Restructured to 5 sections: Live Trading (6), Swarm Intelligence (5), Analytics (2), Command Center (2), System (2)
+- **sidebar_config.py** — Added `swarm-consensus`, `lane-control` views with endpoint contracts
+- **sidebarManifest.ts** — Synced with backend sidebar config (was 3 sections, now 5)
+- **Sidebar.tsx** — Added Positions/Orders items with TrendingUp/ClipboardList icons
+- **constants.ts** — Added 11 endpoint constants (portfolio, orchestrator, trade-mode, reconciliation, audit-trail, UI sidebar)
+- **ForecasterRegistry** — Now 6 forecasters (momentum, mean-reversion, macro, orderbook, time-series, sentiment)
+- **Gap analysis** — 62/62 A+ (was 57/62 A)
+
+### Fixed
+
+- **TypeScript lint errors** — `positions`/`orders` not in `View` type union
+- **Sidebar wiring test failures** — 23 failures → 0 (stale legacy expectations, missing types/routes/constants)
+- **Endpoint path mismatch** — `/api/system/health` → `/api/v1/system/health` in sidebar config
+
+---
+
 ## [3.0.0] - 2026-02-21
 
 ### Kalshi-Focused Platform Release
@@ -83,6 +119,7 @@ Complete pivot to Kalshi prediction markets as the single trading venue.
 
 | Version | Date | Summary |
 |---------|------|---------|
+| 3.1.0 | 2026-02-21 | 62/62 gap closure, 17-view UI, sidebar sync, 6 forecasters |
 | 3.0.0 | 2026-02-21 | Kalshi-focused platform, frozen 14-view UI, stripped dependencies |
 | 2.1.0 | 2026-02-11 | Dev Swarm fixes, task templates |
 | 2.0.0 | 2026-02-09 | Unified pipeline, MeridLoop, RiskContext, 490 tests |
