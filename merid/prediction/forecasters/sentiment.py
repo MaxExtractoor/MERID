@@ -202,8 +202,13 @@ class ExternalSentimentForecaster(Forecaster):
             from merid.swarm.market_mood_bus import get_market_mood_bus
             bus = get_market_mood_bus()
             ctx = bus.get_context(asset.upper(), timeframe)
-            if ctx and hasattr(ctx, "sentiment_score"):
-                return float(ctx.sentiment_score)
+            if ctx:
+                # Combine social, news, and kalshi sentiment (weighted average)
+                social = getattr(ctx, "social_sentiment", 0.0)
+                news = getattr(ctx, "news_sentiment", 0.0)
+                kalshi = getattr(ctx, "kalshi_sentiment", 0.0)
+                # Weight social and news more heavily than kalshi market sentiment
+                return float((social * 0.4 + news * 0.4 + kalshi * 0.2))
         except Exception:
             pass
         return 0.0
@@ -214,8 +219,8 @@ class ExternalSentimentForecaster(Forecaster):
             from merid.swarm.market_mood_bus import get_market_mood_bus
             bus = get_market_mood_bus()
             ctx = bus.get_context(asset.upper(), "daily")
-            if ctx and hasattr(ctx, "fear_greed"):
-                return float(ctx.fear_greed)
+            if ctx and hasattr(ctx, "fg_index"):
+                return float(ctx.fg_index)
         except Exception:
             pass
         return None

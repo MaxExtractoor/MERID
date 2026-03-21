@@ -154,8 +154,8 @@ class MacroRegimeForecaster(Forecaster):
                 from merid.swarm.market_mood_bus import get_market_mood_bus
                 bus = get_market_mood_bus()
                 context = bus.get_context(asset.upper(), "daily")
-                if context and hasattr(context, "fear_greed"):
-                    fg_value = context.fear_greed
+                if context and hasattr(context, "fg_index"):
+                    fg_value = context.fg_index
             except Exception:
                 pass
 

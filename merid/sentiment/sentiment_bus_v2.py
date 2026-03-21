@@ -342,8 +342,8 @@ class SentimentBusV2:
                         volume_24h=ctx.volume,
                         is_trending=abs(ctx.score) > 0.3,
                     )
-        except Exception:
-            pass  # MarketMoodBus may not be initialized yet
+        except Exception as exc:
+            logger.debug(f"MarketMoodBus bridge error (hashtags): {exc}")  # Log instead of silent pass
 
         logger.debug("[bus-v2] update_hashtags: %d groups updated", len(groups))
 
@@ -382,8 +382,8 @@ class SentimentBusV2:
                         sentiment=agg.score,
                         volume_24h=agg.headline_count,
                     )
-        except Exception:
-            pass  # MarketMoodBus may not be initialized yet
+        except Exception as exc:
+            logger.debug(f"MarketMoodBus bridge error (news): {exc}")  # Log instead of silent pass
 
         logger.debug("[bus-v2] update_news: %d aggregates ingested", len(aggregated))
 
