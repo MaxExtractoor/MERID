@@ -293,8 +293,7 @@ class CFGIClient:
             
             bus.update_fear_greed(
                 asset=asset,
-                fg_index=data.fgi,
-                source="cfgi",
+                index_value=data.fgi,
             )
             
             logger.debug(f"Updated MarketMoodBus CFGI for {asset}")
