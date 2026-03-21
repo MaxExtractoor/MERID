@@ -11,7 +11,7 @@
 import React, { useMemo } from 'react';
 import {
   Activity, TrendingUp, TrendingDown, BarChart3,
-  AlertTriangle, Gauge, RefreshCw, Flame, Snowflake,
+  AlertTriangle, Gauge, RefreshCw, Flame, Snowflake, Minus,
   ArrowUp, ArrowDown, Clock, Zap,
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
@@ -61,12 +61,13 @@ interface SentimentData {
 const REGIME_CONFIG: Record<string, { label: string; color: string; bg: string; icon: React.ReactNode }> = {
   extreme_fear:  { label: 'Extreme Fear',  color: 'text-red-400',    bg: 'bg-red-500/20',    icon: <Snowflake className="w-4 h-4" /> },
   fear:          { label: 'Fear',          color: 'text-orange-400', bg: 'bg-orange-500/20', icon: <TrendingDown className="w-4 h-4" /> },
+  neutral:       { label: 'Neutral',       color: 'text-slate-400',  bg: 'bg-slate-500/20',  icon: <Minus className="w-4 h-4" /> },
   greed:         { label: 'Greed',         color: 'text-green-400',  bg: 'bg-green-500/20',  icon: <TrendingUp className="w-4 h-4" /> },
   extreme_greed: { label: 'Extreme Greed', color: 'text-emerald-400',bg: 'bg-emerald-500/20',icon: <Flame className="w-4 h-4" /> },
 };
 
 function regimeCfg(regime: string) {
-  return REGIME_CONFIG[regime] ?? REGIME_CONFIG.greed;
+  return REGIME_CONFIG[regime] ?? REGIME_CONFIG.neutral;
 }
 
 function gaugeColor(score: number): string {
@@ -502,7 +503,7 @@ export default function KalshiSentimentView() {
   }, [data?.top_markets]);
 
   const globalScore = data?.global?.score ?? 50;
-  const globalRegime = data?.global?.regime ?? 'greed';
+  const globalRegime = data?.global?.regime ?? 'neutral';
 
   if (loading && !data) {
     return (

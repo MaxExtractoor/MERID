@@ -641,4 +641,4 @@ async def get_sentiment() -> Dict[str, Any]:
         ]
         return base
     except Exception as exc:
-        return {"error": str(exc), "global": {"score": 50, "regime": "greed"}, "by_category": {}}
+        return {"error": str(exc), "global": {"score": 50, "regime": "neutral"}, "by_category": {}, "top_markets": []}
