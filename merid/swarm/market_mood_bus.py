@@ -308,6 +308,12 @@ class MarketMoodBus:
             ("BTC", "1h"),
             ("ETH", "15m"),
             ("ETH", "1h"),
+            ("SOL", "15m"),
+            ("SOL", "1h"),
+            ("XRP", "15m"),
+            ("XRP", "1h"),
+            ("DOGE", "15m"),
+            ("DOGE", "1h"),
         ]
         
         for asset, tf in assets_timeframes:
