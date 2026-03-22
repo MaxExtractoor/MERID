@@ -489,7 +489,44 @@ class MarketMoodBus:
     def update_fear_greed(self, asset: str, index_value: int):
         """Update fear/greed index (0-100)."""
         self._fg_buffer[asset] = max(0, min(100, index_value))
-    
+
+    def update_settlement_data(
+        self,
+        asset: str,
+        settlement_source: str,  # "cf_benchmarks", "coinbase", etc.
+        settlement_price: float,  # Final settlement price (0 or 1 for binary)
+        settlement_spec_id: Optional[str] = None,  # e.g., "cf_btc_rr"
+        **extra
+    ):
+        """Ingest settlement data from CF Benchmarks, Coinbase, or other sources.
+
+        This data is used to:
+        - Update InsightObject settlement fields
+        - Feed into ReflectionAgent for performance analysis
+        - Calculate realized P&L for signals
+
+        Args:
+            asset: Asset symbol (BTC, ETH, SOL, etc.)
+            settlement_source: Data provider ("cf_benchmarks", "coinbase")
+            settlement_price: Final settlement price (0-1 for binary markets)
+            settlement_spec_id: Settlement specification ID (e.g., "cf_btc_rr")
+            **extra: Additional metadata
+        """
+        if not hasattr(self, '_settlement_buffer'):
+            self._settlement_buffer = {}
+
+        self._settlement_buffer[asset] = {
+            "source": settlement_source,
+            "price": settlement_price,
+            "spec_id": settlement_spec_id,
+            "timestamp": datetime.now(timezone.utc),
+            **extra,
+        }
+        logger.info(
+            f"Settlement data updated: {asset} -> {settlement_price} "
+            f"(source={settlement_source}, spec={settlement_spec_id})"
+        )
+
     # === Public API ===
     
     def get_context(self, asset: str, timeframe: str) -> Optional[SentimentContext]:
@@ -499,7 +536,13 @@ class MarketMoodBus:
     def get_all_contexts(self) -> Dict[str, SentimentContext]:
         """Get all current contexts."""
         return dict(self._contexts)
-    
+
+    def get_settlement_data(self, asset: str) -> Optional[Dict[str, Any]]:
+        """Get latest settlement data for an asset."""
+        if not hasattr(self, '_settlement_buffer'):
+            return None
+        return self._settlement_buffer.get(asset)
+
     def subscribe(self, callback: Callable[[SentimentContext], None]):
         """Subscribe to context updates."""
         self._subscribers.append(callback)

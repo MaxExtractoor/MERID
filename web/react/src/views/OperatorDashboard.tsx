@@ -14,6 +14,7 @@ import AlertHistoryPanel from '../components/AlertHistoryPanel';
 import TradingHaltBanner from '../components/TradingHaltBanner';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import SessionLogPanel from '../components/SessionLogPanel';
+import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { formatCurrency } from '../utils/formatters';
@@ -91,6 +92,9 @@ export default function OperatorDashboard() {
 
   return (
     <div className="space-y-5 p-4 lg:p-6 max-w-[1800px] mx-auto">
+
+      {/* Execution Gate Strip */}
+      <ExecutionGateStrip />
 
       {/* Header */}
       <div className="flex items-center gap-3">

@@ -651,3 +651,25 @@ def get_signal_store() -> SignalStore:
     if _store is None:
         _store = SignalStore()
     return _store
+
+
+# ── Convenience functions ─────────────────────────────────────────────
+
+
+def get_all_approved_signals(limit: int = 1000) -> List[Dict[str, Any]]:
+    """Get all approved signals (for reflection/analysis)."""
+    return get_signal_store().get_approved_signals(limit=limit)
+
+
+def get_all_signal_orders(limit: int = 1000) -> List[Dict[str, Any]]:
+    """Get all signal orders across all signals (for reflection/analysis)."""
+    conn = get_signal_store()._conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM signal_orders ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        if not get_signal_store()._mem_conn:
+            conn.close()
