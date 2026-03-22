@@ -110,8 +110,16 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
 
   const balanceUsd = useMemo(() => {
     if (!balance) return null;
+    // Note: Some Kalshi API responses return USD values in cents (100x scale).
+    // This heuristic detects large values (>100k) and scales them down.
+    // TODO: Verify with backend team if this scaling is still needed.
     if (typeof balance.usd === 'number') {
-      return Math.abs(balance.usd) > 100000 ? balance.usd / 100 : balance.usd;
+      const needsScaling = Math.abs(balance.usd) > 100000;
+      const scaledValue = needsScaling ? balance.usd / 100 : balance.usd;
+      if (needsScaling) {
+        console.debug('[Portfolio] Balance scaled from cents to dollars:', balance.usd, '→', scaledValue);
+      }
+      return scaledValue;
     }
     return (balance.available ?? 0) + (balance.locked ?? 0);
   }, [balance]);
@@ -441,7 +449,12 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
           }`}>
             ${(gridPortfolio?.daily_pnl_usd ?? risk?.daily_realized_pnl_usd ?? 0).toFixed(2)}
           </p>
-          <p className="text-xs text-gray-500">{risk?.daily_trades ?? 0} trades today</p>
+          <p className="text-xs text-gray-500">{risk?.daily_trades ?? 0} trades today · {
+            (() => {
+              const source = gridPortfolio?.daily_pnl_usd != null ? 'grid' : risk?.daily_realized_pnl_usd != null ? 'risk' : 'none';
+              return <span className="text-gray-600" title={`PnL source: ${source}`}>src:{source}</span>;
+            })()
+          }</p>
         </div>
         <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
           <div className="flex items-center gap-2 mb-1">
@@ -875,6 +888,19 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                   </div>
                 );
               })()}
+              {sizingResult.loading && !sizingResult.data && (
+                <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                  <div className="animate-pulse space-y-3">
+                    <div className="h-4 bg-slate-800 rounded w-1/3"></div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="h-20 bg-slate-800 rounded"></div>
+                      <div className="h-20 bg-slate-800 rounded"></div>
+                      <div className="h-20 bg-slate-800 rounded"></div>
+                      <div className="h-20 bg-slate-800 rounded"></div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Live Risk Feed */}
               <KalshiRiskFeed maxItems={30} />
