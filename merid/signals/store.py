@@ -7,6 +7,8 @@ Tables:
   arb_plans          — multi-leg arb/dislocation plans
   drift_metrics      — per-domain drift/quality metrics over time
   cqi_history        — Consensus Quality Index snapshots
+  approved_signals   — approved trading signals from TradingAgent (single signal path)
+  signal_orders      — linkage table: approved_signal_id -> order_id
 """
 
 from __future__ import annotations
@@ -131,6 +133,50 @@ class SignalStore:
                 timestamp REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_cqi_domain ON cqi_history(domain);
+
+            -- Approved Signals table (single signal path)
+            CREATE TABLE IF NOT EXISTS approved_signals (
+                signal_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                tenor TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                market_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                model_prob REAL NOT NULL,
+                market_prob REAL NOT NULL,
+                edge REAL NOT NULL,
+                confidence REAL NOT NULL,
+                swarm_size_band TEXT DEFAULT 'base',
+                limit_price_cents INTEGER NOT NULL,
+                contracts_upper_bound INTEGER NOT NULL,
+                trade_mode TEXT DEFAULT 'paper',
+                executed INTEGER DEFAULT 0,
+                settlement_spec_id TEXT,
+                signal_data_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_as_agent ON approved_signals(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_as_asset ON approved_signals(asset);
+            CREATE INDEX IF NOT EXISTS idx_as_executed ON approved_signals(executed);
+            CREATE INDEX IF NOT EXISTS idx_as_created ON approved_signals(created_at);
+
+            -- Signal Orders linkage table
+            CREATE TABLE IF NOT EXISTS signal_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                order_id TEXT NOT NULL,
+                fill_price_cents INTEGER,
+                fill_contracts INTEGER,
+                fill_timestamp REAL,
+                settlement_price REAL,
+                settlement_timestamp REAL,
+                realized_pnl_usd REAL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (signal_id) REFERENCES approved_signals(signal_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_so_signal ON signal_orders(signal_id);
+            CREATE INDEX IF NOT EXISTS idx_so_order ON signal_orders(order_id);
         """)
         if not self._mem_conn:
             conn.close()
@@ -458,6 +504,138 @@ class SignalStore:
                 "drift_metrics": drift_count,
                 "cqi_entries": cqi_count,
             }
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    # ── Approved Signals (single signal path) ─────────────────────────
+
+    def store_approved_signal(self, signal_dict: Dict[str, Any]):
+        """Store an approved signal from TradingAgent."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO approved_signals
+                   (signal_id, agent_id, asset, tenor, ticker, market_id, direction,
+                    model_prob, market_prob, edge, confidence, swarm_size_band,
+                    limit_price_cents, contracts_upper_bound, trade_mode, executed,
+                    settlement_spec_id, signal_data_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    signal_dict.get("signal_id", ""),
+                    signal_dict.get("agent_id", ""),
+                    signal_dict.get("asset", ""),
+                    signal_dict.get("tenor", ""),
+                    signal_dict.get("ticker", ""),
+                    signal_dict.get("market_id", ""),
+                    signal_dict.get("direction", ""),
+                    signal_dict.get("model_prob", 0.5),
+                    signal_dict.get("market_prob", 0.5),
+                    signal_dict.get("edge", 0.0),
+                    signal_dict.get("confidence", 0.5),
+                    signal_dict.get("swarm_size_band", "base"),
+                    signal_dict.get("limit_price_cents", 50),
+                    signal_dict.get("contracts_upper_bound", 1),
+                    signal_dict.get("trade_mode", "paper"),
+                    1 if signal_dict.get("executed", False) else 0,
+                    signal_dict.get("settlement_spec_id"),
+                    json.dumps(signal_dict),
+                    time.time(),
+                ),
+            )
+            conn.commit()
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def link_signal_to_order(self, signal_id: str, order_id: str, fill_data: Optional[Dict[str, Any]] = None):
+        """Link an approved signal to its executed order."""
+        conn = self._conn()
+        try:
+            fill_price = fill_data.get("fill_price_cents") if fill_data else None
+            fill_contracts = fill_data.get("fill_contracts") if fill_data else None
+            fill_ts = fill_data.get("fill_timestamp") if fill_data else None
+
+            conn.execute(
+                """INSERT INTO signal_orders
+                   (signal_id, order_id, fill_price_cents, fill_contracts, fill_timestamp, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (signal_id, order_id, fill_price, fill_contracts, fill_ts, time.time()),
+            )
+            conn.commit()
+
+            # Mark signal as executed
+            conn.execute(
+                "UPDATE approved_signals SET executed = 1 WHERE signal_id = ?",
+                (signal_id,),
+            )
+            conn.commit()
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def update_signal_settlement(
+        self,
+        signal_id: str,
+        settlement_price: float,
+        settlement_timestamp: float,
+        realized_pnl_usd: float,
+    ):
+        """Update settlement data for a signal after market resolution."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                """UPDATE signal_orders
+                   SET settlement_price = ?, settlement_timestamp = ?, realized_pnl_usd = ?
+                   WHERE signal_id = ?""",
+                (settlement_price, settlement_timestamp, realized_pnl_usd, signal_id),
+            )
+            conn.commit()
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def get_approved_signals(
+        self,
+        asset: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        executed: Optional[bool] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Get approved signals with optional filters."""
+        conn = self._conn()
+        try:
+            query = "SELECT * FROM approved_signals WHERE 1=1"
+            params = []
+
+            if asset:
+                query += " AND asset = ?"
+                params.append(asset)
+            if agent_id:
+                query += " AND agent_id = ?"
+                params.append(agent_id)
+            if executed is not None:
+                query += " AND executed = ?"
+                params.append(1 if executed else 0)
+
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def get_signal_orders(self, signal_id: str) -> List[Dict[str, Any]]:
+        """Get all orders linked to a specific signal."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM signal_orders WHERE signal_id = ? ORDER BY created_at",
+                (signal_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             if not self._mem_conn:
                 conn.close()

@@ -440,9 +440,22 @@ class KalshiContinuousTrader:
             signal.fill_contracts = contracts
             signal.fill_timestamp = datetime.now(timezone.utc)
 
-            # Store approved signal (will be added to store schema next)
-            # For now, just log
-            self.logger.info(f"Fill recorded: {signal.summary()}")
+            # Store approved signal to database
+            store.store_approved_signal(signal.to_dict())
+
+            # Link signal to order
+            if signal.order_id:
+                store.link_signal_to_order(
+                    signal_id=signal.signal_id,
+                    order_id=signal.order_id,
+                    fill_data={
+                        "fill_price_cents": signal.fill_price_cents,
+                        "fill_contracts": signal.fill_contracts,
+                        "fill_timestamp": signal.fill_timestamp.timestamp() if signal.fill_timestamp else None,
+                    },
+                )
+
+            self.logger.info(f"Fill recorded to database: {signal.summary()}")
 
         except Exception as exc:
             self.logger.debug(f"Fill recording error (non-fatal): {exc}")

@@ -817,12 +817,172 @@ class KalshiTradingAgent:
         except Exception as exc:
             self.logger.debug(f"Explainability decision record skipped: {exc}")
 
+    async def _publish_approved_signal(
+        self,
+        market: EventMarket,
+        signal: StrategySignal,
+        check: PreTradeCheck,
+        snapshot: Optional[MarketSnapshot],
+        side: str,
+        size: int,
+        price_cents: int,
+    ) -> None:
+        """Publish ApprovedSignal to event_bus for KalshiContinuousTrader.
+
+        This is the single-path execution: all directional crypto orders flow
+        through the event bus to the continuous trader for Kelly sizing and execution.
+        """
+        from merid.signals.unified_schema import ApprovedSignal
+        from core.event_bus import event_stream
+        from datetime import timezone
+        import uuid
+
+        # Build ApprovedSignal
+        asset = self.config.assets[0] if self.config.assets else ""
+        timeframe = self.config.timeframes[0] if self.config.timeframes else ""
+
+        # Get consensus data if available
+        consensus = self._get_consensus(asset, timeframe)
+        swarm_size_band = "base"
+        swarm_consensus_prob = None
+        swarm_confidence = None
+        agents_voting = 0
+
+        if consensus:
+            swarm_size_band = consensus.size_band if hasattr(consensus, 'size_band') else "base"
+            swarm_consensus_prob = consensus.consensus_probability if hasattr(consensus, 'consensus_probability') else None
+            swarm_confidence = consensus.consensus_confidence if hasattr(consensus, 'consensus_confidence') else None
+            agents_voting = len(consensus.proposals) if hasattr(consensus, 'proposals') else 0
+
+        # Get model and market probabilities
+        model_prob = 0.5
+        if signal.edge and hasattr(signal.edge, 'model_prob'):
+            model_prob = float(signal.edge.model_prob)
+        elif signal.edge and hasattr(signal.edge, 'net_edge') and snapshot and snapshot.implied:
+            # Reconstruct model_prob from implied + edge
+            market_p = float(snapshot.implied.yes_prob)
+            model_prob = max(0.01, min(0.99, market_p + float(signal.edge.net_edge)))
+
+        market_prob = float(snapshot.implied.yes_prob) if snapshot and snapshot.implied else 0.5
+        edge = model_prob - market_prob
+        confidence = float(signal.edge.confidence) if signal.edge and hasattr(signal.edge, 'confidence') else 0.5
+
+        # Build settlement spec (placeholder for now - will be populated when RTI is wired)
+        settlement_spec_id = None
+        settlement_source = None
+        if asset in ["BTC", "ETH"]:
+            # Future: map to CF Benchmarks RTI
+            settlement_spec_id = f"cf_{asset.lower()}_rr"
+            settlement_source = "cf_benchmarks"
+
+        # Get guard layers passed (from pre-execution checks)
+        guard_layers = []
+        if check.allowed:
+            guard_layers = [
+                "prediction_market_risk",
+                "swarm_consensus_gate",
+                "execution_guard",
+            ]
+            if self._btc15m_risk is not None and asset == "BTC" and timeframe == "15m":
+                guard_layers.append("btc15m_risk_layer")
+
+        # Build guard adjustments
+        guard_adjustments = {}
+        if check.adjusted_size and check.adjusted_size != signal.contracts:
+            guard_adjustments["size_adjustment"] = {
+                "original": signal.contracts,
+                "adjusted": check.adjusted_size,
+                "reason": check.reason,
+            }
+
+        # Determine trade mode (paper vs live)
+        trade_mode = "paper"
+        try:
+            from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
+            dep_mode = get_deployment_controller()._agents.get(self.agent_id)
+            if dep_mode and dep_mode.mode == AgentMode.LIVE:
+                trade_mode = "live"
+            elif dep_mode and dep_mode.mode == AgentMode.SHADOW:
+                trade_mode = "live"  # Shadow counts as live mode
+        except Exception as _dm:
+            self.logger.debug(f"trade_mode lookup failed, using paper: {_dm}")
+
+        # Get market context
+        spread_bps = 0.0
+        if snapshot and snapshot.implied:
+            yes_bid = float(snapshot.implied.yes_bid) if snapshot.implied.yes_bid else 0
+            yes_ask = float(snapshot.implied.yes_ask) if snapshot.implied.yes_ask else 0
+            if yes_bid > 0 and yes_ask > 0:
+                spread_bps = (yes_ask - yes_bid) * 10000  # Convert to bps
+
+        minutes_to_expiry = None
+        if snapshot and snapshot.time_to_expiry_hours:
+            minutes_to_expiry = int(snapshot.time_to_expiry_hours * 60)
+
+        fear_greed = None
+        if snapshot and hasattr(snapshot, 'sentiment_global') and snapshot.sentiment_global is not None:
+            fear_greed = int(snapshot.sentiment_global * 100)
+
+        volatility_regime = "normal"
+        if snapshot and hasattr(snapshot, 'sentiment_regime'):
+            volatility_regime = snapshot.sentiment_regime
+
+        # Create approved signal
+        approved_signal = ApprovedSignal(
+            signal_id=f"{self.agent_id}:{uuid.uuid4().hex[:8]}",
+            timestamp=datetime.now(timezone.utc),
+            agent_id=self.agent_id,
+            asset=asset,
+            tenor=timeframe,
+            ticker=market.market_id,
+            market_id=market.market_id.rsplit("-", 1)[0] if "-" in market.market_id else market.market_id,
+            question=market.question[:200] if market.question else "",
+            direction=side,
+            model_prob=model_prob,
+            market_prob=market_prob,
+            edge=edge,
+            confidence=confidence,
+            swarm_size_band=swarm_size_band,
+            swarm_consensus_prob=swarm_consensus_prob,
+            swarm_confidence=swarm_confidence,
+            agents_voting=agents_voting,
+            limit_price_cents=price_cents,
+            contracts_upper_bound=size,
+            spread_bps=spread_bps,
+            volume_24h=float(market.volume) if market.volume else 0.0,
+            open_interest=float(market.open_interest) if market.open_interest else 0.0,
+            minutes_to_expiry=minutes_to_expiry,
+            fear_greed=fear_greed,
+            volatility_regime=volatility_regime,
+            risk_regime="normal",  # TODO: wire from risk state
+            settlement_spec_id=settlement_spec_id,
+            settlement_source=settlement_source,
+            guard_layers_passed=guard_layers,
+            guard_adjustments=guard_adjustments,
+            trade_mode=trade_mode,
+        )
+
+        # Publish to event bus
+        channel = approved_signal.get_event_channel()
+        try:
+            await event_stream.publish(channel, approved_signal.to_dict())
+            self.logger.info(f"Published ApprovedSignal to {channel}: {approved_signal.summary()}")
+
+            # Also record in signal log for audit
+            self._record_signal(market, signal, snapshot, datetime.now(timezone.utc))
+
+        except Exception as exc:
+            self.logger.error(f"Failed to publish ApprovedSignal: {exc}", exc_info=True)
+
     async def _execute_signal(
         self, market: EventMarket, signal: StrategySignal, check: PreTradeCheck,
         snapshot: Optional[MarketSnapshot] = None,
     ) -> None:
-        """Execute a strategy signal by placing an order.
-        
+        """Execute a strategy signal.
+
+        For directional buy/sell signals: publish ApprovedSignal to event_bus.
+        For quote/arb signals: execute directly via _kalshi_place_order (as before).
+
         Integrates with CryptoSwarmRiskBTC15m for single-lane risk management.
         BTC 15m proposals are evaluated for live vs paper routing.
         """
@@ -843,6 +1003,18 @@ class KalshiTradingAgent:
         side, action = action_map[signal.action]
         size = check.adjusted_size if check.adjusted_size else signal.contracts
         price_cents = signal.limit_price_cents or 0
+
+        # === Single Signal Path: directional buy/sell → event_bus ===
+        # Quote/arb stays as-is (direct execution)
+        is_directional = signal.action in (
+            SignalAction.BUY_YES, SignalAction.BUY_NO,
+            SignalAction.SELL_YES, SignalAction.SELL_NO
+        )
+
+        if is_directional:
+            # Publish to event bus instead of direct execution
+            await self._publish_approved_signal(market, signal, check, snapshot, side, size, price_cents)
+            return
         
         # === BTC 15m Risk Layer Integration ===
         # Evaluate proposal through single-lane risk manager
