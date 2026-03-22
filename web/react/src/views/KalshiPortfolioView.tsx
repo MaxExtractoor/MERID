@@ -15,6 +15,7 @@ import KalshiRiskFeed from '../components/KalshiRiskFeed';
 import OrderGroupPanel from '../components/OrderGroupPanel';
 import BatchOrderPanel from '../components/BatchOrderPanel';
 import OrderGroupAnalytics from '../components/OrderGroupAnalytics';
+import { logUiInfo } from '../utils/logger';
 
 const DRAWDOWN_TIER_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   normal: { label: 'Normal', color: 'text-green-400', bg: 'bg-green-500/20' },
@@ -536,7 +537,25 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
 
       {/* Tab Content */}
       {loading ? (
-        <div className="text-center py-12 text-gray-500">Loading...</div>
+        <div className="space-y-4">
+          {/* Loading skeleton for summary cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {[1, 2, 3].map(i => (
+              <div key={i} className="bg-slate-900 rounded-xl border border-slate-800 p-4">
+                <div className="h-4 bg-slate-800 rounded animate-pulse w-24 mb-2"></div>
+                <div className="h-8 bg-slate-800 rounded animate-pulse w-32"></div>
+              </div>
+            ))}
+          </div>
+          {/* Loading skeleton for table */}
+          <div className="bg-slate-900 rounded-xl border border-slate-800 p-4">
+            <div className="space-y-3">
+              {[1, 2, 3, 4].map(i => (
+                <div key={i} className="h-12 bg-slate-800 rounded animate-pulse"></div>
+              ))}
+            </div>
+          </div>
+        </div>
       ) : (
         <>
           {/* Positions Tab */}
@@ -929,7 +948,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
               <OrderGroupPanel
                 compact={false}
                 onGroupTriggered={(groupId) => {
-                  console.log('Portfolio: Group triggered:', groupId);
+                  logUiInfo('KalshiPortfolioView', 'Order group triggered', { groupId });
                 }}
               />
               {/* Order Group Analytics */}

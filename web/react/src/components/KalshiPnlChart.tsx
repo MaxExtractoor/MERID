@@ -16,6 +16,7 @@ import {
 import { TrendingUp, TrendingDown, BarChart3, LineChart } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { logUiError } from '../utils/logger';
 
 interface PnlPoint {
   ts: string;
@@ -117,7 +118,7 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
       const avg = dailyPnls.length > 0 ? dailyPnls.reduce((a, b) => a + b, 0) / dailyPnls.length : 0;
       return { peak, maxDD, winDays, lossDays, avgDaily: avg };
     } catch (err) {
-      console.error('[KalshiPnlChart] Error calculating stats:', err);
+      logUiError('KalshiPnlChart', 'Error calculating stats', err);
       return null;
     }
   }, [chartData]);
