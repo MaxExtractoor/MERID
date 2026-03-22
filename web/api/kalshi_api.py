@@ -1580,8 +1580,8 @@ async def cancel_order(order_id: str) -> Dict[str, Any]:
 @router.patch("/orders/{order_id}")
 async def amend_order(
     order_id: str,
-    price_cents: Optional[int] = None,
-    count: Optional[int] = None,
+    price_cents: Optional[int] = Query(None, description="New price in cents (1-99)"),
+    count: Optional[int] = Query(None, description="New contract count"),
 ) -> Dict[str, Any]:
     """Amend a resting order's price and/or quantity (cancel-replace)."""
     if price_cents is None and count is None:
@@ -2174,6 +2174,23 @@ async def get_risk() -> Dict[str, Any]:
             base.update(risk.summary())
         except Exception as exc:
             logger.warning(f"Risk summary failed: {exc}")
+
+    # Calculate daily fees from fills
+    try:
+        from datetime import datetime, timezone
+        executor = _get_executor()
+        if executor:
+            fills = await executor.get_fills()
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            daily_fees = sum(
+                f.get("fee_paid", 0) / 100.0
+                for f in fills
+                if "created_time" in f and datetime.fromisoformat(f["created_time"].replace("Z", "+00:00")) >= today_start
+            )
+            if daily_fees > 0:
+                base["daily_fees_usd"] = round(daily_fees, 2)
+    except Exception as exc:
+        logger.debug(f"Daily fees calculation skipped: {exc}")
 
     # Overlay global risk_controller state (authoritative kill-switch + daily PnL)
     try:

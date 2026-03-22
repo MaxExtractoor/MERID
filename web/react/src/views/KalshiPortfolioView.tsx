@@ -110,16 +110,10 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
 
   const balanceUsd = useMemo(() => {
     if (!balance) return null;
-    // Note: Some Kalshi API responses return USD values in cents (100x scale).
-    // This heuristic detects large values (>100k) and scales them down.
-    // TODO: Verify with backend team if this scaling is still needed.
+    // Backend now consistently returns values in USD dollars (not cents)
+    // The balance.usd field should always be in dollars
     if (typeof balance.usd === 'number') {
-      const needsScaling = Math.abs(balance.usd) > 100000;
-      const scaledValue = needsScaling ? balance.usd / 100 : balance.usd;
-      if (needsScaling) {
-        console.debug('[Portfolio] Balance scaled from cents to dollars:', balance.usd, '→', scaledValue);
-      }
-      return scaledValue;
+      return balance.usd;
     }
     return (balance.available ?? 0) + (balance.locked ?? 0);
   }, [balance]);
