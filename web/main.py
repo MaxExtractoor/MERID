@@ -1722,6 +1722,20 @@ async def _app_lifespan(application: FastAPI):
     except Exception as e:
         logger.error("Failed to start Kalshi Agent Grid: %s", e, exc_info=True)
 
+    # ── Phase 0.5a: KalshiContinuousTrader ─────────────────────────────────
+    logger.info("=" * 80)
+    logger.info("🎯 Starting KalshiContinuousTrader (single signal path executor)")
+    logger.info("=" * 80)
+    try:
+        from merid.prediction.kalshi_continuous_trader import get_kalshi_continuous_trader
+        continuous_trader = get_kalshi_continuous_trader()
+        await continuous_trader.start()
+        logger.info("✅ KalshiContinuousTrader started and listening on event bus")
+        _startup_state["services"]["kalshi_continuous_trader"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.error("Failed to start KalshiContinuousTrader: %s", e, exc_info=True)
+        _startup_state["services"]["kalshi_continuous_trader"] = {"status": "failed", "error": str(e)}
+
     # ── Phase 0.51: Bootstrap canonical agent registry (C9) ────────────────
     try:
         from merid.agents.bootstrap import ensure_bootstrapped
@@ -2664,6 +2678,14 @@ async def _app_lifespan(application: FastAPI):
         logger.info("✅ KalshiMarketCache stopped")
     except Exception as exc:
         logger.warning("KalshiMarketCache stop failed: %s", exc)
+
+    # Stop KalshiContinuousTrader
+    try:
+        from merid.prediction.kalshi_continuous_trader import get_kalshi_continuous_trader
+        await get_kalshi_continuous_trader().stop()
+        logger.info("✅ KalshiContinuousTrader stopped")
+    except Exception as exc:
+        logger.warning("KalshiContinuousTrader stop failed: %s", exc)
 
     # Stop EnhancedConsensusCoordinator opinion subscriber
     try:
