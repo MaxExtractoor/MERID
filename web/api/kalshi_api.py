@@ -26,12 +26,24 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from utils.logger import get_logger
 
 logger = get_logger("web.api.kalshi_api")
 
 router = APIRouter(prefix="/api/v1/kalshi", tags=["kalshi"])
+
+
+# ── Response Models ────────────────────────────────────────────────────────
+
+class BalanceResponse(BaseModel):
+    """Kalshi account balance response (all values in USD dollars)."""
+    usd: float = Field(..., description="Total balance in USD dollars")
+    locked: float = Field(..., description="Locked balance (in positions) in USD dollars")
+    available: float = Field(..., description="Available balance for trading in USD dollars")
+    error: Optional[str] = Field(None, description="Error message if balance fetch failed")
+
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────
@@ -1045,18 +1057,23 @@ async def get_fills(limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
     return {"count": 0, "fills": [], "error": "No Kalshi client configured"}
 
 
-@router.get("/balance")
-async def get_balance() -> Dict[str, Any]:
-    """Get Kalshi account balance."""
+@router.get("/balance", response_model=BalanceResponse)
+async def get_balance() -> BalanceResponse:
+    """Get Kalshi account balance.
+
+    Returns:
+        Balance with all values in USD dollars (not cents).
+        Fields: usd (total), locked (in positions), available (for trading)
+    """
     executor = _get_executor()
     if executor:
         try:
             bal = await executor.get_balance()
-            return {
-                "usd": bal.get("usd_dollars", 0.0),
-                "locked": bal.get("locked_dollars", 0.0),
-                "available": bal.get("available_dollars", 0.0),
-            }
+            return BalanceResponse(
+                usd=bal.get("usd_dollars", 0.0),
+                locked=bal.get("locked_dollars", 0.0),
+                available=bal.get("available_dollars", 0.0),
+            )
         except Exception as exc:
             logger.warning(f"Executor balance failed: {exc}")
 
@@ -1066,12 +1083,12 @@ async def get_balance() -> Dict[str, Any]:
         try:
             bal = rest.get_balance()
             usd = bal.get("balance", 0) / 100.0  # Kalshi returns cents
-            return {"usd": usd, "locked": 0, "available": usd}
+            return BalanceResponse(usd=usd, locked=0, available=usd)
         except Exception as exc:
             logger.warning(f"merid_core balance failed: {exc}")
-            return {"usd": 0, "locked": 0, "available": 0, "error": str(exc)}
+            return BalanceResponse(usd=0, locked=0, available=0, error=str(exc))
 
-    return {"usd": 0, "locked": 0, "available": 0, "error": "No Kalshi client configured"}
+    return BalanceResponse(usd=0, locked=0, available=0, error="No Kalshi client configured")
 
 
 # ── New Portfolio & Risk Endpoints ──────────────────────────────────────
@@ -1580,8 +1597,8 @@ async def cancel_order(order_id: str) -> Dict[str, Any]:
 @router.patch("/orders/{order_id}")
 async def amend_order(
     order_id: str,
-    price_cents: Optional[int] = None,
-    count: Optional[int] = None,
+    price_cents: Optional[int] = Query(None, description="New price in cents (1-99)"),
+    count: Optional[int] = Query(None, description="New contract count"),
 ) -> Dict[str, Any]:
     """Amend a resting order's price and/or quantity (cancel-replace)."""
     if price_cents is None and count is None:
@@ -2174,6 +2191,23 @@ async def get_risk() -> Dict[str, Any]:
             base.update(risk.summary())
         except Exception as exc:
             logger.warning(f"Risk summary failed: {exc}")
+
+    # Calculate daily fees from fills
+    try:
+        from datetime import datetime, timezone
+        executor = _get_executor()
+        if executor:
+            fills = await executor.get_fills()
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            daily_fees = sum(
+                f.get("fee_paid", 0) / 100.0
+                for f in fills
+                if "created_time" in f and datetime.fromisoformat(f["created_time"].replace("Z", "+00:00")) >= today_start
+            )
+            if daily_fees > 0:
+                base["daily_fees_usd"] = round(daily_fees, 2)
+    except Exception as exc:
+        logger.debug(f"Daily fees calculation skipped: {exc}")
 
     # Overlay global risk_controller state (authoritative kill-switch + daily PnL)
     try:

@@ -15,6 +15,7 @@ import KalshiRiskFeed from '../components/KalshiRiskFeed';
 import OrderGroupPanel from '../components/OrderGroupPanel';
 import BatchOrderPanel from '../components/BatchOrderPanel';
 import OrderGroupAnalytics from '../components/OrderGroupAnalytics';
+import { logUiInfo } from '../utils/logger';
 
 const DRAWDOWN_TIER_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   normal: { label: 'Normal', color: 'text-green-400', bg: 'bg-green-500/20' },
@@ -110,8 +111,10 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
 
   const balanceUsd = useMemo(() => {
     if (!balance) return null;
+    // Backend now consistently returns values in USD dollars (not cents)
+    // The balance.usd field should always be in dollars
     if (typeof balance.usd === 'number') {
-      return Math.abs(balance.usd) > 100000 ? balance.usd / 100 : balance.usd;
+      return balance.usd;
     }
     return (balance.available ?? 0) + (balance.locked ?? 0);
   }, [balance]);
@@ -441,7 +444,12 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
           }`}>
             ${(gridPortfolio?.daily_pnl_usd ?? risk?.daily_realized_pnl_usd ?? 0).toFixed(2)}
           </p>
-          <p className="text-xs text-gray-500">{risk?.daily_trades ?? 0} trades today</p>
+          <p className="text-xs text-gray-500">{risk?.daily_trades ?? 0} trades today · {
+            (() => {
+              const source = gridPortfolio?.daily_pnl_usd != null ? 'grid' : risk?.daily_realized_pnl_usd != null ? 'risk' : 'none';
+              return <span className="text-gray-600" title={`PnL source: ${source}`}>src:{source}</span>;
+            })()
+          }</p>
         </div>
         <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
           <div className="flex items-center gap-2 mb-1">
@@ -529,7 +537,25 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
 
       {/* Tab Content */}
       {loading ? (
-        <div className="text-center py-12 text-gray-500">Loading...</div>
+        <div className="space-y-4">
+          {/* Loading skeleton for summary cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {[1, 2, 3].map(i => (
+              <div key={i} className="bg-slate-900 rounded-xl border border-slate-800 p-4">
+                <div className="h-4 bg-slate-800 rounded animate-pulse w-24 mb-2"></div>
+                <div className="h-8 bg-slate-800 rounded animate-pulse w-32"></div>
+              </div>
+            ))}
+          </div>
+          {/* Loading skeleton for table */}
+          <div className="bg-slate-900 rounded-xl border border-slate-800 p-4">
+            <div className="space-y-3">
+              {[1, 2, 3, 4].map(i => (
+                <div key={i} className="h-12 bg-slate-800 rounded animate-pulse"></div>
+              ))}
+            </div>
+          </div>
+        </div>
       ) : (
         <>
           {/* Positions Tab */}
@@ -875,6 +901,19 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                   </div>
                 );
               })()}
+              {sizingResult.loading && !sizingResult.data && (
+                <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                  <div className="animate-pulse space-y-3">
+                    <div className="h-4 bg-slate-800 rounded w-1/3"></div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="h-20 bg-slate-800 rounded"></div>
+                      <div className="h-20 bg-slate-800 rounded"></div>
+                      <div className="h-20 bg-slate-800 rounded"></div>
+                      <div className="h-20 bg-slate-800 rounded"></div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Live Risk Feed */}
               <KalshiRiskFeed maxItems={30} />
@@ -909,7 +948,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
               <OrderGroupPanel
                 compact={false}
                 onGroupTriggered={(groupId) => {
-                  console.log('Portfolio: Group triggered:', groupId);
+                  logUiInfo('KalshiPortfolioView', 'Order group triggered', { groupId });
                 }}
               />
               {/* Order Group Analytics */}

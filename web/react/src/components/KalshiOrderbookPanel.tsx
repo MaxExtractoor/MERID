@@ -40,7 +40,7 @@ function LevelRow({ level, side, maxQty }: { level: OrderbookLevel; side: 'bid' 
 
 export default function KalshiOrderbookPanel({ ticker, depth = 5 }: KalshiOrderbookPanelProps) {
   const endpoint = ticker ? API_ENDPOINTS.KALSHI_ORDERBOOK(ticker) : '';
-  const { data, loading } = useApiData<OrderbookData>(
+  const { data, loading, error, refetch } = useApiData<OrderbookData>(
     endpoint,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
@@ -52,6 +52,23 @@ export default function KalshiOrderbookPanel({ ticker, depth = 5 }: KalshiOrderb
       <div className="bg-slate-800 rounded-xl p-3">
         <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Orderbook</h4>
         <div className="h-32 flex items-center justify-center text-xs text-gray-600">Loading…</div>
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="bg-slate-800 rounded-xl p-3">
+        <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Orderbook</h4>
+        <div className="h-32 flex flex-col items-center justify-center gap-2 text-xs">
+          <p className="text-red-400">Failed to load orderbook</p>
+          <button
+            onClick={refetch}
+            className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }

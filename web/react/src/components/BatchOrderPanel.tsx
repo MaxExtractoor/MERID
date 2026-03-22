@@ -291,6 +291,7 @@ export function BatchOrderPanel({
               placeholder="Ticker (e.g., KXBTC)"
               value={order.ticker}
               onChange={(e) => updateOrder(order.id, 'ticker', e.target.value)}
+              aria-label={`Ticker for order ${index + 1}`}
               style={{
                 ...styles.input,
                 width: '120px',
@@ -302,6 +303,7 @@ export function BatchOrderPanel({
             <select
               value={order.side}
               onChange={(e) => updateOrder(order.id, 'side', e.target.value)}
+              aria-label={`Side (YES/NO) for order ${index + 1}`}
               style={{
                 ...styles.select,
                 width: '70px',
@@ -318,6 +320,7 @@ export function BatchOrderPanel({
             <select
               value={order.action}
               onChange={(e) => updateOrder(order.id, 'action', e.target.value)}
+              aria-label={`Action (Buy/Sell) for order ${index + 1}`}
               style={{ ...styles.select, width: '80px' }}
               title="Select action (Buy/Sell)"
             >
@@ -332,6 +335,7 @@ export function BatchOrderPanel({
               placeholder="Qty"
               value={order.count}
               onChange={(e) => updateOrder(order.id, 'count', parseInt(e.target.value) || 0)}
+              aria-label={`Quantity for order ${index + 1}`}
               style={{ ...styles.input, width: '70px' }}
             />
 
@@ -344,6 +348,7 @@ export function BatchOrderPanel({
                 placeholder="Price"
                 value={order.price_cents || ''}
                 onChange={(e) => updateOrder(order.id, 'price_cents', parseInt(e.target.value) || null)}
+                aria-label={`Price in cents for order ${index + 1}`}
                 style={{ ...styles.input, width: '60px' }}
               />
               <span style={styles.centsLabel}>¢</span>
@@ -355,6 +360,7 @@ export function BatchOrderPanel({
                 type="checkbox"
                 checked={order.post_only}
                 onChange={(e) => updateOrder(order.id, 'post_only', e.target.checked)}
+                aria-label={`Post-only mode for order ${index + 1}`}
                 style={styles.checkbox}
               />
               <span style={styles.postOnlyText}>Post</span>

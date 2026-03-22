@@ -287,7 +287,12 @@ class KalshiExecutor:
             return False
 
     async def get_balance(self) -> Dict[str, Any]:
-        """Fetch account balance from Kalshi (returns cents and dollars)."""
+        """Fetch account balance from Kalshi.
+
+        Returns:
+            Balance dict with all values in USD dollars (not cents).
+            Fields: usd_dollars, locked_dollars, available_dollars
+        """
         client = self._get_client()
         result = await client._request_with_resilience(
             "GET",
@@ -299,12 +304,10 @@ class KalshiExecutor:
         data = result.data
         balance_cents = data.get("balance", 0)
         locked_cents = data.get("payout", 0)
+        # Return all values in dollars for consistency
         return {
-            "usd": balance_cents,
             "usd_dollars": balance_cents / 100.0,
-            "locked": locked_cents,
             "locked_dollars": locked_cents / 100.0,
-            "available": balance_cents - locked_cents,
             "available_dollars": (balance_cents - locked_cents) / 100.0,
         }
 

@@ -16,6 +16,7 @@ import {
 import { TrendingUp, TrendingDown, BarChart3, LineChart } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { logUiError } from '../utils/logger';
 
 interface PnlPoint {
   ts: string;
@@ -64,10 +65,15 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
     if (!data?.points?.length) return [];
     let pts = data.points;
     if (categoryFilter) {
-      pts = pts.filter(p => (p.category ?? '').toLowerCase().includes(categoryFilter));
+      // Safely filter with null checks
+      pts = pts.filter(p => {
+        const cat = p.category ?? '';
+        return typeof cat === 'string' && cat.toLowerCase().includes(categoryFilter);
+      });
     }
     return pts.map(p => ({
       time: new Date(p.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      rawTs: p.ts, // Keep raw timestamp for alignment
       equity: Number((p.equity ?? 0).toFixed(2)),
       pnl: Number((p.cumulative_pnl ?? 0).toFixed(2)),
       dailyPnl: Number((p.daily_pnl ?? 0).toFixed(2)),
@@ -75,26 +81,46 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
   }, [data, categoryFilter]);
 
   const breachTimes = useMemo(() => {
-    if (!data?.breaches?.length) return [];
-    return data.breaches.map(b => ({
-      time: new Date(b.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      label: b.check,
-    }));
-  }, [data]);
+    if (!data?.breaches?.length || !chartData.length) return [];
+    return data.breaches.map(b => {
+      // Find the closest chart data point to this breach timestamp
+      const breachTime = new Date(b.ts).getTime();
+      const closestPoint = chartData.reduce((closest, point) => {
+        const pointTime = new Date(point.rawTs).getTime();
+        const closestTime = new Date(closest.rawTs).getTime();
+        return Math.abs(pointTime - breachTime) < Math.abs(closestTime - breachTime) ? point : closest;
+      });
+      return {
+        time: closestPoint.time, // Use the chart point's formatted time for alignment
+        label: b.check,
+      };
+    });
+  }, [data, chartData]);
 
   const latestPnl = chartData.length > 0 ? chartData[chartData.length - 1].pnl : 0;
   const isPositive = latestPnl >= 0;
 
   const stats = useMemo(() => {
-    if (chartData.length < 2) return null;
-    const dailyPnls = chartData.map(d => d.dailyPnl);
-    const peak = Math.max(...chartData.map(d => d.pnl));
-    const trough = Math.min(...chartData.map(d => d.pnl));
-    const maxDD = peak > 0 ? peak - trough : 0;
-    const winDays = dailyPnls.filter(d => d > 0).length;
-    const lossDays = dailyPnls.filter(d => d < 0).length;
-    const avg = dailyPnls.reduce((a, b) => a + b, 0) / dailyPnls.length;
-    return { peak, maxDD, winDays, lossDays, avgDaily: avg };
+    try {
+      if (chartData.length < 2) return null;
+      const dailyPnls = chartData.map(d => d.dailyPnl).filter(val => typeof val === 'number' && !isNaN(val));
+      if (dailyPnls.length === 0) return null;
+
+      const pnls = chartData.map(d => d.pnl).filter(val => typeof val === 'number' && !isNaN(val));
+      if (pnls.length === 0) return null;
+
+      const peak = Math.max(...pnls, 0);
+      const trough = Math.min(...pnls, 0);
+      const maxDD = peak > 0 ? peak - trough : 0;
+      const winDays = dailyPnls.filter(d => d > 0).length;
+      const lossDays = dailyPnls.filter(d => d < 0).length;
+      // Safety: Ensure we don't divide by zero
+      const avg = dailyPnls.length > 0 ? dailyPnls.reduce((a, b) => a + b, 0) / dailyPnls.length : 0;
+      return { peak, maxDD, winDays, lossDays, avgDaily: avg };
+    } catch (err) {
+      logUiError('KalshiPnlChart', 'Error calculating stats', err);
+      return null;
+    }
   }, [chartData]);
 
   if (loading && !data) {
