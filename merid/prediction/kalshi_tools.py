@@ -76,10 +76,11 @@ async def _kalshi_list_markets(
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         catalog = get_market_catalog()
-        
         # If catalog is empty or stale, trigger a refresh (non-blocking if already running)
         if not catalog.get_all_markets():
             await catalog.refresh()
+
+        snapshot = catalog.snapshot()
 
         if category == "all":
             markets = catalog.get_all_markets()
@@ -93,6 +94,16 @@ async def _kalshi_list_markets(
         # Limit the results
         markets = markets[:limit]
 
+        catalog_counts = {
+            "market_count": snapshot.market_count,
+            "by_asset_timeframe": snapshot.by_asset_timeframe,
+        }
+        if not markets:
+            logger.info(
+                "kalshi_list_markets returned 0 markets after filters category=%s asset=%s timeframe=%s | counts=%s",
+                category, asset, timeframe, catalog_counts,
+            )
+
         payload = {
             "markets": [
                 {
@@ -102,7 +113,11 @@ async def _kalshi_list_markets(
                     "tags": m.market.tags,
                     "end_date": m.market.end_date.isoformat() if m.market.end_date else None,
                     "volume": str(m.market.volume) if m.market.volume else "0",
+                    "open_interest": str(m.market.open_interest) if m.market.open_interest else "0",
                     "active": m.market.active,
+                    "status": (m.status or m.market.raw_data.get("status") if m.market.raw_data else None),
+                    "asset": m.asset,
+                    "timeframe": m.timeframe,
                     "outcomes": [
                         {
                             "id": o.outcome_id,
@@ -117,6 +132,7 @@ async def _kalshi_list_markets(
             ],
             "count": len(markets),
             "filters": {"category": category, "timeframe": timeframe, "asset": asset},
+            "catalog_counts": catalog_counts,
         }
 
         gate = get_venue_gate()

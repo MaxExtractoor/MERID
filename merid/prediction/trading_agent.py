@@ -519,6 +519,19 @@ class KalshiTradingAgent:
                 self.logger.debug(f"Market resolution failed: {result.error_message}")
                 return
 
+            if result.payload.get("count", 0) == 0:
+                catalog_counts = result.payload.get("catalog_counts", {})
+                self.logger.warning(
+                    "No tradeable markets found (category=%s asset=%s timeframe=%s) | catalog_counts=%s",
+                    category,
+                    asset or "any",
+                    timeframe or "any",
+                    catalog_counts,
+                )
+                self._resolved_markets = []
+                self.state.active_tickers = []
+                return
+
             # Convert tool result back to EventMarket-like objects for strategy
             self._resolved_markets = []
             for m in result.payload.get("markets", []):
