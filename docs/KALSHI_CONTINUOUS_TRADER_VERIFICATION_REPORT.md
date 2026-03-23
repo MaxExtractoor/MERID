@@ -25,3 +25,6 @@ This report validates the BTC discovery and execution loop that powers the Kalsh
 
 ## Regression Coverage
 - `tests/test_btc_market_discovery.py` verifies the BTC discovery funnel: BTC-only selection, timeframe narrowing, volume ordering, and reason labeling when the venue returns nothing.
+
+## Local Testing Notes
+- Use `PYTEST_LIGHT_STUBS=1` with `pytest -c pytest.ini.local tests/test_btc_market_discovery.py` to bypass heavy Telegram/Neo4j deps during offline BTC diagnostics.
