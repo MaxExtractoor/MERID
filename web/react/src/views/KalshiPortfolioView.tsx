@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, API_BASE_URL, DEFAULTS } from '../config/constants';
+import { logUiInfo } from '../utils/logger';
 import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiFill, KalshiRiskSummary, SizingMetrics } from '../types/kalshi';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
@@ -909,7 +910,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
               <OrderGroupPanel
                 compact={false}
                 onGroupTriggered={(groupId) => {
-                  console.log('Portfolio: Group triggered:', groupId);
+                  logUiInfo('KalshiPortfolioView', 'Order group triggered', undefined, { groupId });
                 }}
               />
               {/* Order Group Analytics */}

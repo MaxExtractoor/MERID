@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { Award, Download, BarChart3, Activity, Trophy, Crosshair } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { logUiError } from '../utils/logger';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 
@@ -116,7 +117,7 @@ export default function KalshiAgentPerformanceView() {
         document.body.removeChild(a);
       }
     } catch (e) {
-      console.error('Export failed:', e);
+      logUiError('KalshiAgentPerformanceView', 'Export failed', e);
     }
   };
 
