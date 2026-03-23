@@ -81,6 +81,9 @@ async def _kalshi_list_markets(
         if not catalog.get_all_markets():
             await catalog.refresh()
 
+        snapshot = catalog.snapshot()
+        by_asset_tf = snapshot.by_asset_timeframe if hasattr(snapshot, "by_asset_timeframe") else {}
+
         if category == "all":
             markets = catalog.get_all_markets()
             if timeframe:
@@ -92,6 +95,15 @@ async def _kalshi_list_markets(
         
         # Limit the results
         markets = markets[:limit]
+
+        if not markets:
+            crypto_breakdown = {a: by_asset_tf.get(a, {}) for a in ("BTC", "ETH", "SOL", "XRP", "DOGE")}
+            logger.info(
+                "kalshi_list_markets: no markets after filter | category=%s asset=%s timeframe=%s "
+                "| catalog assets=%s timeframes=%s crypto=%s",
+                category, asset or "*", timeframe or "*",
+                snapshot.by_asset, snapshot.by_timeframe, crypto_breakdown,
+            )
 
         payload = {
             "markets": [
@@ -117,6 +129,12 @@ async def _kalshi_list_markets(
             ],
             "count": len(markets),
             "filters": {"category": category, "timeframe": timeframe, "asset": asset},
+            "catalog_counts": {
+                "by_asset": snapshot.by_asset,
+                "by_timeframe": snapshot.by_timeframe,
+                "by_category": snapshot.by_category,
+                "by_asset_timeframe": by_asset_tf,
+            },
         }
 
         gate = get_venue_gate()

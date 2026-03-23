@@ -360,44 +360,53 @@ class AgentGrid:
     async def _feed_mood_bus(self) -> None:
         """Feed live Kalshi market data into MarketMoodBus for sentiment aggregation."""
         try:
-            # Get active markets from catalog
-            markets = await self._catalog.get_active_markets()
+            # Get active crypto markets from catalog
+            if hasattr(self._catalog, "get_active_markets"):
+                markets = await self._catalog.get_active_markets(category="crypto")
+            else:
+                markets = [
+                    m for m in self._catalog.get_all_markets()
+                    if getattr(m.market, "active", False) and m.category == "crypto"
+                ]
 
-            # Group by asset/timeframe and feed data
-            for market in markets[:20]:  # Limit to top 20 markets to avoid rate limits
+            if not markets:
+                logger.debug("MarketMoodBus feed: no active crypto markets available")
+                return
+
+            # Pick the highest-volume market per (asset, timeframe)
+            top_by_key: Dict[tuple, Any] = {}
+            for cm in markets:
+                if not cm.asset or not cm.timeframe:
+                    continue
+                key = (cm.asset, cm.timeframe)
+                current = top_by_key.get(key)
+                if current is None or float(cm.market.volume or 0) > float(current.market.volume or 0):
+                    top_by_key[key] = cm
+
+            for (asset, timeframe), cm in top_by_key.items():
                 try:
-                    # Extract asset from ticker (e.g., "KXBTC-23DEC01-B71000" -> "BTC")
-                    ticker = market.market_id
-                    asset = None
-                    if "BTC" in ticker.upper():
-                        asset = "BTC"
-                    elif "ETH" in ticker.upper():
-                        asset = "ETH"
+                    yes = next((o for o in cm.market.outcomes if o.outcome_id == "yes"), None)
+                    no = next((o for o in cm.market.outcomes if o.outcome_id == "no"), None)
+                    price = float(yes.price) if yes else 0.5
+                    best_bid = float(getattr(yes, "best_bid", None) or price)
+                    best_ask = float(getattr(yes, "best_ask", None) or price)
+                    spread_bps = max(best_ask - best_bid, 0.0) * 10000
 
-                    if not asset:
-                        continue
-
-                    # Infer timeframe (for now use "15m" as default)
-                    timeframe = "15m"
-
-                    # Feed Kalshi data
                     self._mood_bus.update_kalshi_data(
                         asset=asset,
                         timeframe=timeframe,
-                        price=float(market.yes_bid or 0.5),
-                        volume_24h=float(market.volume or 0),
-                        spread_bps=float((market.yes_ask or 0.5) - (market.yes_bid or 0.5)) * 10000,
-                        open_interest=float(market.open_interest or 0),
+                        price=price,
+                        volume_24h=float(cm.market.volume or 0),
+                        spread_bps=spread_bps,
+                        open_interest=float(cm.market.open_interest or 0),
                     )
 
-                    # Feed fear/greed from sentiment service
                     global_sentiment = self._sentiment.global_score()
                     self._mood_bus.update_fear_greed(asset, global_sentiment.score)
-
                 except Exception as exc:
-                    logger.debug(f"Error feeding market {market.market_id} to mood bus: {exc}")
+                    logger.debug(f"Error feeding market {cm.market.market_id} to mood bus: {exc}")
 
-            logger.debug("MarketMoodBus fed with latest Kalshi data")
+            logger.debug("MarketMoodBus fed with latest Kalshi data (%d asset/timeframe pairs)", len(top_by_key))
 
         except Exception as exc:
             logger.warning(f"Failed to feed mood bus: {exc}")
