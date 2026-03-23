@@ -271,13 +271,199 @@ class AgentOrchestrator:
         except Exception as exc:
             logger.error(f"Error broadcasting arbitrage: {exc}")
     
+    async def form_market_consensus(
+        self,
+        ticker: str,
+        asset: str,
+        timeframe: str,
+    ) -> "MarketConsensusSnapshot":
+        """
+        Form consensus on a Kalshi market (NEW market-centric flow).
+
+        This is the NEW consensus path for Kalshi trading decisions.
+        Uses MarketConsensusSnapshot as the unit of consensus.
+
+        Args:
+            ticker: Kalshi contract ID
+            asset: Asset symbol (BTC, ETH, etc.)
+            timeframe: Timeframe (15m, 1h, 24h, etc.)
+
+        Returns:
+            MarketConsensusSnapshot with consensus action and parameters
+        """
+        try:
+            # Import here to avoid circular dependencies
+            from merid.signals.market_aggregator import get_market_aggregator
+            from merid.signals.market_consensus import AgentOpinion, TradingAction
+            from merid.consensus.market_engine import get_market_consensus_engine
+
+            # Step 1: Create market snapshot with data + features
+            aggregator = get_market_aggregator()
+            snapshot = await aggregator.create_snapshot(ticker, asset, timeframe)
+
+            if not snapshot:
+                logger.warning(f"Could not create snapshot for {ticker}")
+                # Return empty snapshot
+                from merid.signals.market_consensus import MarketConsensusSnapshot
+                return MarketConsensusSnapshot(
+                    contract_id=ticker,
+                    asset=asset,
+                    timeframe=timeframe,
+                    consensus_action=TradingAction.NO_EDGE,
+                )
+
+            # Step 2: Collect agent opinions
+            agent_opinions = []
+            for role, agent in self.agents.items():
+                try:
+                    opinion = await self._get_agent_market_opinion(role, agent, snapshot)
+                    if opinion:
+                        agent_opinions.append(opinion)
+                except Exception as exc:
+                    logger.error(f"Error getting opinion from {role}: {exc}")
+
+            # Step 3: Form consensus using market consensus engine
+            engine = get_market_consensus_engine()
+            consensus_snapshot = await engine.form_consensus(snapshot, agent_opinions)
+
+            logger.info(
+                f"Market consensus formed for {ticker}: "
+                f"{consensus_snapshot.consensus_action.value.upper()} "
+                f"({consensus_snapshot.agreement_pct:.1f}%)"
+            )
+
+            return consensus_snapshot
+
+        except Exception as exc:
+            logger.error(f"Error forming market consensus for {ticker}: {exc}")
+            # Return empty snapshot
+            from merid.signals.market_consensus import MarketConsensusSnapshot, TradingAction
+            return MarketConsensusSnapshot(
+                contract_id=ticker,
+                asset=asset,
+                timeframe=timeframe,
+                consensus_action=TradingAction.NO_EDGE,
+            )
+
+    async def _get_agent_market_opinion(
+        self,
+        role: AgentRole,
+        agent: Any,
+        snapshot: "MarketConsensusSnapshot",
+    ) -> Optional["AgentOpinion"]:
+        """
+        Get an agent's opinion on a market snapshot.
+
+        Each agent evaluates the market data + features and returns
+        a trading action (LONG/SHORT/FLAT/NO_EDGE) with confidence.
+
+        Args:
+            role: Agent role
+            agent: Agent instance
+            snapshot: Market snapshot to evaluate
+
+        Returns:
+            AgentOpinion or None
+        """
+        from merid.signals.market_consensus import AgentOpinion, TradingAction
+
+        # Simplified opinion generation based on role
+        # In production, each agent would have sophisticated models
+
+        if not snapshot.market_data or not snapshot.features:
+            return None
+
+        market_data = snapshot.market_data
+        features = snapshot.features
+
+        action = TradingAction.NO_EDGE
+        confidence = 0.5
+        edge_estimate = 0.0
+        reasoning = []
+        primary_factors = []
+
+        if role == AgentRole.NEWS_MONITOR:
+            # News agent looks at sentiment
+            news_net = features.news_bullish_score - features.news_bearish_score
+            if news_net > 0.3:
+                action = TradingAction.LONG
+                confidence = min(0.8, 0.5 + news_net * 0.5)
+                edge_estimate = news_net * 5.0  # Rough heuristic
+                reasoning.append(f"Bullish news sentiment: {news_net:.2f}")
+                primary_factors.append("news_bullish")
+            elif news_net < -0.3:
+                action = TradingAction.SHORT
+                confidence = min(0.8, 0.5 + abs(news_net) * 0.5)
+                edge_estimate = news_net * 5.0
+                reasoning.append(f"Bearish news sentiment: {news_net:.2f}")
+                primary_factors.append("news_bearish")
+            else:
+                action = TradingAction.FLAT
+                reasoning.append("Neutral news sentiment")
+
+        elif role == AgentRole.PRICE_FEED:
+            # Price feed looks at implied prob vs fair value
+            implied = market_data.implied_prob
+            # Simple heuristic: if price is extreme, fade it
+            if implied > 0.7:
+                action = TradingAction.SHORT
+                confidence = 0.6
+                edge_estimate = (implied - 0.5) * 10
+                reasoning.append(f"Market overpriced at {implied:.0%}")
+                primary_factors.append("price_extreme")
+            elif implied < 0.3:
+                action = TradingAction.LONG
+                confidence = 0.6
+                edge_estimate = (0.5 - implied) * 10
+                reasoning.append(f"Market underpriced at {implied:.0%}")
+                primary_factors.append("price_extreme")
+
+        elif role == AgentRole.ARBITRAGE:
+            # Arbitrage looks at spread and liquidity
+            if market_data.spread_pct < 2.0 and market_data.total_depth > 100:
+                # Good liquidity → more confident
+                confidence = 0.7
+                reasoning.append("Good liquidity for execution")
+                primary_factors.append("liquidity")
+            elif market_data.spread_pct > 5.0:
+                action = TradingAction.FLAT
+                confidence = 0.8
+                reasoning.append(f"Spread too wide: {market_data.spread_pct:.1f}%")
+                primary_factors.append("poor_liquidity")
+
+        elif role == AgentRole.EXECUTION:
+            # Execution looks at feasibility
+            if market_data.total_depth > 50:
+                confidence = 0.65
+                reasoning.append("Sufficient depth for execution")
+            else:
+                action = TradingAction.FLAT
+                confidence = 0.7
+                reasoning.append("Insufficient depth")
+
+        # Add generic reasoning
+        reasoning.append(f"{role.value} evaluated {snapshot.contract_id}")
+
+        return AgentOpinion(
+            agent_id=f"{role.value}_agent",
+            agent_role=role.value,
+            action=action,
+            confidence=confidence,
+            edge_estimate_pct=edge_estimate,
+            reasoning=reasoning,
+            primary_factors=primary_factors,
+        )
+
     async def form_consensus(self, proposal: Dict[str, Any]) -> ConsensusResult:
         """
-        Form consensus among agents on a proposal.
-        
+        Form consensus among agents on a proposal (OLD general-purpose path).
+
+        NOTE: For Kalshi market trading decisions, use form_market_consensus() instead.
+        This method is preserved for backwards compatibility with other proposal types.
+
         Args:
             proposal: Proposal to vote on
-            
+
         Returns:
             ConsensusResult with voting outcome
         """
@@ -345,7 +531,8 @@ class AgentOrchestrator:
                 agents_voted=total_votes
             )
         
-        logger.info(f"Consensus formed: {'APPROVED' if approved else 'REJECTED'} ({consensus_confidence:.1%})")
+        logger.info(f"General consensus formed: {'APPROVED' if approved else 'REJECTED'} ({consensus_confidence:.1%})")
+        logger.debug("Note: For Kalshi markets, use form_market_consensus() instead")
         
         return result
     
