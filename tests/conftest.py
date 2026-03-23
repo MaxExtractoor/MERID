@@ -133,6 +133,53 @@ def missing_endpoints_client():
 
 
 # ---------------------------------------------------------------------------
+# Local lightweight import stubs (opt-in for fast local runs)
+# ---------------------------------------------------------------------------
+
+def _install_lightweight_stubs():
+    """Avoid heavy optional deps when PYTEST_LIGHT_STUBS=1."""
+    import sys
+    import types
+
+    tg_mod = types.ModuleType("telegram")
+    class _DummyBot:
+        def __init__(self, *a, **k): ...
+    tg_mod.Bot = _DummyBot
+    sys.modules.setdefault("telegram", tg_mod)
+    sys.modules.setdefault("telegram.bot", tg_mod)
+    sys.modules.setdefault("telegram.vendor", types.ModuleType("telegram.vendor"))
+    sys.modules.setdefault("telegram.utils", types.ModuleType("telegram.utils"))
+    sys.modules.setdefault("telegram.utils.request", types.ModuleType("telegram.utils.request"))
+
+    neo4j_mod = types.ModuleType("neo4j")
+    class _DummyDriver:
+        def close(self): ...
+    class _DummyGraphDatabase:
+        @staticmethod
+        def driver(*a, **k):
+            return _DummyDriver()
+    neo4j_mod.GraphDatabase = _DummyGraphDatabase
+    sys.modules.setdefault("neo4j", neo4j_mod)
+
+    # Trading mode stub to short-circuit heavy trading imports
+    trading_mod = types.ModuleType("trading")
+    trade_mode_mod = types.ModuleType("trading.trade_mode")
+    class _TradeMode(str):
+        MOCK = "mock"
+        PAPER = "paper"
+        LIVE = "live"
+    trade_mode_mod.TradeMode = _TradeMode
+    trade_mode_mod.get_trade_mode = lambda: _TradeMode.PAPER
+    trade_mode_mod.set_trade_mode = lambda mode, reason="": _TradeMode.PAPER
+    sys.modules.setdefault("trading.trade_mode", trade_mode_mod)
+    sys.modules.setdefault("trading", trading_mod)
+
+
+if os.getenv("PYTEST_LIGHT_STUBS") == "1":
+    _install_lightweight_stubs()
+
+
+# ---------------------------------------------------------------------------
 # Dev Swarm xdist invariant fixtures
 # ---------------------------------------------------------------------------
 

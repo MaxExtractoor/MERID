@@ -177,7 +177,7 @@ class KalshiMarketCatalog:
         self,
         client: Optional[KalshiVenueClient] = None,
         refresh_interval_s: float = 300.0,
-        max_markets: int = 2000,
+        max_markets: int = 200,
     ):
         self._client = client or KalshiVenueClient(KalshiConfig())
         self._refresh_interval = refresh_interval_s
@@ -299,10 +299,22 @@ class KalshiMarketCatalog:
             self._last_refresh = now
             self._refresh_count += 1
 
+            btc_markets = [m for m in enriched if m.asset == "BTC"]
+            btc_15m = [m for m in btc_markets if m.timeframe == "15m"]
+            btc_1h = [m for m in btc_markets if m.timeframe == "1h"]
+            btc_sample = [m.market.market_id for m in self.sort_by_volume(btc_markets)[:5]]
+
             _log = logger.info if enriched else logger.debug
             _log(
-                f"Catalog refreshed: {len(enriched)} markets, "
-                f"{len(cat_idx)} categories, {len(asset_idx)} assets"
+                "Catalog refreshed: %d markets, %d categories, %d assets | "
+                "btc_total=%d btc_15m=%d btc_1h=%d sample=%s",
+                len(enriched),
+                len(cat_idx),
+                len(asset_idx),
+                len(btc_markets),
+                len(btc_15m),
+                len(btc_1h),
+                btc_sample,
             )
             return len(enriched)
 
@@ -529,6 +541,20 @@ class KalshiMarketCatalog:
             "assets": {k: len(v) for k, v in self._by_asset.items()},
             "timeframes": {k: len(v) for k, v in self._by_timeframe.items()},
             "running": self._task is not None and not self._task.done(),
+            "btc": self._btc_summary(),
+        }
+
+    def _btc_summary(self) -> Dict[str, Any]:
+        """Derived BTC visibility metrics for diagnostics."""
+        btc_markets = self._by_asset.get("BTC", [])
+        btc_sorted = self.sort_by_volume(btc_markets)
+        btc_15m = [m for m in btc_markets if m.timeframe == "15m"]
+        btc_1h = [m for m in btc_markets if m.timeframe == "1h"]
+        return {
+            "total": len(btc_markets),
+            "m15": len(btc_15m),
+            "h1": len(btc_1h),
+            "sample_tickers": [m.market.market_id for m in btc_sorted[:5]],
         }
 
     def snapshot(self) -> CatalogSnapshot:

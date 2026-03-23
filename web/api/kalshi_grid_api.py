@@ -183,10 +183,17 @@ async def grid_health() -> Dict[str, Any]:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         cat = get_market_catalog()
         cat_s = cat.summary()
+        btc = cat_s.get("btc", {})
         catalog_info = {
             "market_count": cat_s.get("market_count", 0),
             "last_refresh": cat_s.get("last_refresh"),
             "categories": len(cat_s.get("categories", {})),
+            "btc_markets": {
+                "total": btc.get("total", 0),
+                "m15": btc.get("m15", 0),
+                "h1": btc.get("h1", 0),
+                "sample_tickers": btc.get("sample_tickers", []),
+            },
         }
         if catalog_info["market_count"] == 0:
             issues.append("Market catalog is empty — agents have no markets to trade")
