@@ -187,6 +187,7 @@ async def grid_health() -> Dict[str, Any]:
             "market_count": cat_s.get("market_count", 0),
             "last_refresh": cat_s.get("last_refresh"),
             "categories": len(cat_s.get("categories", {})),
+            "by_asset_timeframe": cat_s.get("by_asset_timeframe", {}),
         }
         if catalog_info["market_count"] == 0:
             issues.append("Market catalog is empty — agents have no markets to trade")

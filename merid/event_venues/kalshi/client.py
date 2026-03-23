@@ -3028,6 +3028,9 @@ class KalshiVenueClient(EventVenueClient):
             
             # Kalshi may use "subtitle" instead of "category"
             category = data.get("category") or data.get("subtitle")
+            status = data.get("status", "active") or "active"
+            status_norm = status.lower()
+            is_active = status_norm in ("active", "open")
             
             return KalshiMarket(
                 ticker=data.get("ticker", ""),
@@ -3041,8 +3044,8 @@ class KalshiVenueClient(EventVenueClient):
                 close_time=self._parse_datetime(data.get("close_time")),
                 expiration_time=self._parse_datetime(data.get("expiration_time")),
                 settlement_time=self._parse_datetime(data.get("settlement_time")),
-                active=data.get("status") == "active",
-                status=data.get("status", "active"),
+                active=is_active,
+                status=status,
                 volume=Decimal(str(data.get("volume", 0))),
                 open_interest=Decimal(str(data.get("open_interest", 0))),
                 liquidity=Decimal(str(data.get("liquidity", 0))),
@@ -3101,7 +3104,11 @@ class KalshiVenueClient(EventVenueClient):
             resolved=market.status == "settled",
             resolution=None,
             resolved_at=market.settlement_time,
-            raw_data={"series_ticker": market.series_ticker, "event_ticker": market.event_ticker}
+            raw_data={
+                "series_ticker": market.series_ticker,
+                "event_ticker": market.event_ticker,
+                "status": market.status,
+            },
         )
     
     def _to_venue_orderbook(self, data: Dict[str, Any], market_id: str) -> VenueOrderBook:

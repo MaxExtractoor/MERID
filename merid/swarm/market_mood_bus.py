@@ -304,10 +304,9 @@ class MarketMoodBus:
     async def _update_all_contexts(self):
         """Update all (asset, timeframe) contexts from buffered data."""
         assets_timeframes = [
-            ("BTC", "15m"),
-            ("BTC", "1h"),
-            ("ETH", "15m"),
-            ("ETH", "1h"),
+            (asset, tf)
+            for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE")
+            for tf in ("15m", "1h", "daily", "weekly")
         ]
         
         for asset, tf in assets_timeframes:

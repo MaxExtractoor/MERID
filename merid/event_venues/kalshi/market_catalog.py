@@ -30,8 +30,8 @@ import asyncio
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Set
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from merid.event_venues.base import EventMarket, MarketFilter
 from merid.event_venues.kalshi.client import KalshiVenueClient
@@ -39,6 +39,9 @@ from merid.event_venues.kalshi.models import KalshiConfig
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.market_catalog")
+
+CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+CRYPTO_TIMEFRAMES = ("15m", "1h", "daily", "weekly")
 
 
 # ── Ticker-prefix → category mapping (primary detection) ────────────────
@@ -149,6 +152,8 @@ class CatalogMarket:
     category: Optional[str] = None
     event_ticker: Optional[str] = None
     series_ticker: Optional[str] = None
+    status: Optional[str] = None
+    is_active: bool = True
     strike_price: Optional[float] = None
     floor_strike: Optional[float] = None
     cap_strike: Optional[float] = None
@@ -165,6 +170,7 @@ class CatalogSnapshot:
     by_category: Dict[str, int] = field(default_factory=dict)
     by_asset: Dict[str, int] = field(default_factory=dict)
     by_timeframe: Dict[str, int] = field(default_factory=dict)
+    by_asset_timeframe: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
 
 class KalshiMarketCatalog:
@@ -187,6 +193,7 @@ class KalshiMarketCatalog:
         self._by_category: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_asset: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_timeframe: Dict[str, List[CatalogMarket]] = defaultdict(list)
+        self._by_asset_timeframe: Dict[str, Dict[str, List[CatalogMarket]]] = defaultdict(lambda: defaultdict(list))
         self._by_ticker: Dict[str, CatalogMarket] = {}
 
         self._last_refresh: Optional[datetime] = None
@@ -259,13 +266,20 @@ class KalshiMarketCatalog:
             cat_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             asset_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             tf_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
+            asset_tf_idx: Dict[str, Dict[str, List[CatalogMarket]]] = defaultdict(lambda: defaultdict(list))
             ticker_idx: Dict[str, CatalogMarket] = {}
 
             categories_found = set()
             assets_found = set()
             
             for mkt in raw_markets:
-                cm = self._enrich(mkt, now)
+                raw_status = (mkt.raw_data or {}).get("status")
+                # Treat Kalshi status=open as active for discovery
+                is_active = bool(mkt.active or (raw_status and raw_status.lower() == "open"))
+                if is_active and not mkt.active:
+                    mkt.active = True
+
+                cm = self._enrich(mkt, now, raw_status=raw_status, is_active=is_active)
                 enriched.append(cm)
                 ticker_idx[mkt.market_id] = cm
 
@@ -277,6 +291,8 @@ class KalshiMarketCatalog:
                     assets_found.add(cm.asset)
                 if cm.timeframe:
                     tf_idx[cm.timeframe].append(cm)
+                if cm.asset and cm.timeframe:
+                    asset_tf_idx[cm.asset][cm.timeframe].append(cm)
             
             # Debug logging for first refresh to see what's happening
             if self._refresh_count == 0 and enriched:
@@ -295,6 +311,7 @@ class KalshiMarketCatalog:
             self._by_category = cat_idx
             self._by_asset = asset_idx
             self._by_timeframe = tf_idx
+            self._by_asset_timeframe = asset_tf_idx
             self._by_ticker = ticker_idx
             self._last_refresh = now
             self._refresh_count += 1
@@ -304,11 +321,19 @@ class KalshiMarketCatalog:
                 f"Catalog refreshed: {len(enriched)} markets, "
                 f"{len(cat_idx)} categories, {len(asset_idx)} assets"
             )
+            self._log_crypto_coverage(enriched)
             return len(enriched)
 
     # ── Enrichment ───────────────────────────────────────────────────────
 
-    def _enrich(self, mkt: EventMarket, now: datetime) -> CatalogMarket:
+    def _enrich(
+        self,
+        mkt: EventMarket,
+        now: datetime,
+        *,
+        raw_status: Optional[str] = None,
+        is_active: bool = True,
+    ) -> CatalogMarket:
         """Tag a raw EventMarket with asset, timeframe, type, and strikes."""
         # Extract event_ticker / series_ticker from raw_data
         raw = mkt.raw_data or {}
@@ -321,7 +346,14 @@ class KalshiMarketCatalog:
         # 2. Secondary detection: text-based patterns
         text = f"{mkt.market_id} {event_ticker} {mkt.question or ''} {mkt.description or ''} {mkt.category or ''}"
         text_asset = self._detect_asset(text)
-        timeframe = self._detect_timeframe(text, mkt.end_date, now)
+        timeframe = self._detect_timeframe(
+            text,
+            mkt.end_date,
+            now,
+            event_ticker=event_ticker,
+            series_ticker=series_ticker,
+            market_id=mkt.market_id,
+        )
         market_type = self._detect_type(text)
         strikes = self._detect_strikes(text)
 
@@ -341,6 +373,8 @@ class KalshiMarketCatalog:
             category=category,
             event_ticker=event_ticker or None,
             series_ticker=series_ticker or None,
+            status=raw_status,
+            is_active=is_active,
             strike_price=strikes.get("strike"),
             floor_strike=strikes.get("floor"),
             cap_strike=strikes.get("cap"),
@@ -398,7 +432,25 @@ class KalshiMarketCatalog:
         text: str,
         end_date: Optional[datetime],
         now: datetime,
+        *,
+        event_ticker: str = "",
+        series_ticker: str = "",
+        market_id: str = "",
     ) -> Optional[str]:
+        ticker_text = f"{event_ticker} {series_ticker} {market_id}"
+        ticker_text_upper = ticker_text.upper()
+        # Direct ticker hints (e.g., KXBTC-15M, KXBTC-1H, KXBTC-W)
+        if re.search(r"(?:^|[-_])15M\b", ticker_text_upper) or "15MIN" in ticker_text_upper:
+            return "15m"
+        if re.search(r"(?:^|[-_])1H\b", ticker_text_upper) or "HOURLY" in ticker_text_upper:
+            return "1h"
+        if re.search(r"(?:^|[-_])H1\b", ticker_text_upper):
+            return "1h"
+        if re.search(r"(?:^|[-_])D\b", ticker_text_upper) or "DAILY" in ticker_text_upper:
+            return "daily"
+        if re.search(r"(?:^|[-_])W\b", ticker_text_upper) or "WEEK" in ticker_text_upper:
+            return "weekly"
+
         # First try text patterns
         for pat, tf in _TIMEFRAME_PATTERNS:
             if pat.search(text):
@@ -517,6 +569,21 @@ class KalshiMarketCatalog:
         """List all detected timeframes."""
         return sorted(self._by_timeframe.keys())
 
+    def counts_by_asset_timeframe(self) -> Dict[str, Dict[str, int]]:
+        """Return counts grouped by asset and timeframe."""
+        return {
+            asset: {tf: len(markets) for tf, markets in tf_map.items()}
+            for asset, tf_map in self._by_asset_timeframe.items()
+        }
+
+    async def get_active_markets(self) -> List[CatalogMarket]:
+        """Return markets considered active (status open or active flag)."""
+        async with self._lock:
+            return [
+                m for m in self._markets
+                if m.is_active or m.market.active
+            ]
+
     # ── Status ───────────────────────────────────────────────────────────
 
     def summary(self) -> Dict[str, Any]:
@@ -528,6 +595,7 @@ class KalshiMarketCatalog:
             "categories": {k: len(v) for k, v in self._by_category.items()},
             "assets": {k: len(v) for k, v in self._by_asset.items()},
             "timeframes": {k: len(v) for k, v in self._by_timeframe.items()},
+            "by_asset_timeframe": self.counts_by_asset_timeframe(),
             "running": self._task is not None and not self._task.done(),
         }
 
@@ -540,6 +608,27 @@ class KalshiMarketCatalog:
             by_category={k: len(v) for k, v in self._by_category.items()},
             by_asset={k: len(v) for k, v in self._by_asset.items()},
             by_timeframe={k: len(v) for k, v in self._by_timeframe.items()},
+            by_asset_timeframe=self.counts_by_asset_timeframe(),
+        )
+
+    def _log_crypto_coverage(self, markets: List[CatalogMarket]) -> None:
+        """Log per-asset/timeframe crypto coverage each refresh."""
+        counts = self.counts_by_asset_timeframe()
+        parts = []
+        for asset in CRYPTO_ASSETS:
+            tf_counts = counts.get(asset, {})
+            total = sum(tf_counts.values())
+            tf_part = ", ".join(
+                f"{tf}:{tf_counts.get(tf, 0)}" for tf in CRYPTO_TIMEFRAMES if tf_counts.get(tf, 0) or total
+            )
+            parts.append(f"{asset}={total} [{tf_part}]")
+        status_open = sum(1 for m in markets if (m.status or "").lower() == "open")
+        status_active = sum(1 for m in markets if m.is_active)
+        logger.info(
+            "Crypto coverage — %s | status=open:%d active:%d",
+            "; ".join(parts),
+            status_open,
+            status_active,
         )
 
 
