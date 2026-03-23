@@ -93,19 +93,29 @@ class KalshiExecutor:
     ) -> TradeResult:
         """Submit an order to Kalshi via the canonical venue client."""
         meta = metadata or {}
+        _ctx = meta.get("cycle_id") or meta.get("agent_name") or symbol
 
         # Kill switch hard gate — fail-CLOSED on any error
         try:
             from merid.risk.kill_switches import risk_controller
             if not risk_controller.can_trade():
                 reason = risk_controller.get_kill_reason() or "kill_switch_active"
+                logger.warning(
+                    "[kalshi.execute_trade:%s] blocked by kill-switch: %s",
+                    _ctx,
+                    reason,
+                )
                 return TradeResult(
                     success=False, venue=self.venue, symbol=symbol,
                     side=side, size=amount, price=price or 0.0,
                     error=f"Trading halted: {reason}", metadata={},
                 )
         except Exception as exc:
-            logger.error("Kill-switch unavailable — blocking order (fail-closed): %s", exc)
+            logger.error(
+                "[kalshi.execute_trade:%s] Kill-switch unavailable — blocking order (fail-closed): %s",
+                _ctx,
+                exc,
+            )
             return TradeResult(
                 success=False, venue=self.venue, symbol=symbol,
                 side=side, size=amount, price=price or 0.0,
@@ -117,6 +127,11 @@ class KalshiExecutor:
             from merid.prediction.venue_gate import get_venue_gate
             _gate = get_venue_gate()
             if _gate.should_simulate_fill():
+                logger.info(
+                    "[kalshi.execute_trade:%s] VenueGate blocked live order: mode=%s",
+                    _ctx,
+                    _gate.mode.value,
+                )
                 return TradeResult(
                     success=False, venue=self.venue, symbol=symbol,
                     side=side, size=amount, price=price or 0.0,
@@ -124,7 +139,11 @@ class KalshiExecutor:
                     metadata={"simulated": True},
                 )
         except Exception as _vge:
-            logger.error("VenueGate unavailable — blocking order (fail-closed): %s", _vge)
+            logger.error(
+                "[kalshi.execute_trade:%s] VenueGate unavailable — blocking order (fail-closed): %s",
+                _ctx,
+                _vge,
+            )
             return TradeResult(
                 success=False, venue=self.venue, symbol=symbol,
                 side=side, size=amount, price=price or 0.0,
@@ -141,13 +160,22 @@ class KalshiExecutor:
                 contracts=int(amount), price_cents=price_cents,
             )
             if not _allowed:
+                logger.info(
+                    "[kalshi.execute_trade:%s] KalshiRiskManager blocked order: %s",
+                    _ctx,
+                    _reason,
+                )
                 return TradeResult(
                     success=False, venue=self.venue, symbol=symbol,
                     side=side, size=amount, price=price or 0.0,
                     error=f"Risk check blocked: {_reason}", metadata={},
                 )
         except Exception as _rke:
-            logger.error("KalshiRiskManager unavailable — blocking order (fail-closed): %s", _rke)
+            logger.error(
+                "[kalshi.execute_trade:%s] KalshiRiskManager unavailable — blocking order (fail-closed): %s",
+                _ctx,
+                _rke,
+            )
             return TradeResult(
                 success=False, venue=self.venue, symbol=symbol,
                 side=side, size=amount, price=price or 0.0,
@@ -161,6 +189,11 @@ class KalshiExecutor:
                 from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
                 _dep = get_deployment_controller()._agents.get(_agent_name)
                 if _dep and _dep.mode in (AgentMode.HALTED, AgentMode.PAPER):
+                    logger.info(
+                        "[kalshi.execute_trade:%s] Deployment gate blocked: %s",
+                        _ctx,
+                        _dep.mode.value,
+                    )
                     return TradeResult(
                         success=False, venue=self.venue, symbol=symbol,
                         side=side, size=amount, price=price or 0.0,
@@ -168,7 +201,11 @@ class KalshiExecutor:
                         metadata={},
                     )
             except Exception as _dce:
-                logger.error("DeploymentController unavailable — blocking order (fail-closed): %s", _dce)
+                logger.error(
+                    "[kalshi.execute_trade:%s] DeploymentController unavailable — blocking order (fail-closed): %s",
+                    _ctx,
+                    _dce,
+                )
                 return TradeResult(
                     success=False, venue=self.venue, symbol=symbol,
                     side=side, size=amount, price=price or 0.0,
@@ -203,6 +240,13 @@ class KalshiExecutor:
         )
 
         if not result.success:
+            logger.error(
+                "[kalshi.execute_trade:%s] Order rejected: %s (retries=%s, latency_ms=%s)",
+                _ctx,
+                result.error,
+                result.retries,
+                result.latency_ms,
+            )
             return TradeResult(
                 success=False,
                 venue=self.venue,

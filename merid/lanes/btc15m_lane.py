@@ -661,10 +661,10 @@ class BTC15MLane:
                 return result
 
             # 1. Market data
-            markets = await self._fetch_market_data()
+            markets, discovery = await self._fetch_market_data(cycle_id=cycle_id)
             result.markets_found = len(markets)
             if not markets:
-                result.blocked_reason = "no_markets_found"
+                result.blocked_reason = discovery.get("reason", "no_markets_found")
                 return result
 
             # Track strike_price history for ATR (real price proxy, not sentiment)
@@ -780,7 +780,11 @@ class BTC15MLane:
     # Step 1 — Market data (phase-gated)
     # ------------------------------------------------------------------
 
-    async def _fetch_market_data(self) -> List[Dict[str, Any]]:
+    async def _fetch_market_data(
+        self,
+        *,
+        cycle_id: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Discover active Kalshi markets for the configured asset/timeframe.
 
@@ -788,34 +792,65 @@ class BTC15MLane:
           - Asset must be in phase.unlocked_assets
           - Timeframe must be in phase.unlocked_timeframes
 
-        Returns list of normalised market dicts sorted by volume desc.
+        Returns tuple of (markets, diagnostics) where markets are sorted by
+        volume desc and diagnostics captures funnel counts and reasons.
         """
+        diagnostics: Dict[str, Any] = {"reason": None, "stage": "start"}
         asset = self.config.asset
         timeframe = self.config.timeframe
 
         # Phase gate — silently return empty if not yet unlocked
         if self._promotion_engine is not None:
             if not self._promotion_engine.is_asset_unlocked(asset):
-                logger.debug(
-                    "_fetch_market_data: asset %s not unlocked in phase %s",
-                    asset, self._promotion_engine.current_phase.name,
+                diagnostics["reason"] = "phase_locked_asset"
+                diagnostics["phase"] = self._promotion_engine.current_phase.name
+                logger.info(
+                    "[%s] market_discovery blocked: asset %s locked in phase %s",
+                    cycle_id or "btc15m",
+                    asset,
+                    self._promotion_engine.current_phase.name,
                 )
-                return []
+                return [], diagnostics
             if not self._promotion_engine.is_timeframe_unlocked(timeframe):
-                logger.debug(
-                    "_fetch_market_data: timeframe %s not unlocked in phase %s",
-                    timeframe, self._promotion_engine.current_phase.name,
+                diagnostics["reason"] = "phase_locked_timeframe"
+                diagnostics["phase"] = self._promotion_engine.current_phase.name
+                logger.info(
+                    "[%s] market_discovery blocked: timeframe %s locked in phase %s",
+                    cycle_id or "btc15m",
+                    timeframe,
+                    self._promotion_engine.current_phase.name,
                 )
-                return []
+                return [], diagnostics
 
         try:
-            catalog_markets = self._catalog.get_markets_by_asset(
-                asset,
-                timeframe=timeframe,
-            )
+            raw_catalog = self._catalog.get_all_markets() if self._catalog else []
+            raw_count = len(raw_catalog)
+            btc_catalog = self._catalog.get_markets_by_asset(asset) if self._catalog else []
+            btc_count = len(btc_catalog)
+            tf_catalog = [m for m in btc_catalog if m.timeframe == timeframe]
+            tf_count = len(tf_catalog)
+            sorted_tf = self._catalog.sort_by_volume(tf_catalog) if self._catalog else []
+            selected = sorted_tf[: self.config.max_markets_per_cycle]
+
+            diagnostics.update({
+                "stage": "filtered",
+                "raw_markets": raw_count,
+                "btc_markets": btc_count,
+                "timeframe_markets": tf_count,
+                "selected": len(selected),
+            })
+
+            if raw_count == 0:
+                diagnostics["reason"] = "api_empty"
+            elif btc_count == 0:
+                diagnostics["reason"] = "no_btc_markets"
+            elif tf_count == 0:
+                diagnostics["reason"] = "no_btc_timeframe"
+            elif len(selected) == 0:
+                diagnostics["reason"] = "volume_filter"
 
             markets = []
-            for cm in catalog_markets:
+            for cm in selected:
                 vol = float(cm.market.volume) if cm.market.volume else 0.0
                 markets.append({
                     "ticker": cm.market.market_id,
@@ -829,18 +864,23 @@ class BTC15MLane:
                     "raw": cm.market.raw_data,
                 })
 
-            markets.sort(key=lambda m: m["volume"], reverse=True)
-            markets = markets[: self.config.max_markets_per_cycle]
-
-            logger.debug(
-                "Fetched %d %s %s markets (phase=%s)",
-                len(markets), asset, timeframe,
-                self._promotion_engine.current_phase.name if self._promotion_engine else "?",
+            logger.info(
+                "[%s] market_discovery: raw=%d btc=%d %s=%d selected=%d sample=%s",
+                cycle_id or "btc15m",
+                raw_count,
+                btc_count,
+                timeframe,
+                tf_count,
+                len(markets),
+                [m["ticker"] for m in markets][:3],
             )
-            return markets
+
+            return markets, diagnostics
         except Exception as exc:
-            logger.error("_fetch_market_data failed: %s", exc)
-            return []
+            diagnostics["reason"] = "api_failure"
+            diagnostics["error"] = str(exc)
+            logger.error("[%s] _fetch_market_data failed: %s", cycle_id or "btc15m", exc)
+            return [], diagnostics
 
     # ------------------------------------------------------------------
     # Step 2 — Sentiment
