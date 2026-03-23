@@ -8,6 +8,7 @@ Key differences from old news consensus:
 - Produces **trading actions** not binary approve/reject
 - Considers **liquidity, fees, and risk** in final decision
 - Logs show **market decisions** not "news rejected"
+- Persists decisions to database for reflection & learning
 
 Flow:
 1. Receive MarketConsensusSnapshot with market data + features
@@ -16,6 +17,7 @@ Flow:
 4. Apply risk filters (liquidity, position limits, fees)
 5. Output final consensus: LONG/SHORT/FLAT/NO_EDGE
 6. Log market decision with edge and confidence
+7. Persist decision to SignalStore for learning
 """
 
 from __future__ import annotations
@@ -43,6 +45,11 @@ class MarketConsensusEngine:
     - Edge threshold: Consensus edge must exceed fees + spread
     - Liquidity filter: Spread must be < 5% of mid
     - No trade default: If no clear consensus, action = NO_EDGE
+
+    Persistence:
+    - All consensus decisions are persisted to SignalStore
+    - Can be updated later with execution and settlement data
+    - Used for reflection, learning, and performance tracking
     """
 
     def __init__(
@@ -52,12 +59,14 @@ class MarketConsensusEngine:
         min_edge_pct: float = 2.0,
         max_spread_pct: float = 5.0,
         kalshi_fee_pct: float = 0.7,  # Kalshi takes 7% of winnings = ~0.7% of notional
+        persist_decisions: bool = True,
     ):
         self.min_quorum_pct = min_quorum_pct
         self.min_agreement_pct = min_agreement_pct
         self.min_edge_pct = min_edge_pct
         self.max_spread_pct = max_spread_pct
         self.kalshi_fee_pct = kalshi_fee_pct
+        self.persist_decisions = persist_decisions
 
         self._consensus_history: List[MarketConsensusSnapshot] = []
 
@@ -129,7 +138,27 @@ class MarketConsensusEngine:
         # Store in history
         self._consensus_history.append(snapshot)
 
+        # Persist to database
+        if self.persist_decisions:
+            self._persist_decision(snapshot)
+
         return snapshot
+
+    def _persist_decision(self, snapshot: MarketConsensusSnapshot) -> None:
+        """Persist consensus decision to SignalStore for reflection & learning."""
+        try:
+            from merid.signals.store import get_signal_store
+
+            # Create MarketConsensusDecision
+            decision = MarketConsensusDecision(snapshot=snapshot)
+
+            # Store in database
+            store = get_signal_store()
+            store.store_market_consensus_decision(decision.to_dict())
+
+            logger.debug(f"Persisted decision: {decision.decision_id}")
+        except Exception as e:
+            logger.warning(f"Failed to persist decision for {snapshot.contract_id}: {e}")
 
     # ── Vote aggregation ──────────────────────────────────────────────────
 
