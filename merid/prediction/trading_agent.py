@@ -519,9 +519,32 @@ class KalshiTradingAgent:
                 self.logger.debug(f"Market resolution failed: {result.error_message}")
                 return
 
+            payload = result.payload or {}
+            raw_markets = payload.get("markets", [])
+
+            if not raw_markets:
+                catalog_counts = payload.get("catalog_counts", {})
+                crypto_counts = {
+                    a: catalog_counts.get("by_asset_timeframe", {}).get(a, {})
+                    for a in ("BTC", "ETH", "SOL", "XRP", "DOGE")
+                }
+                self.logger.info(
+                    "No tradeable markets found | agent=%s category=%s asset=%s timeframe=%s "
+                    "| catalog assets=%s timeframes=%s crypto=%s",
+                    self.config.name,
+                    category,
+                    asset or "*",
+                    timeframe or "*",
+                    catalog_counts.get("by_asset"),
+                    catalog_counts.get("by_timeframe"),
+                    crypto_counts,
+                )
+                self._resolved_markets = []
+                return
+
             # Convert tool result back to EventMarket-like objects for strategy
             self._resolved_markets = []
-            for m in result.payload.get("markets", []):
+            for m in raw_markets:
                 from merid.event_venues.base import EventMarket, EventOutcome
                 outcomes = [
                     EventOutcome(

@@ -40,6 +40,9 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.market_catalog")
 
+_CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+_CRYPTO_TIMEFRAMES = ("15m", "1h", "daily", "weekly", "monthly", "yearly")
+
 
 # ── Ticker-prefix → category mapping (primary detection) ────────────────
 # Kalshi API v2 returns no 'category' field on markets. The event_ticker
@@ -138,6 +141,15 @@ _TYPE_PATTERNS = [
     (re.compile(r"will.*reach|hit|cross", re.I), "binary"),
 ]
 
+_CRYPTO_TF_PATTERNS = [
+    (re.compile(r"15M|15[-\s]*MIN", re.I), "15m"),
+    (re.compile(r"\b1H\b|\bH1\b|-H\b|HOURLY|HOUR", re.I), "1h"),
+    (re.compile(r"\bDAILY\b|\b1D\b|-D\b", re.I), "daily"),
+    (re.compile(r"\bWEEK(LY)?\b|-W\b", re.I), "weekly"),
+    (re.compile(r"\bMONTH(LY)?\b|\b-?MTH\b", re.I), "monthly"),
+    (re.compile(r"\bYEAR(LY)?\b|\b-?Y\b", re.I), "yearly"),
+]
+
 
 @dataclass
 class CatalogMarket:
@@ -165,6 +177,7 @@ class CatalogSnapshot:
     by_category: Dict[str, int] = field(default_factory=dict)
     by_asset: Dict[str, int] = field(default_factory=dict)
     by_timeframe: Dict[str, int] = field(default_factory=dict)
+    by_asset_timeframe: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
 
 class KalshiMarketCatalog:
@@ -299,6 +312,19 @@ class KalshiMarketCatalog:
             self._last_refresh = now
             self._refresh_count += 1
 
+            if cat_idx.get("crypto"):
+                crypto_counts = self.counts_by_asset_timeframe(_CRYPTO_ASSETS, _CRYPTO_TIMEFRAMES)
+                msg_parts = []
+                for asset in _CRYPTO_ASSETS:
+                    total = len(asset_idx.get(asset, []))
+                    tf_counts = crypto_counts.get(asset, {})
+                    tf_snippets = ", ".join(
+                        f"{tf}={tf_counts.get(tf, 0)}"
+                        for tf in ("15m", "1h", "daily")
+                    )
+                    msg_parts.append(f"{asset}:{total} ({tf_snippets})")
+                logger.info("Catalog crypto coverage: %s", " | ".join(msg_parts))
+
             _log = logger.info if enriched else logger.debug
             _log(
                 f"Catalog refreshed: {len(enriched)} markets, "
@@ -315,19 +341,22 @@ class KalshiMarketCatalog:
         event_ticker = raw.get("event_ticker", "") or ""
         series_ticker = raw.get("series_ticker", "") or ""
 
+        # Crypto-specific detection from tickers (first-class path)
+        crypto_asset, crypto_tf = self._detect_crypto_from_tickers(event_ticker, series_ticker)
+
         # 1. Primary detection: ticker prefix → category + asset
         ticker_category, ticker_asset = self._detect_from_ticker(event_ticker or mkt.market_id)
 
         # 2. Secondary detection: text-based patterns
         text = f"{mkt.market_id} {event_ticker} {mkt.question or ''} {mkt.description or ''} {mkt.category or ''}"
         text_asset = self._detect_asset(text)
-        timeframe = self._detect_timeframe(text, mkt.end_date, now)
+        timeframe = crypto_tf or self._detect_timeframe(text, mkt.end_date, now)
         market_type = self._detect_type(text)
         strikes = self._detect_strikes(text)
 
         # Merge: ticker-prefix wins for category; first non-None wins for asset
         category = mkt.category or ticker_category
-        asset = ticker_asset or text_asset
+        asset = crypto_asset or ticker_asset or text_asset
 
         minutes_to_expiry = None
         if mkt.end_date and mkt.end_date > now:
@@ -429,6 +458,23 @@ class KalshiMarketCatalog:
                 return mtype
         return "binary"
 
+    @staticmethod
+    def _detect_crypto_from_tickers(event_ticker: str, series_ticker: str) -> tuple[Optional[str], Optional[str]]:
+        """Detect crypto asset/timeframe directly from Kalshi tickers."""
+        ticker_text = f"{event_ticker} {series_ticker}".upper()
+        asset = None
+        match = re.search(r"\bKX(BTC|ETH|SOL|XRP|DOGE)", ticker_text)
+        if match:
+            asset = match.group(1)
+
+        timeframe = None
+        for pat, tf in _CRYPTO_TF_PATTERNS:
+            if pat.search(ticker_text):
+                timeframe = tf
+                break
+
+        return asset, timeframe
+
     # ── Query methods ────────────────────────────────────────────────────
 
     def get_all_markets(self) -> List[CatalogMarket]:
@@ -469,6 +515,27 @@ class KalshiMarketCatalog:
     def get_markets_by_timeframe(self, timeframe: str) -> List[CatalogMarket]:
         """Filter markets by timeframe."""
         return self._by_timeframe.get(timeframe, [])
+
+    async def get_active_markets(
+        self,
+        category: Optional[str] = None,
+        *,
+        asset: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> List[CatalogMarket]:
+        """Return active markets, optionally filtered by category/asset/timeframe."""
+        if not self._markets:
+            await self.refresh()
+
+        markets = self.get_all_markets()
+        if category:
+            markets = [m for m in markets if m.category == category]
+        if asset:
+            markets = [m for m in markets if m.asset == asset]
+        if timeframe:
+            markets = [m for m in markets if m.timeframe == timeframe]
+
+        return [m for m in markets if getattr(m.market, "active", False)]
 
     def get_markets_by_event(self, event_keyword: str) -> List[CatalogMarket]:
         """Search markets by event keyword in question/description."""
@@ -517,6 +584,24 @@ class KalshiMarketCatalog:
         """List all detected timeframes."""
         return sorted(self._by_timeframe.keys())
 
+    def counts_by_asset_timeframe(
+        self,
+        assets: Optional[List[str]] = None,
+        timeframes: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, int]]:
+        """Return nested counts per asset/timeframe."""
+        assets = assets or self.assets()
+        timeframes = timeframes or self.timeframes()
+        counts: Dict[str, Dict[str, int]] = {}
+        for asset in assets:
+            counts[asset] = {}
+            for tf in timeframes:
+                counts[asset][tf] = len([
+                    m for m in self._by_asset.get(asset, [])
+                    if m.timeframe == tf
+                ])
+        return counts
+
     # ── Status ───────────────────────────────────────────────────────────
 
     def summary(self) -> Dict[str, Any]:
@@ -540,6 +625,7 @@ class KalshiMarketCatalog:
             by_category={k: len(v) for k, v in self._by_category.items()},
             by_asset={k: len(v) for k, v in self._by_asset.items()},
             by_timeframe={k: len(v) for k, v in self._by_timeframe.items()},
+            by_asset_timeframe=self.counts_by_asset_timeframe(),
         )
 
 

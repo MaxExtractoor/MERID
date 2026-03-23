@@ -303,12 +303,21 @@ class MarketMoodBus:
     
     async def _update_all_contexts(self):
         """Update all (asset, timeframe) contexts from buffered data."""
+        default_assets = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+        default_timeframes = ("15m", "1h", "daily", "weekly")
         assets_timeframes = [
-            ("BTC", "15m"),
-            ("BTC", "1h"),
-            ("ETH", "15m"),
-            ("ETH", "1h"),
+            (asset, tf) for asset in default_assets for tf in default_timeframes
         ]
+
+        # Include any dynamically seen asset/timeframe pairs from Kalshi buffer
+        for key in list(self._kalshi_buffer.keys()):
+            try:
+                asset, tf = key.split(":")
+                pair = (asset, tf)
+                if pair not in assets_timeframes:
+                    assets_timeframes.append(pair)
+            except ValueError:
+                continue
         
         for asset, tf in assets_timeframes:
             context = self._build_context(asset, tf)
