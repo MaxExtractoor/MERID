@@ -283,40 +283,58 @@ class KalshiTradingAgent:
                 # Record every signal (including NO_ACTION) for audit
                 self._record_signal(market, signal, snapshot, now)
 
-                # === Submit to SwarmConsensusAggregator ===
+                # === NEW: Market Consensus Flow (Kalshi-centric) ===
                 # Only actionable signals go to consensus
                 if signal.action not in (SignalAction.NO_ACTION, SignalAction.HOLD):
-                    self._submit_to_consensus(market, signal, snapshot, mood_context)
-                    
-                    # Check if we have consensus before acting
-                    consensus = self._get_consensus(asset, timeframe)
-                    if consensus and consensus.status.value == "ready":
-                        # Check if consensus direction matches our signal
-                        signal_dir = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
-                        if consensus.consensus_direction != signal_dir:
-                            self.logger.info(
-                                f"Signal {signal_dir} blocked: consensus is {consensus.consensus_direction} "
-                                f"(conf={consensus.consensus_confidence:.2f})"
-                            )
-                            continue
-                        
-                        # Use consensus confidence for sizing
-                        if signal.edge and hasattr(signal.edge, 'confidence'):
-                            signal.edge.confidence = consensus.consensus_confidence
-                        
+                    # Form market consensus using the new market-centric flow
+                    market_consensus = await self._form_market_consensus(
+                        market.market_id, asset, timeframe
+                    )
+
+                    if not market_consensus:
+                        self.logger.debug("No market consensus available, signal held")
+                        continue
+
+                    # Check if consensus action is tradeable
+                    from merid.signals.market_consensus import TradingAction
+
+                    if market_consensus.consensus_action == TradingAction.NO_EDGE:
                         self.logger.info(
-                            f"Consensus aligned: {consensus.consensus_direction} @ "
-                            f"{consensus.consensus_probability:.1%} "
-                            f"(size={consensus.size_band})"
-                        )
-                    elif consensus and consensus.status.value == "conflicted":
-                        self.logger.info(
-                            f"Signal blocked: swarm conflicted - {consensus.disagreement_flags}"
+                            f"Market consensus: NO_EDGE - no tradeable opportunity "
+                            f"(agreement={market_consensus.agreement_pct:.1f}%)"
                         )
                         continue
-                    elif not consensus:
-                        self.logger.debug("No consensus yet, signal held")
+
+                    if market_consensus.consensus_action == TradingAction.FLAT:
+                        self.logger.info(
+                            f"Market consensus: FLAT - close/avoid position "
+                            f"(agreement={market_consensus.agreement_pct:.1f}%)"
+                        )
                         continue
+
+                    # Check if consensus direction aligns with our signal
+                    signal_is_long = signal.action in (SignalAction.BUY_YES, SignalAction.SELL_NO)
+                    consensus_is_long = market_consensus.consensus_action == TradingAction.LONG
+
+                    if signal_is_long != consensus_is_long:
+                        self.logger.info(
+                            f"Signal blocked: consensus direction mismatch - "
+                            f"signal={'LONG' if signal_is_long else 'SHORT'}, "
+                            f"consensus={market_consensus.consensus_action.value.upper()} "
+                            f"(agreement={market_consensus.agreement_pct:.1f}%)"
+                        )
+                        continue
+
+                    # Use consensus confidence for sizing
+                    if signal.edge and hasattr(signal.edge, 'confidence'):
+                        signal.edge.confidence = market_consensus.consensus_confidence
+
+                    self.logger.info(
+                        f"Market consensus: {market_consensus.consensus_action.value.upper()} "
+                        f"(agreement={market_consensus.agreement_pct:.1f}%, "
+                        f"confidence={market_consensus.consensus_confidence:.2f}, "
+                        f"edge={market_consensus.consensus_edge_pct:+.2f}%)"
+                    )
             except Exception as exc:
                 self.logger.warning(f"Error evaluating {market.market_id}: {exc}")
                 continue
@@ -1474,103 +1492,46 @@ class KalshiTradingAgent:
             self.logger.debug(f"MarketMoodBus fetch error: {exc}")
             return None
 
-    def _submit_to_consensus(
+    async def _form_market_consensus(
         self,
-        market: EventMarket,
-        signal: StrategySignal,
-        snapshot: MarketSnapshot,
-        mood_context: Optional[Any],
-    ) -> None:
-        """Submit agent proposal to SwarmConsensusAggregator."""
-        try:
-            from merid.swarm.consensus_aggregator import (
-                get_consensus_aggregator,
-                AgentProposal,
-            )
-            from datetime import datetime
-
-            # Determine direction from signal action
-            direction_map = {
-                SignalAction.BUY_YES: "yes",
-                SignalAction.SELL_YES: "yes",
-                SignalAction.BUY_NO: "no",
-                SignalAction.SELL_NO: "no",
-            }
-            direction = direction_map.get(signal.action, "neutral")
-
-            # Get probability from signal edge or snapshot
-            prob = 0.5
-            if signal.edge and hasattr(signal.edge, 'yes_prob'):
-                prob = float(signal.edge.yes_prob)
-            elif snapshot.implied:
-                prob = float(snapshot.implied.yes_prob)
-
-            # Get confidence
-            conf = 0.5
-            if signal.edge and hasattr(signal.edge, 'confidence'):
-                conf = float(signal.edge.confidence)
-
-            # Determine size preference
-            size_pref = "base"
-            if mood_context and hasattr(mood_context, 'should_reduce_size'):
-                if mood_context.should_reduce_size():
-                    size_pref = "reduced"
-
-            # Get track record if available
-            track_record = None
-            try:
-                from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
-                tracker = get_agent_performance_tracker()
-                metrics = tracker.get_agent_metrics(self.agent_id)
-                if metrics:
-                    track_record = {
-                        "win_rate": metrics.get("win_rate", 0.5),
-                        "sharpe_ratio": metrics.get("sharpe_ratio", 1.0),
-                    }
-            except Exception as _tre:
-                self.logger.debug("track_record lookup skipped: %s", _tre)
-
-            # Build proposal
-            asset = self.config.assets[0] if self.config.assets else ""
-            timeframe = self.config.timeframes[0] if self.config.timeframes else ""
-
-            proposal = AgentProposal(
-                agent_id=self.agent_id,
-                asset=asset,
-                timeframe=timeframe,
-                direction=direction,
-                probability=prob,
-                confidence=conf,
-                size_preference=size_pref,
-                rationale=str(signal.action),
-                edge_estimate=float(signal.edge.net_edge * 100) if signal.edge else 0.0,
-                timestamp=datetime.now(timezone.utc),
-                agent_archetype=self.config.archetype,
-                agent_track_record=track_record,
-            )
-
-            # Submit to aggregator
-            aggregator = get_consensus_aggregator()
-            aggregator.submit_proposal(proposal)
-
-            self.logger.debug(
-                f"Submitted proposal to consensus: {direction} @ {prob:.1%} "
-                f"(conf={conf:.2f})"
-            )
-
-        except Exception as exc:
-            self.logger.debug(f"Consensus submission error: {exc}")
-
-    def _get_consensus(
-        self,
+        ticker: str,
         asset: str,
         timeframe: str,
     ) -> Optional[Any]:
-        """Get current consensus view from SwarmConsensusAggregator."""
+        """
+        Form market consensus using the new market-centric flow.
+
+        Calls the agent orchestrator's form_market_consensus method which:
+        1. Creates a MarketConsensusSnapshot with market data + features
+        2. Collects agent opinions on the market
+        3. Aggregates opinions using MarketConsensusEngine
+        4. Returns snapshot with consensus action (LONG/SHORT/FLAT/NO_EDGE)
+
+        Args:
+            ticker: Kalshi contract ID
+            asset: Asset symbol (BTC, ETH, etc.)
+            timeframe: Timeframe (15m, 1h, 24h, etc.)
+
+        Returns:
+            MarketConsensusSnapshot with consensus outcome, or None on error
+        """
         try:
-            from merid.swarm.consensus_aggregator import get_consensus_aggregator
-            aggregator = get_consensus_aggregator()
-            return aggregator.get_consensus(asset, timeframe)
+            from core.agent_orchestrator import get_agent_orchestrator
+
+            orchestrator = get_agent_orchestrator()
+            if not orchestrator:
+                self.logger.debug("Agent orchestrator not available")
+                return None
+
+            # Call the new market consensus method
+            market_consensus = await orchestrator.form_market_consensus(
+                ticker=ticker,
+                asset=asset,
+                timeframe=timeframe,
+            )
+
+            return market_consensus
+
         except Exception as exc:
-            self.logger.debug(f"Consensus fetch error: {exc}")
+            self.logger.debug(f"Market consensus error: {exc}")
             return None

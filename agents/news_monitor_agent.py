@@ -1,8 +1,19 @@
 """
-News Monitor Agent for MERID.
+News Monitor Agent for MERID - Refactored as Feature Generator.
 
-Monitors crypto news feeds and automatically posts breaking news to X and Telegram.
-Production-grade implementation with real news sources.
+**NEW ROLE**: Maps news into market-relevant signals/features, NOT a consensus-driven poster.
+
+Changes from old design:
+- No longer forms consensus on "should we post this news?"
+- Instead: extracts sentiment, direction, affected assets, regime flags
+- Feeds features into MarketConsensusSnapshot for Kalshi markets
+- Agents vote on **markets** (with news as one input), not on **news items**
+
+Flow:
+1. Monitor crypto news feeds
+2. Parse headlines → extract sentiment, affected assets, regime signals
+3. Update market feature cache via KalshiMarketAggregator
+4. Optionally post to social media (decoupled from trading decisions)
 """
 
 from __future__ import annotations
@@ -35,36 +46,50 @@ class NewsItem:
 
 class NewsMonitorAgent:
     """
-    Production News Monitor Agent.
-    
-    Monitors multiple crypto news sources and automatically posts
-    breaking news to X/Twitter and Telegram based on importance.
+    News Feature Generator for MERID.
+
+    Monitors crypto news and extracts market-relevant features:
+    - Sentiment (bullish/bearish/neutral)
+    - Affected assets (BTC, ETH, SOL, etc.)
+    - Regime signals (risk-on/off, volatility spike, macro event)
+
+    Feeds features to KalshiMarketAggregator for consensus voting.
+    Optionally posts to social media (decoupled from trading).
     """
-    
+
     def __init__(self, importance_threshold: float = 0.7):
         """
         Initialize news monitor agent.
-        
+
         Args:
-            importance_threshold: Minimum importance score (0-1) to auto-post
+            importance_threshold: Minimum importance score (0-1) to process
         """
         self.news_aggregator = AggregatedNewsFeed()
         self.twitter_agent = get_twitter_agent()
         self.telegram_agent = get_telegram_agent()
-        
+
         self.importance_threshold = importance_threshold
-        self.posted_news: List[NewsItem] = []
+        self.processed_news: List[NewsItem] = []
         self.seen_urls: set = set()
-        
+
         self.running = False
         self.check_interval = 60  # Check every 60 seconds
-        
+
         # Telegram throttle settings
         self.telegram_min_interval = 300  # 5 minutes between Telegram posts
         self.last_telegram_post = 0
         self.telegram_queue: List[NewsItem] = []
-        
-        logger.info(f"News Monitor Agent initialized (threshold: {importance_threshold})")
+
+        # Sentiment cache for feature generation
+        self._asset_sentiments: Dict[str, float] = {
+            "BTC": 0.0,
+            "ETH": 0.0,
+            "SOL": 0.0,
+            "DOGE": 0.0,
+            "XRP": 0.0,
+        }
+
+        logger.info(f"News Feature Generator initialized (threshold: {importance_threshold})")
     
     async def start_monitoring(self):
         """Start continuous news monitoring."""
@@ -85,13 +110,13 @@ class NewsMonitorAgent:
         logger.info("News monitoring stopped")
     
     async def check_and_post_news(self):
-        """Check for new important news and post to social media."""
+        """Check for new important news and extract features."""
         try:
             # Process any queued Telegram posts first
             await self._process_telegram_queue()
             # Fetch latest news from all sources
             all_news_articles = self.news_aggregator.fetch_all(limit_per_source=5)
-            
+
             # Convert to dict format
             all_news = [
                 {
@@ -103,18 +128,18 @@ class NewsMonitorAgent:
                 }
                 for article in all_news_articles
             ]
-            
+
             if not all_news:
                 logger.debug("No news items fetched")
                 return
-            
+
             # Filter for new, important news
             new_important_news = []
             for news in all_news:
                 # Skip if already seen
                 if news['url'] in self.seen_urls:
                     continue
-                
+
                 # Check importance threshold
                 if news['importance'] >= self.importance_threshold:
                     news_item = NewsItem(
@@ -126,55 +151,164 @@ class NewsMonitorAgent:
                     )
                     new_important_news.append(news_item)
                     self.seen_urls.add(news['url'])
-            
-            # Post new important news
+
+            # Process new important news as features
             for news_item in new_important_news:
-                await self.post_breaking_news(news_item)
-                # Rate limiting between posts
+                await self.process_news_as_features(news_item)
+                # Rate limiting between processing
                 await asyncio.sleep(5)
-            
+
             if new_important_news:
-                logger.info(f"Posted {len(new_important_news)} breaking news items")
-            
+                logger.info(f"Processed {len(new_important_news)} news items as features")
+
         except Exception as exc:
             logger.error(f"Error checking news: {exc}")
     
-    async def post_breaking_news(self, news_item: NewsItem):
+    async def process_news_as_features(self, news_item: NewsItem):
         """
-        Post breaking news to X and Telegram via Simulation → Consensus → Post flow.
-        
-        Flow:
-        1. News → Simulation Layer (process and analyze)
-        2. Simulation → Consensus (weighted voting)
-        3. Consensus → Post to Twitter/Telegram
-        
+        Process news item and extract market-relevant features.
+
+        NEW FLOW (refactored from consensus-driven posting):
+        1. Parse headline → extract sentiment, affected assets, regime
+        2. Update market feature cache via KalshiMarketAggregator
+        3. Optionally post to social media (decoupled from trading)
+
         Args:
-            news_item: News item to post
+            news_item: News item to process
         """
         try:
-            # Step 1: Run through simulation layer
-            simulation_result = await self._run_news_simulation(news_item)
-            
-            if not simulation_result['proceed']:
-                logger.info(f"News rejected by simulation: {news_item.title[:50]}...")
-                return
-            
-            # Step 2: Get consensus from agents (using simulation results)
-            consensus_result = await self._get_consensus_for_news(news_item, simulation_result)
-            
-            if not consensus_result['approved']:
-                logger.info(f"News rejected by consensus: {news_item.title[:50]}...")
-                # Store rejection in reflection layer
-                await self._store_news_outcome(news_item, simulation_result, consensus_result, posted=False)
-                return
-            
-            # Prepare full context for posting
-            full_context = {
-                'simulation': simulation_result,
-                'consensus': consensus_result,
-                'news': news_item
-            }
-            
+            # Extract features from news
+            sentiment, affected_assets, regime = self._extract_news_features(news_item)
+
+            # Update sentiment cache for each affected asset
+            for asset in affected_assets:
+                # Apply decay to previous sentiment, blend with new
+                decay_factor = 0.7  # Previous sentiment decays
+                old_sentiment = self._asset_sentiments.get(asset, 0.0)
+                new_sentiment = old_sentiment * decay_factor + sentiment * (1 - decay_factor)
+                self._asset_sentiments[asset] = new_sentiment
+
+                logger.info(
+                    f"News feature update: {asset} sentiment {old_sentiment:+.2f} → {new_sentiment:+.2f} "
+                    f"(headline: {news_item.title[:50]}...)"
+                )
+
+            # Update market aggregator with new sentiment
+            try:
+                from merid.signals.market_aggregator import get_market_aggregator
+                aggregator = get_market_aggregator()
+
+                for asset in affected_assets:
+                    aggregator.update_news_features(asset, self._asset_sentiments[asset])
+
+            except Exception as exc:
+                logger.debug(f"Could not update market aggregator: {exc}")
+
+            # Optionally post to social media (decoupled from trading)
+            # Only post high-importance news with strong sentiment
+            if news_item.importance >= 0.8 and abs(sentiment) >= 0.5:
+                await self._post_to_social_media(news_item, sentiment, affected_assets)
+
+            # Track processed news
+            self.processed_news.append(news_item)
+
+            # Log outcome
+            logger.info(
+                f"News processed: {news_item.title[:50]} - "
+                f"Sentiment: {sentiment:+.2f}, Assets: {affected_assets}, Regime: {regime}"
+            )
+
+        except Exception as exc:
+            logger.error(f"Error processing news: {exc}")
+    
+    def get_recent_posts(self, limit: int = 10) -> List[NewsItem]:
+        """Get recently processed news items."""
+        return self.processed_news[-limit:]
+
+    def get_asset_sentiment(self, asset: str) -> float:
+        """Get current sentiment score for an asset.
+
+        Returns:
+            Sentiment score from -1 (bearish) to +1 (bullish)
+        """
+        return self._asset_sentiments.get(asset, 0.0)
+
+    def _extract_news_features(self, news_item: NewsItem) -> tuple:
+        """Extract features from news headline.
+
+        Returns:
+            (sentiment, affected_assets, regime)
+            - sentiment: -1 to +1 (bearish to bullish)
+            - affected_assets: List of asset symbols
+            - regime: "risk_on", "risk_off", "neutral", "vol_spike"
+        """
+        title_lower = news_item.title.lower()
+
+        # Sentiment extraction (simple keyword-based)
+        bullish_keywords = [
+            "surge", "rally", "breakout", "bullish", "buy", "up",
+            "gain", "rise", "soar", "jump", "pump", "moon",
+            "adoption", "partnership", "upgrade", "optimistic"
+        ]
+        bearish_keywords = [
+            "crash", "dump", "plunge", "bearish", "sell", "down",
+            "drop", "fall", "collapse", "fear", "ban", "hack",
+            "scam", "warning", "risk", "concern", "regulation"
+        ]
+
+        sentiment = 0.0
+        for keyword in bullish_keywords:
+            if keyword in title_lower:
+                sentiment += 0.15
+        for keyword in bearish_keywords:
+            if keyword in title_lower:
+                sentiment -= 0.15
+
+        # Clamp to -1, +1
+        sentiment = max(-1.0, min(1.0, sentiment))
+
+        # Asset extraction
+        asset_keywords = {
+            "BTC": ["bitcoin", "btc"],
+            "ETH": ["ethereum", "eth", "ether"],
+            "SOL": ["solana", "sol"],
+            "DOGE": ["dogecoin", "doge"],
+            "XRP": ["ripple", "xrp"],
+        }
+
+        affected_assets = []
+        for asset, keywords in asset_keywords.items():
+            if any(kw in title_lower for kw in keywords):
+                affected_assets.append(asset)
+
+        # Default to BTC if no specific asset mentioned
+        if not affected_assets:
+            affected_assets = ["BTC"]
+
+        # Regime extraction
+        regime = "neutral"
+        if any(kw in title_lower for kw in ["fed", "interest", "inflation", "cpi", "macro"]):
+            regime = "risk_off" if sentiment < 0 else "risk_on"
+        elif any(kw in title_lower for kw in ["volatility", "spike", "flash", "crash"]):
+            regime = "vol_spike"
+        elif sentiment > 0.3:
+            regime = "risk_on"
+        elif sentiment < -0.3:
+            regime = "risk_off"
+
+        return sentiment, affected_assets, regime
+
+    async def _post_to_social_media(
+        self,
+        news_item: NewsItem,
+        sentiment: float,
+        affected_assets: List[str],
+    ):
+        """Post news to social media (decoupled from trading decisions).
+
+        Only posts high-importance, high-sentiment news.
+        """
+        try:
             # Post to Twitter (no throttle)
             if self.twitter_agent.enabled:
                 tweet = self.twitter_agent.post_breaking_news(
@@ -185,20 +319,25 @@ class NewsMonitorAgent:
                 if tweet:
                     news_item.posted_twitter = True
                     logger.info(f"Posted to Twitter: {news_item.title[:50]}...")
-            
+
             # Post to Telegram with throttle
             if self.telegram_agent.enabled:
                 current_time = time.time()
                 time_since_last = current_time - self.last_telegram_post
-                
+
                 if time_since_last >= self.telegram_min_interval:
-                    # Build detailed message with simulation and consensus data
-                    message_text = self._build_detailed_message(
-                        news_item=news_item,
-                        simulation_result=simulation_result,
-                        consensus_result=consensus_result
+                    # Build message
+                    sentiment_emoji = "📈" if sentiment > 0 else "📉" if sentiment < 0 else "➡️"
+                    assets_str = ", ".join(affected_assets)
+
+                    message_text = (
+                        f"{sentiment_emoji} <b>{news_item.title}</b>\n\n"
+                        f"Assets: {assets_str}\n"
+                        f"Sentiment: {sentiment:+.2f}\n"
+                        f"Source: {news_item.source}\n"
+                        f"{news_item.url}"
                     )
-                    
+
                     # Send via Telegram
                     telegram_msg = await self.telegram_agent.send_message(message_text)
                     if telegram_msg:
@@ -210,180 +349,10 @@ class NewsMonitorAgent:
                     self.telegram_queue.append(news_item)
                     wait_time = self.telegram_min_interval - time_since_last
                     logger.info(f"Telegram throttled. Queued news. Wait {wait_time:.0f}s")
-            
-            # Track posted news and store outcome
-            self.posted_news.append(news_item)
-            await self._store_news_outcome(news_item, simulation_result, consensus_result, posted=True)
-            
+
         except Exception as exc:
-            logger.error(f"Error posting news: {exc}")
-    
-    def get_recent_posts(self, limit: int = 10) -> List[NewsItem]:
-        """Get recently posted news items."""
-        return self.posted_news[-limit:]
-    
-    async def _run_news_simulation(self, news_item: NewsItem) -> Dict:
-        """
-        Run news through simulation layer - 100% working implementation.
-        
-        Args:
-            news_item: News item to simulate
-            
-        Returns:
-            Simulation result with proceed flag and dialogue
-        """
-        try:
-            from core.energy import create_energy
-            from core.orchestrator import MeridCore
-            
-            # Create energy payload
-            energy_payload = (
-                f"Breaking News Analysis\n\n"
-                f"Headline: {news_item.title}\n"
-                f"Source: {news_item.source}\n"
-                f"URL: {news_item.url}\n\n"
-                f"Evaluate this news for social media posting."
-            )
-            energy = create_energy("news_monitor", energy_payload)
-            
-            # Run simulation
-            merid_core = MeridCore()
-            simulation_result = await merid_core.run_cycle(energy)
-            
-            # Extract agent dialogue
-            agent_dialogue = []
-            if 'summaries' in simulation_result:
-                for summary in simulation_result['summaries']:
-                    agent_dialogue.append({
-                        'agent': summary.get('agent', 'Unknown'),
-                        'vote': summary.get('vote', 0),
-                        'confidence': summary.get('confidence', 0),
-                        'reasoning': summary.get('reasoning', 'No reasoning')
-                    })
-            
-            approved = simulation_result.get('approved', False)
-            consensus = simulation_result.get('consensus', 0)
-            
-            logger.info(
-                f"Simulation: {'✅ APPROVED' if approved else '❌ REJECTED'} "
-                f"({consensus:.0%}) - {news_item.title[:50]}..."
-            )
-            
-            # Broadcast to WebSocket for UI
-            await self._broadcast_simulation_update({
-                "type": "simulation_complete",
-                "timestamp": time.time(),
-                "news": {
-                    "headline": news_item.title,
-                    "source": news_item.source,
-                    "url": news_item.url,
-                    "importance": news_item.importance
-                },
-                "simulation": {
-                    "approved": approved,
-                    "consensus": consensus,
-                    "agent_count": len(agent_dialogue),
-                    "agents": agent_dialogue
-                }
-            })
-            
-            return {
-                "proceed": approved,
-                "approved": approved,
-                "consensus": consensus,
-                "agent_dialogue": agent_dialogue,
-                "energy": energy
-            }
-            
-        except Exception as exc:
-            logger.error(f"Simulation error: {exc}")
-            # Default approve on error
-            return {
-                "proceed": True,
-                "approved": True,
-                "consensus": 1.0,
-                "agent_dialogue": [],
-                "energy": None
-            }
-    
-    async def _get_consensus_for_news(self, news_item: NewsItem, simulation_result: Dict) -> Dict:
-        """
-        Get weighted consensus from agents - 100% working implementation.
-        
-        Args:
-            news_item: News item to evaluate
-            simulation_result: Results from simulation layer
-            
-        Returns:
-            Dict with approval status and confidence
-        """
-        try:
-            from core.agent_orchestrator import get_agent_orchestrator
-            
-            # Create proposal
-            proposal = {
-                "type": "breaking_news_post",
-                "headline": news_item.title,
-                "source": news_item.source,
-                "url": news_item.url,
-                "simulation_approved": simulation_result.get('approved', False)
-            }
-            
-            # Get consensus
-            orchestrator = get_agent_orchestrator()
-            consensus_result = await orchestrator.form_consensus(proposal)
-            
-            # Extract votes
-            agent_votes = []
-            if hasattr(consensus_result, 'decisions'):
-                for decision in consensus_result.decisions:
-                    agent_votes.append({
-                        'agent': str(getattr(decision, 'agent_role', 'Unknown')),
-                        'vote': 'approve' if getattr(decision, 'data', {}).get('vote', False) else 'reject',
-                        'confidence': getattr(decision, 'confidence', 0.5)
-                    })
-            
-            approved = consensus_result.confidence >= 0.66
-            
-            logger.info(
-                f"Consensus: {'✅ APPROVED' if approved else '❌ REJECTED'} "
-                f"({consensus_result.confidence:.0%}) - {news_item.title[:50]}..."
-            )
-            
-            # Broadcast to WebSocket for UI
-            await self._broadcast_simulation_update({
-                "type": "consensus_complete",
-                "timestamp": time.time(),
-                "news": {
-                    "headline": news_item.title,
-                    "source": news_item.source,
-                    "url": news_item.url
-                },
-                "consensus": {
-                    "approved": approved,
-                    "confidence": consensus_result.confidence,
-                    "agent_count": len(agent_votes),
-                    "votes": agent_votes,
-                    "summary": f"{len([v for v in agent_votes if v['vote'] == 'approve'])}/{len(agent_votes)} agents approved"
-                }
-            })
-            
-            return {
-                'approved': approved,
-                'confidence': consensus_result.confidence,
-                'agent_votes': agent_votes,
-                'reasoning_summary': f"{len([v for v in agent_votes if v['vote'] == 'approve'])}/{len(agent_votes)} agents approved"
-            }
-            
-        except Exception as exc:
-            logger.error(f"Consensus error: {exc}")
-            return {
-                'approved': True,
-                'confidence': 1.0,
-                'agent_votes': [],
-                'reasoning_summary': 'Error - defaulted to approval'
-            }
-    
+            logger.error(f"Error posting to social media: {exc}")
+
     async def _process_telegram_queue(self):
         """Process queued Telegram posts when throttle allows."""
         if not self.telegram_queue:
@@ -408,68 +377,36 @@ class NewsMonitorAgent:
                 news_item.posted_telegram = True
                 self.last_telegram_post = current_time
                 logger.info(f"Posted queued item to Telegram: {news_item.title[:50]}...")
-    
-    def _build_detailed_message(self, news_item: NewsItem, simulation_result: Dict, consensus_result: Dict) -> str:
-        """Build message with simulation and consensus results."""
-        # Just log to console - Telegram is disabled
-        logger.info(f"\n{'='*60}")
-        logger.info(f"BREAKING NEWS: {news_item.title}")
-        logger.info(f"Source: {news_item.source}")
-        logger.info(f"URL: {news_item.url}")
-        logger.info(f"\nSIMULATION: {'✅ APPROVED' if simulation_result.get('approved') else '❌ REJECTED'} ({simulation_result.get('consensus', 0):.0%})")
-        
-        agent_dialogue = simulation_result.get('agent_dialogue', [])
-        if agent_dialogue:
-            logger.info(f"\nAgent Analysis ({len(agent_dialogue)} agents):")
-            for i, dialogue in enumerate(agent_dialogue[:3], 1):
-                vote_str = '✅' if dialogue.get('vote', 0) > 0 else '❌'
-                logger.info(f"  {i}. {vote_str} {dialogue.get('agent', 'Unknown')} ({dialogue.get('confidence', 0):.0%})")
-                logger.info(f"     {dialogue.get('reasoning', 'No reasoning')[:80]}")
-        
-        logger.info(f"\nCONSENSUS: {'✅ APPROVED' if consensus_result.get('approved') else '❌ REJECTED'} ({consensus_result.get('confidence', 0):.0%})")
-        logger.info(f"Summary: {consensus_result.get('reasoning_summary', 'N/A')}")
-        logger.info(f"{'='*60}\n")
-        
-        return "Telegram disabled - see logs for details"
-    
-    
+
     async def _broadcast_simulation_update(self, update_data: Dict):
-        """Broadcast simulation update to WebSocket clients."""
+        """Broadcast feature update to WebSocket clients."""
         try:
             from web.api.streams import broadcast_simulation_update
             await broadcast_simulation_update(update_data)
         except Exception as exc:
-            logger.debug(f"Could not broadcast simulation update: {exc}")
-    
-    async def _store_news_outcome(self, news_item: NewsItem, simulation_result: Dict, consensus_result: Dict, posted: bool):
-        """Log news outcome."""
-        logger.info(
-            f"News outcome: {news_item.title[:50]} - "
-            f"Sim: {simulation_result.get('approved', False)}, "
-            f"Consensus: {consensus_result.get('approved', False)}, "
-            f"Posted: {posted}"
-        )
-    
+            logger.debug(f"Could not broadcast update: {exc}")
+
     def get_stats(self) -> Dict:
         """Get news monitoring statistics."""
-        total_posted = len(self.posted_news)
-        twitter_posts = sum(1 for n in self.posted_news if n.posted_twitter)
-        telegram_posts = sum(1 for n in self.posted_news if n.posted_telegram)
-        
-        # Calculate posting rate (last hour)
+        total_processed = len(self.processed_news)
+        twitter_posts = sum(1 for n in self.processed_news if n.posted_twitter)
+        telegram_posts = sum(1 for n in self.processed_news if n.posted_telegram)
+
+        # Calculate processing rate (last hour)
         one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        recent_posts = [n for n in self.posted_news if n.published_at >= one_hour_ago]
-        
+        recent_posts = [n for n in self.processed_news if n.published_at >= one_hour_ago]
+
         return {
             "running": self.running,
-            "total_posted": total_posted,
+            "total_processed": total_processed,
             "twitter_posts": twitter_posts,
             "telegram_posts": telegram_posts,
-            "posts_last_hour": len(recent_posts),
+            "processed_last_hour": len(recent_posts),
             "importance_threshold": self.importance_threshold,
             "sources_monitored": 4,  # CoinDesk, CoinTelegraph, Binance, CryptoCompare
             "telegram_queue_size": len(self.telegram_queue),
-            "telegram_throttle_seconds": self.telegram_min_interval
+            "telegram_throttle_seconds": self.telegram_min_interval,
+            "asset_sentiments": self._asset_sentiments,
         }
 
 

@@ -1,12 +1,13 @@
 """§5 SignalStore — SQLite persistence for signals, features, arbs, drift metrics.
 
 Tables:
-  signal_features    — cached feature snapshots per symbol/domain
-  signal_snapshots   — frozen driver snapshots attached to opinions/plans
-  arb_signals        — detected dislocations
-  arb_plans          — multi-leg arb/dislocation plans
-  drift_metrics      — per-domain drift/quality metrics over time
-  cqi_history        — Consensus Quality Index snapshots
+  signal_features            — cached feature snapshots per symbol/domain
+  signal_snapshots           — frozen driver snapshots attached to opinions/plans
+  arb_signals                — detected dislocations
+  arb_plans                  — multi-leg arb/dislocation plans
+  drift_metrics              — per-domain drift/quality metrics over time
+  cqi_history                — Consensus Quality Index snapshots
+  market_consensus_decisions — Kalshi market consensus decisions for reflection & learning
 """
 
 from __future__ import annotations
@@ -131,6 +132,34 @@ class SignalStore:
                 timestamp REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_cqi_domain ON cqi_history(domain);
+
+            CREATE TABLE IF NOT EXISTS market_consensus_decisions (
+                decision_id TEXT PRIMARY KEY,
+                snapshot_id TEXT NOT NULL,
+                contract_id TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                consensus_action TEXT NOT NULL,
+                consensus_confidence REAL DEFAULT 0,
+                consensus_edge_pct REAL DEFAULT 0,
+                snapshot_json TEXT NOT NULL,
+                executed INTEGER DEFAULT 0,
+                execution_time REAL,
+                execution_price TEXT,
+                execution_size INTEGER DEFAULT 0,
+                order_id TEXT,
+                settled INTEGER DEFAULT 0,
+                settlement_time REAL,
+                settlement_price TEXT,
+                pnl_usd REAL,
+                decision_correct INTEGER,
+                edge_realized_pct REAL,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mcd_contract ON market_consensus_decisions(contract_id);
+            CREATE INDEX IF NOT EXISTS idx_mcd_asset ON market_consensus_decisions(asset);
+            CREATE INDEX IF NOT EXISTS idx_mcd_executed ON market_consensus_decisions(executed);
+            CREATE INDEX IF NOT EXISTS idx_mcd_settled ON market_consensus_decisions(settled);
         """)
         if not self._mem_conn:
             conn.close()
@@ -416,6 +445,302 @@ class SignalStore:
             if not self._mem_conn:
                 conn.close()
 
+    # ── Market Consensus Decisions ────────────────────────────────────────
+
+    def store_market_consensus_decision(self, decision_dict: Dict[str, Any]) -> None:
+        """Store a MarketConsensusDecision for reflection and learning.
+
+        Args:
+            decision_dict: Dictionary representation of MarketConsensusDecision
+        """
+        conn = self._conn()
+        try:
+            # Extract snapshot if present
+            snapshot = decision_dict.get("snapshot", {})
+            snapshot_json = json.dumps(snapshot) if snapshot else "{}"
+
+            conn.execute(
+                """INSERT OR REPLACE INTO market_consensus_decisions
+                   (decision_id, snapshot_id, contract_id, asset, timeframe,
+                    consensus_action, consensus_confidence, consensus_edge_pct,
+                    snapshot_json, executed, execution_time, execution_price,
+                    execution_size, order_id, settled, settlement_time,
+                    settlement_price, pnl_usd, decision_correct, edge_realized_pct,
+                    created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    decision_dict.get("decision_id", ""),
+                    snapshot.get("snapshot_id", "") if snapshot else "",
+                    snapshot.get("contract_id", "") if snapshot else "",
+                    snapshot.get("asset", "") if snapshot else "",
+                    snapshot.get("timeframe", "") if snapshot else "",
+                    snapshot.get("consensus_action", "") if snapshot else "",
+                    snapshot.get("consensus_confidence", 0.0) if snapshot else 0.0,
+                    snapshot.get("consensus_edge_pct", 0.0) if snapshot else 0.0,
+                    snapshot_json,
+                    1 if decision_dict.get("executed") else 0,
+                    decision_dict.get("execution_time"),
+                    str(decision_dict.get("execution_price")) if decision_dict.get("execution_price") else None,
+                    decision_dict.get("execution_size", 0),
+                    decision_dict.get("order_id"),
+                    1 if decision_dict.get("settled") else 0,
+                    decision_dict.get("settlement_time"),
+                    str(decision_dict.get("settlement_price")) if decision_dict.get("settlement_price") else None,
+                    decision_dict.get("pnl_usd"),
+                    1 if decision_dict.get("decision_correct") is True else (0 if decision_dict.get("decision_correct") is False else None),
+                    decision_dict.get("edge_realized_pct"),
+                    decision_dict.get("timestamp", time.time()),
+                ),
+            )
+            conn.commit()
+            logger.debug(f"Stored market consensus decision: {decision_dict.get('decision_id')}")
+        except Exception as e:
+            logger.error(f"Failed to store market consensus decision: {e}")
+            raise
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def update_market_consensus_decision_execution(
+        self,
+        decision_id: str,
+        executed: bool,
+        execution_time: Optional[float] = None,
+        execution_price: Optional[str] = None,
+        execution_size: int = 0,
+        order_id: Optional[str] = None,
+    ) -> None:
+        """Update execution details for a decision."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                """UPDATE market_consensus_decisions
+                   SET executed=?, execution_time=?, execution_price=?,
+                       execution_size=?, order_id=?
+                   WHERE decision_id=?""",
+                (
+                    1 if executed else 0,
+                    execution_time,
+                    execution_price,
+                    execution_size,
+                    order_id,
+                    decision_id,
+                ),
+            )
+            conn.commit()
+            logger.debug(f"Updated execution for decision: {decision_id}")
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def update_market_consensus_decision_settlement(
+        self,
+        decision_id: str,
+        settled: bool,
+        settlement_time: Optional[float] = None,
+        settlement_price: Optional[str] = None,
+        pnl_usd: Optional[float] = None,
+        decision_correct: Optional[bool] = None,
+        edge_realized_pct: Optional[float] = None,
+    ) -> None:
+        """Update settlement details for a decision."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                """UPDATE market_consensus_decisions
+                   SET settled=?, settlement_time=?, settlement_price=?,
+                       pnl_usd=?, decision_correct=?, edge_realized_pct=?
+                   WHERE decision_id=?""",
+                (
+                    1 if settled else 0,
+                    settlement_time,
+                    settlement_price,
+                    pnl_usd,
+                    1 if decision_correct is True else (0 if decision_correct is False else None),
+                    edge_realized_pct,
+                    decision_id,
+                ),
+            )
+            conn.commit()
+            logger.debug(f"Updated settlement for decision: {decision_id}")
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def get_market_consensus_decision(self, decision_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a specific market consensus decision by ID."""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM market_consensus_decisions WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            if row:
+                result = dict(row)
+                # Parse snapshot JSON
+                if result.get("snapshot_json"):
+                    try:
+                        result["snapshot"] = json.loads(result["snapshot_json"])
+                    except json.JSONDecodeError:
+                        result["snapshot"] = {}
+                return result
+            return None
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def list_market_consensus_decisions(
+        self,
+        asset: Optional[str] = None,
+        executed: Optional[bool] = None,
+        settled: Optional[bool] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List market consensus decisions with optional filters.
+
+        Args:
+            asset: Filter by asset (BTC, ETH, etc.)
+            executed: Filter by execution status
+            settled: Filter by settlement status
+            limit: Max results to return
+        """
+        conn = self._conn()
+        try:
+            query = "SELECT * FROM market_consensus_decisions WHERE 1=1"
+            params = []
+
+            if asset:
+                query += " AND asset=?"
+                params.append(asset)
+
+            if executed is not None:
+                query += " AND executed=?"
+                params.append(1 if executed else 0)
+
+            if settled is not None:
+                query += " AND settled=?"
+                params.append(1 if settled else 0)
+
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+
+            rows = conn.execute(query, tuple(params)).fetchall()
+            results = []
+            for row in rows:
+                result = dict(row)
+                # Parse snapshot JSON for each result
+                if result.get("snapshot_json"):
+                    try:
+                        result["snapshot"] = json.loads(result["snapshot_json"])
+                    except json.JSONDecodeError:
+                        result["snapshot"] = {}
+                results.append(result)
+            return results
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
+    def get_market_consensus_performance_stats(
+        self,
+        asset: Optional[str] = None,
+        days: int = 30,
+    ) -> Dict[str, Any]:
+        """Get performance statistics for market consensus decisions.
+
+        Args:
+            asset: Optional asset filter
+            days: Number of days to look back
+
+        Returns:
+            Statistics dict with win rate, avg PnL, edge calibration, etc.
+        """
+        conn = self._conn()
+        try:
+            cutoff_time = time.time() - (days * 24 * 3600)
+
+            query_base = """
+                FROM market_consensus_decisions
+                WHERE created_at >= ?
+            """
+            params = [cutoff_time]
+
+            if asset:
+                query_base += " AND asset=?"
+                params.append(asset)
+
+            # Total decisions
+            total = conn.execute(
+                f"SELECT COUNT(*) {query_base}",
+                tuple(params),
+            ).fetchone()[0]
+
+            # Executed decisions
+            executed = conn.execute(
+                f"SELECT COUNT(*) {query_base} AND executed=1",
+                tuple(params),
+            ).fetchone()[0]
+
+            # Settled decisions
+            settled = conn.execute(
+                f"SELECT COUNT(*) {query_base} AND settled=1",
+                tuple(params),
+            ).fetchone()[0]
+
+            # Correct decisions (wins)
+            correct = conn.execute(
+                f"SELECT COUNT(*) {query_base} AND decision_correct=1",
+                tuple(params),
+            ).fetchone()[0]
+
+            # Incorrect decisions (losses)
+            incorrect = conn.execute(
+                f"SELECT COUNT(*) {query_base} AND decision_correct=0",
+                tuple(params),
+            ).fetchone()[0]
+
+            # Total PnL
+            total_pnl = conn.execute(
+                f"SELECT SUM(pnl_usd) {query_base} AND pnl_usd IS NOT NULL",
+                tuple(params),
+            ).fetchone()[0] or 0.0
+
+            # Average edge (predicted)
+            avg_edge = conn.execute(
+                f"SELECT AVG(consensus_edge_pct) {query_base} AND consensus_edge_pct > 0",
+                tuple(params),
+            ).fetchone()[0] or 0.0
+
+            # Average realized edge
+            avg_realized_edge = conn.execute(
+                f"SELECT AVG(edge_realized_pct) {query_base} AND edge_realized_pct IS NOT NULL",
+                tuple(params),
+            ).fetchone()[0] or 0.0
+
+            # Win rate
+            win_rate = (correct / settled * 100) if settled > 0 else 0.0
+
+            # Execution rate
+            execution_rate = (executed / total * 100) if total > 0 else 0.0
+
+            return {
+                "total_decisions": total,
+                "executed_decisions": executed,
+                "settled_decisions": settled,
+                "correct_decisions": correct,
+                "incorrect_decisions": incorrect,
+                "win_rate_pct": round(win_rate, 2),
+                "execution_rate_pct": round(execution_rate, 2),
+                "total_pnl_usd": round(total_pnl, 2),
+                "avg_predicted_edge_pct": round(avg_edge, 2),
+                "avg_realized_edge_pct": round(avg_realized_edge, 2),
+                "edge_calibration_diff_pct": round(avg_realized_edge - avg_edge, 2),
+                "days": days,
+                "asset": asset or "all",
+            }
+        finally:
+            if not self._mem_conn:
+                conn.close()
+
     # ── Reset ─────────────────────────────────────────────────────────
 
     def reset_all(self) -> None:
@@ -428,6 +753,7 @@ class SignalStore:
                 DELETE FROM arb_plans;
                 DELETE FROM drift_metrics;
                 DELETE FROM cqi_history;
+                DELETE FROM market_consensus_decisions;
             """)
             if not self._mem_conn:
                 conn.commit()
@@ -448,6 +774,9 @@ class SignalStore:
             plan_count = conn.execute("SELECT COUNT(*) FROM arb_plans").fetchone()[0]
             drift_count = conn.execute("SELECT COUNT(*) FROM drift_metrics").fetchone()[0]
             cqi_count = conn.execute("SELECT COUNT(*) FROM cqi_history").fetchone()[0]
+            mcd_count = conn.execute("SELECT COUNT(*) FROM market_consensus_decisions").fetchone()[0]
+            mcd_executed = conn.execute("SELECT COUNT(*) FROM market_consensus_decisions WHERE executed=1").fetchone()[0]
+            mcd_settled = conn.execute("SELECT COUNT(*) FROM market_consensus_decisions WHERE settled=1").fetchone()[0]
 
             return {
                 "feature_snapshots": feature_count,
@@ -457,6 +786,9 @@ class SignalStore:
                 "arb_plans": plan_count,
                 "drift_metrics": drift_count,
                 "cqi_entries": cqi_count,
+                "market_consensus_decisions": mcd_count,
+                "market_consensus_executed": mcd_executed,
+                "market_consensus_settled": mcd_settled,
             }
         finally:
             if not self._mem_conn:
