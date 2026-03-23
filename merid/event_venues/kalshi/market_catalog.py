@@ -244,14 +244,18 @@ class KalshiMarketCatalog:
                 )
                 if not result.success:
                     logger.warning(
-                        "Failed to fetch markets: %s (status=%s, retries=%s, circuit_open=%s)",
+                        "Failed to fetch markets from Kalshi API: %s (status=%s, retries=%s, circuit_open=%s)",
                         result.error, getattr(result, 'status_code', None),
                         result.retries, getattr(result, 'circuit_open', False),
                     )
                     return len(self._markets)
                 raw_markets = result.data
+                logger.debug(
+                    "Kalshi API returned %d raw markets (active_only=True, limit=%d)",
+                    len(raw_markets), self._max_markets
+                )
             except Exception as exc:
-                logger.warning(f"Failed to fetch markets: {exc}")
+                logger.warning(f"Failed to fetch markets: {exc}", exc_info=True)
                 return len(self._markets)
 
             now = datetime.now(timezone.utc)
@@ -263,7 +267,7 @@ class KalshiMarketCatalog:
 
             categories_found = set()
             assets_found = set()
-            
+
             for mkt in raw_markets:
                 cm = self._enrich(mkt, now)
                 enriched.append(cm)
@@ -277,7 +281,7 @@ class KalshiMarketCatalog:
                     assets_found.add(cm.asset)
                 if cm.timeframe:
                     tf_idx[cm.timeframe].append(cm)
-            
+
             # Debug logging for first refresh to see what's happening
             if self._refresh_count == 0 and enriched:
                 sample = enriched[0]
@@ -290,6 +294,27 @@ class KalshiMarketCatalog:
                     logger.info(f"Categories detected: {sorted(categories_found)}")
                 if assets_found:
                     logger.info(f"Assets detected: {sorted(assets_found)}")
+
+            # Log BTC market detection details
+            btc_count = len(asset_idx.get("BTC", []))
+            if btc_count > 0:
+                btc_markets = asset_idx["BTC"]
+                btc_15m = [m for m in btc_markets if m.timeframe == "15m"]
+                btc_1h = [m for m in btc_markets if m.timeframe == "1h"]
+                logger.info(
+                    "BTC markets indexed: total=%d, 15m=%d, 1h=%d",
+                    btc_count, len(btc_15m), len(btc_1h)
+                )
+                # Log sample BTC tickers
+                if btc_15m:
+                    sample_tickers = [m.market.market_id for m in btc_15m[:3]]
+                    logger.debug("Sample BTC 15m tickers: %s", ", ".join(sample_tickers))
+            else:
+                logger.warning(
+                    "No BTC markets detected in %d raw markets | "
+                    "Check if Kalshi has BTC markets with tickers matching pattern ^KX(BTC|BITCOIN)",
+                    len(raw_markets)
+                )
 
             self._markets = enriched
             self._by_category = cat_idx
