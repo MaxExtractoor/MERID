@@ -1,4 +1,5 @@
 # Additional test dependencies for coverage enforcement
+# Tested with Python 3.11; some tools may not yet publish wheels for 3.12.
 pytest-cov>=6.0.0
 pytest-xdist>=3.6.0
 pytest-asyncio>=0.25.0
@@ -34,7 +35,7 @@ pip-audit>=2.7.0
 vulture>=2.11.0
 pylint>=3.3.0
 codespell>=2.3.0
-pyre-check>=0.9.0
+pyre-check>=0.9.0; python_version < "3.12"
 
 # Integration testing tools
 pact-python>=2.0.0
@@ -47,8 +48,5 @@ great-expectations>=0.18.0
 dependency-injector>=4.41.0
 
 # Dev Swarm Autonomous Tools
-aider-chat>=0.50.0
-codium>=0.1.0
-openhands-cli>=0.1.0
 gitpython>=3.1.0
 pygithub>=2.1.0

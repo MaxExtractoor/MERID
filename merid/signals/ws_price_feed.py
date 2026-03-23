@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from utils.logger import get_logger
 
@@ -106,6 +107,15 @@ class CoinbasePriceFeed:
         self._error_count = 0
         self._connected_at: Optional[float] = None
         self._task: Optional[asyncio.Task] = None
+        self._last_message_at: Optional[float] = None
+        self._last_error_at: Optional[float] = None
+        self._health_reason: Optional[str] = None
+
+        # Backoff/heartbeat tuning
+        self._backoff_initial = 1.0
+        self._backoff_max = 30.0
+        self._backoff_jitter = 0.3
+        self._read_timeout = 20.0
 
     # ── Connection lifecycle ──────────────────────────────────────────
 
@@ -114,8 +124,8 @@ class CoinbasePriceFeed:
         try:
             import websockets
         except ImportError:
-            logger.warning("websockets package not installed — WS feed unavailable")
-            return
+            logger.error("websockets package not installed — WS feed disabled")
+            raise RuntimeError("websockets dependency missing")
 
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
@@ -140,29 +150,64 @@ class CoinbasePriceFeed:
     async def _run_loop(self):
         """Main WS loop with auto-reconnect."""
 
+        try:
+            import websockets
+        except ImportError:
+            # Should have been caught in connect(), keep guard for safety.
+            self._health_reason = "missing_websockets_dependency"
+            return
+
+        backoff = self._backoff_initial
         while self._running:
             try:
-                async with websockets.connect(self.WS_URL) as ws:
+                async with websockets.connect(
+                    self.WS_URL,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                    max_queue=1000,
+                ) as ws:
                     self._ws = ws
                     self._connected_at = time.time()
+                    self._health_reason = None
+                    backoff = self._backoff_initial
                     await self._subscribe(ws)
                     logger.info(f"Coinbase WS connected, subscribed to {len(self._product_ids)} products")
 
-                    async for message in ws:
-                        if not self._running:
-                            break
+                    while self._running:
                         try:
+                            message = await asyncio.wait_for(ws.recv(), timeout=self._read_timeout)
                             data = json.loads(message)
                             self._handle_message(data)
+                            self._last_message_at = time.time()
+                        except asyncio.TimeoutError:
+                            # Heartbeat: ensure connection is alive
+                            try:
+                                await ws.ping()
+                                logger.debug("Coinbase WS heartbeat ping")
+                            except Exception as exc:
+                                self._error_count += 1
+                                self._last_error_at = time.time()
+                                logger.warning(f"Coinbase WS heartbeat failed: {exc}")
+                                break
                         except json.JSONDecodeError:
                             self._error_count += 1
+                            self._last_error_at = time.time()
+                        except Exception as e:
+                            self._error_count += 1
+                            self._last_error_at = time.time()
+                            logger.warning(f"Coinbase WS recv error: {e}")
+                            break
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self._error_count += 1
+                self._last_error_at = time.time()
                 logger.warning(f"Coinbase WS error: {e}, reconnecting in 5s...")
-                await asyncio.sleep(5)
+                self._health_reason = "error_reconnect"
+                await asyncio.sleep(backoff)
+                backoff = self._next_backoff(backoff)
 
     async def _subscribe(self, ws):
         """Send subscription message for ticker channel."""
@@ -225,6 +270,7 @@ class CoinbasePriceFeed:
         return dict(self._latest_prices)
 
     def status(self) -> Dict[str, Any]:
+        healthy, reason = self.health()
         return {
             "connected": self._ws is not None and self._running,
             "products": self._product_ids,
@@ -233,7 +279,27 @@ class CoinbasePriceFeed:
             "connected_at": self._connected_at,
             "uptime_seconds": round(time.time() - self._connected_at, 1) if self._connected_at else 0,
             "latest_prices": {k: v.to_dict() for k, v in self._latest_prices.items()},
+            "healthy": healthy,
+            "health_reason": reason,
         }
+
+    def health(self) -> Tuple[bool, Optional[str]]:
+        now = time.time()
+        if not self._running or not self._connected_at:
+            return False, self._health_reason or "not_connected"
+
+        if self._last_message_at and (now - self._last_message_at) > (self._read_timeout * 2):
+            return False, "stale_feed"
+
+        if self._health_reason:
+            return False, self._health_reason
+
+        return True, None
+
+    @staticmethod
+    def _next_backoff(current: float) -> float:
+        jitter = random.uniform(-0.5, 0.5)
+        return min(current * 2 * (1 + jitter * 0.5), 30.0)
 
 
 # ── Feed Manager (loop integration) ──────────────────────────────────

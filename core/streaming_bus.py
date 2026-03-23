@@ -81,6 +81,9 @@ class StreamingBus:
             channel: 0 for channel in EventChannel
         }
         self._dropped_events: int = 0
+        self._dropped_by_channel: Dict[EventChannel, int] = {
+            channel: 0 for channel in EventChannel
+        }
         
     async def subscribe(
         self, 
@@ -144,6 +147,7 @@ class StreamingBus:
                         try:
                             queue.get_nowait()
                             self._dropped_events += 1
+                            self._dropped_by_channel[event.channel] += 1
                         except asyncio.QueueEmpty:
                             pass
                     
@@ -179,7 +183,11 @@ class StreamingBus:
                 channel.value: count 
                 for channel, count in self._event_counts.items()
             },
-            "dropped_events": self._dropped_events
+            "dropped_events": self._dropped_events,
+            "dropped_events_by_channel": {
+                channel.value: count
+                for channel, count in self._dropped_by_channel.items()
+            },
         }
     
     def get_subscriber_count(self, channel: Optional[EventChannel] = None) -> int:
@@ -213,17 +221,7 @@ async def subscribe_by_id(
     """Subscribe with a named ID for later retrieval."""
     global _subscriber_queues, _subscriber_channels
     
-    # Create queue for this subscriber
-    queue = asyncio.Queue(maxsize=queue_size)
-    _subscriber_queues[subscriber_id] = queue
-    _subscriber_channels[subscriber_id] = channels
-    
-    # Subscribe to channels
-    async with streaming_bus._lock:
-        for channel in channels:
-            streaming_bus._subscribers[channel].add(queue)
-    
-    logger.info(f"New subscriber added to channels: {[c.value for c in channels]}")
+    await streaming_bus.subscribe_named(subscriber_id, channels, queue_size)
 
 
 async def unsubscribe_by_id(subscriber_id: str) -> None:
@@ -233,16 +231,7 @@ async def unsubscribe_by_id(subscriber_id: str) -> None:
     if subscriber_id not in _subscriber_queues:
         return
     
-    queue = _subscriber_queues[subscriber_id]
-    channels = _subscriber_channels.get(subscriber_id, [])
-    
-    async with streaming_bus._lock:
-        for channel in channels:
-            streaming_bus._subscribers[channel].discard(queue)
-    
-    del _subscriber_queues[subscriber_id]
-    if subscriber_id in _subscriber_channels:
-        del _subscriber_channels[subscriber_id]
+    await streaming_bus.unsubscribe_named(subscriber_id)
 
 
 async def get_event_by_id(subscriber_id: str) -> Optional[StreamEvent]:
@@ -257,10 +246,42 @@ async def get_event_by_id(subscriber_id: str) -> Optional[StreamEvent]:
         return None
 
 
-# Add methods to StreamingBus for compatibility
-StreamingBus.subscribe = lambda self, subscriber_id, channels, queue_size=100: subscribe_by_id(subscriber_id, channels, queue_size)
-StreamingBus.unsubscribe = lambda self, subscriber_id: unsubscribe_by_id(subscriber_id)
-StreamingBus.get_event = lambda self, subscriber_id: get_event_by_id(subscriber_id)
+# Instance-level named subscriber helpers
+async def _subscribe_named(self, subscriber_id: str, channels: List[EventChannel], queue_size: int = 100) -> None:
+    queue = asyncio.Queue(maxsize=queue_size)
+    _subscriber_queues[subscriber_id] = queue
+    _subscriber_channels[subscriber_id] = channels
+    async with self._lock:
+        for channel in channels:
+            self._subscribers[channel].add(queue)
+    logger.info(f"New subscriber added to channels: {[c.value for c in channels]}")
+
+
+async def _unsubscribe_named(self, subscriber_id: str) -> None:
+    if subscriber_id not in _subscriber_queues:
+        return
+    queue = _subscriber_queues[subscriber_id]
+    channels = _subscriber_channels.get(subscriber_id, [])
+    async with self._lock:
+        for channel in channels:
+            self._subscribers[channel].discard(queue)
+    _subscriber_queues.pop(subscriber_id, None)
+    _subscriber_channels.pop(subscriber_id, None)
+
+
+async def _get_event_named(self, subscriber_id: str) -> Optional[StreamEvent]:
+    if subscriber_id not in _subscriber_queues:
+        return None
+    queue = _subscriber_queues[subscriber_id]
+    try:
+        return await queue.get()
+    except (asyncio.CancelledError, asyncio.QueueEmpty):
+        return None
+
+
+StreamingBus.subscribe_named = _subscribe_named
+StreamingBus.unsubscribe_named = _unsubscribe_named
+StreamingBus.get_event_named = _get_event_named
 
 
 async def publish_market_data(

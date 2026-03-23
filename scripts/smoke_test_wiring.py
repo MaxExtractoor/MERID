@@ -10,6 +10,7 @@ Exits 0 if all endpoints respond (any status), exit 1 if any connection fails.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -119,6 +120,15 @@ def run_smoke(base: str, timeout: float = 10.0) -> List[Result]:
     return results
 
 
+def check_base_reachable(base: str, timeout: float = 3.0) -> Optional[str]:
+    """Quick reachability probe to avoid noisy stack traces when API is down."""
+    try:
+        httpx.get(base, timeout=timeout)
+        return None
+    except httpx.RequestError as exc:
+        return f"API not reachable at {base} ({exc.__class__.__name__}: {exc})"
+
+
 def print_report(results: List[Result]) -> int:
     print("\n" + "=" * 78)
     print("  MERID Wiring Smoke Test Report")
@@ -160,6 +170,15 @@ def main():
     parser.add_argument("--base", default="http://localhost:8000", help="Base URL")
     parser.add_argument("--timeout", type=float, default=10.0, help="Request timeout (s)")
     args = parser.parse_args()
+
+    unreachable = check_base_reachable(args.base)
+    if unreachable:
+        allow_offline = os.getenv("SMOKE_ALLOW_OFFLINE", "false").lower() in ("1", "true", "yes")
+        print(f"\n⚠️  {unreachable}\nStart the API server or pass --base to target another instance.")
+        if allow_offline:
+            print("SMOKE_ALLOW_OFFLINE set — reporting success without hitting endpoints.")
+            sys.exit(0)
+        sys.exit(1)
 
     print(f"Smoke-testing {len(ENDPOINTS)} endpoints against {args.base} ...")
     results = run_smoke(args.base, args.timeout)

@@ -19,7 +19,7 @@ class AgentState(TypedDict):
 
 
 def create_trading_workflow() -> StateGraph:
-    """Create a LangGraph workflow for trading execution."""
+    """Create a LangGraph workflow for trading execution (mock simulator path)."""
     
     workflow = StateGraph(AgentState)
     
@@ -82,11 +82,13 @@ def create_trading_workflow() -> StateGraph:
 
 
 class LangGraphTradingSwarm:
-    """MERID Trading Swarm using LangGraph for stateful workflows."""
+    """MERID Trading Swarm using LangGraph for stateful workflows (mock simulator by default)."""
     
-    def __init__(self):
+    def __init__(self, use_mock: bool = True):
         self.workflow = create_trading_workflow()
-        self.logger = logger.bind(component="LangGraphTradingSwarm")
+        self.use_mock = use_mock
+        mode = "mock" if use_mock else "live"
+        self.logger = logger.bind(component="LangGraphTradingSwarm", mode=mode)
     
     async def execute_trade(self, trade_signal: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a trade through the LangGraph workflow."""
@@ -98,7 +100,7 @@ class LangGraphTradingSwarm:
             "next_step": ""
         }
         
-        self.logger.info("workflow_started", signal=trade_signal.get("symbol"))
+        self.logger.info("workflow_started", signal=trade_signal.get("symbol"), mode="mock" if self.use_mock else "live")
         
         # Run the workflow
         final_state = self.workflow.invoke(initial_state)
@@ -110,6 +112,7 @@ class LangGraphTradingSwarm:
         )
         
         return {
+            "mode": "mock" if self.use_mock else "live",
             "approved": final_state["risk_approved"],
             "execution": final_state.get("execution_result"),
             "messages": [m.content for m in final_state["messages"]]
