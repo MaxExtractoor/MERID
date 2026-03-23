@@ -49,9 +49,14 @@ class CheckResult:
     actual: Any = None
     delta: Any = None
     detail: str = ""
+    source: str = "paper_engine"
 
     def to_dict(self) -> Dict[str, Any]:
-        d: Dict[str, Any] = {"name": self.name, "status": self.status.value}
+        d: Dict[str, Any] = {
+            "name": self.name,
+            "status": self.status.value,
+            "source": self.source,
+        }
         if self.detail:
             d["detail"] = self.detail
         if self.status != CheckStatus.OK:
@@ -102,6 +107,21 @@ def _close(a: float, b: float) -> bool:
     return False
 
 
+def _is_legacy_perp_portfolio(uid: str, portfolio: Any) -> bool:
+    """Detect legacy perp paper portfolios that should be quarantined in Kalshi mode."""
+    uid_str = str(uid).lower()
+    if uid_str.startswith(("matrix_", "slo_", "sim_", "paper_legacy", "legacy_")):
+        return True
+    for pk, pos in getattr(portfolio, "positions", {}).items():
+        if str(pk).endswith("_perp_paper"):
+            return True
+        market_type = getattr(pos, "market_type", "")
+        venue = getattr(pos, "venue", "")
+        if market_type == "perp" and venue == "paper":
+            return True
+    return False
+
+
 # ------------------------------------------------------------------ #
 # Core reconciliation logic
 # ------------------------------------------------------------------ #
@@ -112,12 +132,23 @@ def run_reconciliation() -> ReconciliationReport:
     This is the main entry point.  It imports the paper engine lazily
     to avoid circular imports.
     """
+    try:
+        from merid.settings import settings
+        kalshi_only = bool(settings.KALSHI_ONLY)
+    except Exception:
+        kalshi_only = False
+
     from trading.paper_trading import get_paper_engine
 
     engine = get_paper_engine()
     report = ReconciliationReport()
+    skipped_legacy = 0
 
     for uid, portfolio in engine.portfolios.items():
+        if kalshi_only and _is_legacy_perp_portfolio(uid, portfolio):
+            skipped_legacy += 1
+            continue
+
         report.portfolios_checked += 1
 
         # ----------------------------------------------------------
@@ -206,7 +237,24 @@ def run_reconciliation() -> ReconciliationReport:
                 check.expected = round(expected_pnl, 4)
                 check.actual = round(pos.unrealized_pnl, 4)
                 check.delta = round(pos.unrealized_pnl - expected_pnl, 4)
-                check.detail = "recomputed PnL != stored unrealized_pnl"
+                check.detail = "recomputed PnL != stored unrealized_pnl (source=paper_engine)"
+                logger.debug(
+                    "PnL delta [source=paper_engine key=%s]: recomputed=%.6f stored=%.6f "
+                    "asset=%s side=%s entry=%.6f current=%.6f size_usd=%.4f lev=%s "
+                    "market_type=%s venue=%s opened_at=%.3f",
+                    check.name,
+                    expected_pnl,
+                    pos.unrealized_pnl,
+                    getattr(pos, "asset", ""),
+                    getattr(pos, "side", ""),
+                    getattr(pos, "entry_price", 0.0),
+                    getattr(pos, "current_price", 0.0),
+                    getattr(pos, "size_usd", 0.0),
+                    getattr(pos, "leverage", 1),
+                    getattr(pos, "market_type", ""),
+                    getattr(pos, "venue", ""),
+                    getattr(pos, "opened_at", 0.0),
+                )
                 report.all_ok = False
             report.checks.append(check)
 
@@ -272,6 +320,7 @@ def run_reconciliation() -> ReconciliationReport:
                 check = CheckResult(
                     name=f"kalshi/{name}/pnl_finite",
                     status=CheckStatus.OK,
+                    source="kalshi_session",
                 )
                 if not (abs(interval.net_pnl_cents) < 1e12):
                     check.status = CheckStatus.ERROR
@@ -284,6 +333,7 @@ def run_reconciliation() -> ReconciliationReport:
                 check = CheckResult(
                     name=f"kalshi/{name}/win_loss_sum",
                     status=CheckStatus.OK,
+                    source="kalshi_session",
                 )
                 if wl_sum > interval.total_trades:
                     check.status = CheckStatus.DELTA
@@ -298,6 +348,7 @@ def run_reconciliation() -> ReconciliationReport:
                 check = CheckResult(
                     name=f"kalshi/{name}/hwm_consistency",
                     status=CheckStatus.OK,
+                    source="kalshi_session",
                 )
                 if interval.high_water_mark_cents < interval.net_pnl_cents - _ABS_TOLERANCE * 100:
                     check.status = CheckStatus.DELTA
@@ -312,6 +363,7 @@ def run_reconciliation() -> ReconciliationReport:
                 check = CheckResult(
                     name=f"kalshi/{name}/gross_balance",
                     status=CheckStatus.OK,
+                    source="kalshi_session",
                 )
                 if gross_sum > 0 and abs(interval.gross_pnl_cents) > gross_sum * 1.01:
                     check.status = CheckStatus.DELTA
@@ -333,6 +385,7 @@ def run_reconciliation() -> ReconciliationReport:
         check = CheckResult(
             name="cross_source/pnl_consistency",
             status=CheckStatus.OK,
+            source="cross_source",
         )
         if not pnl_result["consistent"]:
             check.status = CheckStatus.DELTA
@@ -350,10 +403,17 @@ def run_reconciliation() -> ReconciliationReport:
             name="cross_source/pnl_consistency",
             status=CheckStatus.ERROR,
             detail=f"Could not run cross-source check: {exc}",
+            source="cross_source",
         ))
 
     # Snapshot hash for audit trail
-    report.snapshot_hash = _compute_snapshot_hash(engine)
+    report.snapshot_hash = _compute_snapshot_hash(engine, skip_legacy=kalshi_only)
+
+    if kalshi_only and skipped_legacy:
+        logger.info(
+            "Kalshi-only mode: skipped %d legacy perp paper portfolios during reconciliation",
+            skipped_legacy,
+        )
 
     if report.all_ok:
         logger.info(
@@ -364,22 +424,26 @@ def run_reconciliation() -> ReconciliationReport:
         )
     else:
         deltas = [c for c in report.checks if c.status != CheckStatus.OK]
+        sources = sorted({c.source for c in deltas if getattr(c, "source", "")})
         logger.warning(
-            "Reconciliation DELTA: %d issues in %d portfolios — %s",
+            "Reconciliation DELTA: %d issues in %d portfolios — sources=%s — %s",
             len(deltas),
             report.portfolios_checked,
+            ",".join(sources) if sources else "unknown",
             "; ".join(c.name for c in deltas[:5]),
         )
 
     return report
 
 
-def _compute_snapshot_hash(engine) -> str:
+def _compute_snapshot_hash(engine, skip_legacy: bool = False) -> str:
     """Deterministic hash of the current paper state for audit trail."""
     data = {
         "portfolios": {},
     }
     for uid, portfolio in sorted(engine.portfolios.items()):
+        if skip_legacy and _is_legacy_perp_portfolio(uid, portfolio):
+            continue
         positions = {}
         for pk, pos in sorted(portfolio.positions.items()):
             positions[pk] = {
