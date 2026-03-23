@@ -299,6 +299,16 @@ class KalshiMarketCatalog:
             self._last_refresh = now
             self._refresh_count += 1
 
+            # Per-asset/timeframe diagnostics for crypto coverage
+            tracked_assets = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+            asset_counts = {a: len(asset_idx.get(a, [])) for a in tracked_assets}
+            tf_counts = {tf: len(tf_idx.get(tf, [])) for tf in sorted(tf_idx)}
+            logger.info(
+                "Catalog assets: %s | timeframes: %s",
+                ", ".join(f"{a}={asset_counts[a]}" for a in tracked_assets),
+                ", ".join(f"{tf}={tf_counts[tf]}" for tf in tf_counts),
+            )
+
             _log = logger.info if enriched else logger.debug
             _log(
                 f"Catalog refreshed: {len(enriched)} markets, "

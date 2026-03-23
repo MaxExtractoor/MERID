@@ -549,6 +549,23 @@ class KalshiTradingAgent:
 
             tickers = [m.market_id for m in self._resolved_markets]
             self.state.active_tickers = tickers[:20]
+            if not tickers:
+                try:
+                    from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                    cat = get_market_catalog()
+                    cat_summary = cat.summary()
+                    assets = cat_summary.get("assets", {})
+                    tfs = cat_summary.get("timeframes", {})
+                    self.logger.info(
+                        "No tradeable markets after filter (asset=%s timeframe=%s); "
+                        "catalog assets=%s timeframes=%s",
+                        asset or "any",
+                        timeframe or "any",
+                        {k: assets.get(k, 0) for k in ("BTC", "ETH", "SOL", "XRP", "DOGE")},
+                        tfs,
+                    )
+                except Exception as exc:
+                    self.logger.debug("Catalog summary unavailable for empty resolution: %s", exc)
 
         except Exception as exc:
             self.logger.warning(f"Market resolution error: {exc}")

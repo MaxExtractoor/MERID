@@ -377,17 +377,25 @@ def check_pnl_consistency() -> dict:
     Returns:
         dict with keys: consistent, max_divergence_usd, threshold_usd, sources
     """
-    sources = {}
-
+    kalshi_only = False
     try:
-        from trading.paper_trading import get_paper_engine
-        engine = get_paper_engine()
-        total_pnl = 0.0
-        for _uid, portfolio in engine.portfolios.items():
-            total_pnl += portfolio.total_pnl
-        sources["paper_engine"] = round(total_pnl, 2)
+        from merid.settings import settings
+        kalshi_only = settings.KALSHI_ONLY
     except Exception:
         pass
+
+    sources = {}
+
+    if not kalshi_only:
+        try:
+            from trading.paper_trading import get_paper_engine
+            engine = get_paper_engine()
+            total_pnl = 0.0
+            for _uid, portfolio in engine.portfolios.items():
+                total_pnl += portfolio.total_pnl
+            sources["paper_engine"] = round(total_pnl, 2)
+        except Exception:
+            pass
 
     try:
         from merid.prediction.paper_session import get_paper_session

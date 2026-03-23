@@ -1030,6 +1030,12 @@ def get_paper_engine() -> PaperTradingEngine:
     if _paper_engine is None:
         _paper_engine = PaperTradingEngine(starting_balance=10000.0)
         from core.fresh_start import is_fresh_start
+        try:
+            from merid.settings import settings
+            kalshi_only = settings.KALSHI_ONLY
+        except Exception:
+            kalshi_only = False
+
         if is_fresh_start():
             _paper_engine.reset_state()
             # Remove stale persist files so they don't leak into future runs
@@ -1038,6 +1044,13 @@ def get_paper_engine() -> PaperTradingEngine:
                     f.unlink()
                     logger.info("FRESH START: deleted %s", f.name)
             logger.warning("FRESH START: wiped all paper trading state")
+        elif kalshi_only:
+            _paper_engine.reset_state()
+            for f in (_PERSIST_FILE, _PERSIST_DIR / "paper_ladder_state.json"):
+                if f.exists():
+                    f.unlink()
+                    logger.info("Kalshi-only mode: deleted legacy paper trading state file %s", f.name)
+            logger.info("Kalshi-only mode: skipping legacy paper portfolio load")
         else:
             _load_paper_state(_paper_engine)
     return _paper_engine
