@@ -2076,15 +2076,26 @@ async def _app_lifespan(application: FastAPI):
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
         from merid.event_venues.kalshi.market_catalog import get_market_catalog as _get_cat
+        from merid.event_venues.kalshi.crypto_markets import build_crypto_market_tickers
         _ws_bridge = get_ws_bridge()
-        # Subscribe to top active tickers from catalog (up to 50)
-        _active_tickers = [m.ticker for m in _get_cat().get_all_markets()[:50]]
+
+        catalog = _get_cat()
+        all_markets = catalog.get_all_markets() if catalog else []
+        top_active = [getattr(m.market, "market_id", None) for m in all_markets[:50]]
+
+        # Ensure all crypto 15m assets are subscribed explicitly (full instance tickers)
+        crypto_15m = build_crypto_market_tickers(catalog, timeframe="15m")
+        if crypto_15m:
+            logger.debug("Preparing WS orderbook_delta subscribe for crypto: %s", sorted(crypto_15m))
+
+        merged = sorted({t for t in top_active + crypto_15m if t})
+
         task = asyncio.create_task(
-            _ws_bridge.start(_active_tickers or None), name="kalshi-ws-bridge"
+            _ws_bridge.start(merged or None), name="kalshi-ws-bridge"
         )
         _startup_state["background_tasks"].append(task)
-        logger.info(f"✅ KalshiWebSocketBridge started ({len(_active_tickers)} tickers)")
-        _startup_state["services"]["kalshi_ws_bridge"] = {"status": "running", "started_at": time.time(), "tickers": len(_active_tickers)}
+        logger.info(f"✅ KalshiWebSocketBridge started ({len(merged)} tickers)")
+        _startup_state["services"]["kalshi_ws_bridge"] = {"status": "running", "started_at": time.time(), "tickers": len(merged)}
     except Exception as e:
         logger.warning(f"⚠️  KalshiWebSocketBridge failed to start: {e}")
         _startup_state["services"]["kalshi_ws_bridge"] = {"status": "failed", "error": str(e)}

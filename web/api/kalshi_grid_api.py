@@ -181,6 +181,7 @@ async def grid_health() -> Dict[str, Any]:
     catalog_info: Dict[str, Any] = {"market_count": 0, "last_refresh": None, "categories": 0}
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        from merid.event_venues.kalshi.crypto_markets import SERIES_TO_CRYPTO, normalize_series_ticker
         cat = get_market_catalog()
         cat_s = cat.summary()
         catalog_info = {
@@ -188,6 +189,27 @@ async def grid_health() -> Dict[str, Any]:
             "last_refresh": cat_s.get("last_refresh"),
             "categories": len(cat_s.get("categories", {})),
         }
+        try:
+            crypto_counts = {asset: 0 for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]}
+            crypto_samples: Dict[str, str] = {}
+            crypto_markets = cat.get_markets_by_category("crypto", timeframe="15m")
+            for m in crypto_markets:
+                ticker = getattr(getattr(m, "market", None), "market_id", None) or getattr(m, "market_id", None)
+                series = normalize_series_ticker(ticker)
+                asset = SERIES_TO_CRYPTO.get(series)
+                if asset:
+                    crypto_counts[asset] = crypto_counts.get(asset, 0) + 1
+                    crypto_samples.setdefault(asset, ticker)
+            catalog_info["crypto_15m_counts"] = crypto_counts
+            catalog_info["crypto_15m_sample_tickers"] = crypto_samples
+            logger.info(
+                "Kalshi crypto catalog: BTC15m=%s, ETH15m=%s, SOL15m=%s, XRP15m=%s, DOGE15m=%s",
+                crypto_counts.get("BTC", 0), crypto_counts.get("ETH", 0),
+                crypto_counts.get("SOL", 0), crypto_counts.get("XRP", 0),
+                crypto_counts.get("DOGE", 0),
+            )
+        except Exception as _ce:
+            logger.debug("crypto catalog diagnostics skipped: %s", _ce)
         if catalog_info["market_count"] == 0:
             issues.append("Market catalog is empty — agents have no markets to trade")
     except Exception as _e:

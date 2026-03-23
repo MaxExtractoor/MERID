@@ -24,19 +24,11 @@ from typing import Any, Dict, List, Optional
 
 from merid.event_venues.kalshi.archiver import SnapshotArchiver
 from merid.event_venues.kalshi.backtest import MarketSnapshot
+from merid.event_venues.kalshi.crypto_markets import CRYPTO_SERIES
 from merid.event_venues.kalshi.historical_sim import HistoricalTrade
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.collector")
-
-# Crypto hourly series tickers on Kalshi
-CRYPTO_SERIES = {
-    "BTC": "KXBTC",
-    "ETH": "KXETH",
-    "SOL": "KXSOL",
-    "XRP": "KXXRP",
-    "DOGE": "KXDOGE",
-}
 
 # Timeframe labels for series matching
 TIMEFRAME_SERIES_SUFFIXES = {
