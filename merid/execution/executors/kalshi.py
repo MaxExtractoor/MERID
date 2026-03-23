@@ -94,11 +94,20 @@ class KalshiExecutor:
         """Submit an order to Kalshi via the canonical venue client."""
         meta = metadata or {}
 
+        logger.info(
+            "KalshiExecutor.execute_trade START | ticker=%s side=%s amount=%.2f price=%s order_type=%s",
+            symbol, side, amount, price, order_type
+        )
+
         # Kill switch hard gate — fail-CLOSED on any error
         try:
             from merid.risk.kill_switches import risk_controller
             if not risk_controller.can_trade():
                 reason = risk_controller.get_kill_reason() or "kill_switch_active"
+                logger.warning(
+                    "KalshiExecutor BLOCKED by kill switch | ticker=%s reason=%s",
+                    symbol, reason
+                )
                 return TradeResult(
                     success=False, venue=self.venue, symbol=symbol,
                     side=side, size=amount, price=price or 0.0,
@@ -117,6 +126,10 @@ class KalshiExecutor:
             from merid.prediction.venue_gate import get_venue_gate
             _gate = get_venue_gate()
             if _gate.should_simulate_fill():
+                logger.warning(
+                    "KalshiExecutor BLOCKED by VenueGate | ticker=%s mode=%s (paper/sim)",
+                    symbol, _gate.mode.value
+                )
                 return TradeResult(
                     success=False, venue=self.venue, symbol=symbol,
                     side=side, size=amount, price=price or 0.0,
@@ -141,10 +154,19 @@ class KalshiExecutor:
                 contracts=int(amount), price_cents=price_cents,
             )
             if not _allowed:
+                logger.warning(
+                    "KalshiExecutor BLOCKED by KalshiRiskManager | ticker=%s reason=%s",
+                    symbol, _reason
+                )
                 return TradeResult(
                     success=False, venue=self.venue, symbol=symbol,
                     side=side, size=amount, price=price or 0.0,
                     error=f"Risk check blocked: {_reason}", metadata={},
+                )
+            else:
+                logger.debug(
+                    "KalshiExecutor passed KalshiRiskManager check | ticker=%s",
+                    symbol
                 )
         except Exception as _rke:
             logger.error("KalshiRiskManager unavailable — blocking order (fail-closed): %s", _rke)
@@ -161,6 +183,10 @@ class KalshiExecutor:
                 from merid.event_venues.kalshi.deployment import get_deployment_controller, AgentMode
                 _dep = get_deployment_controller()._agents.get(_agent_name)
                 if _dep and _dep.mode in (AgentMode.HALTED, AgentMode.PAPER):
+                    logger.warning(
+                        "KalshiExecutor BLOCKED by DeploymentController | ticker=%s agent=%s mode=%s",
+                        symbol, _agent_name, _dep.mode.value
+                    )
                     return TradeResult(
                         success=False, venue=self.venue, symbol=symbol,
                         side=side, size=amount, price=price or 0.0,
@@ -174,6 +200,11 @@ class KalshiExecutor:
                     side=side, size=amount, price=price or 0.0,
                     error=f"DeploymentController unavailable: {_dce}", metadata={},
                 )
+
+        logger.info(
+            "KalshiExecutor submitting order to Kalshi API | ticker=%s side=%s amount=%.2f price=%s",
+            symbol, side, amount, price
+        )
 
         client = self._get_client()
 

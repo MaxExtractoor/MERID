@@ -188,8 +188,23 @@ async def grid_health() -> Dict[str, Any]:
             "last_refresh": cat_s.get("last_refresh"),
             "categories": len(cat_s.get("categories", {})),
         }
+        # Add BTC-specific market visibility
+        btc_markets = cat.get_markets_by_asset("BTC")
+        btc_15m = cat.get_markets_by_asset("BTC", timeframe="15m")
+        btc_1h = cat.get_markets_by_asset("BTC", timeframe="1h")
+        catalog_info["btc_markets"] = {
+            "total": len(btc_markets),
+            "15m": len(btc_15m),
+            "1h": len(btc_1h),
+        }
+        # Sample BTC 15m tickers for diagnostics
+        if btc_15m:
+            catalog_info["btc_sample_tickers"] = [m.market.market_id for m in btc_15m[:3]]
+
         if catalog_info["market_count"] == 0:
             issues.append("Market catalog is empty — agents have no markets to trade")
+        elif len(btc_markets) == 0:
+            issues.append("No BTC markets found in catalog — BTC trading will not occur")
     except Exception as _e:
         logger.debug("catalog health probe skipped: %s", _e)
         issues.append("Market catalog unavailable")

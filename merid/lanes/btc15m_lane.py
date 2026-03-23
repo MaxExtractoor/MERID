@@ -665,6 +665,21 @@ class BTC15MLane:
             result.markets_found = len(markets)
             if not markets:
                 result.blocked_reason = "no_markets_found"
+                # Diagnostic logging to distinguish between different "no markets" scenarios
+                catalog_total = len(self._catalog.get_all_markets()) if self._catalog else 0
+                catalog_btc_all = len(self._catalog.get_markets_by_asset(self.config.asset)) if self._catalog else 0
+                logger.warning(
+                    "[%s] No tradeable BTC markets found | "
+                    "catalog_total=%d | catalog_BTC_all=%d | catalog_BTC_15m=%d | "
+                    "phase=%s | filters: asset=%s timeframe=%s status=open",
+                    cycle_id,
+                    catalog_total,
+                    catalog_btc_all,
+                    len(markets),
+                    self._promotion_engine.current_phase.name if self._promotion_engine else "no_phase",
+                    self.config.asset,
+                    self.config.timeframe,
+                )
                 return result
 
             # Track strike_price history for ATR (real price proxy, not sentiment)
@@ -809,9 +824,21 @@ class BTC15MLane:
                 return []
 
         try:
+            # Get raw catalog markets with detailed logging
             catalog_markets = self._catalog.get_markets_by_asset(
                 asset,
                 timeframe=timeframe,
+            )
+
+            # Diagnostic: show filter progression
+            catalog_btc_all = self._catalog.get_markets_by_asset(asset)
+            logger.debug(
+                "_fetch_market_data filter steps: "
+                "catalog_total=%d | asset=%s markets=%d | "
+                "asset+timeframe=%s+%s markets=%d",
+                len(self._catalog.get_all_markets()),
+                asset, len(catalog_btc_all),
+                asset, timeframe, len(catalog_markets),
             )
 
             markets = []
@@ -830,16 +857,27 @@ class BTC15MLane:
                 })
 
             markets.sort(key=lambda m: m["volume"], reverse=True)
+            pre_cap_count = len(markets)
             markets = markets[: self.config.max_markets_per_cycle]
 
             logger.debug(
-                "Fetched %d %s %s markets (phase=%s)",
+                "Fetched %d %s %s markets (phase=%s, pre_cap=%d, capped=%d)",
                 len(markets), asset, timeframe,
                 self._promotion_engine.current_phase.name if self._promotion_engine else "?",
+                pre_cap_count, len(markets),
             )
+
+            # Log sample tickers when we have markets
+            if markets:
+                sample_tickers = [m["ticker"] for m in markets[:3]]
+                logger.debug(
+                    "_fetch_market_data sample tickers: %s",
+                    ", ".join(sample_tickers)
+                )
+
             return markets
         except Exception as exc:
-            logger.error("_fetch_market_data failed: %s", exc)
+            logger.error("_fetch_market_data failed: %s", exc, exc_info=True)
             return []
 
     # ------------------------------------------------------------------
