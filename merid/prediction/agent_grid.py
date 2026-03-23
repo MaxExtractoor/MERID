@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import os
 from typing import Any, Dict, List, Optional
 
 from merid.prediction.agent_grid_config import (
@@ -35,6 +36,26 @@ from merid.prediction.paper_session import PaperSession, get_paper_session
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.agent_grid")
+
+
+async def run_startup_steps(steps: List[tuple]) -> None:
+    """
+    Run a sequence of startup steps with rollback on failure.
+
+    steps: List of (label, start_fn, stop_fn) where start_fn/stop_fn are awaitables.
+    """
+    started: List[tuple] = []
+    try:
+        for label, start_fn, stop_fn in steps:
+            await start_fn()
+            started.append((label, stop_fn))
+    except Exception as exc:  # noqa: BLE001
+        for label, stop_fn in reversed(started):
+            try:
+                await stop_fn()
+            except Exception:  # noqa: BLE001
+                logger.debug("startup_rollback_failed", step=label)
+        raise exc
 
 
 class AgentGrid:
@@ -97,6 +118,9 @@ class AgentGrid:
         self._alert_manager = get_alert_manager()
         self._register_alert_sinks()
 
+        # Control reconciliation loop via env flag
+        self._reconciliation_enabled = os.getenv("MERID_ENABLE_RECONCILIATION", "true").lower() not in ("false", "0", "no")
+
         self._running = False
         self._started_at: Optional[datetime] = None
         self._volume_poll_task: Optional[asyncio.Task] = None
@@ -120,66 +144,55 @@ class AgentGrid:
         self._running = True
         self._started_at = datetime.now(timezone.utc)
 
-        # Start market catalog
-        await self._catalog.start()
-
-        # Start portfolio risk agent first
-        await self._portfolio_risk.start()
-
-        # L6: Register all agents with DeploymentController (starts each in PAPER mode)
         try:
-            from merid.event_venues.kalshi.deployment import get_deployment_controller
-            _dc = get_deployment_controller()
-            for _a in self._agents:
-                _dc.register_agent(_a.agent_id)
-            logger.info("✓ DeploymentController: %d agents registered (all PAPER)", len(self._agents))
-        except Exception as _dce:
-            logger.warning("DeploymentController registration failed (non-fatal): %s", _dce)
+            startup_steps = [
+                ("catalog", self._catalog.start, self._catalog.stop),
+                ("portfolio_risk", self._portfolio_risk.start, self._portfolio_risk.stop),
+            ]
 
-        # Start trading agents
-        logger.info(f"Starting {len(self._agents)} Kalshi trading agents...")
-        for agent in self._agents:
-            await agent.start()
-            logger.info(
-                f"  ✓ {agent.config.name}: "
-                f"assets={agent.config.assets}, "
-                f"timeframes={agent.config.timeframes}, "
-                f"archetype={agent.config.archetype}"
-            )
-            # Small stagger to avoid thundering herd on Kalshi API
-            await asyncio.sleep(0.5)
+            # Deployment controller registration is best-effort; keep non-fatal
+            async def _register_agents():
+                from merid.event_venues.kalshi.deployment import get_deployment_controller
+                _dc = get_deployment_controller()
+                for _a in self._agents:
+                    _dc.register_agent(_a.agent_id)
+                logger.info("✓ DeploymentController: %d agents registered (all PAPER)", len(self._agents))
 
-        # Start social broadcaster
-        await self._broadcaster.start()
-        logger.info("✓ Social broadcaster started")
+            async def _noop():
+                return None
 
-        # Auto-start paper session for PnL tracking
-        self._paper_session.start_session()
-        logger.info("✓ Paper session started for PnL tracking")
+            startup_steps.append(("deployment_controller", _register_agents, _noop))
 
-        # Ensure ReflectionSystem is initialized and persistence is running
-        # before agents start producing fills (idempotent — singleton pattern)
-        try:
-            from agents.reflection.integration import get_reflection_system
-            _rs = get_reflection_system()
-            logger.info(
-                f"✓ ReflectionSystem active: "
-                f"{_rs.core.get_stats()['total_reflections']} reflections loaded"
-            )
+            # Trading agents
+            for agent in self._agents:
+                startup_steps.append((f"agent_{agent.agent_id}", agent.start, agent.stop))
+
+            # Social broadcaster + paper session
+            startup_steps.append(("broadcaster", self._broadcaster.start, self._broadcaster.stop))
+            startup_steps.append(("paper_session", self._paper_session.start_session, _noop))
+
+            # Reflection system (best effort)
+            async def _start_reflection():
+                from agents.reflection.integration import get_reflection_system
+                _rs = get_reflection_system()
+                logger.info(
+                    f"✓ ReflectionSystem active: "
+                    f"{_rs.core.get_stats()['total_reflections']} reflections loaded"
+                )
+
+            startup_steps.append(("reflection", _start_reflection, _noop))
+
+            # Sentiment + mood bus + insight pipeline
+            startup_steps.append(("sentiment", self._sentiment.start, self._sentiment.stop))
+            startup_steps.append(("mood_bus", self._mood_bus.start, self._mood_bus.stop))
+            startup_steps.append(("insight_pipeline", self._insight_pipeline.start, self._insight_pipeline.stop))
+
+            await run_startup_steps(startup_steps)
+
         except Exception as exc:
-            logger.warning(f"ReflectionSystem init skipped (non-fatal): {exc}")
-
-        # Start sentiment service background loop
-        await self._sentiment.start()
-        logger.info("✓ Sentiment service started")
-
-        # Start market mood bus (unified sentiment aggregation)
-        await self._mood_bus.start()
-        logger.info("✓ Market Mood Bus started")
-
-        # Start insight pipeline (Kalshi → insights → social)
-        await self._insight_pipeline.start()
-        logger.info("✓ Insight Pipeline started with news agent consumer")
+            logger.error("AgentGrid start failed, rolling back", exc_info=exc)
+            await self.stop(force=True)
+            raise
 
         # Start volume monitor polling loop
         self._volume_poll_task = asyncio.create_task(
@@ -188,10 +201,13 @@ class AgentGrid:
         logger.info("✓ Volume monitor polling started")
 
         # Start reconciliation loop (auto-fix critical discrepancies)
-        self._reconciliation_task = asyncio.create_task(
-            self._reconciliation_loop(), name="kalshi-reconciliation"
-        )
-        logger.info("✓ Reconciliation loop started (auto-fix enabled)")
+        if self._reconciliation_enabled:
+            self._reconciliation_task = asyncio.create_task(
+                self._reconciliation_loop(), name="kalshi-reconciliation"
+            )
+            logger.info("✓ Reconciliation loop started (auto-fix enabled)")
+        else:
+            logger.info("Reconciliation loop disabled via MERID_ENABLE_RECONCILIATION=false")
 
         # Start outcome resolver (Brier calibration + realized edge resolution)
         try:
@@ -234,9 +250,9 @@ class AgentGrid:
             f"mode={'DEMO' if self._config.venue.use_demo else 'LIVE'}"
         )
 
-    async def stop(self) -> None:
+    async def stop(self, force: bool = False) -> None:
         """Gracefully stop all agents (idempotent)."""
-        if not self._running:
+        if not self._running and not force:
             return
         self._running = False
 
@@ -331,14 +347,20 @@ class AgentGrid:
             logger.warning(f"Volume monitor unavailable: {exc}")
             monitor = None
 
+        failure_count = 0
         while self._running:
             try:
                 if monitor:
                     changes = monitor.poll()
                     if changes:
                         logger.debug(f"Volume monitor: {changes} markets changed")
+                failure_count = 0
             except Exception as exc:
-                logger.warning(f"Volume monitor poll error: {exc}")
+                failure_count += 1
+                delay = self._backoff_delay(failure_count)
+                logger.warning(f"Volume monitor poll error: {exc}; backoff={delay}s")
+                await asyncio.sleep(delay)
+                continue
 
             # Regime-based agent gating
             try:
@@ -452,6 +474,7 @@ class AgentGrid:
 
     async def _reconciliation_loop(self) -> None:
         """Background task: run reconciliation every 5 minutes and auto-fix critical issues."""
+        failure_count = 0
         while self._running:
             try:
                 # Run auto-reconciliation with auto-fix enabled
@@ -473,9 +496,16 @@ class AgentGrid:
                         f"Reconciliation: {result['critical_discrepancies']} critical discrepancies found "
                         "(auto-fix disabled)"
                     )
-
+                failure_count = 0
             except Exception as exc:
-                logger.warning(f"Reconciliation loop error: {exc}")
+                failure_count += 1
+                delay = self._backoff_delay(failure_count)
+                logger.warning(f"Reconciliation loop error: {exc}; backoff={delay}s")
+                try:
+                    await asyncio.wait_for(asyncio.sleep(delay), timeout=delay + 5)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    break
+                continue
 
             try:
                 # Run every 5 minutes (300 seconds)
@@ -520,6 +550,14 @@ class AgentGrid:
         for agent in self._agents:
             agent.resume()
         logger.info("All agents resumed")
+
+    @staticmethod
+    def _backoff_delay(failures: int, base: float = 1.0, max_delay: float = 60.0) -> float:
+        """Calculate exponential backoff with cap."""
+        if failures <= 0:
+            return base
+        delay = base * (2 ** min(failures, 5))
+        return min(delay, max_delay)
 
     # ── Portfolio risk controls ────────────────────────────────────────
 

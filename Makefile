@@ -26,10 +26,6 @@ coverage:
 run-paper-demo:
 	python scripts/run_paper_demo.py
 
-# Run smoke tests for critical paths
-smoke-test:
-	pytest tests/ -m "smoke or e2e" -q --tb=short -x
-
 # Run linters
 lint:
 	ruff check .
@@ -535,6 +531,7 @@ paper-matrix-test:
 
 # ── Wiring Audit ──────────────────────────────────────────────
 smoke-test:
+	pip install -q -r requirements-smoke.txt
 	python scripts/smoke_test_wiring.py
 
 smoke-test-json:

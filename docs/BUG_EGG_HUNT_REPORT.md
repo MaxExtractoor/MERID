@@ -1,16 +1,24 @@
 ## Quick Take
-- `make smoke-test` is broken: it fails with `ModuleNotFoundError: httpx`, and the later Makefile rule overrides the original pytest-based smoke target (Makefile:31 vs Makefile:538).
-- `pip install -r requirements-test.txt` fails because `codium>=0.1.0` is not published; several pins likely do not support Python 3.12, blocking a clean CI-like setup.
-- Coinbase WS ingestion uses fixed 5s reconnect without heartbeat/backoff and silently no-ops when `websockets` is missing, creating latent data gaps.
-- The streaming bus monkey-patch forces a hidden global singleton, bypassing per-instance locks/metrics.
-- `AgentGrid` startup can leave background tasks running after partial failures; long-lived loops continue without backoff on repeated errors.
-- LangGraph swarm path always returns `"mock-123"`, acting as a built-in simulator that can be mistaken for live execution.
+- `make smoke-test` is consolidated to the wiring check, installs its deps, and now exits cleanly with a friendly message when the API base is down.
+- `requirements-test.txt` installs cleanly after removing the missing `codium` dependency; Python 3.11 is the supported baseline.
+- Coinbase WS feed now pings/heartbeats with jittered backoff, fails fast when `websockets` is missing, and exposes health.
+- Streaming bus uses instance-scoped semantics with per-channel drop metrics instead of a hidden singleton monkey-patch.
+- `AgentGrid` startup rolls back on failure; long-lived loops back off instead of tight-looping; reconciliation can be toggled via env.
+- LangGraph swarm explicitly labels the mock path (`"mock-123"`) vs live mode, reducing confusion.
+
+## Status
+- Smoke test target consolidated; `make smoke-test` now installs `requirements-smoke.txt` (httpx) and exits cleanly with a friendly message if the API base is unreachable.
+- `requirements-test.txt` no longer references missing `codium`; Python 3.11 noted as supported and `pyre-check` gated for <3.12.
+- Coinbase WS feed now uses heartbeat/read timeouts, jittered backoff, fail-fast on missing dependency, and surfaces health.
+- Streaming bus restores instance semantics with per-channel drop metrics; isolation is covered by tests.
+- AgentGrid startup rolls back on failure, loops use capped backoff, and reconciliation is env-toggleable.
+- LangGraph swarm explicitly labels mock vs live modes; tests assert mock identifiers.
 
 ## CI & Tests
-- Blocker: `make smoke-test` runs `scripts/smoke_test_wiring.py` (due to the duplicate target) and fails immediately on missing `httpx`, so no endpoints are exercised.  
-  Repro: `make smoke-test` → import error; `make -p | grep -n "^smoke-test"` shows the later rule winning.
-- Blocker: `requirements-test.txt` cannot install because `codium>=0.1.0` has no matching distribution (and some pins appear 3.12-incompatible), preventing full test env setup.  
-  Repro: `pip install -r requirements-test.txt` → “No matching distribution found for codium>=0.1.0”.
+- `make smoke-test` is now a single target that installs `requirements-smoke.txt` and runs the wiring check; when the API is down it emits a clear reachability message instead of a stack trace.  
+  Repro: `make smoke-test` (with API stopped) → friendly reachability warning and non-zero exit; with API running → endpoint report.
+- `requirements-test.txt` installs after removing `codium`; `pyre-check` is gated to Python <3.12 and Python 3.11 is the expected baseline.  
+  Repro: `pip install -r requirements-test.txt` succeeds on Python 3.11.
 - CI run 23456411810 ended `action_required` with zero jobs executed—likely awaiting manual approval before scheduling.
 
 ## Subsystem Findings
