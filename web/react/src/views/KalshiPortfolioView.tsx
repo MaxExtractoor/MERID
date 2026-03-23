@@ -910,7 +910,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
               <OrderGroupPanel
                 compact={false}
                 onGroupTriggered={(groupId) => {
-                  logUiInfo('KalshiPortfolioView', 'Order group triggered', undefined, { groupId });
+                  logUiInfo('KalshiPortfolioView', 'Order group triggered', { groupId });
                 }}
               />
               {/* Order Group Analytics */}
