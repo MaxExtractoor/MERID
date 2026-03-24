@@ -47,6 +47,7 @@ class AgentMesh:
     def __init__(self):
         self.agents: List = []
         self.running = False
+        self.ready_event: asyncio.Event = asyncio.Event()
         
     async def initialize(self):
         """Initialize all 8 streaming agents."""
@@ -78,6 +79,7 @@ class AgentMesh:
         for agent in self.agents:
             await agent.start()
         
+        self.ready_event.set()
         logger.info(f"Agent mesh started - {len(self.agents)} agents operational")
     
     async def stop(self):

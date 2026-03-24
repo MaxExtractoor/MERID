@@ -75,6 +75,7 @@ class AuditTrail:
         self.bus = get_event_bus()
         self.running = False
         self._task: Optional[asyncio.Task] = None
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         # Storage
         self.storage_path = Path(storage_path)
@@ -150,6 +151,7 @@ class AuditTrail:
         )
         
         self._task = asyncio.create_task(self._run_loop())
+        self.ready_event.set()
         logger.info("Audit trail started")
         
     async def stop(self):

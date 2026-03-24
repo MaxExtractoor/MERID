@@ -78,6 +78,7 @@ class PortfolioRiskAgent:
         self._task: Optional[asyncio.Task] = None
         self._shutdown = asyncio.Event()
         self._running = False
+        self.ready_event: asyncio.Event = asyncio.Event()
 
         # State
         self._latest_snapshot: Optional[PortfolioSnapshot] = None
@@ -101,6 +102,7 @@ class PortfolioRiskAgent:
         self._task = asyncio.create_task(
             self._run_loop(), name="kalshi-portfolio-risk"
         )
+        self.ready_event.set()
         logger.info(
             f"Portfolio risk agent started: "
             f"max_notional=${self._config.max_total_notional_usd}, "
