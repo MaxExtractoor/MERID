@@ -2280,7 +2280,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.agent_orchestrator import get_agent_orchestrator
         orchestrator = get_agent_orchestrator()
-        task = asyncio.create_task(orchestrator.start())
+        task = asyncio.create_task(orchestrator.start(), name="agent-orchestrator")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Agent orchestrator started")
         _startup_state["services"]["agent_orchestrator"] = {"status": "running", "started_at": time.time()}
@@ -2375,8 +2375,9 @@ async def _app_lifespan(application: FastAPI):
     # Agent mesh
     try:
         from agents.agent_mesh import agent_mesh
-        asyncio.create_task(agent_mesh.initialize())
-        task = asyncio.create_task(agent_mesh.start())
+        init_task = asyncio.create_task(agent_mesh.initialize(), name="agent-mesh-init")
+        _startup_state["background_tasks"].append(init_task)
+        task = asyncio.create_task(agent_mesh.start(), name="agent-mesh")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Agent mesh started")
         _startup_state["services"]["agent_mesh"] = {"status": "running", "started_at": time.time()}
@@ -2388,7 +2389,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.consensus_engine import get_consensus_engine
         consensus = get_consensus_engine()
-        task = asyncio.create_task(consensus.start())
+        task = asyncio.create_task(consensus.start(), name="consensus-engine-streaming")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Consensus engine streaming started")
     except Exception as e:
@@ -2401,7 +2402,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.audit_trail import get_audit_trail
         audit = get_audit_trail()
-        task = asyncio.create_task(audit.start())
+        task = asyncio.create_task(audit.start(), name="audit-trail")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Audit trail started")
         _startup_state["services"]["audit_trail"] = {"status": "running", "started_at": time.time()}
@@ -2412,7 +2413,7 @@ async def _app_lifespan(application: FastAPI):
     # Intelligence news aggregation
     try:
         from web.api.intelligence import aggregate_news
-        task = asyncio.create_task(aggregate_news())
+        task = asyncio.create_task(aggregate_news(), name="intelligence-news")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Intelligence news aggregation started")
     except Exception as e:
@@ -2421,7 +2422,7 @@ async def _app_lifespan(application: FastAPI):
     # API live data fetching
     try:
         from web.api.live_data import fetch_live_prices as fetch_api_prices
-        task = asyncio.create_task(fetch_api_prices())
+        task = asyncio.create_task(fetch_api_prices(), name="api-live-data")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ API live data feed started")
     except Exception as e:
@@ -2431,7 +2432,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.alerts import get_alert_manager
         alert_mgr = get_alert_manager()
-        task = asyncio.create_task(alert_mgr.start())
+        task = asyncio.create_task(alert_mgr.start(), name="alert-manager")
         _startup_state["background_tasks"].append(task)
         try:
             from data.live_price_feed import get_live_price_feed
@@ -2451,7 +2452,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.health import get_health_monitor
         health_mon = get_health_monitor()
-        task = asyncio.create_task(health_mon.start())
+        task = asyncio.create_task(health_mon.start(), name="health-monitor")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Health monitor started")
         _startup_state["services"]["health_monitor"] = {"status": "running", "started_at": time.time()}
@@ -2575,6 +2576,9 @@ async def _app_lifespan(application: FastAPI):
     # ── SHUTDOWN ───────────────────────────────────────────────────────
     logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
 
+    # Import shutdown helper
+    from core.task_supervision import shutdown_with_timeout
+
     # Transition to SHUTTING_DOWN mode
     try:
         from core.runtime_state import set_runtime_mode, RuntimeMode
@@ -2593,7 +2597,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiInsightPipeline
     try:
         from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline as _get_pipeline
-        await _get_pipeline().stop()
+        await shutdown_with_timeout(_get_pipeline().stop(), timeout=5.0, component_name="KalshiInsightPipeline")
         logger.info("✅ KalshiInsightPipeline stopped")
     except Exception as exc:
         logger.warning("KalshiInsightPipeline stop failed: %s", exc)
@@ -2601,7 +2605,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop MarketMoodBus aggregation loop
     try:
         from merid.swarm.market_mood_bus import get_market_mood_bus as _get_mood_bus
-        await _get_mood_bus().stop()
+        await shutdown_with_timeout(_get_mood_bus().stop(), timeout=5.0, component_name="MarketMoodBus")
         logger.info("✅ MarketMoodBus stopped")
     except Exception as exc:
         logger.warning("MarketMoodBus stop failed: %s", exc)
@@ -2609,7 +2613,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop WSFeedManager (Coinbase WS price feed)
     try:
         from merid.signals.ws_price_feed import get_ws_feed_manager as _get_ws_mgr
-        await _get_ws_mgr().stop()
+        await shutdown_with_timeout(_get_ws_mgr().stop(), timeout=5.0, component_name="WSFeedManager")
         logger.info("✅ WSFeedManager stopped")
     except Exception as exc:
         logger.warning("WSFeedManager stop failed: %s", exc)
@@ -2617,7 +2621,7 @@ async def _app_lifespan(application: FastAPI):
     # Close LiveFeedManager httpx client
     try:
         from merid.signals.live_feeds import get_live_feed_manager as _get_live_feed_mgr
-        await _get_live_feed_mgr().close()
+        await shutdown_with_timeout(_get_live_feed_mgr().close(), timeout=5.0, component_name="LiveFeedManager")
         logger.info("✅ LiveFeedManager closed")
     except Exception as exc:
         logger.warning("LiveFeedManager close failed: %s", exc)
@@ -2625,7 +2629,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop SentimentBus (Twitter+Reddit background loops)
     try:
         from merid.sentiment.sentiment_bus import get_sentiment_bus as _get_sent_bus
-        await _get_sent_bus().stop()
+        await shutdown_with_timeout(_get_sent_bus().stop(), timeout=5.0, component_name="SentimentBus")
         logger.info("✅ SentimentBus stopped")
     except Exception as exc:
         logger.warning("SentimentBus stop failed: %s", exc)
@@ -2641,7 +2645,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiWebSocketBridge
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge as _get_ws_bridge
-        await _get_ws_bridge().stop()
+        await shutdown_with_timeout(_get_ws_bridge().stop(), timeout=5.0, component_name="KalshiWebSocketBridge")
         logger.info("✅ KalshiWebSocketBridge stopped")
     except Exception as exc:
         logger.warning("KalshiWebSocketBridge stop failed: %s", exc)
@@ -2649,15 +2653,15 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiSentimentService
     try:
         from merid.event_venues.kalshi.sentiment import get_sentiment_service as _get_sentiment_svc
-        await _get_sentiment_svc().stop()
+        await shutdown_with_timeout(_get_sentiment_svc().stop(), timeout=5.0, component_name="KalshiSentimentService")
         logger.info("✅ KalshiSentimentService stopped")
     except Exception as exc:
         logger.warning("KalshiSentimentService stop failed: %s", exc)
 
-    # Stop KalshiInsightPipeline
+    # Stop KalshiInsightPipeline (duplicate stop call)
     try:
         from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline as _get_insight_pl
-        await _get_insight_pl().stop()
+        await shutdown_with_timeout(_get_insight_pl().stop(), timeout=5.0, component_name="KalshiInsightPipeline")
         logger.info("✅ KalshiInsightPipeline stopped")
     except Exception as exc:
         logger.warning("KalshiInsightPipeline stop failed: %s", exc)
@@ -2665,7 +2669,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiMarketCatalog
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog as _get_catalog
-        await _get_catalog().stop()
+        await shutdown_with_timeout(_get_catalog().stop(), timeout=5.0, component_name="KalshiMarketCatalog")
         logger.info("✅ KalshiMarketCatalog stopped")
     except Exception as exc:
         logger.warning("KalshiMarketCatalog stop failed: %s", exc)
@@ -2673,7 +2677,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop TickerCollector
     try:
         from merid.event_venues.kalshi.ticker_collector import get_ticker_collector as _get_ticker_col
-        await _get_ticker_col().stop()
+        await shutdown_with_timeout(_get_ticker_col().stop(), timeout=5.0, component_name="TickerCollector")
         logger.info("✅ TickerCollector stopped")
     except Exception as exc:
         logger.warning("TickerCollector stop failed: %s", exc)
@@ -2681,7 +2685,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiMarketCache
     try:
         from merid.event_venues.kalshi.market_cache import get_market_cache as _get_mkt_cache
-        await _get_mkt_cache().stop()
+        await shutdown_with_timeout(_get_mkt_cache().stop(), timeout=5.0, component_name="KalshiMarketCache")
         logger.info("✅ KalshiMarketCache stopped")
     except Exception as exc:
         logger.warning("KalshiMarketCache stop failed: %s", exc)
@@ -2689,7 +2693,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop EnhancedConsensusCoordinator opinion subscriber
     try:
         from consensus.consensus_coordinator import EnhancedConsensusCoordinator as _ECC
-        await _ECC.get_instance().stop_opinion_subscriber()
+        await shutdown_with_timeout(_ECC.get_instance().stop_opinion_subscriber(), timeout=5.0, component_name="EnhancedConsensusCoordinator")
         logger.info("✅ EnhancedConsensusCoordinator opinion subscriber stopped")
     except Exception as exc:
         logger.warning("EnhancedConsensusCoordinator stop failed: %s", exc)
@@ -2697,7 +2701,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop OrchestratorAgentManager (AgentMesh, NewsMonitor, SocialBroadcaster, ReflectionSystem)
     try:
         from web.startup_agents import get_orchestrator_manager as _get_orch_mgr
-        await _get_orch_mgr().stop_all()
+        await shutdown_with_timeout(_get_orch_mgr().stop_all(), timeout=10.0, component_name="OrchestratorAgentManager")
         logger.info("✅ OrchestratorAgentManager stopped")
     except Exception as exc:
         logger.warning("OrchestratorAgentManager stop failed: %s", exc)
@@ -2705,7 +2709,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop WatchdogCoordinator
     try:
         from agents.watchdog_agents import get_watchdog_coordinator as _get_watchdog
-        await _get_watchdog().stop()
+        await shutdown_with_timeout(_get_watchdog().stop(), timeout=5.0, component_name="WatchdogCoordinator")
         logger.info("✅ WatchdogCoordinator stopped")
     except Exception as exc:
         logger.warning("WatchdogCoordinator stop failed: %s", exc)
@@ -2713,7 +2717,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop SystemOrchestrator (also stops ConsensusEngine)
     try:
         from core.system_orchestrator import stop_merid
-        await stop_merid()
+        await shutdown_with_timeout(stop_merid(), timeout=10.0, component_name="SystemOrchestrator")
         logger.info("✅ SystemOrchestrator stopped")
     except Exception as exc:
         logger.warning("SystemOrchestrator stop failed: %s", exc)
@@ -2721,7 +2725,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop AuditTrail
     try:
         from core.audit_trail import get_audit_trail as _get_audit
-        await _get_audit().stop()
+        await shutdown_with_timeout(_get_audit().stop(), timeout=5.0, component_name="AuditTrail")
         logger.info("✅ AuditTrail stopped")
     except Exception as exc:
         logger.warning("AuditTrail stop failed: %s", exc)
@@ -2729,7 +2733,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop AlertManager
     try:
         from core.alerts import get_alert_manager as _get_alert_mgr
-        await _get_alert_mgr().stop()
+        await shutdown_with_timeout(_get_alert_mgr().stop(), timeout=5.0, component_name="AlertManager")
         logger.info("✅ AlertManager stopped")
     except Exception as exc:
         logger.warning("AlertManager stop failed: %s", exc)
@@ -2737,7 +2741,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop HealthMonitor
     try:
         from core.health import get_health_monitor as _get_health_mon
-        await _get_health_mon().stop()
+        await shutdown_with_timeout(_get_health_mon().stop(), timeout=5.0, component_name="HealthMonitor")
         logger.info("✅ HealthMonitor stopped")
     except Exception as exc:
         logger.warning("HealthMonitor stop failed: %s", exc)
@@ -2746,7 +2750,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from merid.prediction.agent_grid import get_agent_grid
         grid = get_agent_grid()
-        await grid.stop()
+        await shutdown_with_timeout(grid.stop(), timeout=10.0, component_name="KalshiAgentGrid")
         logger.info("✅ Kalshi agent grid stopped")
     except Exception as exc:
         logger.warning("Kalshi agent grid stop failed: %s", exc)
@@ -2754,7 +2758,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop orchestrator agents (news monitor, twitter, telegram)
     try:
         orchestrator_manager = get_orchestrator_manager()
-        await orchestrator_manager.stop_all()
+        await shutdown_with_timeout(orchestrator_manager.stop_all(), timeout=10.0, component_name="orchestrator_agents")
         logger.info("✅ Orchestrator agents stopped")
     except Exception as exc:
         logger.warning("Orchestrator agents stop failed: %s", exc)
