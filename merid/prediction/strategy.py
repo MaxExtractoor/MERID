@@ -46,6 +46,46 @@ class ExpiryPhase(str, Enum):
 
 
 @dataclass
+class MoveBandsConfig:
+    """Configurable move geometry guardrails."""
+
+    max_abs_move_15m: float = 0.02   # 2 %
+    max_abs_move_1h: float = 0.04    # 4 %
+    max_abs_move_1d: float = 0.10    # 10 %
+    allow_tail_bets: bool = False
+
+    def max_abs_move_allowed(self, minutes_to_expiry: Optional[float]) -> float:
+        if minutes_to_expiry is None:
+            return self.max_abs_move_1d
+        if minutes_to_expiry <= 30:
+            return self.max_abs_move_15m
+        if minutes_to_expiry <= 120:
+            return self.max_abs_move_1h
+        return self.max_abs_move_1d
+
+
+@dataclass
+class EdgeThresholdConfig:
+    """Probability and net-edge floors (fee-aware)."""
+
+    min_true_win_prob: float = 0.55
+    min_net_edge_bps_by_price_band: Dict[str, float] = field(
+        default_factory=lambda: {"low": 40.0, "mid": 25.0, "high": 15.0}
+    )
+
+    def _price_band(self, price_cents: float) -> str:
+        if price_cents <= 35:
+            return "low"
+        if price_cents <= 65:
+            return "mid"
+        return "high"
+
+    def min_edge_bps(self, price_cents: float) -> float:
+        band = self._price_band(price_cents)
+        return self.min_net_edge_bps_by_price_band.get(band, 0.0)
+
+
+@dataclass
 class StrategyConfig:
     """Tunable parameters for KalshiStrategy."""
     # Edge thresholds (as probability fraction, e.g. 0.03 = 3 %)
@@ -78,6 +118,10 @@ class StrategyConfig:
 
     # Confidence
     min_confidence: Decimal = Decimal("0.5")
+
+    # Geometry / probability guardrails
+    move_bands: MoveBandsConfig = field(default_factory=MoveBandsConfig)
+    edge_thresholds: EdgeThresholdConfig = field(default_factory=EdgeThresholdConfig)
 
 
 @dataclass
@@ -271,6 +315,96 @@ class KalshiStrategy:
         size = int(raw_size.quantize(Decimal("1"), ROUND_HALF_UP))
         return min(size, self.config.max_contracts_per_order)
 
+    def _kelly_fraction_for_edge(self, edge: EdgeEstimate) -> Optional[Decimal]:
+        """Calculate Kelly fraction for guardrail veto (<= 0 ⇒ reject)."""
+        try:
+            p = edge.model_prob
+            q = Decimal("1") - p
+            if edge.market_prob <= Decimal("0") or edge.market_prob >= Decimal("1"):
+                return None
+            b = (Decimal("1") / edge.market_prob) - Decimal("1")
+            if b <= Decimal("0"):
+                return None
+            return (p * b - q) / b
+        except Exception:
+            return None
+
+    def _guard_reason(self, snapshot: MarketSnapshot, edge: EdgeEstimate) -> Optional[str]:
+        """Return rejection reason string if guardrails veto the edge."""
+        minutes_to_expiry = (
+            float(snapshot.time_to_expiry_hours) * 60.0 if snapshot.time_to_expiry_hours is not None else None
+        )
+        shape = getattr(snapshot, "market_shape", None)
+        spot = getattr(snapshot, "spot_price", None)
+        if (
+            shape
+            and getattr(shape, "strike", None)
+            and spot is not None
+            and getattr(shape, "market_type", None) in ("THRESHOLD_LEQ", "THRESHOLD_GEQ")
+        ):
+            required_move = (shape.strike - spot) / spot
+            max_move = self.config.move_bands.max_abs_move_allowed(minutes_to_expiry)
+            if edge.side == "yes" and (not self.config.move_bands.allow_tail_bets):
+                if abs(required_move) > max_move:
+                    return f"geometry move {required_move:.4f} exceeds allowed {max_move:.4f}"
+
+        if edge.net_edge <= Decimal("0"):
+            return "net edge non-positive"
+
+        win_floor = Decimal(str(self.config.edge_thresholds.min_true_win_prob))
+        if edge.model_prob < win_floor:
+            return f"win_prob {edge.model_prob:.4f} < floor {win_floor}"
+
+        price_cents = float(snapshot.implied.yes_prob if edge.side == "yes" else snapshot.implied.no_prob) * 100.0
+        net_edge_bps = float(edge.net_edge) * 10000.0
+        min_edge_bps = self.config.edge_thresholds.min_edge_bps(price_cents)
+        if net_edge_bps < min_edge_bps:
+            return f"net edge {net_edge_bps:.1f}bps < floor {min_edge_bps:.1f}bps"
+
+        kelly_fraction = self._kelly_fraction_for_edge(edge)
+        if kelly_fraction is not None and kelly_fraction <= Decimal("0"):
+            return "kelly fraction <= 0"
+
+        return None
+
+    def _log_guardrail_rejection(
+        self,
+        snapshot: MarketSnapshot,
+        edge: EdgeEstimate,
+        reason: str,
+    ) -> None:
+        """Emit structured log for rejected edge."""
+        shape = getattr(snapshot, "market_shape", None)
+        minutes_to_expiry = (
+            float(snapshot.time_to_expiry_hours) * 60.0 if snapshot.time_to_expiry_hours is not None else None
+        )
+        logger.info(
+            "Guardrail reject %s side=%s reason=%s spot=%s strike=%s tte_min=%s model_p=%.4f implied=%.4f net_edge=%.4f",
+            snapshot.market_id,
+            edge.side,
+            reason,
+            getattr(snapshot, "spot_price", None),
+            getattr(shape, "strike", None) if shape else None,
+            minutes_to_expiry,
+            float(edge.model_prob),
+            float(edge.market_prob),
+            float(edge.net_edge),
+        )
+
+    def _apply_guardrails(
+        self, snapshot: MarketSnapshot, edges: List[EdgeEstimate]
+    ) -> tuple[List[EdgeEstimate], List[tuple[EdgeEstimate, str]]]:
+        filtered: List[EdgeEstimate] = []
+        rejected: List[tuple[EdgeEstimate, str]] = []
+        for edge in edges:
+            reason = self._guard_reason(snapshot, edge)
+            if reason:
+                rejected.append((edge, reason))
+                self._log_guardrail_rejection(snapshot, edge, reason)
+                continue
+            filtered.append(edge)
+        return filtered, rejected
+
     # ------------------------------------------------------------------
     # Entry evaluation
     # ------------------------------------------------------------------
@@ -350,14 +484,16 @@ class KalshiStrategy:
 
         # 4. Best speculative edge
         spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        spec_edges, rejected_edges = self._apply_guardrails(snapshot, spec_edges)
         if not spec_edges:
+            rej_reason = rejected_edges[0][1] if rejected_edges else "No actionable edge found."
             return StrategySignal(
                 market_id=snapshot.market_id,
                 action=SignalAction.NO_ACTION,
                 side="none",
                 contracts=0,
                 phase=phase,
-                reason="No actionable edge found.",
+                reason=f"Guardrails rejected edges: {rej_reason}",
             )
 
         best = max(spec_edges, key=lambda e: e.net_edge)
