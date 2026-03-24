@@ -59,7 +59,7 @@ async def _kalshi_list_markets(
     category: str = "all",
     timeframe: str = "",
     asset: str = "",
-    limit: int = 50,
+    limit: Optional[int] = None,
 ) -> ToolResult:
     """List Kalshi markets filtered by category, timeframe and asset."""
     t0 = time.time()
@@ -91,7 +91,8 @@ async def _kalshi_list_markets(
             markets = catalog.get_markets_by_category(category, timeframe=timeframe, asset=asset)
         
         # Limit the results
-        markets = markets[:limit]
+        if limit:
+            markets = markets[:limit]
 
         payload = {
             "markets": [

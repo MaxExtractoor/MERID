@@ -146,6 +146,7 @@ class CatalogMarket:
     asset: Optional[str] = None
     timeframe: Optional[str] = None
     market_type: str = "binary"
+    crypto_type: Optional[str] = None  # up_down vs threshold/boundary for crypto
     category: Optional[str] = None
     event_ticker: Optional[str] = None
     series_ticker: Optional[str] = None
@@ -187,6 +188,8 @@ class KalshiMarketCatalog:
         self._by_category: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_asset: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_timeframe: Dict[str, List[CatalogMarket]] = defaultdict(list)
+        self._by_series: Dict[str, List[CatalogMarket]] = defaultdict(list)
+        self._by_asset_timeframe: Dict[tuple, List[CatalogMarket]] = defaultdict(list)
         self._by_ticker: Dict[str, CatalogMarket] = {}
 
         self._last_refresh: Optional[datetime] = None
@@ -259,6 +262,8 @@ class KalshiMarketCatalog:
             cat_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             asset_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             tf_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
+            series_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
+            asset_tf_idx: Dict[tuple, List[CatalogMarket]] = defaultdict(list)
             ticker_idx: Dict[str, CatalogMarket] = {}
 
             categories_found = set()
@@ -277,6 +282,10 @@ class KalshiMarketCatalog:
                     assets_found.add(cm.asset)
                 if cm.timeframe:
                     tf_idx[cm.timeframe].append(cm)
+                if cm.series_ticker:
+                    series_idx[cm.series_ticker].append(cm)
+                if cm.asset and cm.timeframe:
+                    asset_tf_idx[(cm.asset, cm.timeframe)].append(cm)
             
             # Debug logging for first refresh to see what's happening
             if self._refresh_count == 0 and enriched:
@@ -295,6 +304,8 @@ class KalshiMarketCatalog:
             self._by_category = cat_idx
             self._by_asset = asset_idx
             self._by_timeframe = tf_idx
+            self._by_series = series_idx
+            self._by_asset_timeframe = asset_tf_idx
             self._by_ticker = ticker_idx
             self._last_refresh = now
             self._refresh_count += 1
@@ -304,6 +315,18 @@ class KalshiMarketCatalog:
                 f"Catalog refreshed: {len(enriched)} markets, "
                 f"{len(cat_idx)} categories, {len(asset_idx)} assets"
             )
+            # Crypto visibility: log per-asset/timeframe counts with real tickers (not samples)
+            try:
+                crypto_summary = self.crypto_series_summary()
+                if crypto_summary:
+                    for asset, tf_data in crypto_summary.items():
+                        for tf, info in tf_data.items():
+                            logger.info(
+                                "crypto_catalog asset=%s tf=%s count=%s sample=%s",
+                                asset, tf, info.get("count", 0), info.get("sample", []),
+                            )
+            except Exception as _ce:
+                logger.debug("crypto summary logging skipped: %s", _ce)
             return len(enriched)
 
     # ── Enrichment ───────────────────────────────────────────────────────
@@ -315,29 +338,31 @@ class KalshiMarketCatalog:
         event_ticker = raw.get("event_ticker", "") or ""
         series_ticker = raw.get("series_ticker", "") or ""
 
+        minutes_to_expiry = None
+        if mkt.end_date and mkt.end_date > now:
+            minutes_to_expiry = (mkt.end_date - now).total_seconds() / 60.0
+
         # 1. Primary detection: ticker prefix → category + asset
         ticker_category, ticker_asset = self._detect_from_ticker(event_ticker or mkt.market_id)
 
         # 2. Secondary detection: text-based patterns
         text = f"{mkt.market_id} {event_ticker} {mkt.question or ''} {mkt.description or ''} {mkt.category or ''}"
         text_asset = self._detect_asset(text)
-        timeframe = self._detect_timeframe(text, mkt.end_date, now)
+        timeframe = self._detect_timeframe(text, mkt.end_date, now, series_ticker=series_ticker, minutes_to_expiry=minutes_to_expiry)
         market_type = self._detect_type(text)
-        strikes = self._detect_strikes(text)
+        crypto_type = self._detect_crypto_type(series_ticker or mkt.market_id)
+        strikes = self._detect_strikes(text, mkt.market_id)
 
         # Merge: ticker-prefix wins for category; first non-None wins for asset
         category = mkt.category or ticker_category
         asset = ticker_asset or text_asset
-
-        minutes_to_expiry = None
-        if mkt.end_date and mkt.end_date > now:
-            minutes_to_expiry = (mkt.end_date - now).total_seconds() / 60.0
 
         return CatalogMarket(
             market=mkt,
             asset=asset,
             timeframe=timeframe,
             market_type=market_type,
+            crypto_type=crypto_type,
             category=category,
             event_ticker=event_ticker or None,
             series_ticker=series_ticker or None,
@@ -349,8 +374,8 @@ class KalshiMarketCatalog:
         )
 
     @staticmethod
-    def _detect_strikes(text: str) -> Dict[str, float]:
-        """Extract strike prices from market text."""
+    def _detect_strikes(text: str, ticker: str) -> Dict[str, float]:
+        """Extract strike prices from market text or ticker."""
         res = {}
         # Patterns for various strike formats
         # Examples: "above 50,000", "below $1.50", "between 100 and 200"
@@ -369,6 +394,14 @@ class KalshiMarketCatalog:
             try:
                 res["floor"] = float(range_match.group(1).replace(",", ""))
                 res["cap"] = float(range_match.group(2).replace(",", ""))
+            except ValueError:
+                pass
+
+        # Fallback: parse strike from Kalshi ticker suffix e.g. KXBTC-26MAR2415-T77699.99
+        ticker_match = re.search(r"-[TB]([0-9]+(?:\.[0-9]+)?)$", ticker)
+        if ticker_match and "strike" not in res:
+            try:
+                res["strike"] = float(ticker_match.group(1))
             except ValueError:
                 pass
         
@@ -398,7 +431,22 @@ class KalshiMarketCatalog:
         text: str,
         end_date: Optional[datetime],
         now: datetime,
+        *,
+        series_ticker: Optional[str] = None,
+        minutes_to_expiry: Optional[float] = None,
     ) -> Optional[str]:
+        # Series hint (most reliable for crypto intraday)
+        if series_ticker:
+            st = series_ticker.upper()
+            if "15M" in st:
+                return "15m"
+            if st.endswith("D1") or st.endswith("-D") or "-D" in st:
+                return "daily"
+            if st.endswith("W") or "WEEK" in st:
+                return "weekly"
+            if st.endswith("M") and st != "15M":
+                return "monthly"
+
         # First try text patterns
         for pat, tf in _TIMEFRAME_PATTERNS:
             if pat.search(text):
@@ -408,6 +456,12 @@ class KalshiMarketCatalog:
         if end_date and end_date > now:
             delta = end_date - now
             minutes = delta.total_seconds() / 60.0
+        elif minutes_to_expiry is not None:
+            minutes = minutes_to_expiry
+        else:
+            minutes = None
+
+        if minutes is not None:
             if minutes <= 20:
                 return "15m"
             elif minutes <= 90:
@@ -428,6 +482,16 @@ class KalshiMarketCatalog:
             if pat.search(text):
                 return mtype
         return "binary"
+
+    @staticmethod
+    def _detect_crypto_type(identifier: str) -> Optional[str]:
+        """Classify crypto contracts as up/down (intraday) or threshold/boundary."""
+        ident = (identifier or "").upper()
+        if "15M" in ident:
+            return "up_down"
+        if re.search(r"-[TB][0-9]", ident):
+            return "threshold"
+        return None
 
     # ── Query methods ────────────────────────────────────────────────────
 
@@ -469,6 +533,14 @@ class KalshiMarketCatalog:
     def get_markets_by_timeframe(self, timeframe: str) -> List[CatalogMarket]:
         """Filter markets by timeframe."""
         return self._by_timeframe.get(timeframe, [])
+
+    def get_markets_by_series(self, series_ticker: str) -> List[CatalogMarket]:
+        """Filter markets by Kalshi series ticker."""
+        return self._by_series.get(series_ticker, [])
+
+    def get_markets_by_asset_timeframe(self, asset: str, timeframe: str) -> List[CatalogMarket]:
+        """Filter markets by (asset, timeframe) combination."""
+        return self._by_asset_timeframe.get((asset, timeframe), [])
 
     def get_markets_by_event(self, event_keyword: str) -> List[CatalogMarket]:
         """Search markets by event keyword in question/description."""
@@ -517,6 +589,18 @@ class KalshiMarketCatalog:
         """List all detected timeframes."""
         return sorted(self._by_timeframe.keys())
 
+    def crypto_series_summary(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Return counts + sample tickers for crypto assets/timeframes."""
+        summary: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for (asset, tf), markets in self._by_asset_timeframe.items():
+            if asset not in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                continue
+            summary.setdefault(asset, {})[tf] = {
+                "count": len(markets),
+                "sample": [m.market.market_id for m in markets[:3]],
+            }
+        return summary
+
     # ── Status ───────────────────────────────────────────────────────────
 
     def summary(self) -> Dict[str, Any]:
@@ -528,6 +612,8 @@ class KalshiMarketCatalog:
             "categories": {k: len(v) for k, v in self._by_category.items()},
             "assets": {k: len(v) for k, v in self._by_asset.items()},
             "timeframes": {k: len(v) for k, v in self._by_timeframe.items()},
+            "series": {k: len(v) for k, v in self._by_series.items()},
+            "asset_timeframes": {f"{a}:{tf}": len(v) for (a, tf), v in self._by_asset_timeframe.items()},
             "running": self._task is not None and not self._task.done(),
         }
 

@@ -88,6 +88,12 @@ class MarketSnapshot:
     time_to_expiry_hours: Optional[Decimal] = None
     close_time: Optional[datetime] = None
     category: Optional[str] = None
+    asset: Optional[str] = None
+    timeframe: Optional[str] = None
+    market_type: Optional[str] = None
+    strike_price: Optional[Decimal] = None
+    spot_price: Optional[Decimal] = None
+    minutes_to_expiry: Optional[Decimal] = None
     edges: List[EdgeEstimate] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
