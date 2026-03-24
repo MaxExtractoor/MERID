@@ -3,6 +3,33 @@
 **Date:** 2026-03-24
 **Session:** Autonomous Runtime Investigation
 **Scope:** `main.py` (production entrypoint) + `web/main.py` (web shell / router factory)
+**Last Updated:** 2026-03-24 (Session 2 - Hardening Implementation)
+
+---
+
+## Fix Status
+
+### ✅ Completed (Session 1 + 2)
+- **BUG-01** (main.py): Task supervision system implemented via `core/task_supervision.py`
+- **BUG-02** (web/main.py): All background tasks now have descriptive names
+- **BUG-04** (web/main.py): Duplicate MeridLoop startup removed
+- **BUG-05** (web/main.py): Duplicate KalshiInsightPipeline startup removed
+- **BUG-06**: Dual entrypoint architecture documented (no actual duplication occurs)
+- **BUG-07**: Runtime state machine implemented via `core/runtime_state.py`
+- **BUG-08** (web/main.py): Health endpoints updated to check runtime state
+- **BUG-09** (web/main.py): Reconciliation gated by runtime state
+- **BUG-14** (both): Shutdown timeouts added to all component stop() calls
+
+### 📝 Documented but Not Implemented
+- **BUG-10** (main.py): Execution engine readiness requirements documented with TODO
+
+### ⏳ Remaining Work
+- **BUG-03**: Task cancellation improvements
+- **BUG-11**: ExecutionGuard consultation during startup
+- **BUG-12**: Circuit breakers for critical services
+- **BUG-13**: Shutdown order documentation and enforcement
+- **BUG-15**: Startup failure handling
+- **BUG-16**: Startup duration logging
 
 ---
 
