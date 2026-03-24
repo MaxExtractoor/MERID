@@ -846,12 +846,20 @@ class KalshiVenueClient(EventVenueClient):
     # ------------------------------------------------------------------------
 
     async def list_series(
-        self, limit: int = 200
+        self,
+        limit: int = 200,
+        category: Optional[str] = None,
+        include_volume: bool = False,
+        min_updated_ts: Optional[int] = None,
     ) -> OperationResult[List[Dict[str, Any]]]:
-        """List all series with cursor-based pagination.
+        """List series with optional filters and cursor-based pagination.
 
         Args:
             limit: Maximum number of series to fetch (default 200)
+            category: Optional category filter (e.g., ``\"crypto\"``)
+            include_volume: Request Kalshi to include ``volume_fp`` in the payload
+            min_updated_ts: If set, only series updated after this epoch timestamp
+                are returned. Useful for incremental refreshes.
 
         Returns:
             OperationResult containing list of series dictionaries
@@ -865,6 +873,12 @@ class KalshiVenueClient(EventVenueClient):
 
         for _ in range(max_pages):
             params: Dict[str, Any] = {"limit": page_size}
+            if category:
+                params["category"] = category
+            if include_volume:
+                params["include_volume"] = True
+            if min_updated_ts:
+                params["min_updated_ts"] = min_updated_ts
             if cursor:
                 params["cursor"] = cursor
 
