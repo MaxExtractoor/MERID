@@ -504,6 +504,13 @@ async def get_system_health() -> Dict[str, Any]:
         except Exception as exc:
             return {"status": "unavailable", "last_check": now, "error": str(exc)}
 
+    try:
+        from web.api.dependency_health import evaluate_dependencies
+
+        dependencies = evaluate_dependencies()
+    except Exception as exc:
+        dependencies = {"overall_status": "unknown", "error": str(exc), "dependencies": {}}
+
     services = {
         "api_gateway": {"status": "healthy", "last_check": now},
         "risk_engine": _svc(lambda: __import__(
@@ -516,18 +523,20 @@ async def get_system_health() -> Dict[str, Any]:
             "core.audit_trail", fromlist=["AuditTrail"]
         ).AuditTrail().entries is not None),
         "event_bus": _svc(lambda: __import__(
-            "core.event_bus", fromlist=["get_event_bus"]
+        "core.event_bus", fromlist=["get_event_bus"]
         ).get_event_bus() is not None),
     }
     all_ok = all(s["status"] == "healthy" for s in services.values())
+    deps_ok = dependencies.get("overall_status") in ("healthy", "disabled")
     return {
-        "status": "healthy" if all_ok else "degraded",
+        "status": "healthy" if all_ok and deps_ok else "degraded",
         "uptime_seconds": int(uptime_seconds),
         "uptime_hours": round(uptime_seconds / 3600, 2),
         "timestamp": now,
         "environment": os.getenv("MERID_ENV", "development"),
-        "incident_flag": not all_ok,
+        "incident_flag": not (all_ok and deps_ok),
         "services": services,
+        "dependencies": dependencies,
         "metrics": _real_system_metrics(),
     }
 
@@ -595,6 +604,12 @@ async def get_system_health_v1() -> Dict[str, Any]:
     except Exception:
         services["risk"] = "unavailable"
     all_ok = all(v in ("running", "active", "idle") for v in services.values())
+    try:
+        from web.api.dependency_health import evaluate_dependencies
+
+        dependencies = evaluate_dependencies()
+    except Exception as exc:
+        dependencies = {"overall_status": "unknown", "error": str(exc), "dependencies": {}}
     _ver = os.getenv("MERID_VERSION", "")
     if not _ver:
         try:
@@ -603,10 +618,11 @@ async def get_system_health_v1() -> Dict[str, Any]:
         except Exception:
             _ver = "dev"
     return {
-        "status": "healthy" if all_ok else "degraded",
+        "status": "healthy" if all_ok and dependencies.get("overall_status") in ("healthy", "disabled") else "degraded",
         "timestamp": time.time(),
         "version": _ver,
         "services": services,
+        "dependencies": dependencies,
     }
 
 
