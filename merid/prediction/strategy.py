@@ -46,6 +46,15 @@ class ExpiryPhase(str, Enum):
 
 
 @dataclass
+class TimeframeEntryRule:
+    """Entry gating per timeframe."""
+
+    min_minutes_to_expiry: int
+    min_edge: Decimal
+    max_yes_move_pct: Decimal
+
+
+@dataclass
 class StrategyConfig:
     """Tunable parameters for KalshiStrategy."""
     # Edge thresholds (as probability fraction, e.g. 0.03 = 3 %)
@@ -78,6 +87,14 @@ class StrategyConfig:
 
     # Confidence
     min_confidence: Decimal = Decimal("0.5")
+
+    # Entry gating per timeframe
+    freshness_max_age_seconds: int = 90
+    timeframe_entry_rules: Dict[str, TimeframeEntryRule] = field(default_factory=lambda: {
+        "15m": TimeframeEntryRule(min_minutes_to_expiry=4, min_edge=Decimal("0.02"), max_yes_move_pct=Decimal("0.10")),
+        "1h": TimeframeEntryRule(min_minutes_to_expiry=15, min_edge=Decimal("0.03"), max_yes_move_pct=Decimal("0.10")),
+        "daily": TimeframeEntryRule(min_minutes_to_expiry=90, min_edge=Decimal("0.06"), max_yes_move_pct=Decimal("0.12")),
+    })
 
 
 @dataclass
@@ -160,6 +177,50 @@ class KalshiStrategy:
             ExpiryPhase.LATE: self.config.min_edge_late,
             ExpiryPhase.TERMINAL: self.config.min_edge_terminal,
         }[phase]
+
+    def _timeframe_rule(self, snapshot: MarketSnapshot) -> Optional[TimeframeEntryRule]:
+        tf = (snapshot.timeframe or "").lower()
+        return self.config.timeframe_entry_rules.get(tf)
+
+    @staticmethod
+    def _required_move_pct(snapshot: MarketSnapshot) -> Optional[Decimal]:
+        if snapshot.strike_price is None or snapshot.spot_price is None:
+            return None
+        try:
+            if snapshot.spot_price == 0:
+                return None
+            dist = abs(snapshot.strike_price - snapshot.spot_price)
+            return Decimal(str(dist)) / Decimal(str(snapshot.spot_price))
+        except Exception:
+            return None
+
+    def _passes_timeframe_rules(
+        self, snapshot: MarketSnapshot, edge: EdgeEstimate, phase: ExpiryPhase
+    ) -> tuple[bool, Optional[str], Optional[Decimal]]:
+        rule = self._timeframe_rule(snapshot)
+        if not rule:
+            return True, None, None
+
+        minutes_left = float(snapshot.minutes_to_expiry) if snapshot.minutes_to_expiry is not None else None
+        if minutes_left is not None and minutes_left < rule.min_minutes_to_expiry:
+            return False, (
+                f"time_to_expiry {minutes_left:.1f}m < min {rule.min_minutes_to_expiry}m"
+            ), rule.min_edge
+
+        min_edge = max(self._min_edge_for_phase(phase), rule.min_edge)
+
+        move_pct = self._required_move_pct(snapshot)
+        if (
+            move_pct is not None
+            and edge.side == "yes"
+            and snapshot.market_type == "threshold"
+            and move_pct > rule.max_yes_move_pct
+        ):
+            return False, (
+                f"catastrophic_yes: requires move {move_pct:.2%} > {rule.max_yes_move_pct:.2%}"
+            ), min_edge
+
+        return True, None, min_edge
 
     # ------------------------------------------------------------------
     # Position sizing (quarter-Kelly)
@@ -296,6 +357,19 @@ class KalshiStrategy:
                 reason=f"Market state is {snapshot.state.value}, not tradeable.",
             )
 
+        # Freshness filter
+        if snapshot.timestamp:
+            age_s = (datetime.now(timezone.utc) - snapshot.timestamp).total_seconds()
+            if age_s > self.config.freshness_max_age_seconds:
+                return StrategySignal(
+                    market_id=snapshot.market_id,
+                    action=SignalAction.NO_ACTION,
+                    side="none",
+                    contracts=0,
+                    phase=phase,
+                    reason=f"Snapshot stale ({age_s:.0f}s > {self.config.freshness_max_age_seconds}s).",
+                )
+
         # 2. Liquidity filter
         if snapshot.volume < self.config.min_volume:
             return StrategySignal(
@@ -362,8 +436,19 @@ class KalshiStrategy:
 
         best = max(spec_edges, key=lambda e: e.net_edge)
 
-        # 5. Edge threshold
-        min_edge = self._min_edge_for_phase(phase)
+        min_edge_phase = self._min_edge_for_phase(phase)
+        allowed_tf, tf_reason, tf_min_edge = self._passes_timeframe_rules(snapshot, best, phase)
+        min_edge = max(min_edge_phase, tf_min_edge or min_edge_phase)
+        if not allowed_tf:
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side,
+                contracts=0,
+                edge=best,
+                phase=phase,
+                reason=tf_reason or "timeframe_gate",
+            )
         if best.net_edge < min_edge:
             return StrategySignal(
                 market_id=snapshot.market_id,
@@ -372,7 +457,7 @@ class KalshiStrategy:
                 contracts=0,
                 edge=best,
                 phase=phase,
-                reason=f"Edge {best.net_edge:.4f} below {phase.value} threshold {min_edge}.",
+                reason=f"Edge {best.net_edge:.4f} below threshold {min_edge}.",
             )
 
         # Confidence filter

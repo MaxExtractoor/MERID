@@ -29,6 +29,7 @@ from merid.prediction.session_guard import get_session_guard
 from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.model import PredictionMarketModel, MarketSnapshot, ContractState, ImpliedProbability
 from merid.prediction.strategy import KalshiStrategy, StrategySignal, SignalAction, StrategyConfig
+from merid.prediction.position_adjuster import PositionAdjustmentEngine
 from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig, PreTradeCheck
 from merid.event_venues.base import EventMarket
 from merid.event_venues.kalshi.stop_loss import StopLossRules, TrackedPosition
@@ -103,6 +104,7 @@ class KalshiTradingAgent:
             max_notional_per_market_usd=config.risk_limits.max_notional_usd,
             max_contracts_per_order=min(50, config.risk_limits.max_orders_per_window),
         ))
+        self._position_engine = PositionAdjustmentEngine(self._strategy, config.risk_limits)
         self._session_guard = get_session_guard()
         self._venue_gate = get_venue_gate()
 
@@ -249,8 +251,10 @@ class KalshiTradingAgent:
             if self._shutdown.is_set():
                 break
 
-            # Check entry window (already mostly handled by filter but good to be explicit)
-            if not self._in_entry_window(market, now):
+            has_position = market.market_id in self._position_engine.positions
+
+            # Check entry window for new positions (positions can always be managed)
+            if not has_position and not self._in_entry_window(market, now):
                 continue
 
             # Check per-window order limit
@@ -278,7 +282,21 @@ class KalshiTradingAgent:
                         f"tags={mood_context.tags}"
                     )
                 
-                signal = self._strategy.evaluate(snapshot, archetype=self.config.archetype)
+                position_signal = self._position_engine.evaluate(snapshot) if has_position else None
+
+                if position_signal:
+                    signal = position_signal
+                elif has_position:
+                    signal = StrategySignal(
+                        market_id=market.market_id,
+                        action=SignalAction.HOLD,
+                        side="none",
+                        contracts=0,
+                        phase=None,
+                        reason="hold_existing",
+                    )
+                else:
+                    signal = self._strategy.evaluate(snapshot, archetype=self.config.archetype)
 
                 # Record every signal (including NO_ACTION) for audit
                 self._record_signal(market, signal, snapshot, now)
@@ -512,7 +530,7 @@ class KalshiTradingAgent:
                 category=category,
                 timeframe=timeframe,
                 asset=asset,
-                limit=self.config.risk_limits.max_orders_per_window * 3,
+                limit=None,
             )
 
             if not result.success:
@@ -578,9 +596,11 @@ class KalshiTradingAgent:
 
         # Compute time to expiry
         tte_hours = None
+        minutes_to_expiry = None
         if market.end_date:
             delta = market.end_date - now
             tte_hours = Decimal(str(max(delta.total_seconds() / 3600, 0)))
+            minutes_to_expiry = Decimal(str(max(delta.total_seconds() / 60, 0)))
 
         implied = self._model.implied_probabilities(
             yes_bid=max(yes_price - 1, Decimal("1")),
@@ -590,6 +610,27 @@ class KalshiTradingAgent:
         )
 
         state = ContractState.TRADING if market.active else ContractState.CLOSED
+        asset = self.config.assets[0] if self.config.assets else None
+        timeframe = self.config.timeframes[0] if self.config.timeframes else None
+        market_type = None
+        strike = None
+        spot_price = None
+
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            catalog = get_market_catalog()
+            m = catalog.get_market(market.market_id)
+            if m:
+                strike = m.strike_price
+                market_type = m.crypto_type or m.market_type
+                asset = asset or m.asset
+                timeframe = timeframe or m.timeframe
+        except Exception as _ce:
+            self.logger.debug("catalog strike lookup skipped: %s", _ce)
+        try:
+            spot_price = self._get_spot_price(asset)
+        except Exception as _se:
+            self.logger.debug("spot lookup skipped: %s", _se)
 
         snapshot = MarketSnapshot(
             market_id=market.market_id,
@@ -602,6 +643,12 @@ class KalshiTradingAgent:
             time_to_expiry_hours=tte_hours,
             close_time=market.end_date,
             category=market.category,
+            asset=asset,
+            timeframe=timeframe,
+            market_type=market_type,
+            strike_price=Decimal(str(strike)) if strike is not None else None,
+            spot_price=spot_price,
+            minutes_to_expiry=minutes_to_expiry,
             timestamp=now,
         )
 
@@ -625,18 +672,6 @@ class KalshiTradingAgent:
             snapshot.sentiment_regime   = local_s.regime if local_s else glob_s.regime
         except Exception as _se:
             self.logger.debug("sentiment enrichment skipped: %s", _se)
-
-        # Compute edges for both sides using the model
-        asset = self.config.assets[0] if self.config.assets else None
-        strike = None
-        try:
-            from merid.event_venues.kalshi.market_catalog import get_market_catalog
-            catalog = get_market_catalog()
-            m = catalog.get_market(market.market_id)
-            if m:
-                strike = m.strike_price
-        except Exception as _ce:
-            self.logger.debug("catalog strike lookup skipped: %s", _ce)
 
         snapshot.edges = [
             self._model.compute_edge(
@@ -1073,6 +1108,20 @@ class KalshiTradingAgent:
             if len(self.state.fill_log) > _MAX_LOG_ENTRIES:
                 self.state.fill_log = self.state.fill_log[-_MAX_LOG_ENTRIES:]
 
+            # Update position adjustment engine
+            if action != "quote":
+                try:
+                    self._position_engine.apply_fill(
+                        market_id=market.market_id,
+                        side=side,
+                        action=action,
+                        contracts=size,
+                        price_cents=signal.limit_price_cents or 0,
+                        edge=signal.edge,
+                    )
+                except Exception as exc:
+                    self.logger.debug("position engine update skipped: %s", exc)
+
             # Emit event bus event
             try:
                 from core.event_bus import event_stream
@@ -1354,6 +1403,21 @@ class KalshiTradingAgent:
         return self.state.fill_log[-limit:]
 
     # ── BTC 15m Risk Layer Helpers ────────────────────────────────────────
+
+    def _get_spot_price(self, asset: Optional[str]) -> Optional[Decimal]:
+        """Fetch latest spot from the price feed if available."""
+        if not asset:
+            return None
+        feed = getattr(self._model, "_price_feed", None)
+        if not feed:
+            return None
+        try:
+            px = feed.get_current_price(f"{asset}/USDT")
+            if px and getattr(px, "price", None) is not None:
+                return Decimal(str(px.price))
+        except Exception as exc:
+            self.logger.debug("spot lookup failed: %s", exc)
+        return None
 
     def _estimate_spread_ticks(self, snapshot: Optional[MarketSnapshot]) -> Optional[int]:
         """Estimate spread in ticks from snapshot."""
