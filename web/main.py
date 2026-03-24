@@ -2790,6 +2790,26 @@ async def _app_lifespan(application: FastAPI):
     logger.info("✅ Shutdown complete")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# APP INSTANCE CREATION
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# IMPORTANT: Two entry points exist for MERID:
+#
+# 1. main.py (Production): Calls create_app(lifespan=main.lifespan) with
+#    curated component set (14 core components). THIS app instance is used
+#    in production. The app instance created below is shadowed and NOT used.
+#
+# 2. web/main.py (Development/Standalone): Uses the app instance created below
+#    with _app_lifespan (40+ services) when run directly via __main__.
+#
+# The module-level app instance below is required for @app.get() decorators
+# used in this file. When main.py imports web.main, this instance is created
+# but never started (main.py creates its own instance which shadows this one).
+# FastAPI lifespans only execute when uvicorn.run() is called, so no
+# duplication occurs.
+# ═══════════════════════════════════════════════════════════════════════════
+
 # Create app instance after all routes are defined
 app = create_app(lifespan=_app_lifespan)
 

@@ -117,6 +117,14 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to start audit: {e}")
 
     # Start execution engine
+    # TODO(BUG-10): Wire execution engine to readiness flags before allowing execution
+    # The execution engine should check:
+    # 1. Runtime state is LIVE_TRADING (not BOOTING or OBSERVE_ONLY)
+    # 2. Price feed is connected and streaming
+    # 3. Consensus engine is operational
+    # 4. Risk engine has completed initial checks
+    # Currently, the engine starts immediately which could lead to execution
+    # attempts before critical dependencies are ready.
     try:
         logger.info("Starting execution engine...")
         execution = get_optimal_executor()
