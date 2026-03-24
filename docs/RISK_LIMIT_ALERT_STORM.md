@@ -29,7 +29,7 @@
   - Portfolio: `E_port = sum(E_m across book)`; daily loss tracked in `_daily_pnl`.
 - **Hypotheses for alert storms:**
   - Multiple BTC tickers (15m, 1h) share `crypto` bucket; burst of intents pushes category notional above limit, causing repeated rejects.
-  - Dedup window too small vs retry loop → repeated `risk_limit` alerts per ticker.
+- Dedup window too small vs retry loop -> repeated `risk_limit` alerts per ticker.
   - Missing idempotency on `client_tag` or retries on partial fills cause re-checks at stale positions.
 
 ---
