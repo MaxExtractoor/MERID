@@ -5,6 +5,10 @@ import time
 from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timedelta, timezone
+from merid.monitoring.dependency_health import (
+    DependencyStatus,
+    get_dependencies_health,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -496,6 +500,8 @@ async def get_system_health() -> Dict[str, Any]:
     import os
     uptime_seconds = time.time() - _server_start_time
     now = time.time()
+    deps = get_dependencies_health()
+    dep_status = deps.get("overall_status", "unknown")
 
     def _svc(check_fn) -> Dict[str, Any]:
         try:
@@ -520,14 +526,20 @@ async def get_system_health() -> Dict[str, Any]:
         ).get_event_bus() is not None),
     }
     all_ok = all(s["status"] == "healthy" for s in services.values())
+    deps_ok = dep_status in (
+        DependencyStatus.HEALTHY.value,
+        DependencyStatus.DISABLED.value,
+    )
+    overall_healthy = all_ok and deps_ok
     return {
-        "status": "healthy" if all_ok else "degraded",
+        "status": "healthy" if overall_healthy else "degraded",
         "uptime_seconds": int(uptime_seconds),
         "uptime_hours": round(uptime_seconds / 3600, 2),
         "timestamp": now,
         "environment": os.getenv("MERID_ENV", "development"),
-        "incident_flag": not all_ok,
+        "incident_flag": not overall_healthy,
         "services": services,
+        "dependencies": deps,
         "metrics": _real_system_metrics(),
     }
 
@@ -576,6 +588,9 @@ async def get_risk_exposure() -> Dict[str, Any]:
 @router.get("/api/v1/system/health")
 async def get_system_health_v1() -> Dict[str, Any]:
     """System health check — real status from grid and risk controller."""
+    import os
+    deps = get_dependencies_health()
+    dep_status = deps.get("overall_status", "unknown")
     services: Dict[str, str] = {"api": "running"}
     try:
         from merid.prediction.agent_grid import get_agent_grid
@@ -595,6 +610,10 @@ async def get_system_health_v1() -> Dict[str, Any]:
     except Exception:
         services["risk"] = "unavailable"
     all_ok = all(v in ("running", "active", "idle") for v in services.values())
+    deps_ok = dep_status in (
+        DependencyStatus.HEALTHY.value,
+        DependencyStatus.DISABLED.value,
+    )
     _ver = os.getenv("MERID_VERSION", "")
     if not _ver:
         try:
@@ -603,10 +622,11 @@ async def get_system_health_v1() -> Dict[str, Any]:
         except Exception:
             _ver = "dev"
     return {
-        "status": "healthy" if all_ok else "degraded",
+        "status": "healthy" if (all_ok and deps_ok) else "degraded",
         "timestamp": time.time(),
         "version": _ver,
         "services": services,
+        "dependencies": deps,
     }
 
 
