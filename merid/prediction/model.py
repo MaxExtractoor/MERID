@@ -67,6 +67,9 @@ class EdgeEstimate:
     net_edge: Decimal          # raw_edge - fee_drag - slippage_est
     edge_type: str             # "arb" or "speculative"
     confidence: Decimal        # 0-1, how confident the model is
+    true_prob: Optional[Decimal] = None
+    kelly_fraction: Optional[Decimal] = None
+    rejection_reason: Optional[str] = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
@@ -90,6 +93,8 @@ class MarketSnapshot:
     category: Optional[str] = None
     edges: List[EdgeEstimate] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    shape: Optional[object] = None
+    rejections: Dict[str, str] = field(default_factory=dict)
 
     # Fear/greed sentiment (injected by trading_agent._build_snapshot)
     sentiment_local: Optional[float] = None    # 0–100, this market
@@ -141,6 +146,63 @@ class PredictionMarketModel:
             self._price_feed = get_live_price_feed()
         except ImportError:
             self._price_feed = None
+
+    def get_spot(self, asset: Optional[str]) -> Optional[Decimal]:
+        """Return current spot for an asset if the live price feed is available."""
+        if not asset or not self._price_feed:
+            return None
+        try:
+            price_data = self._price_feed.get_current_price(f"{asset}/USDT")
+            if price_data and getattr(price_data, "price", None) is not None:
+                return Decimal(str(price_data.price))
+        except Exception as exc:
+            logger.debug("get_spot failed for asset %s: %s", asset, exc)
+        return None
+
+    def estimate_true_probability(
+        self,
+        shape: Optional[object] = None,
+        side: str = "yes",
+        spot: Optional[Decimal] = None,
+        move_bands: Optional[object] = None,
+        time_to_expiry_min: Optional[float] = None,
+        model_prob_override: Optional[Decimal] = None,
+    ) -> Decimal:
+        """Estimate the true win probability for a side given market geometry."""
+        if model_prob_override is not None:
+            return Decimal(str(model_prob_override))
+
+        if shape is None:
+            return Decimal("0.5")
+
+        market_type = getattr(shape, "market_type", "UP_DOWN")
+
+        # UP/DOWN defaults to 50/50 unless a model overrides it upstream.
+        if market_type == "UP_DOWN":
+            base_prob = Decimal("0.5")
+        else:
+            strike = getattr(shape, "strike", None)
+            if strike is None or spot is None:
+                base_prob = Decimal("0.5")
+            else:
+                required_move = (Decimal(str(strike)) - spot) / spot
+                # Guard: avoid divide-by-zero; default to modest tolerance
+                max_move = Decimal(
+                    str(move_bands.max_move_for_minutes(time_to_expiry_min))
+                ) if move_bands else Decimal("0.05")
+                if max_move <= 0:
+                    max_move = Decimal("0.05")
+                scaled = required_move / max_move
+                # Clamp extreme scaling to avoid >1 probabilities
+                scaled = max(min(scaled, Decimal("2")), Decimal("-2"))
+                direction = Decimal("1") if market_type == "THRESHOLD_LEQ" else Decimal("-1")
+                base_prob = Decimal("0.5") + direction * scaled * Decimal("0.25")
+
+        # Clamp to [0.01, 0.99]
+        base_prob = max(Decimal("0.01"), min(Decimal("0.99"), base_prob))
+        if side == "no":
+            base_prob = Decimal("1.0") - base_prob
+        return base_prob.quantize(Decimal("0.0001"), ROUND_HALF_UP)
 
     # ------------------------------------------------------------------
     # Implied probabilities
@@ -270,11 +332,13 @@ class PredictionMarketModel:
         market_id: str,
         implied: ImpliedProbability,
         model_prob: Optional[Decimal] = None,
+        true_prob: Optional[Decimal] = None,
         side: str = "yes",
         action: str = "buy",
         order_size_contracts: int = 1,
         asset: Optional[str] = None,
         strike_price: Optional[float] = None,
+        price_cents: Optional[int] = None,
     ) -> EdgeEstimate:
         """Compute expected edge for a potential trade.
 
@@ -292,7 +356,7 @@ class PredictionMarketModel:
             asset: Underlying asset (e.g. BTC) for external feed integration.
             strike_price: The strike price of the contract for spot-relative model.
         """
-        mp = model_prob or self._model_probs.get(market_id)
+        mp = true_prob or model_prob or self._model_probs.get(market_id)
         
         # If no explicit model prob, try to derive from external spot price feed for crypto
         if mp is None and self._price_feed and asset and strike_price:
@@ -302,8 +366,6 @@ class PredictionMarketModel:
                 strike = Decimal(str(strike_price))
                 
                 # Simple spot-relative probability model
-                # If spot is near strike, probability is ~0.5
-                # If spot >> strike, YES probability approaches 1.0
                 dist_pct = (spot - strike) / strike
                 
                 # Heuristic: 1% distance from strike shifts probability by ~10%
@@ -332,7 +394,15 @@ class PredictionMarketModel:
             raw_edge = market_prob - mp
 
         # Fee drag: fee per contract / 100 (convert cents to dollars)
-        total_fee = self._fee * order_size_contracts
+        if price_cents is not None:
+            try:
+                from merid.prediction.risk import kalshi_fee_cents
+                total_fee = Decimal(kalshi_fee_cents(int(price_cents), order_size_contracts))
+            except Exception:
+                total_fee = self._fee * order_size_contracts
+        else:
+            total_fee = self._fee * order_size_contracts
+
         fee_drag = (total_fee / (Decimal("100") * order_size_contracts)).quantize(
             Decimal("0.0001"), ROUND_HALF_UP
         )
@@ -358,6 +428,16 @@ class PredictionMarketModel:
             elif implied.spread_cents <= Decimal("5"):
                 confidence = Decimal("0.6")
 
+        # Kelly fraction for binary payoff (cost = price_cents)
+        kelly_fraction = None
+        if price_cents is not None and mp is not None:
+            try:
+                kelly_fraction = ((mp * Decimal("100") - Decimal(price_cents)) / (Decimal("100") - Decimal(price_cents))).quantize(
+                    Decimal("0.0001"), ROUND_HALF_UP
+                )
+            except Exception:
+                kelly_fraction = None
+
         return EdgeEstimate(
             market_id=market_id,
             side=side,
@@ -370,6 +450,8 @@ class PredictionMarketModel:
             net_edge=net_edge.quantize(Decimal("0.0001"), ROUND_HALF_UP),
             edge_type=edge_type,
             confidence=confidence,
+            true_prob=mp,
+            kelly_fraction=kelly_fraction,
         )
 
     # ------------------------------------------------------------------

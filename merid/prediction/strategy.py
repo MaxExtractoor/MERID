@@ -20,6 +20,7 @@ from merid.prediction.model import (
     MarketSnapshot,
     PredictionMarketModel,
 )
+from merid.prediction.kalshi_market_shape import EdgeThresholdConfig, MoveBandsConfig
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.strategy")
@@ -78,6 +79,10 @@ class StrategyConfig:
 
     # Confidence
     min_confidence: Decimal = Decimal("0.5")
+
+    # Guardrails
+    edge_thresholds: EdgeThresholdConfig = field(default_factory=EdgeThresholdConfig)
+    move_bands: MoveBandsConfig = field(default_factory=MoveBandsConfig)
 
 
 @dataclass
