@@ -36,48 +36,90 @@ logger = get_logger("merid.event_venues.kalshi.kalshi_risk")
 
 
 # ── Fee schedule ─────────────────────────────────────────────────────────
+# Kalshi uses parabolic fee functions that depend on P × (1 - P):
+#   Taker fee: round_up(0.07 × C × P × (1 - P)) in dollars
+#   Maker fee: round_up(0.0175 × C × P × (1 - P)) in dollars
+# Where P is price in dollars (price_cents / 100), C is contract count.
+#
+# References:
+# - https://betherosports.com/calculators/prediction-markets
+# - https://kalshi.com/docs/kalshi-fee-schedule.pdf
+# - https://www.cftc.gov/sites/default/files/filings/orgrules/22/09/rule091222kexdcm003.pdf
 
-def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Calculate Kalshi fee in cents for a trade.
+def kalshi_taker_fee_cents_parabolic(price_cents: int, contracts: int) -> int:
+    """Calculate Kalshi TAKER fee in cents using the parabolic formula.
 
-    Fee is charged on the *winning* side only, as a percentage of payout.
-    Payout per contract = 100 - price_cents (for YES buyer winning).
+    Taker fee formula: ceil(0.07 × C × P × (1 - P)) dollars
+    where P is price in dollars (price_cents / 100).
 
-    Tiered:
-      1-99 contracts:   7% of payout, min 2¢ per contract
-      100-999:          5% of payout, min 2¢
-      1000+:            3% of payout, min 2¢
+    Maximum fee occurs at P = 0.5 (50 cents): 0.07 × 0.5 × 0.5 = 0.0175 per contract
+    = 1.75 cents per contract at mid-market.
 
     Args:
-        price_cents: Price paid per contract (0-99)
+        price_cents: Price paid per contract (1-99)
         contracts: Number of contracts
 
     Returns:
-        Total fee in cents (integer, rounded up)
+        Total taker fee in cents (integer, rounded up)
     """
     if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
         return 0
 
-    payout_per = 100 - price_cents  # cents won per contract if correct
+    price_dollars = price_cents / 100.0
+    prob_complement = 1.0 - price_dollars
 
-    if contracts < 100:
-        rate = 0.07
-    elif contracts < 1000:
-        rate = 0.05
-    else:
-        rate = 0.03
+    # Fee in dollars: 0.07 × C × P × (1 - P)
+    fee_dollars = 0.07 * contracts * price_dollars * prob_complement
 
-    fee_per = max(2, math.ceil(payout_per * rate))
-    return fee_per * contracts
+    # Round up and convert to cents
+    return math.ceil(fee_dollars * 100)
 
 
-def kalshi_fee_rate(contracts: int) -> float:
-    """Return the fee rate for a given contract count."""
-    if contracts < 100:
-        return 0.07
-    elif contracts < 1000:
-        return 0.05
-    return 0.03
+def kalshi_maker_fee_cents(price_cents: int, contracts: int) -> int:
+    """Calculate Kalshi MAKER fee in cents using the parabolic formula.
+
+    Maker fee formula: ceil(0.0175 × C × P × (1 - P)) dollars
+    where P is price in dollars (price_cents / 100).
+
+    Maker fee is 1/4 of the taker fee (0.0175 / 0.07 = 0.25).
+    Maximum fee at P = 0.5: 0.4375 cents per contract.
+
+    Args:
+        price_cents: Price paid per contract (1-99)
+        contracts: Number of contracts
+
+    Returns:
+        Total maker fee in cents (integer, rounded up)
+    """
+    if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
+        return 0
+
+    price_dollars = price_cents / 100.0
+    prob_complement = 1.0 - price_dollars
+
+    # Fee in dollars: 0.0175 × C × P × (1 - P)
+    fee_dollars = 0.0175 * contracts * price_dollars * prob_complement
+
+    # Round up and convert to cents
+    return math.ceil(fee_dollars * 100)
+
+
+# Legacy function for backwards compatibility - now delegates to taker fee
+def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
+    """Legacy fee function - now uses parabolic taker fee.
+
+    This function is maintained for backwards compatibility with existing code.
+    New code should use kalshi_taker_fee_cents_parabolic() or
+    kalshi_maker_fee_cents() explicitly.
+
+    Args:
+        price_cents: Price paid per contract (1-99)
+        contracts: Number of contracts
+
+    Returns:
+        Total fee in cents (uses taker fee formula)
+    """
+    return kalshi_taker_fee_cents_parabolic(price_cents, contracts)
 
 
 # ── Kelly sizing ─────────────────────────────────────────────────────────
@@ -126,9 +168,9 @@ def kelly_size_kalshi(
     p = min(max(p, 0.01), 0.99)
     q = 1.0 - p
 
-    # Estimate fee per contract (use 10-contract tier as default)
-    payout_per = 100 - price_cents
-    fee_per = max(2, math.ceil(payout_per * 0.07))
+    # Estimate fee per contract using parabolic taker fee
+    # For a single contract estimate, we use the parabolic formula
+    fee_per = max(1, kalshi_taker_fee_cents_parabolic(price_cents, 1))
 
     net_payout = payout_per - fee_per
     if net_payout <= 0:
