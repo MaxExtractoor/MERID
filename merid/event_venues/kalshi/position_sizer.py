@@ -88,18 +88,19 @@ def kelly_fraction_for_binary(
 
 
 def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Compute Kalshi fee for a trade (mirrors backtest fee calc)."""
+    """Compute Kalshi taker fee using the parabolic formula.
+
+    Taker fee formula: ceil(0.07 × C × P × (1 - P)) dollars
+    where P is price in dollars (price_cents / 100).
+
+    This mirrors the fee calculation in kalshi_risk.py.
+    """
     if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
         return 0
-    payout = 100 - price_cents
-    if contracts < 100:
-        rate = 0.07
-    elif contracts < 1000:
-        rate = 0.05
-    else:
-        rate = 0.03
-    per_contract = max(2, math.ceil(payout * rate))
-    return per_contract * contracts
+    price_dollars = price_cents / 100.0
+    prob_complement = 1.0 - price_dollars
+    fee_dollars = 0.07 * contracts * price_dollars * prob_complement
+    return math.ceil(fee_dollars * 100)
 
 
 def adaptive_kelly_fraction(

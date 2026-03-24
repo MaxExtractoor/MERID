@@ -22,6 +22,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import random
 import time
@@ -224,18 +225,17 @@ def _is_live_mode(mode: TradingMode) -> bool:
 
 
 def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Kalshi fee schedule mirrored for simulation/live-normalized reporting."""
+    """Kalshi parabolic taker fee for simulation/live-normalized reporting.
+
+    Uses the parabolic formula: ceil(0.07 × C × P × (1 - P)) in dollars.
+    This mirrors the kalshi_risk module's taker fee calculation.
+    """
     if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
         return 0
-    payout = 100 - price_cents
-    if contracts < 100:
-        rate = 0.07
-    elif contracts < 1000:
-        rate = 0.05
-    else:
-        rate = 0.03
-    per_contract = max(2, int((payout * rate) + 0.9999))
-    return per_contract * contracts
+    price_dollars = price_cents / 100.0
+    prob_complement = 1.0 - price_dollars
+    fee_dollars = 0.07 * contracts * price_dollars * prob_complement
+    return int(math.ceil(fee_dollars * 100))
 
 
 def simulate_paper_fill(intent: OrderIntent) -> Dict[str, Any]:
