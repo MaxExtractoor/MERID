@@ -1764,13 +1764,10 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["services"]["portfolio_rebalancer"] = {"status": "failed", "error": str(e)}
 
     # ── Phase 0.55: MeridLoop ───────────────────────────────────────────
-    try:
-        from merid.loop import get_merid_loop as _get_merid_loop
-        _merid_loop = _get_merid_loop()
-        asyncio.create_task(_merid_loop.run())
-        logger.info("✅ MeridLoop started")
-    except Exception as e:
-        logger.warning(f"MeridLoop start failed (non-fatal): {e}")
+    # REMOVED: Duplicate start - MeridLoop is started in Phase 3 (line 2270-2280)
+    # The singleton pattern prevents double-start, but we should avoid creating
+    # duplicate tasks. See docs/RUNTIME_HARDENING_BUGS.md BUG-04 for details.
+    logger.info("MeridLoop startup deferred to Phase 3")
 
     # ── Phase 0.6: Orchestrator Agents ─────────────────────────────────
     logger.info("=" * 80)
@@ -2482,9 +2479,19 @@ async def _app_lifespan(application: FastAPI):
     logger.info("🚀 MERID STARTUP COMPLETE - System Ready")
     logger.info("=" * 80)
 
+    # Mark startup as complete and transition to LIVE_TRADING if no critical failures
+    try:
+        from core.runtime_state import mark_startup_complete
+        mark_startup_complete()  # This also transitions to LIVE_TRADING if safe
+    except Exception as exc:
+        logger.warning("Failed to mark startup complete in RuntimeState: %s", exc)
+
     # ── Startup reconciliation — unblock execution gate immediately ─────
     try:
         from merid.reconciliation import reconcile_all_venues, has_critical_discrepancies
+        from core.runtime_state import set_runtime_mode, RuntimeMode
+        from merid.execution_guard import get_execution_guard
+
         logger.info("Running startup reconciliation to unblock execution gate...")
         discrepancies = await asyncio.get_running_loop().run_in_executor(
             None, lambda: reconcile_all_venues(["kalshi"])
@@ -2495,10 +2502,21 @@ async def _app_lifespan(application: FastAPI):
             "✅ Startup reconciliation: %d discrepancies (%d critical, %d warning)",
             len(discrepancies), n_crit, n_warn,
         )
+
+        # BUG-09 FIX: Wire reconciliation to RuntimeState
         if has_critical_discrepancies():
-            logger.warning("⚠️  Execution gate BLOCKED (critical reconciliation issues)")
+            logger.error("⚠️  CRITICAL RECONCILIATION ISSUES - downgrading to OBSERVE_ONLY")
+            set_runtime_mode(RuntimeMode.OBSERVE_ONLY, reason="critical_reconciliation_discrepancies")
+            # Optionally activate kill switch to hard-block execution
+            # get_execution_guard().set_kill_switch(
+            #     active=True,
+            #     reason="Reconciliation found critical discrepancies",
+            #     domain="all"
+            # )
         else:
             logger.info("✅ Execution gate CLEAR — trades can proceed")
+            # Don't transition to LIVE_TRADING yet - wait for mark_startup_complete()
+
     except Exception as exc:
         logger.warning("Startup reconciliation failed (gate may remain blocked): %s", exc)
 
@@ -2540,16 +2558,12 @@ async def _app_lifespan(application: FastAPI):
         logger.debug("Kalshi venue reconciliation loop not started: %s", exc)
 
     # ── Phase N: Kalshi Insight Pipeline + News Agent ──────────────────
-    try:
-        from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline
-        from merid.publishing.kalshi_news_agent import get_kalshi_news_agent
-        _insight_pipeline = get_insight_pipeline()
-        _news_agent = get_kalshi_news_agent()
-        _insight_pipeline.add_consumer(_news_agent.handle_insight)
-        asyncio.create_task(_insight_pipeline.start())
-        logger.info("✅ KalshiInsightPipeline + KalshiNewsAgent started")
-    except Exception as exc:
-        logger.warning("KalshiInsightPipeline start failed (non-fatal): %s", exc)
+    # REMOVED: Duplicate start - KalshiInsightPipeline already started and
+    # wired to KalshiNewsAgent in Phase 3 (lines 2103-2138).
+    # The singleton pattern + idempotent start() prevents issues, but we
+    # should avoid duplicate configuration. See docs/RUNTIME_HARDENING_BUGS.md
+    # BUG-05 for details.
+    logger.info("KalshiInsightPipeline already started in Phase 3")
 
     # Terminal telemetry loop DISABLED — was printing synthetic crypto trades/portfolio
     # Kalshi agent grid has its own telemetry via the /api/v1/kalshi-grid/* endpoints.
@@ -2560,6 +2574,13 @@ async def _app_lifespan(application: FastAPI):
 
     # ── SHUTDOWN ───────────────────────────────────────────────────────
     logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
+
+    # Transition to SHUTTING_DOWN mode
+    try:
+        from core.runtime_state import set_runtime_mode, RuntimeMode
+        set_runtime_mode(RuntimeMode.SHUTTING_DOWN)
+    except Exception as exc:
+        logger.debug("RuntimeState shutdown transition failed: %s", exc)
 
     # Stop MeridLoop
     try:
@@ -2900,10 +2921,21 @@ async def healthz():
 
 @app.get("/readyz")
 async def readyz():
-    """Readiness probe - data feed OK, risk engine responding, DB reachable"""
+    """
+    Readiness probe - system ready to accept traffic AND execute trades
+
+    Checks:
+    1. Startup completed
+    2. Runtime mode (must be LIVE_TRADING or DEGRADED, not BOOTING/OFFLINE)
+    3. Execution guard (kill switch not active)
+    4. Reconciliation status (no critical discrepancies)
+    5. Critical services running (execution, consensus, kalshi_market_catalog)
+
+    See docs/RUNTIME_HARDENING_BUGS.md BUG-08 for rationale.
+    """
     import time
     import os
-    
+
     # Check if startup has completed
     if _startup_state.get("started_at") is None:
         return {
@@ -2911,18 +2943,73 @@ async def readyz():
             "reason": "startup_not_complete",
             "timestamp": time.time()
         }
-    
-    # Check service states from startup tracking
+
+    # Check runtime mode
+    try:
+        from core.runtime_state import get_runtime_state, RuntimeMode
+        runtime_state = get_runtime_state()
+        if runtime_state.mode not in (RuntimeMode.LIVE_TRADING, RuntimeMode.DEGRADED):
+            return {
+                "status": "not_ready",
+                "reason": f"runtime_mode_{runtime_state.mode.value}",
+                "runtime_mode": runtime_state.mode.value,
+                "degradation_reason": runtime_state.degradation_reason,
+                "timestamp": time.time()
+            }
+    except Exception as e:
+        logger.debug(f"Runtime state check error: {e}")
+        # If runtime_state module not available, continue with legacy checks
+        runtime_state = None
+
+    # Check execution guard
+    try:
+        from merid.execution_guard import get_execution_guard
+        guard = get_execution_guard()
+        if guard.is_kill_switch_active():
+            return {
+                "status": "not_ready",
+                "reason": "execution_blocked_kill_switch",
+                "kill_switch_reason": guard._kill_switch_reason,
+                "timestamp": time.time()
+            }
+    except Exception as e:
+        logger.debug(f"Execution guard check error: {e}")
+
+    # Check reconciliation status
+    try:
+        from merid.reconciliation import has_critical_discrepancies
+        if has_critical_discrepancies():
+            return {
+                "status": "not_ready",
+                "reason": "critical_reconciliation_issues",
+                "timestamp": time.time()
+            }
+    except Exception as e:
+        logger.debug(f"Reconciliation check error: {e}")
+
+    # Check critical services
     services = _startup_state.get("services", {})
+    critical_services = ["execution", "consensus", "kalshi_market_catalog", "kalshi_ws_bridge"]
+    failed_services = [
+        svc for svc in critical_services
+        if services.get(svc, {}).get("status") in ("failed", "timeout")
+    ]
+
+    if failed_services:
+        return {
+            "status": "not_ready",
+            "reason": "critical_services_failed",
+            "failed_services": failed_services,
+            "timestamp": time.time()
+        }
+
+    # Check prediction markets / aggregator (legacy check)
     prediction_markets_ok = services.get("prediction_markets", {}).get("status") == "running"
-    
-    # Check if we're in synthetic mode
     synthetic_mode = os.getenv("SIMULATION_MODE", "").lower() == "synthetic_only"
-    
-    # Check aggregator status
+
     aggregator_available = False
     data_fresh = False
-    
+
     try:
         from monitoring.real_prediction_markets import get_real_prediction_aggregator
         aggregator = await get_real_prediction_aggregator()
@@ -2933,17 +3020,20 @@ async def readyz():
                 data_fresh = True
     except Exception as e:
         logger.debug(f"Ready check aggregator error: {e}")
-    
-    # Overall readiness - allow degraded mode if prediction markets started
-    ready = (aggregator_available or prediction_markets_ok) and (data_fresh or synthetic_mode)
-    
+
+    # Overall readiness
+    ready = (aggregator_available or prediction_markets_ok or synthetic_mode) and len(failed_services) == 0
+
     return {
         "status": "ready" if ready else "not_ready",
         "timestamp": time.time(),
+        "runtime_mode": runtime_state.mode.value if runtime_state else "unknown",
+        "execution_allowed": runtime_state.is_execution_allowed() if runtime_state else None,
         "services": {
             "prediction_markets": services.get("prediction_markets", {}).get("status", "unknown"),
             "aggregator_available": aggregator_available,
             "data_fresh": data_fresh,
+            "critical_services": {svc: services.get(svc, {}).get("status", "unknown") for svc in critical_services},
         },
         "synthetic_mode": synthetic_mode,
     }
