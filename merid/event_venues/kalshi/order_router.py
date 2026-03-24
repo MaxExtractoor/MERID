@@ -224,18 +224,32 @@ def _is_live_mode(mode: TradingMode) -> bool:
 
 
 def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Kalshi fee schedule mirrored for simulation/live-normalized reporting."""
+    """Kalshi taker fee using parabolic formula.
+
+    Updated to use accurate parabolic fee model: f(P) ≈ 0.07 × contracts × P × (1-P)
+
+    This is a local convenience function that wraps the canonical implementation
+    in kalshi_risk.py. For maker fees (typically zero), use kalshi_maker_fee_cents.
+
+    Reference: https://defirate.com/prediction-markets/fees/
+    """
     if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
         return 0
-    payout = 100 - price_cents
-    if contracts < 100:
-        rate = 0.07
-    elif contracts < 1000:
-        rate = 0.05
-    else:
-        rate = 0.03
-    per_contract = max(2, int((payout * rate) + 0.9999))
-    return per_contract * contracts
+
+    P = price_cents / 100.0  # Convert to probability
+
+    # Parabolic taker fee: 0.07 × P × (1-P) per contract
+    # Peaks at P=0.5 with value ~1.75¢/contract
+    fee_per_contract = 0.07 * P * (1 - P) * 100.0  # Convert to cents
+
+    # Round up to nearest cent
+    import math
+    fee_per_contract_int = math.ceil(fee_per_contract)
+
+    # Total fee
+    total_fee = fee_per_contract_int * contracts
+
+    return total_fee
 
 
 def simulate_paper_fill(intent: OrderIntent) -> Dict[str, Any]:

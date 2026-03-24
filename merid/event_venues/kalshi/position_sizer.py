@@ -88,18 +88,41 @@ def kelly_fraction_for_binary(
 
 
 def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Compute Kalshi fee for a trade (mirrors backtest fee calc)."""
+    """Compute Kalshi TAKER fee using parabolic formula.
+
+    Updated to use accurate parabolic fee model: f(P) ≈ 0.07 × contracts × P × (1-P)
+
+    This peaks at ~1.75¢/contract when P=0.5 (50¢ price) and is minimal
+    near 0¢ or 99¢ due to the parabolic shape.
+
+    For maker fees (typically zero), this should be replaced with explicit
+    maker/taker differentiation in the future.
+
+    Reference: https://defirate.com/prediction-markets/fees/
+
+    Args:
+        price_cents: Price per contract in cents (1-99)
+        contracts: Number of contracts
+
+    Returns:
+        Total taker fee in cents (integer, rounded up)
+    """
     if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
         return 0
-    payout = 100 - price_cents
-    if contracts < 100:
-        rate = 0.07
-    elif contracts < 1000:
-        rate = 0.05
-    else:
-        rate = 0.03
-    per_contract = max(2, math.ceil(payout * rate))
-    return per_contract * contracts
+
+    P = price_cents / 100.0  # Convert to probability
+
+    # Parabolic taker fee: 0.07 × P × (1-P) per contract
+    # Peaks at P=0.5 with value ~1.75¢/contract
+    fee_per_contract = 0.07 * P * (1 - P) * 100.0  # Convert to cents
+
+    # Round up to nearest cent
+    fee_per_contract_int = math.ceil(fee_per_contract)
+
+    # Total fee
+    total_fee = fee_per_contract_int * contracts
+
+    return total_fee
 
 
 def adaptive_kelly_fraction(
