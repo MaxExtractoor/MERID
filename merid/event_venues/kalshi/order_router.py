@@ -160,6 +160,12 @@ class OrderIntent:
         source: Originating agent/strategy name
         order_group_id: Optional order group ID for aggregate limits
         self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
+        post_only: Whether to enforce post-only (maker-only)
+        policy_mode: Maker/taker policy mode (None = use default)
+        expected_role: Expected role ("maker" or "taker", None = auto-decide)
+        fair_value_cents: Fair value estimate for policy engine
+        market_best_bid_cents: Current best bid for policy engine
+        market_best_ask_cents: Current best ask for policy engine
     """
     ticker: str
     side: str
@@ -174,6 +180,11 @@ class OrderIntent:
     order_group_id: Optional[str] = None
     self_trade_prevention_type: Optional[str] = None
     post_only: bool = False
+    policy_mode: Optional[str] = None  # "neutral_mm", "aggressive_conviction", "arb_leg"
+    expected_role: Optional[str] = None  # "maker" or "taker"
+    fair_value_cents: Optional[int] = None
+    market_best_bid_cents: Optional[int] = None
+    market_best_ask_cents: Optional[int] = None
 
 
 @dataclass
@@ -186,15 +197,95 @@ class OrderResult:
         fill: Fill details (if filled)
         reason: Rejection reason (if rejected)
         latency_ms: Routing latency
+        expected_role: Expected role ("maker" or "taker")
+        actual_role: Actual role after fill (if known)
+        fee_cents: Actual fee charged (if filled)
     """
     status: str
     mode: TradingMode
     fill: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
     latency_ms: float = 0.0
+    expected_role: Optional[str] = None
+    actual_role: Optional[str] = None
+    fee_cents: Optional[int] = None
 
 
 # ── Paper fill simulation ─────────────────────────────────────────────────
+
+def _apply_maker_taker_policy(intent: OrderIntent) -> Optional[str]:
+    """Apply MakerTakerPolicyEngine to an OrderIntent if policy fields are provided.
+
+    Modifies intent in-place based on policy decision.
+    Returns rejection reason if order should be blocked, None if allowed.
+    """
+    # Skip if no policy mode specified or if market data not provided
+    if not intent.policy_mode:
+        return None
+
+    if (intent.fair_value_cents is None or
+        intent.market_best_bid_cents is None or
+        intent.market_best_ask_cents is None):
+        logger.debug("Policy engine skipped: missing market data for %s", intent.ticker)
+        return None
+
+    try:
+        from merid.event_venues.kalshi.maker_taker_policy import (
+            get_maker_taker_engine,
+            PolicyMode,
+        )
+
+        engine = get_maker_taker_engine()
+
+        # Map string policy mode to enum
+        try:
+            policy_enum = PolicyMode(intent.policy_mode.lower())
+        except ValueError:
+            logger.warning("Invalid policy_mode '%s', using NEUTRAL_MM", intent.policy_mode)
+            policy_enum = PolicyMode.NEUTRAL_MM
+
+        decision = engine.decide(
+            fair_value_cents=intent.fair_value_cents,
+            market_best_bid_cents=intent.market_best_bid_cents,
+            market_best_ask_cents=intent.market_best_ask_cents,
+            side=intent.side,
+            contracts=intent.count,
+            policy_mode=policy_enum,
+            allow_market_orders=(intent.order_type == "market"),
+        )
+
+        if not decision.allowed:
+            logger.info(
+                "[policy-engine] Order blocked: %s ticker=%s policy=%s",
+                decision.reason, intent.ticker, intent.policy_mode,
+            )
+            return f"policy_engine:{decision.reason}"
+
+        # Apply policy decision to intent
+        intent.expected_role = decision.expected_role
+        intent.order_type = decision.order_type
+        intent.post_only = decision.post_only
+
+        if decision.price_cents is not None:
+            intent.price_cents = decision.price_cents
+
+        logger.info(
+            "[policy-engine] Order allowed: ticker=%s role=%s type=%s post_only=%s price=%s reason=%s",
+            intent.ticker,
+            decision.expected_role,
+            decision.order_type,
+            decision.post_only,
+            decision.price_cents,
+            decision.reason,
+        )
+
+        return None  # Allowed
+
+    except Exception as exc:
+        logger.error("Policy engine error: %s", exc)
+        # Fail-open for policy engine (conservative risk check already happened)
+        return None
+
 
 def _resolve_mode(override: Optional[TradingMode]) -> TradingMode:
     """Resolve mode from explicit override or canonical process-wide mode."""
@@ -313,6 +404,9 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
             mode=mode,
             fill=fill,
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
+            actual_role=intent.expected_role or "simulated",
+            fee_cents=fill.get("fee_cents"),
         )
 
     if _is_paper_mode(mode):
@@ -327,6 +421,9 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
             mode=mode,
             fill=fill,
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
+            actual_role=intent.expected_role or "simulated",
+            fee_cents=fill.get("fee_cents"),
         )
 
     latency = (time.monotonic() - t0) * 1000
@@ -335,6 +432,7 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         mode=mode,
         reason=f"sync_route_unsupported_mode_{_mode_value(mode)}",
         latency_ms=round(latency, 2),
+        expected_role=intent.expected_role,
     )
 
 
@@ -509,6 +607,18 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             except Exception as _rr:
                 logger.debug("record_order after live fill failed (non-fatal): %s", _rr)
 
+        # Determine actual role based on fill behavior
+        # If post_only was set and order filled, it was a maker
+        # If order crossed immediately, it was likely a taker
+        actual_role = intent.expected_role
+        if intent.post_only:
+            actual_role = "maker"
+        elif filled_count > 0 and filled_count >= requested_count:
+            # Immediate full fill suggests taker behavior
+            actual_role = "taker"
+        elif not intent.post_only and intent.order_type == "market":
+            actual_role = "taker"
+
         return OrderResult(
             status=status,
             mode=mode,
@@ -525,8 +635,13 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 "status": placed.status,
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "simulated": False,
+                "expected_role": intent.expected_role,
+                "actual_role": actual_role,
             },
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
+            actual_role=actual_role,
+            fee_cents=fee_cents,
         )
     except Exception as exc:
         latency = (time.monotonic() - t0) * 1000
@@ -548,6 +663,22 @@ def route_order(intent: OrderIntent) -> OrderResult:
     t0 = time.monotonic()
     mode = _resolve_mode(intent.mode)
 
+    # Apply maker/taker policy engine if configured
+    policy_rejection = _apply_maker_taker_policy(intent)
+    if policy_rejection:
+        latency = (time.monotonic() - t0) * 1000
+        logger.warning(
+            f"[order-router] REJECTED by policy {intent.ticker} {intent.action} "
+            f"{intent.count}x @ {intent.price_cents}c: {policy_rejection}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=policy_rejection,
+            latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
+        )
+
     # Risk check
     reject_reason = _check_intent_risk(intent)
     if reject_reason:
@@ -561,6 +692,7 @@ def route_order(intent: OrderIntent) -> OrderResult:
             mode=mode,
             reason=reject_reason,
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
         )
 
     if _is_live_mode(mode):
@@ -570,6 +702,7 @@ def route_order(intent: OrderIntent) -> OrderResult:
             mode=mode,
             reason="live_requires_async_route_order",
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
         )
 
     return _route_sync_non_live(intent, mode, t0)
@@ -579,6 +712,22 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     """Async order routing that supports true LIVE execution."""
     t0 = time.monotonic()
     mode = _resolve_mode(intent.mode)
+
+    # Apply maker/taker policy engine if configured
+    policy_rejection = _apply_maker_taker_policy(intent)
+    if policy_rejection:
+        latency = (time.monotonic() - t0) * 1000
+        logger.warning(
+            f"[order-router] REJECTED by policy {intent.ticker} {intent.action} "
+            f"{intent.count}x @ {intent.price_cents}c: {policy_rejection}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=policy_rejection,
+            latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
+        )
 
     reject_reason = _check_intent_risk(intent)
     if reject_reason:
@@ -592,6 +741,7 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             mode=mode,
             reason=reject_reason,
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
         )
 
     if _is_live_mode(mode):
