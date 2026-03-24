@@ -27,8 +27,10 @@ from merid.prediction.strategy import (
     StrategySignal,
     SignalAction,
     ExpiryPhase,
+    MoveBandsConfig,
     PositionState,
 )
+from merid.prediction.market_shape import KalshiMarketShape
 from merid.prediction.risk import (
     PredictionMarketRisk,
     PredictionRiskConfig,
@@ -444,6 +446,112 @@ class TestKalshiStrategy:
         sig = self.strategy.evaluate(snap)
         assert sig.action in (SignalAction.BUY_YES, SignalAction.BUY_NO)
         assert sig.contracts > 0
+
+    def test_catastrophic_yes_rejected_geometry(self):
+        yes_edge = EdgeEstimate(
+            market_id="BTC-LEQ",
+            side="yes",
+            action="buy",
+            market_prob=Decimal("0.22"),
+            model_prob=Decimal("0.70"),
+            raw_edge=Decimal("0.48"),
+            fee_drag=Decimal("0.02"),
+            slippage_est=Decimal("0.01"),
+            net_edge=Decimal("0.45"),
+            edge_type="speculative",
+            confidence=Decimal("0.9"),
+        )
+        no_edge = EdgeEstimate(
+            market_id="BTC-LEQ",
+            side="no",
+            action="buy",
+            market_prob=Decimal("0.78"),
+            model_prob=Decimal("0.90"),
+            raw_edge=Decimal("0.12"),
+            fee_drag=Decimal("0.02"),
+            slippage_est=Decimal("0.01"),
+            net_edge=Decimal("0.09"),
+            edge_type="speculative",
+            confidence=Decimal("0.9"),
+        )
+        snap = self._make_snapshot(
+            market_id="BTC-LEQ",
+            yes_bid=Decimal("20"),
+            yes_ask=Decimal("22"),
+            volume=Decimal("5000"),
+            oi=Decimal("500"),
+            hours_left=Decimal("6"),
+            edges=[yes_edge, no_edge],
+        )
+        snap.market_shape = KalshiMarketShape(
+            asset="BTC",
+            timeframe_label="1H",
+            expiry_ts=datetime.now(timezone.utc) + timedelta(hours=6),
+            market_type="THRESHOLD_LEQ",
+            strike=59099.99,
+            yes_price=22.0,
+            no_price=78.0,
+            series_ticker="KXBTC-TEST",
+            title="BTC at or below 59,099.99 by 3pm",
+        )
+        snap.spot_price = 69480.0  # ~14% above strike → catastrophic dump required
+        # Ensure move bands are strict enough to reject the YES tail
+        self.config.move_bands = MoveBandsConfig(
+            max_abs_move_15m=0.02, max_abs_move_1h=0.04, max_abs_move_1d=0.10, allow_tail_bets=False
+        )
+        sig = self.strategy.evaluate(snap)
+        assert sig.action == SignalAction.BUY_NO
+
+    def test_up_down_allows_no_side(self):
+        yes_edge = EdgeEstimate(
+            market_id="BTC-UPDOWN",
+            side="yes",
+            action="buy",
+            market_prob=Decimal("0.52"),
+            model_prob=Decimal("0.54"),
+            raw_edge=Decimal("0.02"),
+            fee_drag=Decimal("0.01"),
+            slippage_est=Decimal("0.005"),
+            net_edge=Decimal("0.005"),
+            edge_type="speculative",
+            confidence=Decimal("0.8"),
+        )
+        no_edge = EdgeEstimate(
+            market_id="BTC-UPDOWN",
+            side="no",
+            action="buy",
+            market_prob=Decimal("0.48"),
+            model_prob=Decimal("0.60"),
+            raw_edge=Decimal("0.12"),
+            fee_drag=Decimal("0.01"),
+            slippage_est=Decimal("0.005"),
+            net_edge=Decimal("0.105"),
+            edge_type="speculative",
+            confidence=Decimal("0.9"),
+        )
+        snap = self._make_snapshot(
+            market_id="BTC-UPDOWN",
+            yes_bid=Decimal("48"),
+            yes_ask=Decimal("52"),
+            volume=Decimal("8000"),
+            oi=Decimal("800"),
+            hours_left=Decimal("1"),
+            edges=[yes_edge, no_edge],
+        )
+        snap.market_shape = KalshiMarketShape(
+            asset="BTC",
+            timeframe_label="15M",
+            expiry_ts=datetime.now(timezone.utc) + timedelta(minutes=15),
+            market_type="UP_DOWN",
+            strike=None,
+            yes_price=52.0,
+            no_price=48.0,
+            series_ticker="KXBTC-UPDOWN",
+            title="BTC up or down in 15 minutes",
+        )
+        snap.spot_price = 69480.0
+        sig = self.strategy.evaluate(snap)
+        assert sig.action == SignalAction.BUY_NO
 
     def test_no_action_edge_below_threshold(self):
         weak_edge = EdgeEstimate(

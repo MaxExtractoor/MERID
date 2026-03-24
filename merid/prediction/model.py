@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+import math
 
 from utils.logger import get_logger
 
@@ -85,6 +87,8 @@ class MarketSnapshot:
     implied: ImpliedProbability
     volume: Decimal
     open_interest: Decimal
+    market_shape: Optional[Any] = None  # Normalized shape (direction, strike, expiry)
+    spot_price: Optional[float] = None
     time_to_expiry_hours: Optional[Decimal] = None
     close_time: Optional[datetime] = None
     category: Optional[str] = None
@@ -275,6 +279,7 @@ class PredictionMarketModel:
         order_size_contracts: int = 1,
         asset: Optional[str] = None,
         strike_price: Optional[float] = None,
+        market_shape: Optional[Any] = None,
     ) -> EdgeEstimate:
         """Compute expected edge for a potential trade.
 
@@ -291,6 +296,7 @@ class PredictionMarketModel:
             order_size_contracts: Number of contracts for fee calc.
             asset: Underlying asset (e.g. BTC) for external feed integration.
             strike_price: The strike price of the contract for spot-relative model.
+            market_shape: Normalized market description (threshold vs up/down).
         """
         mp = model_prob or self._model_probs.get(market_id)
         
@@ -300,23 +306,26 @@ class PredictionMarketModel:
             if price_data:
                 spot = Decimal(str(price_data.price))
                 strike = Decimal(str(strike_price))
-                
-                # Simple spot-relative probability model
-                # If spot is near strike, probability is ~0.5
-                # If spot >> strike, YES probability approaches 1.0
+
+                # Use market_shape when available to align direction semantics.
+                mtype = getattr(market_shape, "market_type", None) if market_shape else None
+                # Positive distance implies spot > strike
                 dist_pct = (spot - strike) / strike
-                
-                # Heuristic: 1% distance from strike shifts probability by ~10%
-                derived_prob = Decimal("0.5") + (dist_pct * 10)
-                derived_prob = min(max(derived_prob, Decimal("0.05")), Decimal("0.95"))
-                
+                if mtype == "THRESHOLD_LEQ":
+                    # For "≤ K" markets, positive distance should decrease YES prob
+                    dist_pct = -dist_pct
+                # Logistic mapping keeps probabilities bounded and smooth
+                prob_float = 1.0 / (1.0 + math.exp(float(-dist_pct * Decimal("12"))))
+                derived_prob = Decimal(str(round(prob_float, 4)))
+                derived_prob = min(max(derived_prob, Decimal("0.02")), Decimal("0.98"))
+
                 if side == "no":
                     derived_prob = Decimal("1.0") - derived_prob
-                
+
                 mp = derived_prob
                 logger.debug(
                     f"[model] Derived {side} prob {mp:.2f} for {market_id} "
-                    f"from spot {spot:.2f} vs strike {strike:.2f}"
+                    f"(type={mtype}) from spot {spot:.2f} vs strike {strike:.2f}"
                 )
 
         if mp is None:

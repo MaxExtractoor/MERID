@@ -570,6 +570,7 @@ class KalshiTradingAgent:
         """Build a MarketSnapshot from an EventMarket for strategy consumption."""
         yes_price = Decimal("50")
         no_price = Decimal("50")
+        asset = self.config.assets[0] if self.config.assets else None
         for o in market.outcomes:
             if o.outcome_id == "yes":
                 yes_price = o.price * 100  # Convert back to cents
@@ -591,6 +592,46 @@ class KalshiTradingAgent:
 
         state = ContractState.TRADING if market.active else ContractState.CLOSED
 
+        # Live spot lookup for geometry guardrails
+        spot_price = None
+        if asset:
+            try:
+                from data.live_price_feed import get_live_price_feed
+
+                price_feed = get_live_price_feed()
+                if price_feed:
+                    p = price_feed.get_current_price(f"{asset}/USDT")
+                    if p and getattr(p, "price", None):
+                        spot_price = float(p.price)
+            except Exception as _pe:
+                self.logger.debug("spot lookup skipped: %s", _pe)
+
+        catalog_market = None
+        strike = None
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+
+            catalog = get_market_catalog()
+            m = catalog.get_market(market.market_id)
+            if m:
+                catalog_market = m
+                strike = m.strike_price
+        except Exception as _ce:
+            self.logger.debug("catalog strike lookup skipped: %s", _ce)
+
+        market_shape = None
+        try:
+            from merid.prediction.market_shape import build_market_shape
+
+            market_shape = build_market_shape(
+                market,
+                catalog_market=catalog_market,
+                asset=asset,
+                now=now,
+            )
+        except Exception as _se:
+            self.logger.debug("market shape derivation skipped: %s", _se)
+
         snapshot = MarketSnapshot(
             market_id=market.market_id,
             event_id=market.market_id.rsplit("-", 1)[0] if "-" in market.market_id else market.market_id,
@@ -599,6 +640,8 @@ class KalshiTradingAgent:
             implied=implied,
             volume=market.volume or Decimal("0"),
             open_interest=market.open_interest or Decimal("0"),
+            market_shape=market_shape,
+            spot_price=spot_price,
             time_to_expiry_hours=tte_hours,
             close_time=market.end_date,
             category=market.category,
@@ -627,17 +670,6 @@ class KalshiTradingAgent:
             self.logger.debug("sentiment enrichment skipped: %s", _se)
 
         # Compute edges for both sides using the model
-        asset = self.config.assets[0] if self.config.assets else None
-        strike = None
-        try:
-            from merid.event_venues.kalshi.market_catalog import get_market_catalog
-            catalog = get_market_catalog()
-            m = catalog.get_market(market.market_id)
-            if m:
-                strike = m.strike_price
-        except Exception as _ce:
-            self.logger.debug("catalog strike lookup skipped: %s", _ce)
-
         snapshot.edges = [
             self._model.compute_edge(
                 market_id=market.market_id, 
@@ -645,7 +677,8 @@ class KalshiTradingAgent:
                 side="yes", 
                 action="buy",
                 asset=asset,
-                strike_price=strike
+                strike_price=market_shape.strike if market_shape else strike,
+                market_shape=market_shape,
             ),
             self._model.compute_edge(
                 market_id=market.market_id, 
@@ -653,7 +686,8 @@ class KalshiTradingAgent:
                 side="no", 
                 action="buy",
                 asset=asset,
-                strike_price=strike
+                strike_price=market_shape.strike if market_shape else strike,
+                market_shape=market_shape,
             ),
         ]
 
