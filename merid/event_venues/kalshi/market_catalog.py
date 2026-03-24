@@ -138,6 +138,21 @@ _TYPE_PATTERNS = [
     (re.compile(r"will.*reach|hit|cross", re.I), "binary"),
 ]
 
+# ── Series → asset/timeframe hints (explicit crypto series) ─────────────
+
+_CRYPTO_SERIES_HINTS: Dict[str, tuple[str, str]] = {
+    "KXBTC15M": ("BTC", "15m"),
+    "KXETH15M": ("ETH", "15m"),
+    "KXSOL15M": ("SOL", "15m"),
+    "KXXRP15M": ("XRP", "15m"),
+    "KXDOGE15M": ("DOGE", "15m"),
+    "KXBTC": ("BTC", "daily"),   # threshold/spot surface
+    "KXETH": ("ETH", "daily"),
+    "KXSOL": ("SOL", "daily"),
+    "KXXRP": ("XRP", "daily"),
+    "KXDOGE": ("DOGE", "daily"),
+}
+
 
 @dataclass
 class CatalogMarket:
@@ -187,6 +202,8 @@ class KalshiMarketCatalog:
         self._by_category: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_asset: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_timeframe: Dict[str, List[CatalogMarket]] = defaultdict(list)
+        self._by_asset_timeframe: Dict[str, Dict[str, List[CatalogMarket]]] = defaultdict(lambda: defaultdict(list))
+        self._by_series: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_ticker: Dict[str, CatalogMarket] = {}
 
         self._last_refresh: Optional[datetime] = None
@@ -259,6 +276,8 @@ class KalshiMarketCatalog:
             cat_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             asset_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             tf_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
+            asset_tf_idx: Dict[str, Dict[str, List[CatalogMarket]]] = defaultdict(lambda: defaultdict(list))
+            series_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             ticker_idx: Dict[str, CatalogMarket] = {}
 
             categories_found = set()
@@ -277,6 +296,10 @@ class KalshiMarketCatalog:
                     assets_found.add(cm.asset)
                 if cm.timeframe:
                     tf_idx[cm.timeframe].append(cm)
+                if cm.asset and cm.timeframe:
+                    asset_tf_idx[cm.asset][cm.timeframe].append(cm)
+                if cm.series_ticker:
+                    series_idx[cm.series_ticker].append(cm)
             
             # Debug logging for first refresh to see what's happening
             if self._refresh_count == 0 and enriched:
@@ -295,6 +318,8 @@ class KalshiMarketCatalog:
             self._by_category = cat_idx
             self._by_asset = asset_idx
             self._by_timeframe = tf_idx
+            self._by_asset_timeframe = asset_tf_idx
+            self._by_series = series_idx
             self._by_ticker = ticker_idx
             self._last_refresh = now
             self._refresh_count += 1
@@ -304,6 +329,19 @@ class KalshiMarketCatalog:
                 f"Catalog refreshed: {len(enriched)} markets, "
                 f"{len(cat_idx)} categories, {len(asset_idx)} assets"
             )
+
+            # Crypto surface diagnostics: counts per asset/timeframe with sample tickers
+            try:
+                for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                    tf_map = asset_tf_idx.get(asset, {})
+                    for tf, mkts in tf_map.items():
+                        sample_tickers = [m.market.market_id for m in mkts[:3]]
+                        logger.debug(
+                            "catalog crypto %s %s count=%d sample=%s",
+                            asset, tf, len(mkts), sample_tickers,
+                        )
+            except Exception as _e:
+                logger.debug("crypto diagnostics skipped: %s", _e)
             return len(enriched)
 
     # ── Enrichment ───────────────────────────────────────────────────────
@@ -317,6 +355,7 @@ class KalshiMarketCatalog:
 
         # 1. Primary detection: ticker prefix → category + asset
         ticker_category, ticker_asset = self._detect_from_ticker(event_ticker or mkt.market_id)
+        series_asset, series_timeframe = self._detect_from_series(series_ticker)
 
         # 2. Secondary detection: text-based patterns
         text = f"{mkt.market_id} {event_ticker} {mkt.question or ''} {mkt.description or ''} {mkt.category or ''}"
@@ -327,7 +366,12 @@ class KalshiMarketCatalog:
 
         # Merge: ticker-prefix wins for category; first non-None wins for asset
         category = mkt.category or ticker_category
-        asset = ticker_asset or text_asset
+        asset = ticker_asset or series_asset or text_asset
+        timeframe = series_timeframe or timeframe
+
+        # Explicitly tag 15m series as intraday up/down markets
+        if market_type == "binary" and series_ticker and "15M" in series_ticker.upper():
+            market_type = "up_down"
 
         minutes_to_expiry = None
         if mkt.end_date and mkt.end_date > now:
@@ -373,6 +417,35 @@ class KalshiMarketCatalog:
                 pass
         
         return res
+
+    @staticmethod
+    def _detect_from_series(series_ticker: str) -> tuple:
+        """Map Kalshi series tickers to asset/timeframe hints.
+
+        Uses explicit crypto series mapping first, then falls back to
+        simple regex parsing of suffixes like 15M/1H/D/W.
+        """
+        if not series_ticker:
+            return None, None
+        ser = series_ticker.upper()
+        if ser in _CRYPTO_SERIES_HINTS:
+            return _CRYPTO_SERIES_HINTS[ser]
+
+        m = re.match(r"^KX([A-Z]+)(15M|1H|D1|D|W)?", ser)
+        if not m:
+            return None, None
+
+        asset = m.group(1)
+        suffix = m.group(2) or ""
+        tf_map = {
+            "15M": "15m",
+            "1H": "1h",
+            "D1": "daily",
+            "D": "daily",
+            "W": "weekly",
+        }
+        timeframe = tf_map.get(suffix, None)
+        return asset, timeframe
 
     @staticmethod
     def _detect_from_ticker(ticker: str) -> tuple:
@@ -470,6 +543,10 @@ class KalshiMarketCatalog:
         """Filter markets by timeframe."""
         return self._by_timeframe.get(timeframe, [])
 
+    def get_markets_by_asset_timeframe(self, asset: str, timeframe: str) -> List[CatalogMarket]:
+        """Filter by asset + timeframe using explicit index."""
+        return list(self._by_asset_timeframe.get(asset, {}).get(timeframe, []))
+
     def get_markets_by_event(self, event_keyword: str) -> List[CatalogMarket]:
         """Search markets by event keyword in question/description."""
         kw = event_keyword.lower()
@@ -528,6 +605,10 @@ class KalshiMarketCatalog:
             "categories": {k: len(v) for k, v in self._by_category.items()},
             "assets": {k: len(v) for k, v in self._by_asset.items()},
             "timeframes": {k: len(v) for k, v in self._by_timeframe.items()},
+            "asset_timeframes": {
+                a: {tf: len(v) for tf, v in tf_map.items()}
+                for a, tf_map in self._by_asset_timeframe.items()
+            },
             "running": self._task is not None and not self._task.done(),
         }
 

@@ -32,6 +32,7 @@ from merid.prediction.strategy import KalshiStrategy, StrategySignal, SignalActi
 from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig, PreTradeCheck
 from merid.event_venues.base import EventMarket
 from merid.event_venues.kalshi.stop_loss import StopLossRules, TrackedPosition
+from merid.event_venues.kalshi.position_sizer import kelly_fraction_for_binary
 from utils.logger import get_logger
 
 
@@ -73,6 +74,42 @@ class AgentState:
         }
 
 
+@dataclass
+class PositionMemory:
+    """Tracks last-seen edge/probability for an open position."""
+    edge: Optional[Decimal] = None
+    model_prob: Optional[Decimal] = None
+    kelly_fraction: Optional[float] = None
+    target_contracts: int = 0
+
+
+@dataclass
+class OpenPosition:
+    """Normalized open position pulled from Kalshi."""
+    ticker: str
+    side: str
+    contracts: int
+    avg_entry_cents: int
+    asset: Optional[str] = None
+    timeframe: Optional[str] = None
+
+
+@dataclass
+class PositionAdjustmentDecision:
+    """Decision for an existing position."""
+    ticker: str
+    side: str
+    action: str  # "buy_more", "sell", "hold"
+    current_contracts: int
+    target_contracts: int
+    delta_contracts: int
+    edge_now: Decimal
+    edge_prev: Optional[Decimal]
+    prob_now: Decimal
+    prob_prev: Optional[Decimal]
+    reason: str = ""
+
+
 class KalshiTradingAgent:
     """Trades a specific (asset, timeframe) cell on Kalshi.
 
@@ -88,6 +125,21 @@ class KalshiTradingAgent:
         4. If allowed: place order via kalshi_place_order tool
         5. Sleep until next cycle
     """
+
+    _ENTRY_RULES_DEFAULT: Dict[str, Dict[str, Decimal]] = {
+        "15m": {"min_minutes_to_expiry": Decimal("4"), "min_edge": Decimal("0.02")},
+        "1h": {"min_minutes_to_expiry": Decimal("15"), "min_edge": Decimal("0.03")},
+        "daily": {"min_minutes_to_expiry": Decimal("60"), "min_edge": Decimal("0.05")},
+    }
+
+    _MAX_MOVE_PCT: Dict[str, float] = {
+        "15m": 0.04,   # >4% move in 15m considered catastrophic for YES
+        "1h": 0.07,
+        "daily": 0.15,
+    }
+
+    _EDGE_EPSILON = Decimal("0.0015")  # ~0.15% improvement/decay threshold
+    _MIN_INCREMENT = 1
 
     def __init__(self, config: AgentConfig):
         self.config = config
@@ -119,6 +171,9 @@ class KalshiTradingAgent:
         self._stop_loss = StopLossRules()
         # position_id -> TrackedPosition for open fills awaiting settlement
         self._tracked_positions: Dict[str, TrackedPosition] = {}
+        # Position memory for buy-more vs sell decisions
+        self._position_memory: Dict[str, PositionMemory] = {}
+        self._latest_positions: List[OpenPosition] = []
 
     @property
     def agent_id(self) -> str:
@@ -232,13 +287,20 @@ class KalshiTradingAgent:
         if not self._session_guard.is_trading_allowed(now):
             return
 
+        # 1.5 Fetch current open positions for this agent's asset (used for rebalancing + market backfill)
+        positions = await self._get_open_positions_for_agent()
+        self._latest_positions = positions
+
         # 2. Resolve markets
-        await self._resolve_markets()
+        await self._resolve_markets(existing_positions=positions)
         if not self._resolved_markets:
             return
 
         # 3. Reset per-window order count if window rolled
         self._maybe_reset_window(now)
+
+        # 3.5 Evaluate buy-more / sell/close decisions for open positions
+        await self._rebalance_positions(now, positions)
 
         # 4. Filter for the "most active" contract per asset/timeframe slot
         # Requirement: at most one active Kalshi contract at a time per slot.
@@ -322,6 +384,9 @@ class KalshiTradingAgent:
                 continue
 
             if signal.action == SignalAction.NO_ACTION or signal.action == SignalAction.HOLD:
+                continue
+
+            if not self._entry_rule_allows(signal, snapshot):
                 continue
 
             # Pre-trade risk check
@@ -498,7 +563,7 @@ class KalshiTradingAgent:
 
     # ── Market resolution ──────────────────────────────────────────────
 
-    async def _resolve_markets(self) -> None:
+    async def _resolve_markets(self, existing_positions: Optional[List[OpenPosition]] = None) -> None:
         """Resolve config filters into live Kalshi market tickers."""
         try:
             from merid.prediction.kalshi_tools import _kalshi_list_markets
@@ -548,6 +613,25 @@ class KalshiTradingAgent:
                 self._resolved_markets.append(em)
 
             tickers = [m.market_id for m in self._resolved_markets]
+
+            # Ensure markets with open positions are always included (even if low volume)
+            try:
+                from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                catalog = get_market_catalog()
+                positions = existing_positions or []
+                known = set(tickers)
+                for pos in positions:
+                    if pos.ticker in known:
+                        continue
+                    cm = catalog.get_market(pos.ticker)
+                    if cm:
+                        self._resolved_markets.append(cm.market)
+                        known.add(pos.ticker)
+                if known:
+                    tickers = list(known)
+            except Exception as _pe:
+                self.logger.debug("position backfill skipped: %s", _pe)
+
             self.state.active_tickers = tickers[:20]
 
         except Exception as exc:
@@ -602,6 +686,7 @@ class KalshiTradingAgent:
             time_to_expiry_hours=tte_hours,
             close_time=market.end_date,
             category=market.category,
+            timeframe=(self.config.timeframes[0] if self.config.timeframes else None),
             timestamp=now,
         )
 
@@ -635,8 +720,12 @@ class KalshiTradingAgent:
             m = catalog.get_market(market.market_id)
             if m:
                 strike = m.strike_price
+                snapshot.timeframe = snapshot.timeframe or m.timeframe
+                snapshot.series_ticker = m.series_ticker
         except Exception as _ce:
             self.logger.debug("catalog strike lookup skipped: %s", _ce)
+
+        snapshot.strike_price = strike
 
         snapshot.edges = [
             self._model.compute_edge(
@@ -816,6 +905,79 @@ class KalshiTradingAgent:
             get_explainability_tracker().record_decision(reasoning)
         except Exception as exc:
             self.logger.debug(f"Explainability decision record skipped: {exc}")
+
+    def _entry_rule_allows(self, signal: StrategySignal, snapshot: MarketSnapshot) -> bool:
+        """Apply timeframe-aware entry rules before risk + order placement."""
+        timeframe = snapshot.timeframe or (self.config.timeframes[0] if self.config.timeframes else None)
+        rules = self._ENTRY_RULES_DEFAULT.get(timeframe or "", {})
+        tte_minutes = None
+        if snapshot.time_to_expiry_hours is not None:
+            tte_minutes = float(snapshot.time_to_expiry_hours) * 60.0
+
+        min_minutes = float(rules.get("min_minutes_to_expiry", 0)) if rules else 0.0
+        if tte_minutes is not None and min_minutes and tte_minutes < min_minutes:
+            self.logger.debug(
+                "Entry blocked: tte=%.1fmin < min %.1f for %s",
+                tte_minutes, min_minutes, timeframe or "?",
+            )
+            return False
+
+        min_edge = Decimal(str(rules.get("min_edge", Decimal("0")))) if rules else Decimal("0")
+        if signal.edge and signal.edge.net_edge is not None and signal.edge.net_edge < min_edge:
+            self.logger.debug(
+                "Entry blocked: edge %.4f < min %.4f for %s",
+                signal.edge.net_edge, min_edge, timeframe or "?",
+            )
+            return False
+
+        if self._is_catastrophic_yes(signal, snapshot):
+            self.logger.info(
+                "Entry blocked: catastrophic move required for YES on %s (strike=%s)",
+                snapshot.market_id, snapshot.strike_price,
+            )
+            return False
+
+        return True
+
+    def _catastrophic_distance(self, snapshot: MarketSnapshot) -> Optional[float]:
+        """Return fractional distance between strike and spot, if available."""
+        if snapshot.strike_price is None:
+            return None
+        asset = self.config.assets[0] if self.config.assets else None
+        if not asset:
+            return None
+        spot = self._get_spot_price(asset)
+        if spot is None or spot <= 0:
+            return None
+        try:
+            return abs((float(snapshot.strike_price) - spot) / spot)
+        except Exception:
+            return None
+
+    def _is_catastrophic_yes(self, signal: StrategySignal, snapshot: MarketSnapshot) -> bool:
+        """True when a YES entry would require an out-of-band move for the timeframe."""
+        if signal.side != "yes" and signal.action != SignalAction.BUY_YES:
+            return False
+        timeframe = snapshot.timeframe or (self.config.timeframes[0] if self.config.timeframes else None)
+        if not timeframe:
+            return False
+        dist = self._catastrophic_distance(snapshot)
+        if dist is None:
+            return False
+        threshold = self._MAX_MOVE_PCT.get(timeframe, 0.0)
+        return threshold > 0 and dist > threshold
+
+    def _get_spot_price(self, asset: str) -> Optional[float]:
+        """Lookup latest spot price from the model's price feed (if available)."""
+        try:
+            feed = getattr(self._model, "_price_feed", None)
+            if feed:
+                data = feed.get_current_price(f"{asset}/USDT")
+                if data and getattr(data, "price", None):
+                    return float(data.price)
+        except Exception as exc:
+            self.logger.debug("spot lookup failed: %s", exc)
+        return None
 
     async def _execute_signal(
         self, market: EventMarket, signal: StrategySignal, check: PreTradeCheck,
@@ -1320,6 +1482,282 @@ class KalshiTradingAgent:
             self.logger.warning(
                 f"Order failed for {market.market_id}: {result_error}"
             )
+
+    # ── Position adjustment logic ───────────────────────────────────────
+
+    async def _get_open_positions_for_agent(self) -> List[OpenPosition]:
+        """Fetch open positions filtered to this agent's asset/timeframe."""
+        asset = self.config.assets[0] if self.config.assets else ""
+        if not asset:
+            return []
+        try:
+            from merid.prediction.kalshi_tools import _kalshi_get_positions
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+
+            result = await _kalshi_get_positions(asset=asset)
+            if not result.success:
+                self.logger.debug("get_positions failed: %s", result.error_message)
+                return []
+
+            catalog = get_market_catalog()
+            positions: List[OpenPosition] = []
+            for p in result.payload.get("positions", []):
+                ticker = p.get("ticker") or p.get("market_id")
+                if not ticker:
+                    continue
+                outcome = (p.get("outcome") or "").lower()
+                side = "yes" if outcome == "yes" else "no"
+                try:
+                    size = int(abs(float(p.get("size", "0"))))
+                except Exception:
+                    size = 0
+                avg_price = p.get("avg_entry_price") or p.get("average_entry_price") or "0"
+                try:
+                    avg_cents = int(round(float(avg_price) * 100)) if float(avg_price) <= 1 else int(round(float(avg_price)))
+                except Exception:
+                    avg_cents = 50
+
+                cm = catalog.get_market(ticker) if catalog else None
+                timeframe = cm.timeframe if cm else None
+                asset_tag = cm.asset if cm else asset
+
+                if self.config.timeframes and timeframe and timeframe not in self.config.timeframes:
+                    continue
+
+                positions.append(OpenPosition(
+                    ticker=ticker,
+                    side=side,
+                    contracts=size,
+                    avg_entry_cents=avg_cents,
+                    asset=asset_tag,
+                    timeframe=timeframe,
+                ))
+            return positions
+        except Exception as exc:
+            self.logger.debug("get_open_positions error: %s", exc)
+            return []
+
+    def _build_position_snapshots(
+        self,
+        positions: List[OpenPosition],
+        now: datetime,
+    ) -> Dict[str, MarketSnapshot]:
+        """Build snapshots for all open positions using catalog fallbacks."""
+        snapshots: Dict[str, MarketSnapshot] = {}
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            catalog = get_market_catalog()
+        except Exception as _e:
+            catalog = None
+            self.logger.debug("catalog unavailable for position snapshots: %s", _e)
+
+        for pos in positions:
+            market = next((m for m in self._resolved_markets if m.market_id == pos.ticker), None)
+            if market is None and catalog:
+                cm = catalog.get_market(pos.ticker)
+                market = cm.market if cm else None
+            if market is None:
+                continue
+            snapshots[pos.ticker] = self._build_snapshot(market, now)
+        return snapshots
+
+    def _decide_position_adjustment(
+        self,
+        pos: OpenPosition,
+        snapshot: MarketSnapshot,
+    ) -> PositionAdjustmentDecision:
+        """Decide whether to buy more, sell/reduce, or hold an open position."""
+        try:
+            edge_now = self._model.compute_edge(
+                market_id=pos.ticker,
+                implied=snapshot.implied,
+                side=pos.side,
+                action="buy",
+                asset=pos.asset,
+                strike_price=snapshot.strike_price,
+            )
+        except Exception as exc:
+            self.logger.debug("edge compute failed for %s: %s", pos.ticker, exc)
+            edge_now = None
+
+        if edge_now is None:
+            return PositionAdjustmentDecision(
+                ticker=pos.ticker, side=pos.side, action="hold",
+                current_contracts=pos.contracts, target_contracts=pos.contracts,
+                delta_contracts=0, edge_now=Decimal("0"), edge_prev=None,
+                prob_now=Decimal("0.5"), prob_prev=None, reason="no_edge",
+            )
+
+        # Catastrophic YES guard: force reduction if distance is extreme
+        dist = self._catastrophic_distance(snapshot)
+        timeframe = snapshot.timeframe or (self.config.timeframes[0] if self.config.timeframes else None)
+        if pos.side == "yes" and dist is not None and timeframe and dist > self._MAX_MOVE_PCT.get(timeframe, 0.0):
+            target_contracts = 0
+            return PositionAdjustmentDecision(
+                ticker=pos.ticker, side=pos.side, action="sell",
+                current_contracts=pos.contracts, target_contracts=target_contracts,
+                delta_contracts=pos.contracts, edge_now=edge_now.net_edge,
+                edge_prev=self._position_memory.get(pos.ticker, PositionMemory()).edge,
+                prob_now=edge_now.model_prob, prob_prev=self._position_memory.get(pos.ticker, PositionMemory()).model_prob,
+                reason="catastrophic_yes_block",
+            )
+
+        # Kelly fraction for current conditions
+        price_cents = None
+        if pos.side == "yes":
+            price_cents = int(snapshot.implied.yes_ask or snapshot.implied.yes_prob * 100)
+        else:
+            price_cents = int(snapshot.implied.no_ask or snapshot.implied.no_prob * 100)
+        price_cents = max(1, min(99, price_cents or 50))
+
+        kelly_fraction = kelly_fraction_for_binary(
+            float(edge_now.model_prob),
+            100 - price_cents,
+            price_cents,
+        )
+
+        cap = self.config.risk_limits.max_yes_position if pos.side == "yes" else self.config.risk_limits.max_no_position
+        target_contracts = 0
+        if edge_now.net_edge > 0 and kelly_fraction > 0:
+            target_contracts = min(cap, max(self._MIN_INCREMENT, int(kelly_fraction * cap)))
+
+        mem = self._position_memory.get(pos.ticker, PositionMemory())
+        edge_prev = mem.edge
+        prob_prev = mem.model_prob
+
+        action = "hold"
+        delta = 0
+        reason = "stable"
+
+        if edge_prev is None:
+            # First observation: record and hold
+            action = "hold"
+            reason = "baseline_recorded"
+        elif edge_now.net_edge <= 0 or kelly_fraction <= 0 or target_contracts == 0:
+            action = "sell"
+            delta = pos.contracts
+            target_contracts = 0
+            reason = "edge_flipped_or_negative_kelly"
+        elif edge_now.net_edge < (edge_prev - self._EDGE_EPSILON):
+            # Edge deteriorated materially
+            desired = min(pos.contracts, target_contracts)
+            if desired < pos.contracts - self._MIN_INCREMENT:
+                action = "sell"
+                delta = pos.contracts - desired
+                target_contracts = desired
+                reason = "edge_shrunk"
+        elif (
+            edge_now.net_edge > (edge_prev + self._EDGE_EPSILON)
+            and target_contracts >= pos.contracts + self._MIN_INCREMENT
+        ):
+            action = "buy_more"
+            delta = target_contracts - pos.contracts
+            reason = "edge_improved"
+        elif target_contracts < pos.contracts - self._MIN_INCREMENT:
+            action = "sell"
+            delta = pos.contracts - target_contracts
+            reason = "kelly_downshift"
+
+        # Update memory
+        self._position_memory[pos.ticker] = PositionMemory(
+            edge=edge_now.net_edge,
+            model_prob=edge_now.model_prob,
+            kelly_fraction=kelly_fraction,
+            target_contracts=target_contracts,
+        )
+
+        return PositionAdjustmentDecision(
+            ticker=pos.ticker,
+            side=pos.side,
+            action=action,
+            current_contracts=pos.contracts,
+            target_contracts=target_contracts,
+            delta_contracts=delta,
+            edge_now=edge_now.net_edge,
+            edge_prev=edge_prev,
+            prob_now=edge_now.model_prob,
+            prob_prev=prob_prev,
+            reason=reason,
+        )
+
+    async def _execute_position_adjustment(
+        self,
+        decision: PositionAdjustmentDecision,
+        snapshot: MarketSnapshot,
+        now: datetime,
+    ) -> None:
+        """Place buy-more or sell/close orders based on adjustment decision."""
+        if decision.action == "hold" or decision.delta_contracts <= 0:
+            return
+
+        if self.state.orders_this_window >= self.config.risk_limits.max_orders_per_window:
+            self.logger.debug("Adjustment skipped: order window maxed")
+            return
+
+        side = decision.side
+        action = "buy" if decision.action == "buy_more" else "sell"
+        price_cents = None
+        if side == "yes":
+            price_cents = int(snapshot.implied.yes_ask if action == "buy" else snapshot.implied.yes_bid or 50)
+        else:
+            price_cents = int(snapshot.implied.no_ask if action == "buy" else snapshot.implied.no_bid or 50)
+        price_cents = max(1, min(99, price_cents or 50))
+
+        event_id = snapshot.market_id.rsplit("-", 1)[0] if "-" in snapshot.market_id else snapshot.market_id
+        check = self._risk.check_order(
+            market_id=snapshot.market_id,
+            event_id=event_id,
+            side=side,
+            contracts=decision.delta_contracts,
+            price_cents=Decimal(str(price_cents)),
+            edge=decision.edge_now,
+        )
+        if not check.allowed:
+            self.logger.info("Adjustment risk blocked for %s: %s", snapshot.market_id, check.reason)
+            return
+
+        try:
+            from merid.prediction.kalshi_tools import _kalshi_place_order
+            result = await _kalshi_place_order(
+                ticker=snapshot.market_id,
+                side=side,
+                action=action,
+                price_cents=price_cents,
+                count=decision.delta_contracts,
+                agent_name=self.agent_id,
+            )
+        except Exception as exc:
+            self.logger.warning("Adjustment order failed for %s: %s", snapshot.market_id, exc)
+            return
+
+        self.logger.info(
+            "position_adjustment %s %s %s Δ=%d -> target=%d | "
+            "p_prev=%s p_now=%s edge_prev=%s edge_now=%s reason=%s success=%s",
+            decision.ticker, side, action, decision.delta_contracts, decision.target_contracts,
+            decision.prob_prev, decision.prob_now, decision.edge_prev, decision.edge_now,
+            decision.reason, result.success if result else None,
+        )
+
+        if result and result.success:
+            self.state.orders_this_window += 1
+            self.state.orders_placed += 1
+
+    async def _rebalance_positions(
+        self,
+        now: datetime,
+        positions: Optional[List[OpenPosition]] = None,
+    ) -> None:
+        """Evaluate all open positions for buy-more vs sell/close decisions."""
+        positions = positions if positions is not None else await self._get_open_positions_for_agent()
+        if not positions:
+            return
+        snapshots = self._build_position_snapshots(positions, now)
+        for pos in positions:
+            snap = snapshots.get(pos.ticker)
+            if not snap:
+                continue
+            decision = self._decide_position_adjustment(pos, snap)
+            await self._execute_position_adjustment(decision, snap, now)
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serialisable agent summary."""
