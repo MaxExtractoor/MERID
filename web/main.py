@@ -190,6 +190,7 @@ from web.api.x_bot import router as x_bot_router
 from web.api.swarm import router as swarm_router
 from web.api.moat import router as moat_router
 from web.api.health import router as health_router
+from web.api.dependency_health import router as dependency_health_router
 from web.api.analytics import router as analytics_router
 from web.api.brier_metrics import router as brier_metrics_router
 from web.api.feedback import router as feedback_router
@@ -361,6 +362,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(system_control_router)
     application.include_router(data_endpoints_router)
     application.include_router(live_stream_router)
+    application.include_router(dependency_health_router)
     if not _kalshi_only:
         application.include_router(institutional_router)
     application.include_router(schemas_router)
