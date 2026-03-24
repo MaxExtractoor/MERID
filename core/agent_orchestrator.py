@@ -94,6 +94,8 @@ class AgentOrchestrator:
         self.running = False
         self.recent_decisions: List[AgentDecision] = []
         self.consensus_history: List[ConsensusResult] = []
+        self._task: Optional[asyncio.Task] = None
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         logger.info("Agent Orchestrator initialized with 7 agents")
     
@@ -104,18 +106,38 @@ class AgentOrchestrator:
 
         # Note: news_monitor is started by OrchestratorAgentManager — not duplicated here.
         # Note: price_feed.start_streaming() is started by main.py lifespan — not duplicated here.
-        tasks = [
-            asyncio.create_task(self._orchestration_loop())
-        ]
+        if self._task and not self._task.done():
+            logger.warning("Agent orchestrator already running")
+            return
 
+        self._task = asyncio.create_task(self._orchestration_loop())
+        self.ready_event.set()
         logger.info("All agents started successfully")
-
-        # Wait for tasks
-        await asyncio.gather(*tasks, return_exceptions=True)
     
-    def stop(self):
+    async def stop(self):
         """Stop all agents."""
         self.running = False
+
+        # Stop orchestration loop
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop agents gracefully
+        for agent in self.agents.values():
+            stop_fn = getattr(agent, "stop", None)
+            if stop_fn:
+                try:
+                    if asyncio.iscoroutinefunction(stop_fn):
+                        await stop_fn()
+                    else:
+                        stop_fn()
+                except Exception as exc:
+                    logger.warning("Error stopping agent %s: %s", getattr(agent, "name", agent), exc)
+
         self.news_monitor.stop_monitoring()
         self.price_feed.stop_streaming()
         logger.info("All agents stopped")

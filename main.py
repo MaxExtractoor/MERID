@@ -23,6 +23,8 @@ import uvicorn
 from web.main import create_app
 from utils.logger import get_logger
 from web.api import test_page
+from core.runtime import TaskManager, SystemController, SystemMode, Subsystem
+from merid.execution_guard import get_execution_guard
 
 logger = get_logger("main")
 
@@ -38,7 +40,12 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("MERID PRODUCTION SYSTEM STARTING")
     logger.info("=" * 60)
-    
+    task_manager = TaskManager()
+    controller = SystemController()
+    controller.attach_execution_guard(get_execution_guard())
+    app.state.task_manager = task_manager
+    app.state.system_controller = controller
+
     # Import all components
     from core.agent_orchestrator import get_agent_orchestrator
     from core.consensus_engine import get_consensus_engine
@@ -52,195 +59,257 @@ async def lifespan(app: FastAPI):
     from core.health import get_health_monitor
     from web.api.intelligence import aggregate_news
     from web.api.live_data import fetch_live_prices as fetch_api_prices
-    
-    # Start WebSocket data publishers FIRST (before any blocking initialization)
+    from web.services.price_publisher import get_price_publisher
+    from web.services.portfolio_publisher import get_portfolio_publisher
+    from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
+    from web.startup_agents import get_orchestrator_manager
+    from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
+    from merid.prediction.agent_grid_config import PortfolioRiskConfig
+
+    controller.set_mode(SystemMode.BOOTING)
+    price_feed = None
+
+    # Start WebSocket data publishers FIRST (before blocking initialization)
     try:
         logger.info("Starting WebSocket price publisher...")
-        from web.services.price_publisher import get_price_publisher
         price_publisher = get_price_publisher()
-        asyncio.create_task(price_publisher.start())
-        logger.info("Price publisher task created")
+        task_manager.create_task(
+            "price_publisher", price_publisher.start(), stop=price_publisher.stop, critical=False
+        )
+        task_manager.create_task(
+            "price_publisher_ready",
+            controller.watch_readiness(Subsystem.PRICE_PUBLISHER, price_publisher.ready_event, timeout=5),
+            critical=False,
+        )
     except Exception as e:
-        logger.error(f"Failed to start price publisher: {e}", exc_info=True)
-    
+        controller.mark_failed(Subsystem.PRICE_PUBLISHER, str(e))
+
     try:
         logger.info("Starting WebSocket portfolio publisher...")
-        from web.services.portfolio_publisher import get_portfolio_publisher
         portfolio_publisher = get_portfolio_publisher()
-        asyncio.create_task(portfolio_publisher.start())
-        logger.info("Portfolio publisher task created")
+        task_manager.create_task(
+            "portfolio_publisher", portfolio_publisher.start(), stop=portfolio_publisher.stop, critical=False
+        )
+        task_manager.create_task(
+            "portfolio_publisher_ready",
+            controller.watch_readiness(Subsystem.PORTFOLIO_PUBLISHER, portfolio_publisher.ready_event, timeout=5),
+            critical=False,
+        )
     except Exception as e:
-        logger.error(f"Failed to start portfolio publisher: {e}", exc_info=True)
-    
-    # Yield to event loop to allow publishers to start
-    await asyncio.sleep(0.1)
-    
-    # Start agent orchestrator
-    try:
-        logger.info("Starting agent orchestrator...")
-        orchestrator = get_agent_orchestrator()
-        asyncio.create_task(orchestrator.start())
-    except Exception as e:
-        logger.error(f"Failed to start orchestrator: {e}")
-    
-    # Yield to event loop after each major component
-    await asyncio.sleep(0)
-    
-    # Start consensus engine
-    try:
-        logger.info("Starting consensus engine...")
-        consensus = get_consensus_engine()
-        asyncio.create_task(consensus.start())
-    except Exception as e:
-        logger.error(f"Failed to start consensus: {e}")
-    
-    # Start simulation miner
-    try:
-        logger.info("Starting simulation miner...")
-        miner = get_continuous_miner()
-        asyncio.create_task(miner.start())
-    except Exception as e:
-        logger.error(f"Failed to start miner: {e}")
-    
-    # Start audit trail
-    try:
-        logger.info("Starting audit trail...")
-        audit = get_audit_trail()
-        asyncio.create_task(audit.start())
-    except Exception as e:
-        logger.error(f"Failed to start audit: {e}")
-    
-    # Start execution engine
-    try:
-        logger.info("Starting execution engine...")
-        execution = get_optimal_executor()
-        asyncio.create_task(execution.start())
-        
-        # Wire execution engine to live price feed
-        price_feed = get_live_price_feed()
-        def on_execution_price_update(price_data):
-            execution.update_price(price_data.symbol, price_data.price)
-        price_feed.subscribe(on_execution_price_update)
-        logger.info("Execution engine wired to live price feed")
-    except Exception as e:
-        logger.error(f"Failed to start execution: {e}")
-    
-    # Start streaming agent mesh
-    try:
-        logger.info("Starting streaming agent mesh...")
-        asyncio.create_task(agent_mesh.initialize())
-        asyncio.create_task(agent_mesh.start())
-    except Exception as e:
-        logger.error(f"Failed to start agent mesh: {e}")
-    
-    # Start prediction markets aggregator
-    try:
-        logger.info("Starting prediction markets aggregator...")
-        prediction_agg = get_prediction_aggregator()
-        asyncio.create_task(prediction_agg.start())
-        # Store in app state for API access
-        app.state.prediction_aggregator = prediction_agg
-        logger.info(f"Prediction aggregator stored in app.state (id={id(prediction_agg)})")
-    except Exception as e:
-        logger.error(f"Failed to start prediction markets: {e}")
-    
-    await asyncio.sleep(0)  # Yield to event loop
-    
+        controller.mark_failed(Subsystem.PORTFOLIO_PUBLISHER, str(e))
+
     # Start live price feed streaming
     try:
         logger.info("Starting live price feed...")
         price_feed = get_live_price_feed()
-        asyncio.create_task(price_feed.start_streaming())
+        task_manager.create_task(
+            "price_feed", price_feed.start_streaming(), stop=price_feed.stop_streaming, critical=True
+        )
+        task_manager.create_task(
+            "price_feed_ready",
+            controller.watch_readiness(Subsystem.PRICE_FEED, price_feed.ready_event, timeout=15),
+            critical=False,
+        )
     except Exception as e:
-        logger.error(f"Failed to start price feed: {e}")
-    
-    await asyncio.sleep(0)  # Yield to event loop
-    
-    # Start intelligence news aggregation
-    try:
-        logger.info("Starting intelligence news aggregation...")
-        asyncio.create_task(aggregate_news())
-    except Exception as e:
-        logger.error(f"Failed to start intelligence: {e}")
-    
-    await asyncio.sleep(0)  # Yield to event loop
-    
-    # Start API live data fetching
-    try:
-        logger.info("Starting API live data feed...")
-        asyncio.create_task(fetch_api_prices())
-    except Exception as e:
-        logger.error(f"Failed to start API live data: {e}")
-    
-    await asyncio.sleep(0)  # Yield to event loop
-    
-    # Start alert manager
-    try:
-        logger.info("Starting alert manager...")
-        alert_mgr = get_alert_manager()
-        asyncio.create_task(alert_mgr.start())
-        
-        price_feed = get_live_price_feed()
-        def on_price_update(price_data):
-            alert_mgr.update_price(price_data.symbol, price_data.price)
-        price_feed.subscribe(on_price_update)
-    except Exception as e:
-        logger.error(f"Failed to start alerts: {e}")
-    
-    await asyncio.sleep(0)  # Yield to event loop
-    
+        controller.mark_failed(Subsystem.PRICE_FEED, str(e))
+
     # Start health monitor
     try:
         logger.info("Starting health monitor...")
         health_mon = get_health_monitor()
-        asyncio.create_task(health_mon.start())
+        task_manager.create_task(
+            "health_monitor", health_mon.start(), stop=health_mon.stop, critical=True
+        )
+        task_manager.create_task(
+            "health_monitor_ready",
+            controller.watch_readiness(Subsystem.HEALTH, health_mon.ready_event, timeout=10),
+            critical=False,
+        )
     except Exception as e:
-        logger.error(f"Failed to start health monitor: {e}")
+        controller.mark_failed(Subsystem.HEALTH, str(e))
 
-    await asyncio.sleep(0)
+    # Start execution engine (wired to price feed)
+    try:
+        logger.info("Starting execution engine...")
+        execution = get_optimal_executor()
+        task_manager.create_task("execution_engine", execution.start(), stop=execution.stop, critical=True)
+        task_manager.create_task(
+            "execution_ready",
+            controller.watch_readiness(Subsystem.EXECUTION, execution.ready_event, timeout=15),
+            critical=False,
+        )
+
+        if price_feed:
+            def on_execution_price_update(price_data):
+                execution.update_price(price_data.symbol, price_data.price)
+
+            price_feed.subscribe(on_execution_price_update)
+            logger.info("Execution engine wired to live price feed")
+        else:
+            logger.warning("Execution engine wiring skipped: price feed unavailable")
+    except Exception as e:
+        controller.mark_failed(Subsystem.EXECUTION, str(e))
+
+    # Start consensus engine
+    try:
+        logger.info("Starting consensus engine...")
+        consensus = get_consensus_engine()
+        task_manager.create_task("consensus_engine", consensus.start(), stop=consensus.stop, critical=True)
+        task_manager.create_task(
+            "consensus_ready",
+            controller.watch_readiness(Subsystem.CONSENSUS, consensus.ready_event, timeout=10),
+            critical=False,
+        )
+    except Exception as e:
+        controller.mark_failed(Subsystem.CONSENSUS, str(e))
+
+    # Start audit trail
+    try:
+        logger.info("Starting audit trail...")
+        audit = get_audit_trail()
+        task_manager.create_task("audit_trail", audit.start(), stop=audit.stop, critical=False)
+        controller.mark_ready(Subsystem.AUDIT)
+    except Exception as e:
+        controller.mark_failed(Subsystem.AUDIT, str(e))
+
+    # Start simulation miner
+    try:
+        logger.info("Starting simulation miner...")
+        miner = get_continuous_miner()
+        task_manager.create_task("continuous_miner", miner.start(), stop=miner.stop, critical=False)
+        controller.mark_ready(Subsystem.MINER)
+    except Exception as e:
+        controller.mark_failed(Subsystem.MINER, str(e))
+
+    # Start streaming agent mesh
+    try:
+        logger.info("Starting streaming agent mesh...")
+        await agent_mesh.initialize()
+        task_manager.create_task("agent_mesh", agent_mesh.start(), stop=agent_mesh.stop, critical=False)
+        task_manager.create_task(
+            "agent_mesh_ready",
+            controller.watch_readiness(Subsystem.AGENT_MESH, agent_mesh.ready_event, timeout=20),
+            critical=False,
+        )
+    except Exception as e:
+        controller.mark_failed(Subsystem.AGENT_MESH, str(e))
+
+    # Start agent orchestrator
+    try:
+        logger.info("Starting agent orchestrator...")
+        orchestrator = get_agent_orchestrator()
+        task_manager.create_task("agent_orchestrator", orchestrator.start(), stop=orchestrator.stop, critical=False)
+        task_manager.create_task(
+            "orchestrator_ready",
+            controller.watch_readiness(Subsystem.ORCHESTRATOR, orchestrator.ready_event, timeout=10),
+            critical=False,
+        )
+    except Exception as e:
+        controller.mark_failed(Subsystem.ORCHESTRATOR, str(e))
+
+    # Start prediction markets aggregator
+    try:
+        logger.info("Starting prediction markets aggregator...")
+        prediction_agg = get_prediction_aggregator()
+        task_manager.create_task("prediction_aggregator", prediction_agg.start(), stop=prediction_agg.stop, critical=False)
+        task_manager.create_task(
+            "prediction_aggregator_ready",
+            controller.watch_readiness(Subsystem.PREDICTION, prediction_agg.ready_event, timeout=10),
+            critical=False,
+        )
+        app.state.prediction_aggregator = prediction_agg
+        logger.info("Prediction aggregator stored in app.state (id=%s)", id(prediction_agg))
+    except Exception as e:
+        controller.mark_failed(Subsystem.PREDICTION, str(e))
+
+    # Start intelligence news aggregation
+    try:
+        logger.info("Starting intelligence news aggregation...")
+        task_manager.create_task("intelligence_news", aggregate_news(), stop=None, critical=False)
+        controller.mark_ready(Subsystem.NEWS_INTELLIGENCE)
+    except Exception as e:
+        controller.mark_failed(Subsystem.NEWS_INTELLIGENCE, str(e))
+
+    # Start API live data fetching
+    try:
+        logger.info("Starting API live data feed...")
+        task_manager.create_task("api_live_prices", fetch_api_prices(), stop=None, critical=False)
+        controller.mark_ready(Subsystem.API_PRICE)
+    except Exception as e:
+        controller.mark_failed(Subsystem.API_PRICE, str(e))
+
+    # Start alert manager
+    try:
+        logger.info("Starting alert manager...")
+        alert_mgr = get_alert_manager()
+        task_manager.create_task("alert_manager", alert_mgr.start(), stop=alert_mgr.stop, critical=False)
+        task_manager.create_task(
+            "alert_manager_ready",
+            controller.watch_readiness(Subsystem.ALERTS, alert_mgr.ready_event, timeout=10),
+            critical=False,
+        )
+
+        price_feed = price_feed or get_live_price_feed()
+
+        if price_feed:
+            def on_price_update(price_data):
+                alert_mgr.update_price(price_data.symbol, price_data.price)
+
+            price_feed.subscribe(on_price_update)
+        else:
+            logger.warning("Alert manager wiring skipped: price feed unavailable")
+    except Exception as e:
+        controller.mark_failed(Subsystem.ALERTS, str(e))
 
     # ── Kalshi subsystems ────────────────────────────────────────────────
     # Start Kalshi WS bridge (live market data feed)
     try:
         logger.info("Starting Kalshi WS bridge...")
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
         ws_bridge = get_ws_bridge()
-        asyncio.create_task(ws_bridge.start())
-        logger.info("✅ Kalshi WS bridge started")
+        task_manager.create_task("kalshi_ws_bridge", ws_bridge.start(), stop=ws_bridge.stop, critical=False)
+        task_manager.create_task(
+            "kalshi_ws_ready",
+            controller.watch_readiness(Subsystem.WS_BRIDGE, ws_bridge.ready_event, timeout=15),
+            critical=False,
+        )
     except Exception as e:
-        logger.warning(f"Kalshi WS bridge not started (non-fatal): {e}")
-
-    await asyncio.sleep(0)
+        controller.mark_failed(Subsystem.WS_BRIDGE, str(e))
 
     # Start OrchestratorAgentManager (news monitor, twitter, telegram, Kalshi grid)
     try:
         logger.info("Starting orchestrator agent manager...")
-        from web.startup_agents import get_orchestrator_manager
         orch_mgr = get_orchestrator_manager()
         await orch_mgr.start_all()
+        controller.mark_ready(Subsystem.ORCHESTRATOR_MANAGER)
         app.state.orchestrator_manager = orch_mgr
-        logger.info("✅ Orchestrator agent manager started")
     except Exception as e:
-        logger.warning(f"Orchestrator agent manager not started (non-fatal): {e}")
-
-    await asyncio.sleep(0)
+        controller.mark_failed(Subsystem.ORCHESTRATOR_MANAGER, str(e))
 
     # Start PortfolioRiskAgent (cross-asset exposure caps, drawdown, margin monitoring)
     try:
         logger.info("Starting portfolio risk agent...")
-        from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
-        from merid.prediction.agent_grid_config import PortfolioRiskConfig
         portfolio_risk = PortfolioRiskAgent(config=PortfolioRiskConfig())
-        await portfolio_risk.start()
+        task_manager.create_task("portfolio_risk_agent", portfolio_risk.start(), stop=portfolio_risk.stop, critical=True)
+        task_manager.create_task(
+            "portfolio_risk_ready",
+            controller.watch_readiness(Subsystem.PORTFOLIO_RISK, portfolio_risk.ready_event, timeout=15),
+            critical=False,
+        )
         app.state.portfolio_risk_agent = portfolio_risk
-        logger.info("✅ Portfolio risk agent started")
     except Exception as e:
-        logger.warning(f"Portfolio risk agent not started (non-fatal): {e}")
+        controller.mark_failed(Subsystem.PORTFOLIO_RISK, str(e))
 
-    await asyncio.sleep(0)  # Final yield before completing startup
+    controller.set_mode(SystemMode.WARMUP)
+    critical_ready = await controller.wait_for_critical(timeout=20)
+    if critical_ready:
+        controller.set_mode(SystemMode.LIVE_TRADING)
+        controller.allow_trading()
+    else:
+        controller.set_mode(SystemMode.DEGRADED)
+        controller.block_trading("critical subsystems not ready")
 
     logger.info("=" * 60)
-    logger.info("MERID SYSTEM LIVE - All components operational")
+    logger.info("MERID SYSTEM LIVE - mode=%s | readiness=%s", controller.mode.value, controller.snapshot())
     logger.info("=" * 60)
     
     yield
@@ -249,94 +318,18 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("MERID SYSTEM SHUTTING DOWN")
     logger.info("=" * 60)
-    
-    # Stop WebSocket publishers
-    try:
-        from web.services.price_publisher import get_price_publisher
-        price_publisher = get_price_publisher()
-        await price_publisher.stop()
-    except Exception as e:
-        logger.debug("shutdown: price_publisher stop error: %s", e)
+    controller.block_trading("shutdown")
+    controller.set_mode(SystemMode.SHUTTING_DOWN)
 
-    try:
-        from web.services.portfolio_publisher import get_portfolio_publisher
-        portfolio_publisher = get_portfolio_publisher()
-        await portfolio_publisher.stop()
-    except Exception as e:
-        logger.debug("shutdown: portfolio_publisher stop error: %s", e)
+    # Stop components in reverse registration order
+    await task_manager.stop_all()
 
+    # Explicit clean-up for orchestrator manager and WS bridge tied to app state
     try:
-        health_mon = get_health_monitor()
-        await health_mon.stop()
-    except Exception as e:
-        logger.debug("shutdown: health_monitor stop error: %s", e)
-
-    try:
-        alert_mgr = get_alert_manager()
-        await alert_mgr.stop()
-    except Exception as e:
-        logger.debug("shutdown: alert_manager stop error: %s", e)
-
-    try:
-        prediction_agg = get_prediction_aggregator()
-        await prediction_agg.stop()
-    except Exception as e:
-        logger.debug("shutdown: prediction_aggregator stop error: %s", e)
-
-    try:
-        price_feed = get_live_price_feed()
-        price_feed.stop_streaming()
-    except Exception as e:
-        logger.debug("shutdown: price_feed stop error: %s", e)
-
-    try:
-        await agent_mesh.stop()
-    except Exception as e:
-        logger.debug("shutdown: agent_mesh stop error: %s", e)
-
-    try:
-        execution = get_optimal_executor()
-        await execution.stop()
-    except Exception as e:
-        logger.debug("shutdown: execution stop error: %s", e)
-
-    try:
-        audit = get_audit_trail()
-        await audit.stop()
-    except Exception as e:
-        logger.debug("shutdown: audit_trail stop error: %s", e)
-
-    try:
-        miner = get_continuous_miner()
-        await miner.stop()
-    except Exception as e:
-        logger.debug("shutdown: miner stop error: %s", e)
-
-    try:
-        consensus = get_consensus_engine()
-        await consensus.stop()
-    except Exception as e:
-        logger.debug("shutdown: consensus stop error: %s", e)
-
-    try:
-        orchestrator = get_agent_orchestrator()
-        orchestrator.stop()
-    except Exception as e:
-        logger.debug("shutdown: orchestrator stop error: %s", e)
-
-    try:
-        from web.startup_agents import get_orchestrator_manager
-        orch_mgr = get_orchestrator_manager()
-        await orch_mgr.stop_all()
+        if hasattr(app.state, "orchestrator_manager"):
+            await app.state.orchestrator_manager.stop_all()
     except Exception as e:
         logger.debug("shutdown: orchestrator_manager stop error: %s", e)
-
-    try:
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-        await get_ws_bridge().stop()
-    except Exception as e:
-        logger.debug("shutdown: ws_bridge stop error: %s", e)
-
     try:
         if hasattr(app.state, "portfolio_risk_agent"):
             await app.state.portfolio_risk_agent.stop()

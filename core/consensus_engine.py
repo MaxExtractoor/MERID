@@ -86,6 +86,7 @@ class ConsensusEngine:
         # State
         self.last_consensus_time = 0.0
         self.consensus_interval = 10.0  # Resolve consensus every N seconds
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         # CONSTITUTIONAL: Consensus transparency logging
         self.consensus_logger = get_consensus_logger()
@@ -106,6 +107,7 @@ class ConsensusEngine:
         )
         
         self._task = asyncio.create_task(self._run_loop())
+        self.ready_event.set()
         logger.info("Consensus engine started")
         
     async def stop(self):

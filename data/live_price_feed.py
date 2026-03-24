@@ -76,6 +76,7 @@ class LivePriceFeed:
         self.exchanges = {}
         self.price_cache: Dict[str, PriceData] = {}
         self.subscribers: List[Callable] = []
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         self.running = False
         self.update_interval = 1.0  # Update every 1 second
@@ -204,6 +205,10 @@ class LivePriceFeed:
             except Exception as exc:
                 logger.error(f"Error in price streaming loop: {exc}")
                 await asyncio.sleep(self.update_interval)
+            finally:
+                if self.price_cache and not self.ready_event.is_set():
+                    # Mark ready after the first successful cache fill
+                    self.ready_event.set()
     
     def stop_streaming(self):
         """Stop price streaming."""

@@ -267,6 +267,7 @@ class ExecutionEngine:
         
         self._running = False
         self._monitor_task: Optional[asyncio.Task[None]] = None
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         # Reality enforcement integration
         self._reality_auditor: RealityAuditorProtocol | None = None
@@ -367,6 +368,7 @@ class ExecutionEngine:
         
         # Start health monitoring
         await self._health_monitor.start_monitoring(interval=30.0)
+        self.ready_event.set()
         
         self._logger.info(
             "Execution engine started: mode=%s, max_position=$%.0f",

@@ -202,6 +202,7 @@ class ExecutionGuard:
         self._promotion_eligible_domains: Optional[set] = None
         self._promotion_blocked_agents: Optional[set] = None
         self._promotion_report_ts: float = 0.0
+        self._system_block_reason: Optional[str] = None
 
     # ── Kill switch ───────────────────────────────────────────────────
 
@@ -218,6 +219,17 @@ class ExecutionGuard:
         self._global_kill_reason = ""
         self._persist_kill_switch()
         logger.info("Kill switch deactivated")
+
+    def set_system_block(self, reason: str):
+        """Block execution due to system readiness/health issues."""
+        self._system_block_reason = reason
+        logger.warning("System trading block enabled: %s", reason)
+
+    def clear_system_block(self):
+        """Clear system readiness block while keeping kill-switch state intact."""
+        if self._system_block_reason:
+            logger.info("System trading block cleared")
+        self._system_block_reason = None
 
     def _persist_kill_switch(self):
         """Write kill switch state to disk so it survives restarts."""
@@ -363,6 +375,18 @@ class ExecutionGuard:
             self._log_verdict(plan_id, verdict)
             return verdict
         passed.append("global_kill_switch")
+
+        # 1.5 System readiness block
+        if self._system_block_reason:
+            verdict.allowed = False
+            verdict.reason = f"system_block: {self._system_block_reason}"
+            verdict.adjusted_size_usd = 0
+            failed.append("system_block")
+            verdict.checks_passed = passed
+            verdict.checks_failed = failed
+            self._log_verdict(plan_id, verdict)
+            return verdict
+        passed.append("system_block")
 
         # 2. Per-domain kill switch
         cap = self._domain_caps.get(domain)

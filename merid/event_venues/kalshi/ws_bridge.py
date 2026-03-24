@@ -66,6 +66,7 @@ class KalshiWebSocketBridge:
         self._forward_errors: int = 0
         self._subscribed_tickers: List[str] = []
         self._start_ts: float = 0.0
+        self.ready_event: asyncio.Event = asyncio.Event()
 
         # Per-type counters
         self._type_counts: Dict[str, int] = defaultdict(int)
@@ -124,6 +125,7 @@ class KalshiWebSocketBridge:
             self._ui_coalesce_loop(),
             name="kalshi-ws-ui-coalesce",
         )
+        self.ready_event.set()
         logger.info(
             f"KalshiWebSocketBridge started — "
             f"subscribed to {len(self._subscribed_tickers)} tickers"

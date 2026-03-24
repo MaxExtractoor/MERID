@@ -55,6 +55,7 @@ class HealthMonitor:
         self._start_time = time.time()
         self._running = False
         self._check_task: Optional[asyncio.Task] = None
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         logger.info("Health monitor initialized")
     
@@ -65,6 +66,7 @@ class HealthMonitor:
         
         self._running = True
         self._check_task = asyncio.create_task(self._monitor_loop())
+        self.ready_event.set()
         logger.info("Health monitor started")
     
     async def stop(self) -> None:

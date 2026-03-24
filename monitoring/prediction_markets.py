@@ -1003,6 +1003,7 @@ class PredictionMarketAggregator:
         
         self._running = False
         self._update_task: Optional[asyncio.Task] = None
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         logger.info("PredictionMarketAggregator initialized")
     
@@ -1013,6 +1014,7 @@ class PredictionMarketAggregator:
         
         self._running = True
         self._update_task = asyncio.create_task(self._update_loop())
+        self.ready_event.set()
         logger.info("PredictionMarketAggregator started")
     
     async def stop(self) -> None:

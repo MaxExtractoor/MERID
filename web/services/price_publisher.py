@@ -18,6 +18,7 @@ class PricePublisher:
         self.event_stream = get_event_stream()
         self.running = False
         self.task = None
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         # Connect to real live price feed
         self.live_feed = get_live_price_feed()
@@ -32,6 +33,7 @@ class PricePublisher:
             return
         
         self.running = True
+        self.ready_event.set()
         self.task = asyncio.create_task(self._publish_loop())
         logger.info(f"Price publisher started for symbols: {self.symbols}")
     

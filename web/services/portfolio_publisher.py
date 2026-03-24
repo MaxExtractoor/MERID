@@ -18,6 +18,7 @@ class PortfolioPublisher:
         self.running = False
         self.task = None
         self.user_id = user_id
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         # Connect to real paper trading engine
         self.trading_engine = get_paper_trading_engine()
@@ -31,6 +32,7 @@ class PortfolioPublisher:
             return
         
         self.running = True
+        self.ready_event.set()
         self.task = asyncio.create_task(self._publish_loop())
         logger.info("Portfolio publisher started")
     

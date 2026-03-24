@@ -75,6 +75,7 @@ class ContinuousMiner:
         # Mining parameters
         self.block_interval = 30.0  # Seconds between blocks
         self.base_reward = 1.0
+        self.ready_event: asyncio.Event = asyncio.Event()
         
         # Strategy tracking
         self.strategies: Dict[str, Dict] = {}
@@ -95,6 +96,7 @@ class ContinuousMiner:
         )
         
         self._task = asyncio.create_task(self._run_loop())
+        self.ready_event.set()
         logger.info("Continuous simulation miner started")
         
     async def stop(self):
