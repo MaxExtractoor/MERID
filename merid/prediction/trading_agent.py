@@ -29,6 +29,13 @@ from merid.prediction.session_guard import get_session_guard
 from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.model import PredictionMarketModel, MarketSnapshot, ContractState, ImpliedProbability
 from merid.prediction.strategy import KalshiStrategy, StrategySignal, SignalAction, StrategyConfig
+from merid.prediction.kalshi_market_shape import (
+    EdgeThresholdConfig,
+    KalshiMarketShape,
+    MoveBandsConfig,
+    classify_market_shape,
+    evaluate_geometry,
+)
 from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig, PreTradeCheck
 from merid.event_venues.base import EventMarket
 from merid.event_venues.kalshi.stop_loss import StopLossRules, TrackedPosition
@@ -99,6 +106,8 @@ class KalshiTradingAgent:
         self._strategy = KalshiStrategy(StrategyConfig(
             max_contracts_per_order=config.risk_limits.max_orders_per_window,
         ))
+        self._edge_thresholds: EdgeThresholdConfig = self._strategy.config.edge_thresholds
+        self._move_bands: MoveBandsConfig = self._strategy.config.move_bands
         self._risk = PredictionMarketRisk(PredictionRiskConfig(
             max_notional_per_market_usd=config.risk_limits.max_notional_usd,
             max_contracts_per_order=min(50, config.risk_limits.max_orders_per_window),
@@ -591,6 +600,16 @@ class KalshiTradingAgent:
 
         state = ContractState.TRADING if market.active else ContractState.CLOSED
 
+        catalog_market = None
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            catalog = get_market_catalog()
+            catalog_market = catalog.get_market(market.market_id)
+        except Exception as _ce:
+            self.logger.debug("catalog lookup skipped: %s", _ce)
+
+        shape = classify_market_shape(market, catalog_market, now)
+
         snapshot = MarketSnapshot(
             market_id=market.market_id,
             event_id=market.market_id.rsplit("-", 1)[0] if "-" in market.market_id else market.market_id,
@@ -603,6 +622,7 @@ class KalshiTradingAgent:
             close_time=market.end_date,
             category=market.category,
             timestamp=now,
+            shape=shape,
         )
 
         # Inject fear/greed sentiment scores
@@ -626,36 +646,78 @@ class KalshiTradingAgent:
         except Exception as _se:
             self.logger.debug("sentiment enrichment skipped: %s", _se)
 
-        # Compute edges for both sides using the model
+        # Compute edges for both sides using shape-aware guardrails
         asset = self.config.assets[0] if self.config.assets else None
-        strike = None
-        try:
-            from merid.event_venues.kalshi.market_catalog import get_market_catalog
-            catalog = get_market_catalog()
-            m = catalog.get_market(market.market_id)
-            if m:
-                strike = m.strike_price
-        except Exception as _ce:
-            self.logger.debug("catalog strike lookup skipped: %s", _ce)
+        spot = self._model.get_spot(asset)
+        geom = evaluate_geometry(shape, float(spot) if spot is not None else None, self._move_bands, now)
+        tte_minutes = float(tte_hours * 60) if tte_hours is not None else None
 
-        snapshot.edges = [
-            self._model.compute_edge(
-                market_id=market.market_id, 
-                implied=implied, 
-                side="yes", 
+        price_map = {
+            "yes": int(yes_price),
+            "no": int(no_price),
+        }
+
+        for side in ("yes", "no"):
+            if side == "yes" and not geom.allow_yes:
+                if geom.reason_yes:
+                    snapshot.rejections["yes"] = geom.reason_yes
+                    self.logger.info("Guardrail reject YES %s: %s", market.market_id, geom.reason_yes)
+                continue
+            if side == "no" and not geom.allow_no:
+                if geom.reason_no:
+                    snapshot.rejections["no"] = geom.reason_no
+                    self.logger.info("Guardrail reject NO %s: %s", market.market_id, geom.reason_no)
+                continue
+
+            true_prob = self._model.estimate_true_probability(
+                shape=shape,
+                side=side,
+                spot=spot,
+                move_bands=self._move_bands,
+                time_to_expiry_min=tte_minutes,
+            )
+
+            edge = self._model.compute_edge(
+                market_id=market.market_id,
+                implied=implied,
+                model_prob=true_prob,
+                true_prob=true_prob,
+                side=side,
                 action="buy",
                 asset=asset,
-                strike_price=strike
-            ),
-            self._model.compute_edge(
-                market_id=market.market_id, 
-                implied=implied, 
-                side="no", 
-                action="buy",
-                asset=asset,
-                strike_price=strike
-            ),
-        ]
+                strike_price=shape.strike,
+                price_cents=price_map.get(side),
+            )
+            edge.true_prob = true_prob
+
+            net_edge_bps = abs(edge.net_edge) * Decimal("10000")
+            min_edge_bps = self._edge_thresholds.threshold_for_price(price_map.get(side))
+
+            if shape.market_type != "UP_DOWN" and true_prob < self._edge_thresholds.min_true_win_prob:
+                reason = f"REJECT_PROB true_prob={true_prob}"
+                snapshot.rejections[side] = reason
+                self.logger.debug("%s %s rejected: %s", market.market_id, side.upper(), reason)
+                continue
+
+            if edge.kelly_fraction is not None and edge.kelly_fraction <= Decimal("0"):
+                reason = f"REJECT_KELLY kelly={edge.kelly_fraction}"
+                snapshot.rejections[side] = reason
+                self.logger.debug("%s %s rejected: %s", market.market_id, side.upper(), reason)
+                continue
+
+            if edge.net_edge <= Decimal("0"):
+                reason = f"REJECT_EDGE_NONPOSITIVE net_edge={edge.net_edge}"
+                snapshot.rejections[side] = reason
+                self.logger.debug("%s %s rejected: %s", market.market_id, side.upper(), reason)
+                continue
+
+            if net_edge_bps < min_edge_bps:
+                reason = f"REJECT_EDGE net_bps={net_edge_bps} < {min_edge_bps}"
+                snapshot.rejections[side] = reason
+                self.logger.debug("%s %s rejected: %s", market.market_id, side.upper(), reason)
+                continue
+
+            snapshot.edges.append(edge)
 
         return snapshot
 
