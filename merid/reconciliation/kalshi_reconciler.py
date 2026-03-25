@@ -215,7 +215,8 @@ class KalshiReconciler:
 
         # Aggregate positions from filled orders
         positions_map: Dict[str, VenuePosition] = {}
-        for order in self.matching_engine._orders.values():
+        # Create a list copy to avoid RuntimeError: dictionary changed size during iteration
+        for order in list(self.matching_engine._orders.values()):
             if order.status != OrderStatus.FILLED or order.filled_quantity <= 0:
                 continue
 
@@ -250,7 +251,8 @@ class KalshiReconciler:
             return []
 
         orders = []
-        for order in self.matching_engine._orders.values():
+        # Create a list copy to avoid RuntimeError: dictionary changed size during iteration
+        for order in list(self.matching_engine._orders.values()):
             orders.append(
                 PlacedOrder(
                     order_id=order.order_id,
@@ -271,7 +273,7 @@ class KalshiReconciler:
         venue: List[VenuePosition],
     ) -> List[ReconciliationIssue]:
         """Compare internal vs venue positions.
-        
+
         Detects:
         - Phantom positions (on venue, not internal)
         - Missing positions (internal, not on venue)
@@ -285,7 +287,8 @@ class KalshiReconciler:
         venue_map = {p.market_id: p for p in venue}
 
         # Check for phantom positions (on venue, not internal)
-        for market_id, venue_pos in venue_map.items():
+        # Create a list copy to avoid RuntimeError: dictionary changed size during iteration
+        for market_id, venue_pos in list(venue_map.items()):
             if market_id not in internal_map:
                 issues.append(
                     ReconciliationIssue(
@@ -301,7 +304,8 @@ class KalshiReconciler:
                 )
 
         # Check for missing positions (internal, not on venue)
-        for market_id, internal_pos in internal_map.items():
+        # Create a list copy to avoid RuntimeError: dictionary changed size during iteration
+        for market_id, internal_pos in list(internal_map.items()):
             if market_id not in venue_map:
                 # In paper mode, this is expected (venue may not have real positions)
                 # Only warn if size is significant
@@ -369,7 +373,7 @@ class KalshiReconciler:
         venue: List[PlacedOrder],
     ) -> List[ReconciliationIssue]:
         """Compare internal vs venue orders.
-        
+
         Detects:
         - Stale orders (status mismatch)
         - Unknown orders (on venue, not internal)
@@ -381,7 +385,8 @@ class KalshiReconciler:
         venue_map = {o.order_id: o for o in venue}
 
         # Check for unknown orders on venue
-        for order_id, venue_order in venue_map.items():
+        # Create a list copy to avoid RuntimeError: dictionary changed size during iteration
+        for order_id, venue_order in list(venue_map.items()):
             if order_id not in internal_map:
                 issues.append(
                     ReconciliationIssue(
@@ -397,7 +402,8 @@ class KalshiReconciler:
                 )
 
         # Check for stale orders (status mismatch)
-        for order_id, internal_order in internal_map.items():
+        # Create a list copy to avoid RuntimeError: dictionary changed size during iteration
+        for order_id, internal_order in list(internal_map.items()):
             if order_id not in venue_map:
                 # Order not on venue (could be cancelled or filled)
                 if internal_order.status in ("pending", "partially_filled"):
