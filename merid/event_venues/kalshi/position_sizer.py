@@ -77,14 +77,23 @@ def kelly_fraction_for_binary(
         loss_amount: Amount lost on loss (e.g. 55 cents, your cost)
 
     Returns:
-        Kelly fraction (can be negative if edge is negative).
+        Kelly fraction (non-negative, clamped to 0).
+
+    Implements S-001: Kelly division by zero protection with logging.
     """
-    if loss_amount <= 0 or win_payout <= 0:
+    # S-001: Protect against invalid inputs that would cause division by zero
+    if loss_amount <= 0:
+        logger.warning(f"Invalid loss_amount={loss_amount}, returning 0")
         return 0.0
+    if win_payout <= 0:
+        logger.warning(f"Invalid win_payout={win_payout}, returning 0")
+        return 0.0
+
     b = win_payout / loss_amount
     q = 1.0 - win_prob
     f = (win_prob * b - q) / b
-    return f
+    # S-001: Clamp negative Kelly to 0 (no negative edge trades)
+    return max(0.0, f)
 
 
 def kalshi_fee_cents(price_cents: int, contracts: int) -> int:

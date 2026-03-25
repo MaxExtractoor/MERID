@@ -243,6 +243,11 @@ class KalshiVenueClient(EventVenueClient):
 
         # Concurrency cap: prevent unlimited in-flight HTTP requests
         self._request_semaphore = asyncio.Semaphore(KALSHI_MAX_CONCURRENT_REQUESTS)
+
+        # E-002: Idempotency tracking to prevent duplicate orders
+        self._inflight_orders: set[str] = set()
+        self._completed_orders: Dict[str, PlacedOrder] = {}
+        self._order_lock = asyncio.Lock()
         
     @property
     def venue_name(self) -> str:
@@ -1070,58 +1075,94 @@ class KalshiVenueClient(EventVenueClient):
         Kalshi order format:
           POST /portfolio/orders
           {ticker, side, action, type, count, {side}_price, time_in_force, client_order_id}
-        
+
+        Implements E-002: Idempotency deduplication to prevent double-fills.
+
         Args:
             order: VenueOrder to place
             order_group_id: Optional order group ID for aggregate limits
             self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
         """
-        outcome = order.outcome_id or "yes"
-        kalshi_order: Dict[str, Any] = {
-            "ticker": order.market_id,
-            "action": order.side,           # "buy" or "sell"
-            "side": outcome,                # "yes" or "no"
-            "count": int(order.size),
-            "type": order.order_type,       # "limit" or "market"
-            "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
-        }
+        # E-002: Generate or use provided client_order_id for idempotency
+        client_order_id = order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}"
 
-        if order.order_type == "limit" and order.price:
-            # Kalshi uses {side}_price: yes_price or no_price (cents, integer)
-            kalshi_order[f"{outcome}_price"] = int(order.price * 100)
+        # E-002: Check for duplicate orders
+        async with self._order_lock:
+            # Check if order already completed
+            if client_order_id in self._completed_orders:
+                cached_order = self._completed_orders[client_order_id]
+                logger.info(f"E-002: Order {client_order_id} already completed, returning cached result")
+                return OperationResult.ok(cached_order, latency_ms=0, retries=0)
 
-        # Map MERID time_in_force to Kalshi (gtc, ioc, fok)
-        tif_map = {"GTC": "gtc", "IOC": "ioc", "FOK": "fok"}
-        kalshi_order["time_in_force"] = tif_map.get(
-            getattr(order, "time_in_force", "GTC"), "gtc"
-        )
-        
-        # Add optional STP and order group
-        if order_group_id:
-            kalshi_order["order_group_id"] = order_group_id
-        if self_trade_prevention_type:
-            kalshi_order["self_trade_prevention_type"] = self_trade_prevention_type
-        
-        # Add post_only if specified
-        if getattr(order, "post_only", False):
-            kalshi_order["post_only"] = True
+            # Check if order currently in flight
+            if client_order_id in self._inflight_orders:
+                logger.warning(f"E-002: Order {client_order_id} already in flight, rejecting duplicate")
+                return OperationResult.fail(
+                    RuntimeError(f"Order {client_order_id} already in flight"),
+                    latency_ms=0,
+                    retries=0,
+                )
 
-        result = await self._request_with_resilience(
-            "POST", "/portfolio/orders", json_data=kalshi_order, operation_name="place_order"
-        )
-        
-        if not result.success:
-            return OperationResult.fail(
-                result.error,
+            # Mark as in flight
+            self._inflight_orders.add(client_order_id)
+
+        try:
+            outcome = order.outcome_id or "yes"
+            kalshi_order: Dict[str, Any] = {
+                "ticker": order.market_id,
+                "action": order.side,           # "buy" or "sell"
+                "side": outcome,                # "yes" or "no"
+                "count": int(order.size),
+                "type": order.order_type,       # "limit" or "market"
+                "client_order_id": client_order_id,
+            }
+
+            if order.order_type == "limit" and order.price:
+                # Kalshi uses {side}_price: yes_price or no_price (cents, integer)
+                kalshi_order[f"{outcome}_price"] = int(order.price * 100)
+
+            # Map MERID time_in_force to Kalshi (gtc, ioc, fok)
+            tif_map = {"GTC": "gtc", "IOC": "ioc", "FOK": "fok"}
+            kalshi_order["time_in_force"] = tif_map.get(
+                getattr(order, "time_in_force", "GTC"), "gtc"
+            )
+
+            # Add optional STP and order group
+            if order_group_id:
+                kalshi_order["order_group_id"] = order_group_id
+            if self_trade_prevention_type:
+                kalshi_order["self_trade_prevention_type"] = self_trade_prevention_type
+
+            # Add post_only if specified
+            if getattr(order, "post_only", False):
+                kalshi_order["post_only"] = True
+
+            result = await self._request_with_resilience(
+                "POST", "/portfolio/orders", json_data=kalshi_order, operation_name="place_order"
+            )
+
+            if not result.success:
+                return OperationResult.fail(
+                    result.error,
+                    latency_ms=result.latency_ms,
+                    retries=result.retries,
+                )
+
+            placed_order = self._to_placed_order(result.data.get("order", result.data))
+
+            # E-002: Cache successful order
+            async with self._order_lock:
+                self._completed_orders[client_order_id] = placed_order
+
+            return OperationResult.ok(
+                placed_order,
                 latency_ms=result.latency_ms,
                 retries=result.retries,
             )
-        
-        return OperationResult.ok(
-            self._to_placed_order(result.data.get("order", result.data)),
-            latency_ms=result.latency_ms,
-            retries=result.retries,
-        )
+        finally:
+            # E-002: Remove from in-flight set
+            async with self._order_lock:
+                self._inflight_orders.discard(client_order_id)
     
     async def cancel_order(self, order_id: str, market_id: Optional[str] = None) -> bool:
         """Cancel an order.

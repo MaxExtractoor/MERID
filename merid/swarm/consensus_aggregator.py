@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 import asyncio
 import logging
+import threading
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -159,20 +160,23 @@ class SwarmConsensusAggregator:
     ):
         if self._initialized:
             return
-        
+
         self.min_agents = min_agents_for_consensus
         self.max_age = timedelta(seconds=max_proposal_age_seconds)
         self.consensus_threshold = consensus_threshold
-        
+
         # Storage
         self._proposals: Dict[str, List[AgentProposal]] = defaultdict(list)
         # "BTC:15m" -> [proposals]
-        
+
         self._consensus_cache: Dict[str, ConsensusView] = {}
         # "BTC:15m" -> current consensus
-        
+
+        # C-002: Lock to protect consensus cache from concurrent updates
+        self._cache_lock = threading.Lock()
+
         self._subscribers: List[Callable[[ConsensusView], None]] = []
-        
+
         self._initialized = True
         logger.info(f"SwarmConsensusAggregator initialized (min={min_agents_for_consensus})")
     
@@ -194,26 +198,31 @@ class SwarmConsensusAggregator:
         self._recompute_consensus(key)
     
     def _recompute_consensus(self, key: str) -> None:
-        """Recompute consensus for an asset/timeframe."""
+        """Recompute consensus for an asset/timeframe.
+
+        Implements C-002: Thread-safe cache updates to prevent race conditions.
+        """
         proposals = self._proposals[key]
         if len(proposals) < self.min_agents:
             return
-        
+
         asset, timeframe = key.split(":")
         consensus = self._aggregate_proposals(asset, timeframe, proposals)
-        
-        # Update cache
-        old_consensus = self._consensus_cache.get(key)
-        self._consensus_cache[key] = consensus
-        
-        # Notify if significant change
+
+        # C-002: Use lock to prevent concurrent cache corruption
+        with self._cache_lock:
+            # Update cache
+            old_consensus = self._consensus_cache.get(key)
+            self._consensus_cache[key] = consensus
+
+        # Notify if significant change (outside lock to avoid blocking)
         if self._is_significant_change(old_consensus, consensus):
             for callback in self._subscribers:
                 try:
                     callback(consensus)
                 except Exception as exc:
                     logger.debug(f"Subscriber error: {exc}")
-        
+
         # Publish to MarketMoodBus
         try:
             from merid.swarm.market_mood_bus import get_market_mood_bus
@@ -332,7 +341,15 @@ class SwarmConsensusAggregator:
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.5
         confidence_factors = []
         disagreement_flags = []
-        
+
+        # C-001: Detect herding behavior (agents too similar)
+        if self._is_herding(proposals):
+            logger.warning(f"Herding detected: {len(proposals)} agents within 5% probability range")
+            herding_penalty = 0.5
+            avg_confidence *= herding_penalty
+            disagreement_flags.append("herding_detected")
+            confidence_factors.append(f"Herding penalty applied ({herding_penalty:.0%})")
+
         # Confidence based on agreement
         if agreement_ratio >= 0.8:
             consensus_confidence = avg_confidence * 1.0
@@ -407,6 +424,8 @@ class SwarmConsensusAggregator:
         - win_rate           → scaled 0.5–1.0
         - sharpe_ratio       → capped at 2.0, scaled 0–1.0
         - avg_realized_edge  → bonus when positive
+
+        Implements C-003: Sample size penalty and max weight capping.
         """
         # ── Sprint C: Brier calibration weight (primary signal) ──────────
         brier_weight = 1.0
@@ -443,6 +462,13 @@ class SwarmConsensusAggregator:
         win_rate = float(track.get("win_rate", 0.5))
         sharpe = float(track.get("sharpe_ratio", 1.0))
         avg_realized_edge = float(track.get("avg_realized_edge", 0.0))
+        sample_size = int(track.get("total_closes", 0))
+
+        # C-003: Penalize low sample sizes to prevent overfitting to lucky streaks
+        if sample_size < 50:
+            sample_penalty = sample_size / 50.0
+        else:
+            sample_penalty = 1.0
 
         # Win rate: scale 0.5–1.0 (below 0.5 is below chance)
         win_weight = 0.5 + (max(0.0, min(1.0, win_rate)) * 0.5)
@@ -455,10 +481,13 @@ class SwarmConsensusAggregator:
 
         # Combine: Brier calibration weight modulates the performance-based weight
         performance_weight = ((win_weight + sharpe_weight) / 2) + edge_bonus
-        base_weight = performance_weight * brier_weight
+        base_weight = performance_weight * brier_weight * sample_penalty
 
         # Boost for high confidence proposals
-        return base_weight * proposal.confidence
+        final_weight = base_weight * proposal.confidence
+
+        # C-003: Cap max weight at 40% to prevent single-agent dominance
+        return min(final_weight, 0.40)
     
     def _calculate_size_band(
         self,
@@ -526,8 +555,34 @@ class SwarmConsensusAggregator:
         # Confidence shift > 20%
         if abs(old.consensus_confidence - new.consensus_confidence) > 0.2:
             return True
-        
+
         return False
+
+    def _is_herding(self, proposals: List[AgentProposal]) -> bool:
+        """Check if agents are exhibiting herding behavior.
+
+        Implements C-001: Herding detection to reduce overconfidence risk.
+
+        Herding is detected when all agent probabilities fall within a narrow
+        5% range, suggesting circular reasoning or lack of independent analysis.
+
+        Args:
+            proposals: List of agent proposals to check
+
+        Returns:
+            True if herding detected, False otherwise
+        """
+        if len(proposals) < 3:
+            # Need at least 3 agents to detect herding meaningfully
+            return False
+
+        probabilities = [p.probability for p in proposals]
+        if not probabilities:
+            return False
+
+        prob_range = max(probabilities) - min(probabilities)
+        # C-001: Herding threshold = 5% probability spread
+        return prob_range < 0.05
     
     # === Public API ===
     
@@ -536,12 +591,22 @@ class SwarmConsensusAggregator:
         asset: str,
         timeframe: str,
     ) -> Optional[ConsensusView]:
-        """Get current consensus for asset/timeframe."""
-        return self._consensus_cache.get(f"{asset}:{timeframe}")
-    
+        """Get current consensus for asset/timeframe.
+
+        Implements C-002: Thread-safe cache reads.
+        """
+        # C-002: Protect read access to consensus cache
+        with self._cache_lock:
+            return self._consensus_cache.get(f"{asset}:{timeframe}")
+
     def get_all_consensus(self) -> Dict[str, ConsensusView]:
-        """Get all current consensus views."""
-        return dict(self._consensus_cache)
+        """Get all current consensus views.
+
+        Implements C-002: Thread-safe cache reads.
+        """
+        # C-002: Protect read access to consensus cache
+        with self._cache_lock:
+            return dict(self._consensus_cache)
     
     def subscribe(self, callback: Callable[[ConsensusView], None]):
         """Subscribe to consensus updates."""
