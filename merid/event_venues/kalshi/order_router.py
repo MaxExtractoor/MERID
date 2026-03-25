@@ -196,14 +196,35 @@ class OrderResult:
 # ── Paper fill simulation ─────────────────────────────────────────────────
 
 def _resolve_mode(override: Optional[TradingMode]) -> TradingMode:
-    """Resolve mode from explicit override or canonical process-wide mode."""
+    """Resolve mode from explicit override or canonical process-wide mode.
+
+    Args:
+        override: Explicit mode override from OrderIntent
+
+    Returns:
+        Resolved trading mode
+
+    Raises:
+        RuntimeError: If TradeMode and VenueGate are inconsistent
+    """
     if override is not None:
         return override
+
+    # Single source of truth - no fallback
+    mode = TradingMode(get_trade_mode().value)
+
+    # Verify consistency with VenueGate for defense-in-depth
     try:
-        return TradingMode(get_trade_mode().value)
-    except Exception as _e:
-        logger.debug("_resolve_mode: get_trade_mode failed, falling back to venue_gate: %s", _e)
-        return get_venue_gate().mode
+        gate = get_venue_gate()
+        if mode != gate.mode:
+            raise RuntimeError(
+                f"Mode inconsistency detected: TradeMode ({mode.value}) != VenueGate.mode ({gate.mode.value}). "
+                f"Fix configuration before trading. This is a safety check to prevent live/paper confusion."
+            )
+    except Exception as gate_err:
+        logger.warning(f"VenueGate consistency check skipped: {gate_err}")
+
+    return mode
 
 
 def _mode_value(mode: TradingMode) -> str:

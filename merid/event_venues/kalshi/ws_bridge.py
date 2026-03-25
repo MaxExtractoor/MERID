@@ -258,7 +258,8 @@ class KalshiWebSocketBridge:
                 # Update position cache unrealized PnL with latest price
                 try:
                     from merid.event_venues.kalshi.position_cache import get_position_cache
-                    cache = get_position_cache()
+                    from trading.trade_mode import TradeMode
+                    cache = get_position_cache(TradeMode.LIVE)  # WebSocket updates are always live
                     if event.last_price:
                         price_cents = int(round(float(event.last_price) * 100)) if float(event.last_price) <= 1.0 else int(round(float(event.last_price)))
                         cache.on_price_update(event.market_id, price_cents)
@@ -301,13 +302,15 @@ class KalshiWebSocketBridge:
                 # Update position cache with fill
                 try:
                     from merid.event_venues.kalshi.position_cache import get_position_cache
-                    cache = get_position_cache()
+                    from trading.trade_mode import TradeMode
+                    cache = get_position_cache(TradeMode.LIVE)  # WebSocket fills are always live
                     cache.on_fill(
                         market_id=event.market_id,
                         contracts=int(event.size),
                         price_cents=price_cents,
                         fee_cents=int(round(float(event.fee) * 100)),
                         side=event.side,
+                        mode=TradeMode.LIVE,  # WebSocket trades are always live (see line 294)
                     )
                 except Exception as _exc:
                     logger.debug(f"Position cache update error (ignored): {_exc}")
