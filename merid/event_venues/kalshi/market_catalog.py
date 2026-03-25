@@ -234,24 +234,48 @@ class KalshiMarketCatalog:
     async def refresh(self) -> int:
         """Fetch all active markets from Kalshi and rebuild indexes.
 
+        Implements:
+        - D-001: Schema validation for malformed API data
+        - D-002: Latency SLA tracking and timeout enforcement
+
         Returns:
             Number of markets cataloged.
         """
         async with self._lock:
+            # D-002: Track latency for SLA monitoring
+            start_time = asyncio.get_event_loop().time()
+
             try:
-                result = await self._client.list_markets_result(
-                    MarketFilter(active_only=True, limit=self._max_markets)
-                )
+                # D-002: Enforce 15s hard timeout on API call
+                async with asyncio.timeout(15.0):
+                    result = await self._client.list_markets_result(
+                        MarketFilter(active_only=True, limit=self._max_markets)
+                    )
+
+                elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+
+                # D-002: Log slow refreshes
+                if elapsed_ms > 5000:
+                    logger.warning(f"Slow catalog refresh: {elapsed_ms:.0f}ms (threshold: 5000ms)")
+
                 if not result.success:
                     logger.warning(
-                        "Failed to fetch markets: %s (status=%s, retries=%s, circuit_open=%s)",
+                        "Failed to fetch markets: %s (status=%s, retries=%s, circuit_open=%s, latency_ms=%d)",
                         result.error, getattr(result, 'status_code', None),
                         result.retries, getattr(result, 'circuit_open', False),
+                        int(elapsed_ms),
                     )
                     return len(self._markets)
                 raw_markets = result.data
+
+            except asyncio.TimeoutError:
+                elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+                logger.error(f"Catalog refresh timeout after {elapsed_ms:.0f}ms (hard limit: 15s)")
+                # Return stale market count instead of crashing
+                return len(self._markets)
             except Exception as exc:
-                logger.warning(f"Failed to fetch markets: {exc}")
+                elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+                logger.warning(f"Failed to fetch markets after {elapsed_ms:.0f}ms: {exc}")
                 return len(self._markets)
 
             now = datetime.now(timezone.utc)
@@ -263,21 +287,57 @@ class KalshiMarketCatalog:
 
             categories_found = set()
             assets_found = set()
-            
-            for mkt in raw_markets:
-                cm = self._enrich(mkt, now)
-                enriched.append(cm)
-                ticker_idx[mkt.market_id] = cm
 
-                if cm.category:
-                    cat_idx[cm.category].append(cm)
-                    categories_found.add(cm.category)
-                if cm.asset:
-                    asset_idx[cm.asset].append(cm)
-                    assets_found.add(cm.asset)
-                if cm.timeframe:
-                    tf_idx[cm.timeframe].append(cm)
-            
+            # D-001: Track validation failures
+            validation_failures = 0
+
+            for mkt in raw_markets:
+                # D-001: Validate market data before enrichment
+                # Check for critical fields that would cause enrichment to fail
+                raw_data = mkt.raw_data or {}
+                market_id = getattr(mkt, 'market_id', raw_data.get('market_id'))
+
+                # Basic validation
+                if not market_id:
+                    validation_failures += 1
+                    logger.warning("Skipping market with missing market_id")
+                    continue
+
+                if not mkt.end_date:
+                    validation_failures += 1
+                    logger.warning(f"Skipping market {market_id} with missing end_date")
+                    continue
+
+                # Validate end_date is timezone-aware
+                if mkt.end_date and mkt.end_date.tzinfo is None:
+                    logger.warning(f"Market {market_id} has naive end_date, assuming UTC")
+                    mkt.end_date = mkt.end_date.replace(tzinfo=timezone.utc)
+
+                try:
+                    cm = self._enrich(mkt, now)
+                    enriched.append(cm)
+                    ticker_idx[mkt.market_id] = cm
+
+                    if cm.category:
+                        cat_idx[cm.category].append(cm)
+                        categories_found.add(cm.category)
+                    if cm.asset:
+                        asset_idx[cm.asset].append(cm)
+                        assets_found.add(cm.asset)
+                    if cm.timeframe:
+                        tf_idx[cm.timeframe].append(cm)
+                except Exception as exc:
+                    validation_failures += 1
+                    logger.warning(f"Failed to enrich market {market_id}: {exc}")
+                    continue
+
+            # D-001: Log validation failures
+            if validation_failures > 0:
+                logger.warning(
+                    f"Catalog refresh: {validation_failures} validation failures "
+                    f"out of {len(raw_markets)} total markets ({validation_failures / len(raw_markets) * 100:.1f}%)"
+                )
+
             # Debug logging for first refresh to see what's happening
             if self._refresh_count == 0 and enriched:
                 sample = enriched[0]
@@ -299,10 +359,13 @@ class KalshiMarketCatalog:
             self._last_refresh = now
             self._refresh_count += 1
 
+            total_elapsed_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+
             _log = logger.info if enriched else logger.debug
             _log(
                 f"Catalog refreshed: {len(enriched)} markets, "
-                f"{len(cat_idx)} categories, {len(asset_idx)} assets"
+                f"{len(cat_idx)} categories, {len(asset_idx)} assets, "
+                f"latency={total_elapsed_ms:.0f}ms, validation_failures={validation_failures}"
             )
             return len(enriched)
 
