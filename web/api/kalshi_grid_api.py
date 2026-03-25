@@ -252,6 +252,31 @@ async def grid_health() -> Dict[str, Any]:
         "drawdown_pct": _drawdown,
     }
 
+    # Agent deployment modes (CRITICAL for operator visibility)
+    agent_modes: Dict[str, str] = {}
+    agents_by_mode: Dict[str, List[str]] = {"live": [], "paper": [], "shadow": [], "halted": []}
+    try:
+        from merid.event_venues.kalshi.deployment import get_deployment_controller
+        dc = get_deployment_controller()
+        for name, dep in dc._agents.items():
+            mode = dep.mode.value.lower()
+            agent_modes[name] = mode
+            agents_by_mode[mode].append(name)
+
+        # Add warning if global mode is LIVE but all agents are PAPER
+        try:
+            from merid.prediction.venue_gate import get_venue_gate
+            gate = get_venue_gate()
+            if gate.is_live and not agents_by_mode["live"] and agents_by_mode["paper"]:
+                issues.append(
+                    f"WARNING: Global mode is LIVE but all {len(agents_by_mode['paper'])} agents are in PAPER mode. "
+                    "No real trades will be placed!"
+                )
+        except Exception as _gate_exc:
+            logger.debug("VenueGate check skipped: %s", _gate_exc)
+    except Exception as _dc_exc:
+        logger.debug("DeploymentController status skipped: %s", _dc_exc)
+
     return {
         "status": "healthy" if not issues else ("degraded" if len(issues) < 3 else "critical"),
         "issues": issues,
@@ -262,6 +287,8 @@ async def grid_health() -> Dict[str, Any]:
         "venue": venue_health,
         "session": summary.get("session", {}),
         "metrics": metrics,
+        "agent_modes": agent_modes,
+        "agents_by_mode": agents_by_mode,
     }
 
 

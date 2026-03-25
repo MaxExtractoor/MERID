@@ -95,7 +95,24 @@ def _is_kalshi_demo_mode() -> bool:
     """
     try:
         from merid.settings import settings
-        return settings.KALSHI_USE_DEMO
+        is_demo = settings.KALSHI_USE_DEMO
+
+        # CRITICAL: Warn if demo mode is enabled with live trading
+        if is_demo:
+            try:
+                from merid.prediction.venue_gate import get_venue_gate
+                gate = get_venue_gate()
+                if gate.is_live:
+                    logger.warning(
+                        "[execution_gate] ⚠️ KALSHI_USE_DEMO=true but VenueGate mode is LIVE. "
+                        "Safety checks are DOWNGRADED (reconciliation, price feeds are warnings only). "
+                        "This configuration should ONLY be used for testing/development. "
+                        "Set KALSHI_USE_DEMO=false for production live trading."
+                    )
+            except Exception as _gate_exc:
+                pass  # VenueGate unavailable, skip warning
+
+        return is_demo
     except Exception:
         import os
         return os.environ.get("KALSHI_USE_DEMO", "false").lower() in ("true", "1", "yes")
