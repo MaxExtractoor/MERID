@@ -186,6 +186,128 @@ class LagMetricsCollector:
         }
 
 
+class LatencyTracker:
+    """Tracks execution latency with percentile calculations.
+
+    Implements E-003: P99 latency tracking and SLA alerting.
+
+    Maintains a rolling window of recent latency measurements and computes
+    percentiles for monitoring and alerting.
+    """
+
+    def __init__(self, window_size: int = 1000, alert_threshold_ms: float = 2000.0):
+        """Initialize latency tracker.
+
+        Args:
+            window_size: Number of measurements to keep in rolling window
+            alert_threshold_ms: P99 threshold for alerting (default 2000ms)
+        """
+        self._latencies: List[float] = []
+        self._window_size = window_size
+        self._alert_threshold_ms = alert_threshold_ms
+        self._total_recorded = 0
+
+    def record(self, latency_ms: float) -> None:
+        """Record a latency measurement.
+
+        Args:
+            latency_ms: Latency in milliseconds
+        """
+        self._latencies.append(latency_ms)
+        self._total_recorded += 1
+
+        # Trim to window size
+        if len(self._latencies) > self._window_size:
+            self._latencies = self._latencies[-self._window_size:]
+
+    def p99(self) -> float:
+        """Get P99 latency.
+
+        Returns:
+            P99 latency in milliseconds, or 0.0 if no data
+        """
+        if not self._latencies:
+            return 0.0
+
+        sorted_lats = sorted(self._latencies)
+        idx = int(len(sorted_lats) * 0.99)
+        return sorted_lats[min(idx, len(sorted_lats) - 1)]
+
+    def p95(self) -> float:
+        """Get P95 latency.
+
+        Returns:
+            P95 latency in milliseconds, or 0.0 if no data
+        """
+        if not self._latencies:
+            return 0.0
+
+        sorted_lats = sorted(self._latencies)
+        idx = int(len(sorted_lats) * 0.95)
+        return sorted_lats[min(idx, len(sorted_lats) - 1)]
+
+    def p50(self) -> float:
+        """Get P50 (median) latency.
+
+        Returns:
+            P50 latency in milliseconds, or 0.0 if no data
+        """
+        if not self._latencies:
+            return 0.0
+
+        sorted_lats = sorted(self._latencies)
+        idx = int(len(sorted_lats) * 0.50)
+        return sorted_lats[min(idx, len(sorted_lats) - 1)]
+
+    def avg(self) -> float:
+        """Get average latency.
+
+        Returns:
+            Average latency in milliseconds, or 0.0 if no data
+        """
+        if not self._latencies:
+            return 0.0
+        return sum(self._latencies) / len(self._latencies)
+
+    def max(self) -> float:
+        """Get maximum latency.
+
+        Returns:
+            Maximum latency in milliseconds, or 0.0 if no data
+        """
+        return max(self._latencies) if self._latencies else 0.0
+
+    def summary(self) -> Dict[str, float]:
+        """Get latency summary statistics.
+
+        Returns:
+            Dictionary with count, avg, p50, p95, p99, max
+        """
+        return {
+            "count": len(self._latencies),
+            "total_recorded": self._total_recorded,
+            "avg_ms": self.avg(),
+            "p50_ms": self.p50(),
+            "p95_ms": self.p95(),
+            "p99_ms": self.p99(),
+            "max_ms": self.max(),
+        }
+
+    def check_sla(self) -> bool:
+        """Check if P99 exceeds alert threshold.
+
+        Implements E-003: SLA violation detection.
+
+        Returns:
+            True if P99 exceeds threshold, False otherwise
+        """
+        if len(self._latencies) < 100:
+            # Need sufficient samples for reliable P99
+            return False
+
+        return self.p99() > self._alert_threshold_ms
+
+
 _lag_metrics_collector: Optional[LagMetricsCollector] = None
 
 

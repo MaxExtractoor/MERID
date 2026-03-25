@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -66,7 +67,10 @@ class TradeVerdict:
 
 @dataclass
 class DomainCap:
-    """Per-domain execution limits."""
+    """Per-domain execution limits.
+
+    Implements S-002: Thread-safe counter updates for concurrent access.
+    """
     domain: str
     max_daily_notional_usd: float = 5000.0
     max_single_trade_usd: float = 1000.0
@@ -79,7 +83,13 @@ class DomainCap:
     daily_trade_count: int = 0
     last_reset_date: str = ""
 
+    def __post_init__(self):
+        """Initialize the lock after dataclass init."""
+        # S-002: Lock to protect concurrent updates to counters
+        self._lock = threading.Lock()
+
     def reset_if_new_day(self):
+        """Reset daily counters if date changed. Must be called within lock."""
         today = time.strftime("%Y-%m-%d")
         if today != self.last_reset_date:
             self.daily_notional_usd = 0.0
@@ -87,26 +97,44 @@ class DomainCap:
             self.last_reset_date = today
 
     def record_trade(self, notional_usd: float):
-        self.reset_if_new_day()
-        self.daily_notional_usd += notional_usd
-        self.daily_trade_count += 1
+        """Record a trade and update counters thread-safely.
+
+        Implements S-002: Thread-safe counter updates.
+        """
+        # S-002: Protect counter updates from race conditions
+        with self._lock:
+            self.reset_if_new_day()
+            self.daily_notional_usd += notional_usd
+            self.daily_trade_count += 1
 
     def remaining_notional(self) -> float:
-        self.reset_if_new_day()
-        return max(0, self.max_daily_notional_usd - self.daily_notional_usd)
+        """Get remaining notional capacity for today thread-safely.
+
+        Implements S-002: Thread-safe counter reads.
+        """
+        # S-002: Protect counter reads from race conditions
+        with self._lock:
+            self.reset_if_new_day()
+            return max(0, self.max_daily_notional_usd - self.daily_notional_usd)
 
     def to_dict(self) -> Dict[str, Any]:
-        self.reset_if_new_day()
-        return {
-            "domain": self.domain,
-            "enabled": self.enabled,
-            "kill_switch": self.kill_switch,
-            "max_daily_notional_usd": self.max_daily_notional_usd,
-            "daily_notional_usd": round(self.daily_notional_usd, 2),
-            "remaining_notional_usd": round(self.remaining_notional(), 2),
-            "daily_trade_count": self.daily_trade_count,
-            "max_daily_trades": self.max_daily_trades,
-        }
+        """Convert to dict for serialization.
+
+        Implements S-002: Thread-safe counter reads.
+        """
+        # S-002: Protect counter reads from race conditions
+        with self._lock:
+            self.reset_if_new_day()
+            return {
+                "domain": self.domain,
+                "enabled": self.enabled,
+                "kill_switch": self.kill_switch,
+                "max_daily_notional_usd": self.max_daily_notional_usd,
+                "daily_notional_usd": round(self.daily_notional_usd, 2),
+                "remaining_notional_usd": round(max(0, self.max_daily_notional_usd - self.daily_notional_usd), 2),
+                "daily_trade_count": self.daily_trade_count,
+                "max_daily_trades": self.max_daily_trades,
+            }
 
 
 # ── Per-venue exposure caps ──────────────────────────────────────────

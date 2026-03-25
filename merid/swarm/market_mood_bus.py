@@ -34,56 +34,124 @@ class SentimentConfidence(Enum):
 class SentimentContext:
     """
     Unified sentiment/market context for agents.
-    
+
     This is the single scored context stream that every agent reads from.
     Updated every few seconds with fresh data from all sources.
+
+    Implements A-001: Timestamp tracking for staleness detection.
     """
     # Identifiers
     asset: str                          # e.g., "BTC"
     timeframe: str                      # e.g., "15m", "1h", "daily"
     timestamp: datetime
-    
+
     # Fear/Greed (0-100 scale)
     fg_index: int = 50                  # Combined fear/greed 0-100
     fg_crypto_index: Optional[int] = None   # External crypto fear/greed
     fg_kalshi_index: Optional[int] = None   # Kalshi-specific fear/greed
-    
+
     # Sentiment (-1 to +1 scale)
     social_sentiment: float = 0.0       # X/Twitter sentiment
     news_sentiment: float = 0.0         # News headline sentiment
     kalshi_sentiment: float = 0.0       # Kalshi market sentiment
-    
+
+    # A-001: Timestamps for staleness detection
+    social_sentiment_updated_at: Optional[datetime] = None
+    news_sentiment_updated_at: Optional[datetime] = None
+    kalshi_sentiment_updated_at: Optional[datetime] = None
+
     # Confidence flags
     sentiment_confidence: SentimentConfidence = SentimentConfidence.MODERATE
     social_volume_24h: int = 0          # Tweet/post count
     news_volume_24h: int = 0           # News article count
-    
+
     # Market microstructure
     trend_score: float = 0.5           # 0-1, strength of trend
     volatility_regime: VolatilityRegime = VolatilityRegime.NORMAL
     price_momentum_1h: float = 0.0     # % change
     price_momentum_24h: float = 0.0
-    
+
     # Kalshi-specific
     kalshi_price: float = 0.5          # Current price 0-1
     kalshi_volume_24h: float = 0.0
     kalshi_spread_bps: float = 0.0     # Spread in basis points
     kalshi_oi: float = 0.0             # Open interest
-    
+
     # Tags for quick filtering
     tags: List[str] = field(default_factory=list)
     # ["trending","volatile","new","closing_soon","50_50","high_volume"]
-    
+
     # Consensus snapshot (populated by SwarmConsensusAggregator)
     swarm_consensus_prob: Optional[float] = None  # 0-1
     swarm_consensus_direction: Optional[str] = None  # "yes","no","neutral"
     swarm_confidence: Optional[float] = None  # 0-1
     swarm_agents_voting: int = 0
-    
+
     # Risk layer status
     risk_regime: str = "normal"        # "normal","tight","halt"
     daily_pnl_usd: float = 0.0
     open_exposure_usd: float = 0.0
+
+    def is_sentiment_stale(self, max_age_seconds: float = 300.0) -> bool:
+        """Check if any sentiment source is stale.
+
+        Implements A-001: Sentiment staleness detection.
+
+        Args:
+            max_age_seconds: Maximum age in seconds (default 5 minutes)
+
+        Returns:
+            True if any sentiment source is older than max_age_seconds
+        """
+        now = datetime.now(timezone.utc)
+
+        # Check each sentiment source that has a timestamp
+        if self.social_sentiment_updated_at:
+            age = (now - self.social_sentiment_updated_at).total_seconds()
+            if age > max_age_seconds:
+                return True
+
+        if self.news_sentiment_updated_at:
+            age = (now - self.news_sentiment_updated_at).total_seconds()
+            if age > max_age_seconds:
+                return True
+
+        if self.kalshi_sentiment_updated_at:
+            age = (now - self.kalshi_sentiment_updated_at).total_seconds()
+            if age > max_age_seconds:
+                return True
+
+        return False
+
+    def get_staleness_report(self) -> Dict[str, Any]:
+        """Get detailed staleness report for all sentiment sources.
+
+        Implements A-001: Observability for sentiment freshness.
+
+        Returns:
+            Dictionary with age in seconds for each sentiment source
+        """
+        now = datetime.now(timezone.utc)
+        report = {}
+
+        if self.social_sentiment_updated_at:
+            report["social_age_seconds"] = (now - self.social_sentiment_updated_at).total_seconds()
+        else:
+            report["social_age_seconds"] = None
+
+        if self.news_sentiment_updated_at:
+            report["news_age_seconds"] = (now - self.news_sentiment_updated_at).total_seconds()
+        else:
+            report["news_age_seconds"] = None
+
+        if self.kalshi_sentiment_updated_at:
+            report["kalshi_age_seconds"] = (now - self.kalshi_sentiment_updated_at).total_seconds()
+        else:
+            report["kalshi_age_seconds"] = None
+
+        report["is_stale"] = self.is_sentiment_stale()
+
+        return report
     
     def to_agent_prompt(self) -> str:
         """Convert to a concise prompt for LLM agents."""

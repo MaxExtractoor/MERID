@@ -461,7 +461,10 @@ class KalshiWebSocket(EventVenueStream):
     # ── Sequence tracking ──────────────────────────────────────────────
 
     def _check_sequence(self, data: Dict[str, Any]) -> bool:
-        """Validate message sequence; returns False to drop the message."""
+        """Validate message sequence; returns False to drop the message.
+
+        Implements M-001: Enhanced gap detection with position reload.
+        """
         seq = data.get("seq")
         if seq is None:
             return True  # not all channels have seq
@@ -479,15 +482,59 @@ class KalshiWebSocket(EventVenueStream):
         if last is not None and seq > last + 1:
             gap = seq - last - 1
             self._seq_gaps += gap
-            logger.warning(
+            logger.error(
                 f"WS seq gap: market={market_id} expected={last+1} got={seq} "
                 f"gap={gap} total_gaps={self._seq_gaps}"
             )
-            # Invalidate cached orderbook — need a fresh snapshot
+            # M-001: Invalidate cached orderbook — need a fresh snapshot
             self._ob_initialised.discard(market_id)
+
+            # M-001: Trigger gap recovery for large gaps
+            if gap >= 5:
+                # Schedule async gap recovery without blocking message processing
+                try:
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(self._handle_gap(last + 1, seq, market_id))
+                except Exception as exc:
+                    logger.warning(f"Failed to schedule gap recovery: {exc}")
 
         self._last_seq[market_id] = seq
         return True
+
+    async def _handle_gap(self, expected_seq: int, received_seq: int, market_id: str) -> None:
+        """Handle sequence gap with full recovery.
+
+        Implements M-001: Fail-safe gap recovery with position reload.
+
+        Args:
+            expected_seq: Expected sequence number
+            received_seq: Received sequence number
+            market_id: Market identifier
+        """
+        gap_size = received_seq - expected_seq
+        logger.error(f"M-001: WS gap recovery initiated for {market_id}: gap={gap_size}")
+
+        try:
+            # Force position reload to catch any missed fills
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            await cache.force_refresh()
+            logger.info(f"M-001: Position cache refreshed after gap on {market_id}")
+        except Exception as exc:
+            logger.error(f"M-001: Position reload failed during gap recovery: {exc}")
+
+        # Emit alert for monitoring
+        try:
+            from merid.prediction.alerts import get_alert_manager
+            alert_mgr = get_alert_manager()
+            await alert_mgr.send_alert(
+                f"websocket_gap_{market_id}",
+                f"WebSocket gap detected: {gap_size} messages missed on {market_id}",
+                cooldown_s=600.0,  # 10-minute cooldown
+            )
+        except Exception as exc:
+            logger.debug(f"M-001: Alert emission failed: {exc}")
     
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff + jitter, then resubscribe."""
