@@ -87,19 +87,29 @@ def kelly_fraction_for_binary(
     return f
 
 
-def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Compute Kalshi fee for a trade (mirrors backtest fee calc)."""
+def kalshi_fee_cents(price_cents: int, contracts: int, role: str = "taker") -> int:
+    """Compute Kalshi fee for a trade using parabolic formula.
+
+    Args:
+        price_cents: Price per contract in cents (1-99)
+        contracts: Number of contracts
+        role: "maker" or "taker" (default "taker")
+
+    Returns:
+        Total fee in cents
+    """
+    from merid.event_venues.kalshi.maker_taker_policy import (
+        kalshi_taker_fee_cents_parabolic,
+        kalshi_maker_fee_cents,
+    )
+
     if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
         return 0
-    payout = 100 - price_cents
-    if contracts < 100:
-        rate = 0.07
-    elif contracts < 1000:
-        rate = 0.05
+
+    if role == "maker":
+        return kalshi_maker_fee_cents(price_cents, contracts)
     else:
-        rate = 0.03
-    per_contract = max(2, math.ceil(payout * rate))
-    return per_contract * contracts
+        return kalshi_taker_fee_cents_parabolic(price_cents, contracts)
 
 
 def adaptive_kelly_fraction(

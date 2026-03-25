@@ -159,6 +159,12 @@ class OrderIntent:
         source: Originating agent/strategy name
         order_group_id: Optional order group ID for aggregate limits
         self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
+        post_only: Force post-only (maker) execution
+        policy_mode: Maker/taker policy mode (None = use default)
+        expected_role: Expected execution role ("maker" or "taker", None = not specified)
+        bid_cents: Best bid for spread-aware routing (optional)
+        ask_cents: Best ask for spread-aware routing (optional)
+        spread_bps: Spread in basis points (optional)
     """
     ticker: str
     side: str
@@ -173,6 +179,11 @@ class OrderIntent:
     order_group_id: Optional[str] = None
     self_trade_prevention_type: Optional[str] = None
     post_only: bool = False
+    policy_mode: Optional[str] = None  # "neutral_mm", "aggressive_conviction", "arb_leg"
+    expected_role: Optional[str] = None  # "maker" or "taker"
+    bid_cents: Optional[int] = None
+    ask_cents: Optional[int] = None
+    spread_bps: Optional[float] = None
 
 
 @dataclass
@@ -185,12 +196,18 @@ class OrderResult:
         fill: Fill details (if filled)
         reason: Rejection reason (if rejected)
         latency_ms: Routing latency
+        expected_role: Expected execution role from policy ("maker" or "taker", None if not applicable)
+        actual_role: Actual execution role ("maker" or "taker", None if unknown/rejected)
+        fee_cents: Actual fee charged in cents (None if not filled)
     """
     status: str
     mode: TradingMode
     fill: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
     latency_ms: float = 0.0
+    expected_role: Optional[str] = None
+    actual_role: Optional[str] = None
+    fee_cents: Optional[int] = None
 
 
 # ── Paper fill simulation ─────────────────────────────────────────────────
@@ -224,7 +241,11 @@ def _is_live_mode(mode: TradingMode) -> bool:
 
 
 def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Kalshi fee schedule mirrored for simulation/live-normalized reporting."""
+    """Kalshi fee schedule mirrored for simulation/live-normalized reporting.
+
+    DEPRECATED: Use parabolic fee functions from maker_taker_policy module.
+    This function is kept for backward compatibility.
+    """
     if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
         return 0
     payout = 100 - price_cents
@@ -239,7 +260,17 @@ def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
 
 
 def simulate_paper_fill(intent: OrderIntent) -> Dict[str, Any]:
-    """Simulate a paper/mock fill with slippage, partial-fill probability, and fees."""
+    """Simulate a paper/mock fill with slippage, partial-fill probability, and fees.
+
+    Uses parabolic fee calculation and maker/taker policy engine if configured.
+    """
+    from merid.event_venues.kalshi.maker_taker_policy import (
+        PolicyMode,
+        get_maker_taker_policy_engine,
+        kalshi_taker_fee_cents_parabolic,
+        kalshi_maker_fee_cents,
+    )
+
     requested_count = max(0, int(intent.count))
     requested_price = max(1, min(99, int(intent.price_cents)))
 
@@ -261,7 +292,43 @@ def simulate_paper_fill(intent: OrderIntent) -> Dict[str, Any]:
         fill_count = random.randint(min_fill, requested_count)
 
     remaining_count = max(0, requested_count - fill_count)
-    fee_cents = _kalshi_fee_cents(fill_price, fill_count)
+
+    # Determine actual role and fee
+    actual_role = "unknown"
+    fee_cents = 0
+
+    # If policy mode specified, use policy engine
+    if intent.policy_mode and intent.edge_pct is not None:
+        try:
+            policy_engine = get_maker_taker_policy_engine()
+            mode = PolicyMode(intent.policy_mode)
+            decision = policy_engine.decide(
+                mode=mode,
+                edge_pct=intent.edge_pct,
+                price_cents=fill_price,
+                contracts=fill_count,
+                bid_cents=intent.bid_cents,
+                ask_cents=intent.ask_cents,
+                spread_bps=intent.spread_bps,
+            )
+            actual_role = decision.role
+            fee_cents = decision.maker_fee_cents if decision.role == "maker" else decision.taker_fee_cents
+        except Exception as e:
+            logger.warning(f"Policy engine decision failed, using default: {e}")
+            actual_role = "maker" if intent.post_only else "taker"
+            fee_cents = (
+                kalshi_maker_fee_cents(fill_price, fill_count)
+                if actual_role == "maker"
+                else kalshi_taker_fee_cents_parabolic(fill_price, fill_count)
+            )
+    else:
+        # Determine role based on post_only flag
+        actual_role = "maker" if intent.post_only else "taker"
+        fee_cents = (
+            kalshi_maker_fee_cents(fill_price, fill_count)
+            if actual_role == "maker"
+            else kalshi_taker_fee_cents_parabolic(fill_price, fill_count)
+        )
 
     return {
         "ticker": intent.ticker,
@@ -274,6 +341,7 @@ def simulate_paper_fill(intent: OrderIntent) -> Dict[str, Any]:
         "remaining_count": remaining_count,
         "partial_fill": partial_fill,
         "fee_cents": fee_cents,
+        "actual_role": actual_role,
         "ts": datetime.now(timezone.utc).isoformat(),
         "simulated": True,
     }
@@ -306,13 +374,16 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         latency = (time.monotonic() - t0) * 1000
         logger.info(
             f"[order-router] MOCK fill {intent.ticker} {intent.action} "
-            f"{intent.count}x @ {intent.price_cents}c"
+            f"{intent.count}x @ {intent.price_cents}c (role={fill.get('actual_role', 'unknown')}, fee={fill.get('fee_cents', 0)}¢)"
         )
         return OrderResult(
             status="filled_mock",
             mode=mode,
             fill=fill,
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
+            actual_role=fill.get("actual_role"),
+            fee_cents=fill.get("fee_cents"),
         )
 
     if _is_paper_mode(mode):
@@ -320,13 +391,16 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         latency = (time.monotonic() - t0) * 1000
         logger.info(
             f"[order-router] PAPER fill {intent.ticker} {intent.action} "
-            f"{intent.count}x @ {intent.price_cents}c"
+            f"{intent.count}x @ {intent.price_cents}c (role={fill.get('actual_role', 'unknown')}, fee={fill.get('fee_cents', 0)}¢)"
         )
         return OrderResult(
             status="filled_paper",
             mode=mode,
             fill=fill,
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
+            actual_role=fill.get("actual_role"),
+            fee_cents=fill.get("fee_cents"),
         )
 
     latency = (time.monotonic() - t0) * 1000
@@ -335,6 +409,7 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         mode=mode,
         reason=f"sync_route_unsupported_mode_{_mode_value(mode)}",
         latency_ms=round(latency, 2),
+        expected_role=intent.expected_role,
     )
 
 
@@ -492,7 +567,28 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         filled_count = int(placed.filled_size)
         remaining_count = int(placed.remaining_size) if placed.remaining_size is not None else max(0, requested_count - filled_count)
         fill_price_cents = int((placed.price or Decimal(intent.price_cents) / Decimal("100")) * 100)
-        fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count)
+
+        # Determine actual role from order response
+        # Kalshi API returns 'maker' or 'taker' role in the order response
+        actual_role = None
+        if hasattr(placed, 'role'):
+            actual_role = placed.role
+        elif intent.post_only:
+            actual_role = "maker"
+        else:
+            # Default to taker if not specified (conservative for fees)
+            actual_role = "taker"
+
+        # Calculate fee using parabolic formula based on actual role
+        from merid.event_venues.kalshi.maker_taker_policy import (
+            kalshi_taker_fee_cents_parabolic,
+            kalshi_maker_fee_cents,
+        )
+
+        if actual_role == "maker":
+            fee_cents = kalshi_maker_fee_cents(fill_price_cents, filled_count)
+        else:
+            fee_cents = kalshi_taker_fee_cents_parabolic(fill_price_cents, filled_count)
 
         if filled_count >= requested_count and requested_count > 0:
             status = "filled_live"
@@ -521,12 +617,16 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 "requested_count": requested_count,
                 "remaining_count": remaining_count,
                 "fee_cents": fee_cents,
+                "actual_role": actual_role,
                 "order_id": placed.order_id,
                 "status": placed.status,
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "simulated": False,
             },
             latency_ms=round(latency, 2),
+            expected_role=intent.expected_role,
+            actual_role=actual_role,
+            fee_cents=fee_cents,
         )
     except Exception as exc:
         latency = (time.monotonic() - t0) * 1000

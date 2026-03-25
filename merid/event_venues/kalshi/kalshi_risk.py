@@ -1,7 +1,7 @@
 """KalshiRiskManager — Venue-aware risk layer for all Kalshi markets.
 
 Responsibilities:
-1. Kalshi fee calculation (tiered schedule)
+1. Kalshi fee calculation (parabolic schedule for maker/taker)
 2. Fee-aware Kelly position sizing
 3. Per-contract position limits (from Kalshi terms)
 4. Per-category exposure caps
@@ -9,16 +9,22 @@ Responsibilities:
 6. Drawdown monitoring
 7. Rate-limit awareness
 
-Fee schedule (as of 2025):
+Fee schedule (parabolic, as of 2025):
+  - Taker: ceil(0.07 × contracts × P × (1-P)) in dollars
+  - Maker: ceil(0.0175 × contracts × P × (1-P)) in dollars
+  - Where P is price in decimal form (e.g., 0.55 for 55¢)
+  - No fee on losing side
+
+Legacy tiered schedule (DEPRECATED):
   - Contracts 1-99:    7% of payout (min 2¢)
   - Contracts 100-999:  5% of payout
   - Contracts 1000+:    3% of payout
-  - No fee on losing side
 
 Usage::
 
     risk = get_kalshi_risk()
-    fee = risk.kalshi_fee_cents(price_cents=55, contracts=10)
+    taker_fee = risk.kalshi_taker_fee_cents_parabolic(price_cents=55, contracts=10)
+    maker_fee = risk.kalshi_maker_fee_cents(price_cents=55, contracts=10)
     size = risk.kelly_size_kalshi(edge=0.08, price_cents=55, bankroll_cents=50000)
     ok, reason = risk.check_order("BTC", "crypto", 10, 55)
 """
@@ -37,8 +43,74 @@ logger = get_logger("merid.event_venues.kalshi.kalshi_risk")
 
 # ── Fee schedule ─────────────────────────────────────────────────────────
 
+def kalshi_taker_fee_cents_parabolic(price_cents: int, contracts: int) -> int:
+    """Calculate Kalshi taker fee using parabolic formula.
+
+    Formula: ceil(0.07 × contracts × P × (1-P)) where P is in decimal form.
+
+    This fee structure is proportional to the expected value of the position,
+    maximal at P=0.5 (50¢) and decreasing toward the extremes (1¢ or 99¢).
+
+    Args:
+        price_cents: Price per contract in cents (1-99)
+        contracts: Number of contracts
+
+    Returns:
+        Total taker fee in cents (integer, rounded up)
+    """
+    if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
+        return 0
+
+    # Convert to decimal price (0-1 range)
+    price_decimal = price_cents / 100.0
+
+    # Parabolic formula: 0.07 × contracts × P × (1-P) in dollars
+    fee_dollars = 0.07 * contracts * price_decimal * (1.0 - price_decimal)
+
+    # Convert to cents and round up
+    fee_cents = math.ceil(fee_dollars * 100.0)
+
+    return fee_cents
+
+
+def kalshi_maker_fee_cents(price_cents: int, contracts: int) -> int:
+    """Calculate Kalshi maker fee using parabolic formula.
+
+    Formula: ceil(0.0175 × contracts × P × (1-P)) where P is in decimal form.
+
+    Maker fees are 1/4 of taker fees (0.0175 vs 0.07), incentivizing
+    liquidity provision.
+
+    Args:
+        price_cents: Price per contract in cents (1-99)
+        contracts: Number of contracts
+
+    Returns:
+        Total maker fee in cents (integer, rounded up)
+    """
+    if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
+        return 0
+
+    # Convert to decimal price (0-1 range)
+    price_decimal = price_cents / 100.0
+
+    # Parabolic formula: 0.0175 × contracts × P × (1-P) in dollars
+    fee_dollars = 0.0175 * contracts * price_decimal * (1.0 - price_decimal)
+
+    # Convert to cents and round up
+    fee_cents = math.ceil(fee_dollars * 100.0)
+
+    return fee_cents
+
+
 def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     """Calculate Kalshi fee in cents for a trade.
+
+    DEPRECATED: Use kalshi_taker_fee_cents_parabolic() or kalshi_maker_fee_cents()
+    for more accurate fee calculation.
+
+    This function uses the legacy tiered schedule and is kept for backward
+    compatibility. Defaults to taker fees (more conservative).
 
     Fee is charged on the *winning* side only, as a percentage of payout.
     Payout per contract = 100 - price_cents (for YES buyer winning).
@@ -92,6 +164,7 @@ def kelly_size_kalshi(
     min_edge: float = 0.02,
     sentiment_score: Optional[float] = None,
     volatility_regime: Optional[str] = None,
+    role: str = "taker",  # "maker" or "taker" for fee calculation
 ) -> int:
     """Fee-aware Kelly position sizing for Kalshi binary contracts with sentiment adjustment.
 
@@ -100,6 +173,8 @@ def kelly_size_kalshi(
       p = implied probability + edge
       q = 1 - p
       b = (100 - price - fee_per) / price  (net odds after fees)
+
+    Uses parabolic fee schedule based on maker/taker role.
 
     Sentiment adjustment:
       - Extreme fear/greed (score <20 or >80): reduce size by 50%
@@ -115,6 +190,7 @@ def kelly_size_kalshi(
         min_edge: Minimum edge to trade
         sentiment_score: Fear/greed index 0-100 (None = no adjustment)
         volatility_regime: "calm", "normal", "hot" (None = no adjustment)
+        role: "maker" or "taker" for fee calculation (default "taker")
 
     Returns:
         Number of contracts to buy (0 if edge insufficient)
@@ -126,9 +202,12 @@ def kelly_size_kalshi(
     p = min(max(p, 0.01), 0.99)
     q = 1.0 - p
 
-    # Estimate fee per contract (use 10-contract tier as default)
+    # Estimate fee per contract using parabolic formula based on role
     payout_per = 100 - price_cents
-    fee_per = max(2, math.ceil(payout_per * 0.07))
+    if role == "maker":
+        fee_per = kalshi_maker_fee_cents(price_cents, 1)  # Per-contract maker fee
+    else:
+        fee_per = kalshi_taker_fee_cents_parabolic(price_cents, 1)  # Per-contract taker fee
 
     net_payout = payout_per - fee_per
     if net_payout <= 0:
@@ -168,7 +247,11 @@ def kelly_size_kalshi(
     contracts = max(0, min(contracts, max_contracts))
 
     # Re-check with actual fee tier
-    actual_fee = kalshi_fee_cents(price_cents, contracts)
+    if role == "maker":
+        actual_fee = kalshi_maker_fee_cents(price_cents, contracts)
+    else:
+        actual_fee = kalshi_taker_fee_cents_parabolic(price_cents, contracts)
+
     actual_net = (100 - price_cents) * contracts - actual_fee
     cost = price_cents * contracts
     if actual_net <= 0 or cost > bankroll_cents:
@@ -186,11 +269,14 @@ def dynamic_position_sizes(
     category_cap_pct: float = 0.30,
     max_contracts_per_market: int = 500,
     min_edge_pct: float = 0.5,
+    role: str = "taker",  # "maker" or "taker" for fee calculation
 ) -> Dict[str, int]:
     """Edge-weighted position sizing across multiple Kalshi markets.
 
     Allocates a category budget proportionally to each market's edge,
     then converts dollars to contracts (each contract pays $1 on win).
+
+    Uses parabolic fee schedule based on maker/taker role.
 
     Args:
         markets: List of dicts with keys:
@@ -199,6 +285,7 @@ def dynamic_position_sizes(
         category_cap_pct: Max fraction of equity for this category
         max_contracts_per_market: Hard cap per market
         min_edge_pct: Minimum edge to include a market
+        role: "maker" or "taker" for fee calculation (default "taker")
 
     Returns:
         {ticker: contracts} for each market with positive allocation
@@ -224,7 +311,10 @@ def dynamic_position_sizes(
         contracts = min(contracts, max_contracts_per_market)
         # Apply fee check: ensure net payout is positive
         if contracts > 0:
-            fee = kalshi_fee_cents(m.get("price_cents", 50), contracts)
+            if role == "maker":
+                fee = kalshi_maker_fee_cents(m.get("price_cents", 50), contracts)
+            else:
+                fee = kalshi_taker_fee_cents_parabolic(m.get("price_cents", 50), contracts)
             payout = (100 - m.get("price_cents", 50)) * contracts
             if payout - fee <= 0:
                 continue
@@ -266,10 +356,13 @@ def multi_market_kelly_sizes(
     frac_of_kelly: float = 0.25,
     max_per_market_usd: float = 1000.0,
     max_contracts_per_market: int = 500,
+    role: str = "taker",  # "maker" or "taker" for fee calculation
 ) -> Dict[str, int]:
     """Win-prob-based Kelly allocation across independent Kalshi markets.
 
     Each market is sized independently using Kelly criterion, then capped.
+
+    Uses parabolic fee schedule based on maker/taker role.
 
     Args:
         markets: List of dicts with keys:
@@ -279,6 +372,7 @@ def multi_market_kelly_sizes(
         frac_of_kelly: Fraction of full Kelly to use (default quarter-Kelly)
         max_per_market_usd: Dollar cap per market
         max_contracts_per_market: Contract cap per market
+        role: "maker" or "taker" for fee calculation (default "taker")
 
     Returns:
         {ticker: contracts} for each market with positive allocation
@@ -307,7 +401,10 @@ def multi_market_kelly_sizes(
 
         # Fee check
         if contracts > 0:
-            fee = kalshi_fee_cents(price_cents, contracts)
+            if role == "maker":
+                fee = kalshi_maker_fee_cents(price_cents, contracts)
+            else:
+                fee = kalshi_taker_fee_cents_parabolic(price_cents, contracts)
             payout = (100 - price_cents) * contracts
             if payout - fee <= 0:
                 continue
