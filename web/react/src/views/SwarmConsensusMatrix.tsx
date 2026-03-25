@@ -46,6 +46,46 @@ interface ConsensusView {
   raw_proposals: AgentProposal[];
 }
 
+interface SystemHealth {
+  status: string;
+  services: Record<string, string>;
+  version?: string;
+  timestamp?: number;
+}
+
+interface GridHealth {
+  status: string;
+  ws?: { running?: boolean; events_forwarded?: number; subscribed_tickers?: number };
+  risk?: { kill_switch?: boolean; drawdown_pct?: number; daily_pnl?: number };
+  rate_limits?: { orders_this_minute?: number; max_per_minute?: number };
+  venue?: { connected?: boolean };
+  metrics?: Record<string, unknown>;
+}
+
+interface DeploymentStatus {
+  live_count?: number;
+  shadow_count?: number;
+  total_agents?: number;
+  live?: string[];
+  shadow?: string[];
+  paper?: string[];
+  halted?: string[];
+}
+
+interface ExecutionGateReason {
+  source: string;
+  severity: string;
+  message: string;
+}
+
+interface ExecutionGateStatus {
+  blocked: boolean;
+  safe_to_trade: boolean;
+  gate_state: "clear" | "limited" | "blocked";
+  reasons: ExecutionGateReason[];
+  timestamp?: number;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 const DIR_COLOR: Record<string, string> = {
@@ -330,9 +370,98 @@ export default function SwarmConsensusMatrix() {
   const bullishCount = views.filter(v => v.consensus_direction === "yes").length;
   const bearishCount = views.filter(v => v.consensus_direction === "no").length;
 
+  // Health + deployment overlays
+  const { data: systemHealth } = useApiData<SystemHealth>(
+    API_ENDPOINTS.SYSTEM_HEALTH,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SYSTEM_HEALTH }
+  );
+  const { data: gridHealth } = useApiData<GridHealth>(
+    API_ENDPOINTS.KALSHI_GRID_HEALTH,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SYSTEM_HEALTH }
+  );
+  const { data: deploymentStatus } = useApiData<DeploymentStatus>(
+    API_ENDPOINTS.KALSHI_DEPLOYMENT_STATUS,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+  );
+  const { data: executionGate } = useApiData<ExecutionGateStatus>(
+    API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STALENESS }
+  );
+
+  const wsHealthy = gridHealth?.ws?.running ?? false;
+  const killSwitch = gridHealth?.risk?.kill_switch ?? false;
+  const gateState = executionGate?.gate_state ?? "blocked";
+  const gateBlocked = executionGate?.blocked ?? true;
+  const gateIssues = executionGate?.reasons?.length ?? 0;
+  const deploymentLive = deploymentStatus?.live_count ?? deploymentStatus?.live?.length ?? 0;
+  const deploymentShadow = deploymentStatus?.shadow_count ?? deploymentStatus?.shadow?.length ?? 0;
+
   return (
     <div className="space-y-6 text-white">
       <ErrorBar label="Swarm Consensus" error={error} onRetry={refetch} />
+
+      {/* Global header strip */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3">
+          <div className="text-xs text-slate-400 mb-1">System</div>
+          <div className="flex items-center justify-between">
+            <span className={`text-sm font-semibold ${systemHealth?.status === "healthy" ? "text-emerald-300" : "text-amber-300"}`}>
+              {systemHealth?.status ?? "unknown"}
+            </span>
+            <span className="text-[10px] text-slate-500">
+              ver {systemHealth?.version ?? "—"}
+            </span>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">
+            api {systemHealth?.services?.api ?? "?"} · risk {systemHealth?.services?.risk ?? "?"}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3">
+          <div className="text-xs text-slate-400 mb-1">Execution Gate</div>
+          <div className="flex items-center justify-between">
+            <span className={`text-sm font-semibold ${
+              gateState === "clear" ? "text-emerald-300" :
+              gateState === "limited" ? "text-amber-300" : "text-red-300"
+            }`}>
+              {gateState.toUpperCase()}
+            </span>
+            <span className="text-[11px] text-slate-500">
+              {gateBlocked ? "blocked" : "open"}
+            </span>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">
+            {gateIssues} issue{gateIssues === 1 ? "" : "s"}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3">
+          <div className="text-xs text-slate-400 mb-1">Venue Health</div>
+          <div className="flex items-center justify-between">
+            <span className={`text-sm font-semibold ${wsHealthy ? "text-emerald-300" : "text-red-300"}`}>
+              WS {wsHealthy ? "OK" : "Down"}
+            </span>
+            <span className={`text-sm font-semibold ${killSwitch ? "text-red-300" : "text-emerald-300"}`}>
+              {killSwitch ? "Kill" : "Live"}
+            </span>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">
+            rate {gridHealth?.rate_limits?.orders_this_minute ?? 0}/{gridHealth?.rate_limits?.max_per_minute ?? 0}/min
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3">
+          <div className="text-xs text-slate-400 mb-1">Deployment</div>
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold text-emerald-300">Live {deploymentLive}</span>
+            <span className="text-sm font-semibold text-blue-300">Shadow {deploymentShadow}</span>
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">
+            total {deploymentStatus?.total_agents ?? "—"}
+          </div>
+        </div>
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
