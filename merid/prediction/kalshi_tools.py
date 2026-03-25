@@ -283,6 +283,16 @@ async def _kalshi_place_order(
 
     # Simulate if in SIM/PAPER mode OR agent is in PAPER deployment mode
     _force_paper_deploy = (_agent_mode is not None and _agent_mode.value == "PAPER")
+
+    # CRITICAL: If global gate says LIVE but agent is PAPER, log loud warning
+    if not gate.should_simulate_fill() and _force_paper_deploy:
+        logger.warning(
+            f"[kalshi_tools] ⚠️ Agent {_agent_name} is in PAPER deployment mode, "
+            f"overriding global LIVE setting. Order will be SIMULATED. "
+            f"To enable real trades for this agent, promote it to LIVE mode via: "
+            f"deployment_controller.promote_to_live('{_agent_name}')"
+        )
+
     if gate.should_simulate_fill() or _force_paper_deploy:
         # Realistic fill simulation using orderbook
         try:

@@ -122,10 +122,64 @@ class DeploymentController:
 
     # ── Agent registration ───────────────────────────────────────────
 
-    def register_agent(self, agent_name: str) -> AgentDeployment:
-        """Register an agent (starts in PAPER mode)."""
+    def register_agent(
+        self,
+        agent_name: str,
+        initial_mode: Optional[AgentMode] = None,
+        bypass_readiness: bool = False,
+    ) -> AgentDeployment:
+        """Register an agent with mode determined by global settings or explicit override.
+
+        Args:
+            agent_name: Name of the agent to register.
+            initial_mode: Optional explicit mode (PAPER/LIVE/SHADOW/HALTED).
+                         If None, mode is determined from global settings.
+            bypass_readiness: If True, skip readiness checks when auto-promoting to LIVE.
+                             Used during startup when paper session data is not yet available.
+
+        Returns:
+            AgentDeployment object for the agent.
+        """
         if agent_name not in self._agents:
-            self._agents[agent_name] = AgentDeployment(agent_name=agent_name)
+            # Determine initial mode from global settings if not explicitly specified
+            if initial_mode is None:
+                try:
+                    from merid.settings import settings
+                    # Check if global settings indicate live trading
+                    if settings.MERID_PM_LIVE_ENABLED and settings.MERID_PM_TRADING_MODE == "live":
+                        initial_mode = AgentMode.LIVE
+                        logger.info(
+                            f"[deploy] Auto-promoting {agent_name} to LIVE mode "
+                            f"(MERID_PM_LIVE_ENABLED=true, MERID_PM_TRADING_MODE=live)"
+                        )
+                    else:
+                        initial_mode = AgentMode.PAPER
+                        logger.info(
+                            f"[deploy] Registering {agent_name} in PAPER mode "
+                            f"(MERID_PM_LIVE_ENABLED={settings.MERID_PM_LIVE_ENABLED}, "
+                            f"MERID_PM_TRADING_MODE={settings.MERID_PM_TRADING_MODE})"
+                        )
+                except Exception as exc:
+                    # Fallback to PAPER if settings unavailable
+                    initial_mode = AgentMode.PAPER
+                    logger.warning(
+                        f"[deploy] Could not read settings for {agent_name}, "
+                        f"defaulting to PAPER mode: {exc}"
+                    )
+
+            self._agents[agent_name] = AgentDeployment(
+                agent_name=agent_name,
+                mode=initial_mode,
+            )
+
+            # Log transition for audit trail
+            self._log_transition(
+                agent_name,
+                "UNREGISTERED",
+                initial_mode.value,
+                f"Initial registration (bypass_readiness={bypass_readiness})",
+            )
+
         return self._agents[agent_name]
 
     def get_mode(self, agent_name: str) -> AgentMode:

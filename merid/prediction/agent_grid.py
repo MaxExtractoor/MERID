@@ -126,13 +126,23 @@ class AgentGrid:
         # Start portfolio risk agent first
         await self._portfolio_risk.start()
 
-        # L6: Register all agents with DeploymentController (starts each in PAPER mode)
+        # Register all agents with DeploymentController
+        # Agents will be automatically promoted to LIVE if global settings allow
         try:
             from merid.event_venues.kalshi.deployment import get_deployment_controller
             _dc = get_deployment_controller()
+            live_count = 0
+            paper_count = 0
             for _a in self._agents:
-                _dc.register_agent(_a.agent_id)
-            logger.info("✓ DeploymentController: %d agents registered (all PAPER)", len(self._agents))
+                dep = _dc.register_agent(_a.agent_id, bypass_readiness=True)
+                if dep.mode.value == "LIVE":
+                    live_count += 1
+                else:
+                    paper_count += 1
+            logger.info(
+                f"✓ DeploymentController: {len(self._agents)} agents registered "
+                f"({live_count} LIVE, {paper_count} PAPER)"
+            )
         except Exception as _dce:
             logger.warning("DeploymentController registration failed (non-fatal): %s", _dce)
 
