@@ -2269,6 +2269,45 @@ async def ws_status() -> Dict[str, Any]:
 
 # ── Health ───────────────────────────────────────────────────────────────
 
+@router.get("/invariants")
+async def check_invariants(force: bool = False) -> Dict[str, Any]:
+    """Check PnL and position consistency invariants.
+
+    Returns:
+        Invariant violations and summary
+    """
+    try:
+        from merid.reconciliation.invariant_checker import get_invariant_checker
+
+        checker = get_invariant_checker()
+        violations = await checker.check_all(force=force)
+        summary = checker.get_violation_summary()
+
+        return {
+            "status": "CRITICAL" if any(v.severity == "CRITICAL" for v in violations) else
+                     "WARNING" if any(v.severity == "WARNING" for v in violations) else "OK",
+            "violations": [
+                {
+                    "invariant_id": v.invariant_id,
+                    "severity": v.severity,
+                    "message": v.message,
+                    "details": v.details,
+                    "timestamp": v.timestamp,
+                }
+                for v in violations
+            ],
+            "summary": summary,
+        }
+    except Exception as exc:
+        logger.error(f"Invariant check failed: {exc}")
+        return {
+            "status": "ERROR",
+            "error": str(exc),
+            "violations": [],
+            "summary": {},
+        }
+
+
 @router.get("/health",
     summary="Kalshi Integration Health Check",
     description="Comprehensive health check covering catalog freshness, risk manager state, WebSocket bridge connectivity, REST client connectivity, and rate limit headroom.",
@@ -2369,9 +2408,51 @@ async def health_check() -> Dict[str, Any]:
     if orders_this_minute >= max_per_minute * 0.8:
         issues.append("rate_limit_warning")
 
+    # Check reconciliation status
+    reconciliation_data = {"severity": "OK", "issue_count": 0}
+    try:
+        from merid.reconciliation.kalshi_reconciler import get_kalshi_reconciler
+        reconciler = get_kalshi_reconciler()
+        last_report = reconciler.get_last_report()
+        if last_report:
+            reconciliation_data = {
+                "severity": last_report.severity,
+                "issue_count": len(last_report.issues),
+                "internal_position_count": last_report.internal_position_count,
+                "venue_position_count": last_report.venue_position_count,
+                "summary": last_report.summary,
+            }
+            if last_report.severity == "CRITICAL":
+                issues.append("reconciliation_critical")
+            elif last_report.severity == "WARNING":
+                issues.append("reconciliation_warning")
+    except Exception as _e:
+        logger.debug("reconciliation check skipped: %s", _e)
+
+    # Check invariants
+    invariant_data = {"status": "OK", "violation_count": 0}
+    try:
+        from merid.reconciliation.invariant_checker import get_invariant_checker
+        checker = get_invariant_checker()
+        summary = checker.get_violation_summary()
+        critical_count = summary.get("by_severity", {}).get("CRITICAL", 0)
+        warning_count = summary.get("by_severity", {}).get("WARNING", 0)
+        invariant_data = {
+            "status": "CRITICAL" if critical_count > 0 else "WARNING" if warning_count > 0 else "OK",
+            "violation_count": summary.get("total_violations_last_hour", 0),
+            "critical_violations": critical_count,
+            "warning_violations": warning_count,
+        }
+        if critical_count > 0:
+            issues.append("invariant_violations_critical")
+    except Exception as _e:
+        logger.debug("invariant check skipped: %s", _e)
+
     # Overall status - REST is required, WS is optional
     if "kill_switch_active" in issues:
         status = "halted"
+    elif "invariant_violations_critical" in issues or "reconciliation_critical" in issues:
+        status = "critical"
     elif not rest_ok:
         status = "disconnected"
     elif not issues or (len(issues) == 1 and "rate_limit_warning" in issues):
@@ -2392,6 +2473,8 @@ async def health_check() -> Dict[str, Any]:
             "orders_this_hour": orders_this_hour,
             "max_per_hour": max_per_hour,
         },
+        "reconciliation": reconciliation_data,
+        "invariants": invariant_data,
     }
 
 
