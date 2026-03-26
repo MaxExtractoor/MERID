@@ -202,6 +202,7 @@ class AuditLogger:
         result: str = "success",
         error_message: str = "",
         duration_ms: float = 0.0,
+        timestamp: Optional[float] = None,
     ) -> str:
         """Log an audit event."""
         import uuid
@@ -222,6 +223,7 @@ class AuditLogger:
             result=result,
             error_message=error_message,
             duration_ms=duration_ms,
+            timestamp=timestamp if timestamp is not None else time.time(),
             previous_hash=self._last_hash,
         )
         

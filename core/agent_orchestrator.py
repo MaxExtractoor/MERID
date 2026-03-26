@@ -102,8 +102,19 @@ class AgentOrchestrator:
         self.running = True
         logger.info("Starting agent orchestration...")
 
-        # Note: news_monitor is started by OrchestratorAgentManager — not duplicated here.
-        # Note: price_feed.start_streaming() is started by main.py lifespan — not duplicated here.
+        # Start supporting agents if available
+        try:
+            if hasattr(self.news_monitor, "start_monitoring"):
+                maybe_coro = self.news_monitor.start_monitoring()
+                if asyncio.iscoroutine(maybe_coro):
+                    await maybe_coro
+            if hasattr(self.price_feed, "start_streaming"):
+                maybe_coro = self.price_feed.start_streaming()
+                if asyncio.iscoroutine(maybe_coro):
+                    await maybe_coro
+        except Exception as exc:
+            logger.warning(f"Failed to start supporting agents: {exc}")
+
         tasks = [
             asyncio.create_task(self._orchestration_loop())
         ]

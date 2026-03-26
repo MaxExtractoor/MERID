@@ -18,6 +18,16 @@ from utils.logger import get_logger
 
 logger = get_logger("merid_assertions")
 
+try:  # Optional dependency for tests and runtime integration
+    from core.reality_auditor import get_reality_auditor as _get_reality_auditor  # type: ignore
+except Exception:  # pragma: no cover - fallback when auditor unavailable
+    def _get_reality_auditor():
+        return None
+
+def get_reality_auditor():
+    """Expose reality auditor getter for bindings/tests."""
+    return _get_reality_auditor()
+
 # Python Decorators and Context Managers
 def assertion_template(
     template_id: str,
@@ -291,9 +301,10 @@ def assert_data_quality_probabilities_sum_to_one(
 # Integration with existing MERID components
 def integrate_with_reality_auditor():
     """Integrate assertion framework with existing Reality Auditor."""
-    from core.reality_auditor import get_reality_auditor
-    
     auditor = get_reality_auditor()
+    if not auditor or not getattr(auditor, "registry", None):
+        logger.warning("Reality auditor unavailable; skipping assertion registration")
+        return {"success": False, "registered": 0}
     
     # Register assertion templates as reality assertions
     templates_to_register = [
@@ -319,12 +330,15 @@ def integrate_with_reality_auditor():
         }
     ]
     
+    registered = 0
     for template in templates_to_register:
         try:
             assertion_id = auditor.registry.register_assertion(**template)
             logger.info(f"Registered assertion template with reality auditor: {assertion_id}")
+            registered += 1
         except Exception as e:
             logger.error(f"Failed to register template with reality auditor: {e}")
+    return {"success": registered == len(templates_to_register), "registered": registered}
 
 def integrate_with_prediction_agents():
     """Integrate assertion framework with prediction agents."""
