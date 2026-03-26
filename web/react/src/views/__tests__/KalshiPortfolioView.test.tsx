@@ -91,7 +91,7 @@ const MOCK_BALANCE = { usd: 500.00, locked: 50.00, available: 450.00 };
 const MOCK_MODE_PAPER = { mode: 'paper', is_live: false, live_enabled: true };
 const MOCK_MODE_LIVE  = { mode: 'live',  is_live: true,  live_enabled: true };
 
-const MOCK_SESSION = { session_open: true, ws_connected: true, ws_lag_ms: 12, mode: 'live' };
+const MOCK_SESSION = { session_open: true, trading_allowed: true, ws_connected: true, ws_lag_ms: 12, mode: 'live', block_reason: null };
 
 const MOCK_GRID_PORTFOLIO = { equity_usd: 512.50, daily_pnl_usd: 14.75, open_interest: 18, position_count: 2 };
 
@@ -297,6 +297,32 @@ describe('KalshiPortfolioView', () => {
       });
       render(<KalshiPortfolioView />);
       expect(screen.getByText('ACTIVE')).toBeInTheDocument();
+    });
+  });
+
+  describe('Execution guardrails', () => {
+    it('requires override before executing cancel-all when session is closed', () => {
+      setupMocks({
+        session: { ...MOCK_SESSION, trading_allowed: false, block_reason: 'maintenance' },
+      });
+      render(<KalshiPortfolioView />);
+      fireEvent.click(screen.getByText(/^Orders/));
+      const cancelAllBtn = screen.getByText(/Cancel All/);
+      expect(cancelAllBtn).toBeDisabled();
+      const overrideBox = screen.getByLabelText(/Override once/);
+      fireEvent.click(overrideBox);
+      expect(cancelAllBtn).not.toBeDisabled();
+    });
+
+    it('disables downsize when kill switch is active', () => {
+      setupMocks({
+        risk: { ...MOCK_RISK, kill_switch_active: true },
+        killSwitch: { global_kill: true, can_trade: false, kill_reason: 'Manual stop' },
+      });
+      render(<KalshiPortfolioView />);
+      fireEvent.click(screen.getByText(/^Risk/));
+      const downsizeBtn = screen.getByText(/Force Downsize/);
+      expect(downsizeBtn).toBeDisabled();
     });
   });
 

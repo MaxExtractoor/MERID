@@ -13,6 +13,12 @@ from unittest.mock import MagicMock
 QUARANTINE_MARKERS = {"quarantine"}
 
 
+def pytest_addoption(parser):
+    """Stub out checklist flags so runs succeed without pytest-checklist installed."""
+    parser.addoption("--checklist-collect", action="store", default=None, help="noop placeholder for pytest-checklist")
+    parser.addoption("--checklist-report", action="store_true", help="noop placeholder for pytest-checklist")
+
+
 def pytest_collection_modifyitems(config, items):
     """Skip tests marked with quarantine markers unless explicitly requested."""
     run_quarantine = config.getoption("--run-quarantine", default=False) if hasattr(config.option, "run_quarantine") else False

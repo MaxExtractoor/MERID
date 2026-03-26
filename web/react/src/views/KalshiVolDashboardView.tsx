@@ -7,7 +7,7 @@
  *   Bottom row: [Live Alerts]           [AI Insights + Consensus Signals]
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Shield, Gauge, Target, TrendingUp,
   AlertTriangle, BarChart3, RefreshCw,
@@ -21,6 +21,7 @@ import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiInsightsPanel from '../components/KalshiInsightsPanel';
 import PublishPipelinePanel from '../components/PublishPipelinePanel';
 import type { SizingMetrics, KalshiRiskSummary } from '../types/kalshi';
+import { logUxEvent } from '../utils/uxTelemetry';
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -139,6 +140,8 @@ const KalshiVolDashboardView: React.FC = () => {
   const [alertTab, setAlertTab]     = useState<'alerts' | 'liq-alerts' | 'changes' | 'anomalies'>('alerts');
   const [modeToggling, setModeToggling] = useState(false);
   const [modeError, setModeError]       = useState<string | null>(null);
+  const [liveOverride, setLiveOverride] = useState(false);
+  const [liveBlockReason, setLiveBlockReason] = useState<string | null>(null);
 
   // ── Derived values ────────────────────────────────────────────────────────
   const health        = healthRes.data;
@@ -182,12 +185,36 @@ const KalshiVolDashboardView: React.FC = () => {
   const maxDailyLoss    = risk?.limits?.max_daily_loss_usd ?? 500;
   const maxNotional     = risk?.limits?.max_total_notional_usd ?? 10000;
   const drawdownHalt    = (risk?.limits?.drawdown_halt_pct ?? 0.15) * 100;
+  const healthDegraded  = (health?.status && health.status !== 'healthy') || false;
+  const rateLimitUsage  = (health?.rate_limits?.orders_this_minute ?? 0) / Math.max(1, (health?.rate_limits?.max_per_minute ?? 30));
+  const nearRateLimit   = rateLimitUsage >= 0.8;
+  const nearDrawdown    = drawdownPct >= drawdownHalt * 0.8;
+  const liveBlockReasons = useMemo(() => {
+    const reasons: string[] = [];
+    if (killActive || !canTrade) reasons.push('Kill switch active');
+    if (healthDegraded) reasons.push('Venue health degraded');
+    if (nearRateLimit) reasons.push('Rate limits near saturation');
+    if (nearDrawdown) reasons.push('Drawdown near halt threshold');
+    return reasons;
+  }, [canTrade, healthDegraded, killActive, nearDrawdown, nearRateLimit]);
+  const liveBlockReasonText = liveBlockReasons.join('; ');
+
+  useEffect(() => {
+    setLiveOverride(false);
+    setLiveBlockReason(liveBlockReasons.length ? liveBlockReasonText : null);
+  }, [liveBlockReasonText, liveBlockReasons.length]);
 
   // ── Mode toggle ───────────────────────────────────────────────────────────
   const handleModeToggle = async () => {
     const targetMode = isLive ? 'paper' : 'live';
     if (targetMode === 'live' && !liveEnabled) {
       setModeError('Live mode requires MERID_PM_LIVE_ENABLED=true in environment');
+      return;
+    }
+    if (targetMode === 'live' && liveBlockReasons.length > 0 && !liveOverride) {
+      const reason = liveBlockReasons.join('; ');
+      setModeError(`LIVE mode blocked: ${reason}`);
+      setLiveBlockReason(reason);
       return;
     }
     setModeToggling(true);
@@ -208,6 +235,9 @@ const KalshiVolDashboardView: React.FC = () => {
       } else {
         modeRes.refetch();
         healthRes.refetch();
+        if (targetMode === 'live' && liveOverride) {
+          logUxEvent('vol_dashboard_live_override', 'mode_toggle', { reasons: liveBlockReasons });
+        }
       }
     } catch {
       setModeError('Network error during mode switch');
@@ -248,7 +278,7 @@ const KalshiVolDashboardView: React.FC = () => {
             <button
               type="button"
               onClick={handleModeToggle}
-              disabled={modeToggling || !!killActive}
+              disabled={modeToggling || !!killActive || (!isLive && liveBlockReasons.length > 0 && !liveOverride)}
               title={
                 isLive ? 'Switch to Paper mode'
                 : liveEnabled ? 'Switch to Live mode'
@@ -267,6 +297,20 @@ const KalshiVolDashboardView: React.FC = () => {
             </button>
             {modeError && (
               <span className="text-[10px] text-red-400 max-w-[240px] text-right">{modeError}</span>
+            )}
+            {!isLive && liveBlockReason && (
+              <div className="flex items-center gap-2 text-[10px] text-amber-300 max-w-xs text-right">
+                <span>{liveBlockReason}</span>
+                <label className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={liveOverride}
+                    onChange={(e) => setLiveOverride(e.target.checked)}
+                    title="Acknowledge risk to override and allow LIVE toggle"
+                  />
+                  <span>Override</span>
+                </label>
+              </div>
             )}
           </div>
 

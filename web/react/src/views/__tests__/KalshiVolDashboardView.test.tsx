@@ -97,23 +97,21 @@ const MOCK_PNL_WITH_DATA = {
 
 function setupMocks(overrides: Record<string, unknown> = {}) {
   const refetch = jest.fn();
-  // The component calls useApiData 6 times in order:
-  //   0: health, 1: sizing, 2: risk, 3: grid, 4: alerts, 5: pnl
-  const get = (key: string, fallback: unknown) =>
-    key in overrides ? overrides[key] : fallback;
-  const responses = [
-    { data: get('health', MOCK_HEALTH), loading: false, refetch },
-    { data: get('sizing', MOCK_SIZING), loading: false, refetch },
-    { data: get('risk', MOCK_RISK), loading: false, refetch },
-    { data: get('grid', MOCK_GRID), loading: false, refetch },
-    { data: get('alerts', MOCK_ALERTS_EMPTY), loading: false, refetch },
-    { data: get('pnl', MOCK_PNL_EMPTY), loading: false, refetch },
-  ];
-  let callIndex = 0;
-  mockUseApiData.mockImplementation(() => {
-    const idx = callIndex % responses.length;
-    callIndex++;
-    return responses[idx];
+  const get = (key: string, fallback: unknown) => (key in overrides ? overrides[key] : fallback);
+  mockUseApiData.mockImplementation((endpoint: string) => {
+    if (endpoint.includes('/kalshi/health')) return { data: get('health', MOCK_HEALTH), loading: false, refetch };
+    if (endpoint.includes('/kalshi/sizing-metrics')) return { data: get('sizing', MOCK_SIZING), loading: false, refetch };
+    if (endpoint.includes('/kalshi/risk')) return { data: get('risk', MOCK_RISK), loading: false, refetch };
+    if (endpoint.includes('/kalshi-grid/status')) return { data: get('grid', MOCK_GRID), loading: false, refetch };
+    if (endpoint.includes('/kalshi/liquidity-alerts')) return { data: get('liqAlerts', MOCK_ALERTS_EMPTY), loading: false, refetch };
+    if (endpoint.includes('/kalshi/volume-alerts')) return { data: get('alerts', MOCK_ALERTS_EMPTY), loading: false, refetch };
+    if (endpoint.includes('/kalshi/volume-history')) return { data: get('pnl', MOCK_PNL_EMPTY), loading: false, refetch };
+    if (endpoint.includes('/kalshi/volume-changes')) return { data: get('changes', { changes: [] }), loading: false, refetch };
+    if (endpoint.includes('/kalshi/volume-anomalies')) return { data: get('anomalies', { anomalies: [] }), loading: false, refetch };
+    if (endpoint.includes('/kalshi-grid/mode') || endpoint.includes('/trade-mode')) return { data: get('mode', { mode: 'paper', is_live: false, live_enabled: true }), loading: false, refetch };
+    if (endpoint.includes('/kalshi-grid/consensus')) return { data: get('consensus', { signals: [], consensus_rate: 0, engine_running: true }), loading: false, refetch };
+    if (endpoint.includes('kill-switch-status')) return { data: get('kill', { active: false, can_trade: true, kill_reason: null }), loading: false, refetch };
+    return { data: null, loading: false, refetch };
   });
   return refetch;
 }
@@ -147,6 +145,16 @@ describe('KalshiVolDashboardView', () => {
       const btn = screen.getByText('Refresh');
       fireEvent.click(btn);
       expect(refetch).toHaveBeenCalled();
+    });
+
+    it('blocks LIVE toggle when venue health is degraded until override is checked', () => {
+      setupMocks({ health: { ...MOCK_HEALTH, status: 'degraded' } });
+      render(<KalshiVolDashboardView />);
+      const toggleBtn = screen.getByRole('button', { name: /PAPER — click for Live/i });
+      expect(toggleBtn).toBeDisabled();
+      const override = screen.getByLabelText(/Override/i);
+      fireEvent.click(override);
+      expect(screen.getByRole('button', { name: /PAPER — click for Live/i })).not.toBeDisabled();
     });
   });
 
