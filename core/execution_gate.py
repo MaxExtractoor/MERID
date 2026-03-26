@@ -35,6 +35,7 @@ REMEDIATION_HINTS: dict[str, str] = {
     "reconciliation": "Wait for the next reconciliation cycle or trigger a manual run from System settings.",
     "price_feed": "Check venue connectivity and data source health in Venue Health Grid.",
     "pnl_consistency": "Inspect PnL sources in the Consistency widget; look for missed fills or stale equity data.",
+    "dependency_health": "Check /api/v1/dependencies/health for detailed subsystem status. Verify Kalshi WebSocket connection and market catalog are healthy.",
 }
 
 
@@ -205,6 +206,22 @@ def check_execution_gate() -> ExecutionGateStatus:
             ))
     except Exception as exc:
         logger.debug("PnL consistency check failed: %s", exc)
+
+    # ── 5. Dependency health (WebSocket, catalog) ───────────────────
+    try:
+        from merid.monitoring.dependency_health import is_trading_ready
+        ready, dep_issues = is_trading_ready()
+        if not ready:
+            for issue in dep_issues:
+                reasons.append(BlockReason(
+                    source="dependency_health",
+                    severity="critical",
+                    message=issue,
+                    details="Critical subsystems must be healthy before trading",
+                    hint="Check /api/v1/dependencies/health endpoint for detailed status",
+                ))
+    except Exception as exc:
+        logger.debug("Dependency health check failed: %s", exc)
 
     has_critical = any(r.severity == "critical" for r in reasons)
     has_warning = any(r.severity == "warning" for r in reasons)

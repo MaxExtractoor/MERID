@@ -164,6 +164,7 @@ class Settings(BaseSettings):
     # PREDICTION MARKET SETTINGS (Kalshi-first)
     # =============================================================================
     KALSHI_ONLY: bool = Field(default=True, description="Kalshi-only mode: restricts UI/API to 8 canonical Kalshi views")
+    KALSHI_ENV: str = Field(default="demo", description="Kalshi environment: demo or prod")
     MERID_PM_TRADING_MODE: str = Field(default="paper", description="Prediction market mode: paper/live (set MERID_PM_LIVE_ENABLED=true to unlock live)")
     MERID_PM_LIVE_ENABLED: bool = Field(default=False, description="Explicit unlock for live PM trading — must be true for MERID_PM_TRADING_MODE=live to take effect")
     MERID_PM_MAX_NOTIONAL_PER_MARKET: float = Field(default=500.0, description="Max notional per PM market (USD)")
@@ -376,13 +377,23 @@ class Settings(BaseSettings):
     def validate_venue_credentials(self, venue: str) -> list[str]:
         """Validate credentials for a specific venue."""
         issues = []
-        
+
         if venue.lower() == "kalshi":
             if not self.KALSHI_API_KEY_ID:
                 issues.append("KALSHI_API_KEY_ID is required for Kalshi")
             if not self.KALSHI_PRIVATE_KEY_PATH and not self.KALSHI_PRIVATE_KEY_PEM:
                 issues.append("KALSHI_PRIVATE_KEY_PATH or KALSHI_PRIVATE_KEY_PEM is required")
-        
+
+            # Validate KALSHI_ENV
+            if self.KALSHI_ENV not in ("demo", "prod"):
+                issues.append(f"KALSHI_ENV must be 'demo' or 'prod', got: {self.KALSHI_ENV}")
+
+            # Ensure KALSHI_USE_DEMO aligns with KALSHI_ENV
+            if self.KALSHI_ENV == "prod" and self.KALSHI_USE_DEMO:
+                issues.append("KALSHI_ENV=prod but KALSHI_USE_DEMO=true - inconsistent configuration")
+            if self.KALSHI_ENV == "demo" and not self.KALSHI_USE_DEMO:
+                issues.append("KALSHI_ENV=demo but KALSHI_USE_DEMO=false - inconsistent configuration")
+
         elif venue.lower() == "polymarket":
             if not self.POLYMARKET_API_KEY:
                 issues.append("POLYMARKET_API_KEY is required for Polymarket")
@@ -406,7 +417,7 @@ class Settings(BaseSettings):
     def validate_for_go_live(self, venues: list[str] = None) -> dict:
         """
         Comprehensive validation for going live.
-        
+
         Returns dict with:
             - ready: bool - True if all checks pass
             - issues: list[str] - List of issues found
@@ -415,18 +426,27 @@ class Settings(BaseSettings):
         venues = venues or ["kalshi", "alpaca", "coinbase_advanced"]
         issues = []
         warnings = []
-        
+
         # Check trading mode
         issues.extend(self.validate_trading_mode())
-        
+
         # Check venue credentials
         for venue in venues:
             issues.extend(self.validate_venue_credentials(venue))
-        
+
         # Check production requirements
         if self.is_production:
             issues.extend(self.validate_required_for_production())
-        
+
+        # Check dependency health
+        try:
+            from merid.monitoring.dependency_health import is_trading_ready
+            ready, dep_issues = is_trading_ready()
+            if not ready:
+                issues.extend(dep_issues)
+        except Exception as exc:
+            warnings.append(f"Could not check dependency health: {exc}")
+
         # Warnings for recommended settings
         if self.MERID_MAX_ORDER_SIZE_USD > 1000:
             warnings.append(f"MERID_MAX_ORDER_SIZE_USD is high ({self.MERID_MAX_ORDER_SIZE_USD})")
@@ -434,7 +454,7 @@ class Settings(BaseSettings):
             warnings.append(f"MERID_MAX_DAILY_LOSS_USD is high ({self.MERID_MAX_DAILY_LOSS_USD})")
         if not self.MERID_REQUIRE_CONFIRMATION and self.is_live_trading:
             warnings.append("MERID_REQUIRE_CONFIRMATION is disabled for live trading")
-        
+
         return {
             "ready": len(issues) == 0,
             "issues": issues,
