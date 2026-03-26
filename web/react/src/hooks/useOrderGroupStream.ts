@@ -102,6 +102,7 @@ export function useOrderGroupStream(
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isManualDisconnectRef = useRef(false);
+  const unsupportedNotifiedRef = useRef(false);
 
   // Build SSE URL with optional group filter
   const buildUrl = useCallback(() => {
@@ -123,7 +124,18 @@ export function useOrderGroupStream(
 
   // Connect to SSE endpoint
   const connect = useCallback(() => {
-    if (eventSourceRef.current?.readyState === EventSource.OPEN) {
+    const hasEventSource = typeof window !== 'undefined' && typeof window.EventSource !== 'undefined';
+    if (!hasEventSource) {
+      if (!unsupportedNotifiedRef.current) {
+        unsupportedNotifiedRef.current = true;
+        const envErr = new Error('EventSource not supported in this environment');
+        setError(envErr);
+        onError?.(envErr);
+      }
+      return;
+    }
+
+    if (eventSourceRef.current?.readyState === window.EventSource.OPEN) {
       return; // Already connected
     }
 
@@ -137,7 +149,7 @@ export function useOrderGroupStream(
     setError(null);
 
     const url = buildUrl();
-    const es = new EventSource(url);
+    const es = new window.EventSource(url);
     eventSourceRef.current = es;
 
     es.onopen = () => {
@@ -249,9 +261,8 @@ export function useOrderGroupStream(
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
+      setIsConnected(false);
     }
-
-    setIsConnected(false);
   }, []);
 
   // Auto-connect on mount
