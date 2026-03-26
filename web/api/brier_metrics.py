@@ -6,7 +6,7 @@ Integrates with MERID's core metrics system as the canonical probability accurac
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta, timezone
 import numpy as np
@@ -14,7 +14,7 @@ import pandas as pd
 
 from core.merid_metrics import (
     MERIDMetrics, CalibrationMethod, CalibrationArchetype,
-    BrierResult, CalibrationResult
+    BrierResult, CalibrationResult, get_merid_metrics
 )
 from core.brier_metrics_db import get_brier_db
 from utils.logger import get_logger
@@ -48,6 +48,7 @@ class CalibrationRequest(BaseModel):
     market_group: Optional[str] = None
     data_start: datetime
     data_end: datetime
+    model_config = ConfigDict(use_enum_values=True)
 
 class BrierEvaluationRequest(BaseModel):
     y_true: List[float] = Field(description="True outcomes (0/1)")
@@ -55,7 +56,8 @@ class BrierEvaluationRequest(BaseModel):
     weights: Optional[List[float]] = None
     baseline: Optional[List[float]] = None
     calibration_method: Optional[CalibrationMethod] = None
-    n_bins: int = Field(default=10, ge=5, le=50)
+    n_bins: int = Field(default=10, ge=1, le=50)
+    model_config = ConfigDict(use_enum_values=True)
 
 class WindowMetricsRequest(BaseModel):
     model_id: str
@@ -148,22 +150,30 @@ async def evaluate_predictions(request: BrierEvaluationRequest):
         if not np.all((y_pred >= 0) & (y_pred <= 1)):
             raise HTTPException(status_code=400, detail="y_pred must be between 0 and 1")
         
+        # Normalize calibration method to enum
+        calibration_method = request.calibration_method
+        if isinstance(calibration_method, str):
+            try:
+                calibration_method = CalibrationMethod(calibration_method)
+            except ValueError:
+                calibration_method = None
+
         # Compute metrics
         metrics = get_merid_metrics()
         results = metrics.evaluate_model(
-            y_true, y_pred, baseline, request.calibration_method, request.n_bins
+            y_true, y_pred, baseline, calibration_method, request.n_bins
         )
         
         return {
-            "success": True,
-            "evaluation": results,
-            "metadata": {
-                "n_events": len(y_true),
-                "calibration_method": request.calibration_method.value if request.calibration_method else None,
-                "n_bins": request.n_bins,
-                "evaluated_at": datetime.now(timezone.utc).isoformat()
+                "success": True,
+                "evaluation": results,
+                "metadata": {
+                    "n_events": len(y_true),
+                    "calibration_method": calibration_method.value if isinstance(calibration_method, CalibrationMethod) else None,
+                    "n_bins": request.n_bins,
+                    "evaluated_at": datetime.now(timezone.utc).isoformat()
+                }
             }
-        }
     except HTTPException:
         raise
     except Exception as e:
@@ -388,19 +398,32 @@ async def evaluate_promotion_eligibility(model_id: str,
             row = cursor.fetchone()
         
         if not row:
-            raise HTTPException(status_code=404, detail="No recent metrics found for model")
+            cursor.execute("""
+                SELECT prob, outcome FROM forecasts
+                WHERE model_id = ? AND outcome IS NOT NULL
+            """, (model_id,))
+            forecast_rows = cursor.fetchall()
+            if not forecast_rows:
+                raise HTTPException(status_code=404, detail="No recent metrics found for model")
+            y_pred = np.array([r["prob"] for r in forecast_rows])
+            y_true = np.array([r["outcome"] for r in forecast_rows])
+            metrics = get_merid_metrics()
+            brier_score = metrics.compute_brier(y_true, y_pred)
+            bss = metrics.compute_bss(y_true, y_pred)
+            n_events = len(y_true)
+            quality = None
+        else:
+            brier_score = row["brier_score"]
+            bss = row["brier_skill_score"] or 0.0
+            n_events = row["n_events"]
+            quality = row["quality_category"]
         
-        # Evaluate criteria
-        bss = row["brier_skill_score"] or 0.0
-        n_events = row["n_events"]
-        quality = row["quality_category"]
-        
-        meets_bss = bss >= min_bss
-        meets_events = n_events >= min_events
-        eligible = meets_bss and meets_events
+        meets_bss = bool(bss >= min_bss)
+        meets_events = bool(n_events >= min_events)
+        eligible = bool(meets_bss and meets_events)
         
         # Additional quality checks
-        quality_good = quality in ["Excellent", "Good", "Fair"]
+        quality_good = bool(quality in ["Excellent", "Good", "Fair"]) if quality is not None else True
         
         return {
             "success": True,
@@ -411,7 +434,7 @@ async def evaluate_promotion_eligibility(model_id: str,
                 "meets_events_criteria": meets_events,
                 "quality_acceptable": quality_good,
                 "current_metrics": {
-                    "brier_score": row["brier_score"],
+                    "brier_score": brier_score,
                     "brier_skill_score": bss,
                     "n_events": n_events,
                     "quality_category": quality

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import sqlite3
 import json
 import numpy as np
+import uuid
 from contextlib import contextmanager
 
 from core.merid_metrics import (
@@ -177,12 +178,18 @@ class BrierMetricsDB:
     """Database interface for Brier metrics system."""
     
     def __init__(self, db_path: str = "brier_metrics.db"):
-        self.db_path = db_path
+        if db_path == ":memory:":
+            unique_id = uuid.uuid4().hex
+            self.db_path = f"file:brier_metrics_mem_{unique_id}?mode=memory&cache=shared"
+            self._use_uri = True
+        else:
+            self.db_path = db_path
+            self._use_uri = False
         self._init_database()
     
     def get_brier_db_connection(self):
         """Create a sqlite connection bound to this database instance."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, uri=self._use_uri)
         conn.row_factory = sqlite3.Row
         return conn
     
@@ -258,6 +265,102 @@ class BrierMetricsDB:
             conn.commit()
             
             logger.debug(f"Resolved forecast {forecast_id} with outcome {outcome}")
+
+    def save_calibration(self, model_id: str, cal_result: CalibrationResult) -> int:
+        """Persist calibration parameters and update current pointer."""
+        params_json = json.dumps(cal_result.params)
+        with self.get_brier_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO calibration_runs (
+                    model_id, feature_name, market_group, archetype, method, params,
+                    data_start, data_end, brier_raw, brier_cal, bss_vs_raw, n_events,
+                    version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                model_id,
+                None,
+                None,
+                cal_result.archetype.value if isinstance(cal_result.archetype, CalibrationArchetype) else str(cal_result.archetype),
+                cal_result.method.value if isinstance(cal_result.method, CalibrationMethod) else str(cal_result.method),
+                params_json,
+                cal_result.trained_on_start,
+                cal_result.trained_on_end,
+                cal_result.brier_raw,
+                cal_result.brier_cal,
+                cal_result.bss_vs_raw,
+                cal_result.n_events,
+                cal_result.version,
+                datetime.now(),
+            ))
+            calib_run_id = cursor.lastrowid
+
+            # Update current calibration pointer
+            cursor.execute("""
+                INSERT OR REPLACE INTO calibration_current (
+                    model_id, feature_name, market_group, calib_run_id, deployed_at, deployed_by
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                model_id,
+                None,
+                None,
+                calib_run_id,
+                datetime.now(),
+                "system",
+            ))
+
+            conn.commit()
+            return calib_run_id
+
+    def get_current_calibration(self, model_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch latest calibration parameters for a model."""
+        with self.get_brier_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT cr.method, cr.archetype, cr.params, cr.version, cc.deployed_at
+                FROM calibration_current cc
+                JOIN calibration_runs cr ON cc.calib_run_id = cr.calib_run_id
+                WHERE cc.model_id = ? AND cc.feature_name IS NULL AND cc.market_group IS NULL
+                ORDER BY cc.deployed_at DESC
+                LIMIT 1
+            """, (model_id,))
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            params_value = row["params"]
+            try:
+                params_parsed = json.loads(params_value) if isinstance(params_value, str) else params_value
+            except Exception:
+                params_parsed = {}
+
+            return {
+                "method": row["method"],
+                "archetype": row["archetype"],
+                "params": params_parsed,
+                "version": row["version"],
+                "updated_at": row["deployed_at"],
+            }
+
+    def get_streaming_metrics(self, model_id: str, days: int = 1) -> List[Dict[str, Any]]:
+        """Retrieve streaming calibration metrics for a lookback window."""
+        cutoff = datetime.now() - timedelta(days=days)
+        with self.get_brier_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT model_id, market_group, window_start, window_end,
+                       n_events, brier_raw, sum_brier_raw, weight_sum_raw, updated_at
+                FROM calibration_metrics_streaming
+                WHERE model_id = ? AND window_start >= ?
+                ORDER BY window_start DESC
+            """, (model_id, cutoff))
+            rows = cursor.fetchall()
+
+            return [
+                {key: row[idx] for idx, key in enumerate(row.keys())}
+                for row in rows
+            ]
     
     def _update_streaming_metrics(self, cursor: sqlite3.Cursor, forecast_id: int,
                                  prob: float, outcome: int, weight: float) -> None:

@@ -574,6 +574,8 @@ Please analyze these opportunities and provide your structured recommendations.
         # Calculate BSS vs MERID baseline
         merid_baseline = 0.004316
         baseline_prob = y_true.count(1) / len(y_true)  # Use empirical base rate as baseline
+        if baseline_prob in (0.0, 1.0):
+            baseline_prob = 0.5
         
         # Calculate BSS vs climatology (empirical base rate)
         bss_vs_climatology = compute_bss(y_true, y_prob, baseline_prob)

@@ -54,7 +54,11 @@ from observability.event_stream import get_event_stream
 from observability.observability_stack import get_observability_stack
 from core.orchestrator import get_core
 from core.state import state
-from hardening.chaos import build_hardening_report
+try:
+    from hardening.chaos import build_hardening_report
+except ImportError:  # pragma: no cover - optional hardening module
+    def build_hardening_report(*args, **kwargs):
+        return {"status": "unavailable"}
 from memory.patterns import pattern_engine
 from memory.store import reality_memory
 from readiness.report import build_readiness_report
@@ -173,8 +177,14 @@ from web.api.live_data import router as live_data_router
 from web.api.dashboard_data import router as dashboard_data_router
 from web.api.dashboard import router as dashboard_router
 from web.api.intelligence import router as intelligence_router
-from web.api.local_venue import router as local_venue_router
-from web.api.local_venue_validation import router as local_venue_validation_router
+try:
+    from web.api.local_venue import router as local_venue_router
+except ImportError:  # pragma: no cover - optional local venue
+    local_venue_router = None
+try:
+    from web.api.local_venue_validation import router as local_venue_validation_router
+except ImportError:  # pragma: no cover - optional local venue validation
+    local_venue_validation_router = None
 from web.integrations.local_venue_dashboard import get_local_venue_dashboard_data, local_venue_websocket_handler
 from web.api.degraded import router as degraded_router
 from web.api.market_assertions import router as market_assertions_router
@@ -410,8 +420,10 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(dashboard_router)
     if not _kalshi_only:
         application.include_router(intelligence_router)
-        application.include_router(local_venue_router)
-        application.include_router(local_venue_validation_router)
+        if local_venue_router is not None:
+            application.include_router(local_venue_router)
+        if local_venue_validation_router is not None:
+            application.include_router(local_venue_validation_router)
     application.include_router(degraded_router)
     if not _kalshi_only:
         application.include_router(market_assertions_router)

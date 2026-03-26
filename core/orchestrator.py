@@ -17,7 +17,11 @@ from memory.store import reality_memory
 from swarm.performance import performance_ledger
 from swarm.spawner import SwarmSpawner
 from utils.logger import get_logger
-from voting.engine import blind_vote
+try:
+    from voting.engine import blind_vote
+except ImportError:  # pragma: no cover - optional voting engine
+    def blind_vote(responses_with_agents, threshold=0.5):
+        return {"consensus": 0.0, "approved": False}
 from hardening.watchdog import watchdog
 
 

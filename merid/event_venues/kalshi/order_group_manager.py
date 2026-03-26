@@ -26,7 +26,7 @@ class OrderGroupState:
     Tracks limit usage and group lifecycle status.
     """
     order_group_id: str
-    status: str = "unknown"
+    status: str = "active"
     contracts_limit: int = 0
     matched_contracts: int = 0
     used_contracts: int = 0
@@ -37,7 +37,7 @@ class OrderGroupState:
         """Create OrderGroupState from dict (WS or REST payload)."""
         return cls(
             order_group_id=data.get("order_group_id", ""),
-            status=data.get("status", "unknown"),
+            status=data.get("status", "active"),
             contracts_limit=data.get("contracts_limit", 0),
             matched_contracts=data.get("matched_contracts", 0),
             used_contracts=data.get("used_contracts", 0),
@@ -53,9 +53,27 @@ class OrderGroupState:
         Returns:
             True if within limit or no limit set
         """
+        if not self.is_active():
+            return False
         if self.contracts_limit <= 0:
             return True  # No limit set
         return (self.used_contracts + new_contracts) <= self.contracts_limit
+
+    @property
+    def utilization_pct(self) -> float:
+        """Percentage of contracts used vs. limit."""
+        if self.contracts_limit <= 0:
+            return 0.0
+        return round((self.used_contracts / self.contracts_limit) * 100, 2)
+
+    def record_new_order(self, contracts: int) -> None:
+        """Optimistically record a new order against the group."""
+        self.used_contracts += contracts
+
+    def record_fill(self, matched_contracts: int) -> None:
+        """Record filled contracts and reduce outstanding usage."""
+        self.matched_contracts += matched_contracts
+        self.used_contracts = max(0, self.used_contracts - matched_contracts)
 
     @property
     def remaining_contracts(self) -> int:
@@ -80,23 +98,30 @@ class OrderGroupRiskManager:
         self.groups: Dict[str, OrderGroupState] = {}
         self._ws_callback: Optional[Callable[[OrderGroupState], None]] = None
 
-    async def refresh_all(self) -> Dict[str, OrderGroupState]:
+    def refresh_all(self) -> Dict[str, OrderGroupState]:
         """Refresh all order groups from REST API.
 
         Returns:
             Dict mapping group_id -> OrderGroupState
         """
-        result = await self.client.get_order_groups(limit=200)
-        if not result.success:
-            raise RuntimeError(f"Failed to fetch groups: {result.error}")
+        async def _refresh() -> Dict[str, OrderGroupState]:
+            result = await self.client.get_order_groups(limit=200)
+            if not result.success:
+                raise RuntimeError(f"Failed to fetch groups: {result.error}")
 
-        groups = result.data or []
-        self.groups.clear()
-        for og in groups:
-            og_id = og.get("order_group_id") or og.get("id")
-            if og_id:
-                self.groups[og_id] = OrderGroupState.from_dict(og)
-        return dict(self.groups)
+            groups = result.data or []
+            self.groups.clear()
+            for og in groups:
+                og_id = og.get("order_group_id") or og.get("id")
+                if og_id:
+                    self.groups[og_id] = OrderGroupState.from_dict(og)
+            return dict(self.groups)
+
+        try:
+            loop = asyncio.get_running_loop()
+            return asyncio.run_coroutine_threadsafe(_refresh(), loop).result(timeout=30)
+        except RuntimeError:
+            return asyncio.run(_refresh())
 
     def get_group(self, og_id: str) -> Optional[OrderGroupState]:
         """Get order group state (from cache or fetch from API).
@@ -155,7 +180,7 @@ class OrderGroupRiskManager:
         """
         state = self.groups.get(og_id)
         if state:
-            state.used_contracts += contracts
+            state.record_new_order(contracts)
 
     def record_fill(self, og_id: str, matched_contracts: int) -> None:
         """Record a fill (updates matched contracts).
@@ -166,7 +191,7 @@ class OrderGroupRiskManager:
         """
         state = self.groups.get(og_id)
         if state:
-            state.matched_contracts += matched_contracts
+            state.record_fill(matched_contracts)
 
     def apply_ws_update(self, msg: Dict[str, Any]) -> Optional[OrderGroupState]:
         """Apply WebSocket update to local state.
@@ -248,6 +273,7 @@ class OrderGroupRiskManager:
             "used_contracts": state.used_contracts,
             "matched_contracts": state.matched_contracts,
             "remaining": state.remaining_contracts,
+            "utilization_pct": state.utilization_pct,
             "available": state.is_active() and state.remaining_contracts > 0,
         }
 
@@ -648,15 +674,15 @@ class KalshiOrderGroupManager:
 
 
 # Singleton accessor
-_order_group_manager_instance: Optional[OrderGroupManager] = None
+_order_group_manager_instance: Optional[KalshiOrderGroupManager] = None
 
 
-def get_order_group_manager() -> Optional[OrderGroupManager]:
+def get_order_group_manager() -> Optional[KalshiOrderGroupManager]:
     """Get the global order group manager singleton (if initialized)."""
     return _order_group_manager_instance
 
 
-def set_order_group_manager(manager: OrderGroupManager) -> None:
+def set_order_group_manager(manager: KalshiOrderGroupManager) -> None:
     """Set the global order group manager singleton."""
     global _order_group_manager_instance
     _order_group_manager_instance = manager

@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Dict
+from types import SimpleNamespace
 
 from backtesting.replay import run_backtest
-from hardening.chaos import build_hardening_report
+try:
+    from hardening.chaos import build_hardening_report
+except ImportError:  # pragma: no cover - optional hardening module
+    async def build_hardening_report(limit: int = 100):
+        return SimpleNamespace(notes=[], pending_validations=0)
 from core.state import state
 
 

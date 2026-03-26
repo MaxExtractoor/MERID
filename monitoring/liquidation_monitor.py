@@ -24,6 +24,19 @@ class LiquidationEvent:
     raw: Dict[str, Any]
 
 
+@dataclass
+class WhaleSignal:
+    """Whale transfer or position signal."""
+    address: str
+    amount: float
+    token: str
+    action: str
+    exchange: str
+    confidence: float
+    timestamp: float
+    metadata: Dict[str, Any]
+
+
 class CoinGlassLiquidationMonitor:
     """Fetch liquidation heatmap snapshots via CoinGlass public API."""
 

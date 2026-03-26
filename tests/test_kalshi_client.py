@@ -401,7 +401,7 @@ class TestSubaccountOperations:
         assert result.data["5"]["event_exposure"] == Decimal("1000")
 
 
-classTestSingleton:
+class TestSingleton:
     """Tests for singleton pattern."""
 
     def test_get_kalshi_client_returns_same_instance(self):
