@@ -1091,6 +1091,25 @@ graph TD
 
 ---
 
+## Live-Load Testing — Kalshi WebSocket Ingestion & Trading
+
+- **Rate-limit window size (subscription burst control)**
+  - **Issue:** Self-imposed cap `max_ws_subscriptions_per_second=5` may be below Kalshi's documented window; with batching, the 20-strike BTC ladder now needs only three messages (quotes, trades, batched orderbook).
+  - **Impact:** Overly conservative window slows resubscription after disconnects and delays market recovery despite staying under Kalshi limits.
+  - **Mitigation:** Verify current Kalshi WebSocket subscription limits in live docs and raise `max_ws_subscriptions_per_second` accordingly; keep batch strategy to minimize reconnect bursts.
+
+- **Executor saturation during reconnect storms**
+  - **Issue:** `run_in_executor(None, _sign)` uses the process-wide default `ThreadPoolExecutor`; simultaneous reconnects can exhaust the shared pool during signature generation.
+  - **Impact:** Signing backlog throttles subscribe/auth messages, delaying resubscription and order dispatch while the event loop is idle.
+  - **Mitigation:** Route signing through a dedicated single-thread (or bounded) executor and monitor queue depth/latency; fall back to synchronous signing if the pool is exhausted.
+
+- **Optimistic orderbook subscription state**
+  - **Issue:** `_active_ob_subs` marks markets active when a subscribe message is sent rather than when Kalshi acks with `{"type": "subscribed"}`.
+  - **Impact:** On flaky links, `get_subscription_health()` can report healthy while the server never registered the subscription, leading to silent gaps in orderbooks/trades until the next poll or manual resubscribe.
+  - **Mitigation:** Track and reconcile subscription acks against requested topics, marking entries pending until acked; alert or auto-resubscribe when acks are missing or late; expose ack-based health metrics.
+
+---
+
 ## Remediation Roadmap
 
 ### Sprint 1 (Week 1-2): Critical P0 Fixes
