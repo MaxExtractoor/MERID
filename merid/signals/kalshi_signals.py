@@ -98,7 +98,9 @@ class MarketEdgeSignal:
     source: str = "kalshi_edge"        # kalshi_edge, edge_model, synthetic
     
     def __post_init__(self):
-        """Generate signal_id if not provided."""
+        """Generate signal_id if not provided; coerce enum fields to their string values."""
+        if isinstance(self.signal_type, KalshiSignalType):
+            self.signal_type = self.signal_type.value
         if not self.signal_id:
             self.signal_id = f"edge-{self.ticker}-{int(self.timestamp)}"
     
@@ -163,6 +165,10 @@ class LiquiditySignal:
     timestamp: float = field(default_factory=time.time)
     
     def __post_init__(self):
+        if isinstance(self.signal_type, KalshiSignalType):
+            self.signal_type = self.signal_type.value
+        if isinstance(self.severity, LiquiditySeverity):
+            self.severity = self.severity.value
         if not self.signal_id:
             self.signal_id = f"liq-{self.ticker}-{int(self.timestamp)}"
     
@@ -213,6 +219,8 @@ class VolumeAnomalySignal:
     timestamp: float = field(default_factory=time.time)
     
     def __post_init__(self):
+        if isinstance(self.signal_type, KalshiSignalType):
+            self.signal_type = self.signal_type.value
         if not self.signal_id:
             self.signal_id = f"vol-{self.ticker}-{int(self.timestamp)}"
     
@@ -266,6 +274,10 @@ class KalshiRiskSignal:
     timestamp: float = field(default_factory=time.time)
     
     def __post_init__(self):
+        if isinstance(self.signal_type, KalshiSignalType):
+            self.signal_type = self.signal_type.value
+        if isinstance(self.category, RiskEventCategory):
+            self.category = self.category.value
         if not self.signal_id:
             self.signal_id = f"risk-{self.category}-{int(self.timestamp)}"
     
@@ -291,6 +303,28 @@ class KalshiRiskSignal:
             data["daily_loss_usd"] = round(self.daily_loss_usd, 2)
         
         return data
+
+
+# ── Factory helpers ───────────────────────────────────────────────────
+
+def make_market_edge_signal(**kwargs) -> MarketEdgeSignal:
+    """Factory for MarketEdgeSignal — accepts all documented field names."""
+    return MarketEdgeSignal(**kwargs)
+
+
+def make_liquidity_signal(**kwargs) -> LiquiditySignal:
+    """Factory for LiquiditySignal — accepts all documented field names."""
+    return LiquiditySignal(**kwargs)
+
+
+def make_volume_anomaly_signal(**kwargs) -> VolumeAnomalySignal:
+    """Factory for VolumeAnomalySignal — accepts all documented field names."""
+    return VolumeAnomalySignal(**kwargs)
+
+
+def make_kalshi_risk_signal(**kwargs) -> KalshiRiskSignal:
+    """Factory for KalshiRiskSignal — accepts all documented field names."""
+    return KalshiRiskSignal(**kwargs)
 
 
 # ── Signal Generator ──────────────────────────────────────────────────────
