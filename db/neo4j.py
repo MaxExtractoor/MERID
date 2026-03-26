@@ -1,14 +1,25 @@
-from neo4j import GraphDatabase
-from core.env import capabilities
+try:
+    from neo4j import GraphDatabase as _GraphDatabase
+    _NEO4J_AVAILABLE = True
+except ImportError:
+    _GraphDatabase = None  # type: ignore[assignment,misc]
+    _NEO4J_AVAILABLE = False
+
+import os
 import uuid
 from datetime import datetime
 
 
 class Neo4jMemory:
     def __init__(self):
-        self.driver = GraphDatabase.driver(
-            capabilities.neo4j_uri,
-            auth=(capabilities.neo4j_user, capabilities.neo4j_password)
+        if not _NEO4J_AVAILABLE or _GraphDatabase is None:
+            raise RuntimeError("neo4j driver not installed; install 'neo4j' to enable graph memory")
+        self.driver = _GraphDatabase.driver(
+            os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+            auth=(
+                os.getenv("NEO4J_USER", "neo4j"),
+                os.getenv("NEO4J_PASSWORD", ""),
+            ),
         )
         self._create_constraints()
 

@@ -6,7 +6,13 @@ import os
 from functools import lru_cache
 from typing import Dict
 
-from alpaca_trade_api import REST
+try:  # alpaca_trade_api is optional for test environments
+    from alpaca_trade_api import REST
+    _ALPACA_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised when dependency missing
+    REST = None  # type: ignore[assignment,misc]
+    _ALPACA_AVAILABLE = False
+
 from utils.logger import get_logger
 
 logger = get_logger("trading.integrations.alpaca")
