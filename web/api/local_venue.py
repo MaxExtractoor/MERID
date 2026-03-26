@@ -16,7 +16,26 @@ from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from pydantic import BaseModel, Field
 
-from execution.simulator import get_execution_simulator
+try:
+    from execution.simulator import get_execution_simulator
+except ImportError:  # pragma: no cover - optional simulator
+    class _DummySimulator:
+        def __init__(self):
+            self._running = False
+            self._order_queue = []
+            self._message_count = 0
+            self._start_time = time.time()
+
+        async def start(self):
+            self._running = True
+
+        async def stop(self):
+            self._running = False
+
+    _dummy_simulator = _DummySimulator()
+
+    def get_execution_simulator():
+        return _dummy_simulator
 from execution.persistent_book import get_persistent_book_manager
 from execution.book_builder import get_book_builder
 from data.feed_handlers import get_feed_handler_manager

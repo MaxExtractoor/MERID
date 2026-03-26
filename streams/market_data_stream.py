@@ -5,15 +5,27 @@ Concrete implementation of BaseStream for real-time market data ingestion.
 Supports WebSocket and HTTP polling sources with health monitoring and metrics.
 """
 
+from __future__ import annotations
+
 import asyncio
 import time
 import json
 import logging
-from typing import Dict, List, Optional, Any, AsyncIterator
+from typing import Dict, List, Optional, Any, AsyncIterator, AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
 from collections import deque
+
+try:
+    import aiohttp
+except ImportError:  # pragma: no cover - optional dependency for mock streams
+    aiohttp = None
+
+try:
+    import websockets
+except ImportError:  # pragma: no cover - optional dependency for mock streams
+    websockets = None
 
 from streams.base_stream import BaseStream, StreamState
 from core.events import EventEnvelope, EventType, EventPriority

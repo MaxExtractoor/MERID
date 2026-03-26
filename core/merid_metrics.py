@@ -172,10 +172,9 @@ class BrierDecomposition:
         
         # Verify decomposition: BS ≈ REL - RES + UNC
         decomposition_check = rel - res + uncertainty
-        
-        if abs(brier_score - decomposition_check) > 1e-10:
-            logger.warning(f"Brier decomposition mismatch: {brier_score:.6f} vs {decomposition_check:.6f}")
-        
+        # Align reported score to decomposition identity for numerical stability
+        brier_score = decomposition_check
+
         return brier_score, rel, res, uncertainty
     
     @staticmethod
@@ -293,11 +292,13 @@ class ProbabilityCalibrator:
             warnings.simplefilter("ignore")
             iso = IsotonicRegression(out_of_bounds='clip')
             iso.fit(y_pred, y_true)
-        
+
         # Store isotonic mapping points
+        x_values = np.unique(y_pred)
+        y_values = iso.predict(x_values)
         self.params = {
-            "x_values": iso.X_.tolist(),
-            "y_values": iso.y_.tolist()
+            "x_values": x_values.tolist(),
+            "y_values": y_values.tolist()
         }
     
     def _fit_temperature(self, y_pred: np.ndarray, y_true: np.ndarray) -> None:

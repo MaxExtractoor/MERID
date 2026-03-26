@@ -16,6 +16,8 @@ OLLAMA_GENERATE_ENDPOINT = os.getenv("OLLAMA_GENERATE_ENDPOINT", "/api/generate"
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search")
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 
+AGENT_LLM_MODE = os.getenv("AGENT_LLM_MODE", os.getenv("MERID_AGENT_LLM_MODE", "mock"))
+
 WEB_CONCURRENCY = int(os.getenv("MERID_WEB_CONCURRENCY", "4"))
 CONSENSUS_THRESHOLD = float(os.getenv("MERID_CONSENSUS_THRESHOLD", "0.65"))
 TRUTH_MIN_CONFIDENCE = float(os.getenv("MERID_TRUTH_MIN_CONFIDENCE", "0.55"))
@@ -35,6 +37,7 @@ __all__ = [
     "OLLAMA_GENERATE_ENDPOINT",
     "SEARXNG_URL",
     "REDIS_URL",
+    "AGENT_LLM_MODE",
     "WEB_CONCURRENCY",
     "CONSENSUS_THRESHOLD",
     "TRUTH_MIN_CONFIDENCE",

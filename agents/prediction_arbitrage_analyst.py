@@ -146,6 +146,7 @@ class ArbitrageOpportunitySummary:
     total_liquidity: float
     risk_note: str
     forecast_probability: float  # Agent's confidence this will be profitable
+    market_id: str = ""  # Optional market identifier for outcome lookups
 
 @dataclass
 class BucketAnalysis:
@@ -574,6 +575,8 @@ Please analyze these opportunities and provide your structured recommendations.
         # Calculate BSS vs MERID baseline
         merid_baseline = 0.004316
         baseline_prob = y_true.count(1) / len(y_true)  # Use empirical base rate as baseline
+        if baseline_prob in (0.0, 1.0):
+            baseline_prob = 0.5
         
         # Calculate BSS vs climatology (empirical base rate)
         bss_vs_climatology = compute_bss(y_true, y_prob, baseline_prob)
@@ -690,6 +693,52 @@ Please analyze these opportunities and provide your structured recommendations.
             "phase": phase,
             "energy_id": energy["energy_id"]
         }
+
+    def _generate_mock_response(self, prompt: str) -> str:
+        """Deterministic mock response for testing without LLM calls."""
+        import json
+        # Track LLM mode for run logs if present
+        run_log = getattr(self, "_current_run_log", None)
+        if run_log:
+            run_log.llm_mode = "mock"
+            run_log.llm_status = "skipped"
+
+        prompt_lower = prompt.lower()
+        if "arbitrage" in prompt_lower:
+            response = {
+                "summary": "Identified balanced arbitrage set with moderate spreads.",
+                "top_opportunities": [
+                    {
+                        "canonical_question": "will rain occur tomorrow in nyc",
+                        "spread_probability": 0.08,
+                        "best_venue": "polymarket",
+                        "best_probability": 0.62,
+                        "worst_venue": "kalshi",
+                        "worst_probability": 0.54,
+                        "days_to_resolution": 2.0,
+                        "total_liquidity": 150000.0,
+                        "risk_note": "Tight book; monitor weather updates",
+                        "forecast_probability": 0.58,
+                        "market_id": "WX-NYC-01"
+                    }
+                ],
+                "filters_used": {
+                    "min_spread": self.min_spread,
+                    "min_liquidity": self.min_liquidity,
+                    "categories": self.categories
+                },
+                "total_opportunities_analyzed": 1,
+                "analysis_timestamp": 1234567890.0
+            }
+        else:
+            response = {
+                "reasoning": "Mock reasoning path executed.",
+                "confidence": 0.5,
+                "vote": "hold",
+                "simulation": {"outcome": "neutral"}
+            }
+
+        return json.dumps(response)
     
     def _parse_response(self, raw: str) -> Dict[str, Any]:
         """Parse LLM response into structured ArbitrageAnalysisResponse."""
@@ -728,7 +777,8 @@ Please analyze these opportunities and provide your structured recommendations.
                     days_to_resolution=opp_data.get("days_to_resolution"),
                     total_liquidity=liquidity,
                     risk_note=opp_data.get("risk_note", ""),
-                    forecast_probability=forecast_probability
+                    forecast_probability=forecast_probability,
+                    market_id=opp_data.get("market_id", "")
                 )
                 top_opportunities.append(opportunity)
             
@@ -773,7 +823,8 @@ Please analyze these opportunities and provide your structured recommendations.
                         "days_to_resolution": opp.days_to_resolution,
                         "total_liquidity": opp.total_liquidity,
                         "risk_note": opp.risk_note,
-                        "forecast_probability": opp.forecast_probability
+                        "forecast_probability": opp.forecast_probability,
+                        "market_id": opp.market_id
                     }
                     for opp in response.top_opportunities
                 ],

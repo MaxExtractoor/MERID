@@ -149,7 +149,7 @@ def init_database():
 
 # API Endpoints
 @router.post("/register")
-async def register_assertion(request: AssertionRegistration):
+def register_assertion(request: AssertionRegistration):
     """Register a new assertion instance."""
     try:
         # Validate template exists
@@ -217,7 +217,7 @@ async def register_assertion(request: AssertionRegistration):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/update")
-async def update_assertion_status(request: AssertionUpdate):
+def update_assertion_status(request: AssertionUpdate):
     """Update assertion status."""
     try:
         with get_db_connection() as conn:
@@ -266,7 +266,7 @@ async def update_assertion_status(request: AssertionUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/record")
-async def record_assertion(request: AssertionRecord):
+def record_assertion(request: AssertionRecord):
     """Record assertion result (create or update)."""
     try:
         with get_db_connection() as conn:
@@ -364,7 +364,7 @@ async def record_assertion(request: AssertionRecord):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/list")
-async def list_assertions(
+def list_assertions(
     status: Optional[str] = Query(None),
     template_id: Optional[str] = Query(None),
     owner_team: Optional[str] = Query(None),
@@ -439,7 +439,7 @@ async def list_assertions(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/templates/{template_id}")
-async def get_template(template_id: str):
+def get_template(template_id: str):
     """Get assertion template by ID."""
     try:
         with get_db_connection() as conn:
@@ -472,7 +472,7 @@ async def get_template(template_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/templates")
-async def list_templates(
+def list_templates(
     category: Optional[str] = Query(None),
     lifecycle: Optional[str] = Query(None),
     owner_team: Optional[str] = Query(None)
@@ -524,7 +524,7 @@ async def list_templates(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/metrics")
-async def get_assertion_metrics():
+def get_assertion_metrics():
     """Get assertion metrics for monitoring."""
     try:
         with get_db_connection() as conn:

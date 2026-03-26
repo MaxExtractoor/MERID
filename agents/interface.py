@@ -111,9 +111,9 @@ class MarketState:
     timestamp: float
     prices: Dict[str, float]
     volumes: Dict[str, float]
-    funding_rates: Dict[str, float]
-    news_sentiment: float
-    volatility_index: float
+    funding_rates: Dict[str, float] = field(default_factory=dict)
+    news_sentiment: float = 0.0
+    volatility_index: float = 0.0
     metadata: Dict[str, object] = field(default_factory=dict)
 
 

@@ -33,6 +33,21 @@ class ArbitrageOpportunity:
     max_probability_venue: str
     min_probability_venue: str
 
+@dataclass
+class ArbitrageOpportunitySummary:
+    """Lightweight summary used by downstream analytics and tests."""
+    canonical_question: str
+    spread_probability: float
+    best_venue: str
+    best_probability: float
+    worst_venue: str
+    worst_probability: float
+    days_to_resolution: Optional[float]
+    total_liquidity: float
+    risk_note: str
+    forecast_probability: float
+    market_id: str = ""
+
 
 def get_arbitrage_opportunities(
     min_spread: float = DEFAULT_MIN_PROB_SPREAD,

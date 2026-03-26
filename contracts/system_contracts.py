@@ -39,6 +39,8 @@ class SystemID(Enum):
     TRADING = "trading"
     TREASURY = "treasury"
     GOVERNANCE = "governance"
+    EXECUTION = "execution"
+    ANALYTICS = "analytics"
 
 
 class ViolationType(Enum):

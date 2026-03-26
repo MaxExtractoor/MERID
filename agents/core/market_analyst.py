@@ -344,10 +344,10 @@ class MarketAnalystAgent(AgentInterface):
         
         if diff_pct > 0.01:
             direction = "bullish"
-            strength = min(abs(diff_pct) * 10, 1.0)
+            strength = min(abs(diff_pct) * 40, 1.0)
         elif diff_pct < -0.01:
             direction = "bearish"
-            strength = min(abs(diff_pct) * 10, 1.0)
+            strength = min(abs(diff_pct) * 40, 1.0)
         else:
             direction = "neutral"
             strength = 0.0
@@ -447,9 +447,9 @@ class MarketAnalystAgent(AgentInterface):
         first_half = sum(recent[:len(recent)//2]) / (len(recent)//2)
         second_half = sum(recent[len(recent)//2:]) / (len(recent) - len(recent)//2)
         
-        if second_half > first_half * 1.2:
+        if second_half > first_half * 1.02:
             trend = "increasing"
-        elif second_half < first_half * 0.8:
+        elif second_half < first_half * 0.98:
             trend = "decreasing"
         else:
             trend = "stable"

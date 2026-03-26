@@ -10,11 +10,39 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # Add the project root to Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_TEST_DIR, "..", ".."))
+for _path in (_PROJECT_ROOT, _TEST_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from testing.final_validation import FinalValidation, TestType, TestStatus
-from integration.system_integration import SystemIntegration, ComponentType
-from integration.performance_optimization import PerformanceOptimization, CacheStrategy, LoadBalanceAlgorithm
+try:
+    from integration.system_integration import SystemIntegration, ComponentType
+    from integration.performance_optimization import (
+        PerformanceOptimization,
+        CacheStrategy,
+        LoadBalanceAlgorithm,
+    )
+except ModuleNotFoundError:
+    import importlib.util
+    import pathlib
+
+    _ROOT = pathlib.Path(__file__).resolve().parents[2]
+    for _name in ("integration.system_integration", "integration.performance_optimization"):
+        _module_path = _ROOT / "integration" / f"{_name.split('.')[-1]}.py"
+        _spec = importlib.util.spec_from_file_location(_name, _module_path)
+        if _spec and _spec.loader:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            sys.modules[_name] = _mod
+
+    from integration.system_integration import SystemIntegration, ComponentType
+    from integration.performance_optimization import (
+        PerformanceOptimization,
+        CacheStrategy,
+        LoadBalanceAlgorithm,
+    )
 from utils.logger import get_logger
 
 logger = get_logger("test_final_validation")
