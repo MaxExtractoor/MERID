@@ -306,7 +306,7 @@ describe('KalshiDashboardView', () => {
       render(<KalshiDashboardView />);
       expect(screen.queryByText(/Mid:/i)).not.toBeInTheDocument();
       const peekButtons = screen.getAllByText('Peek');
-      fireEvent.click(peekButtons[0]);
+      fireEvent.click(peekButtons[1]); // card-level peek (index 0 is the global toggle)
       expect(screen.getByText(/Mid:/i)).toBeInTheDocument();
     });
   });

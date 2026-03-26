@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Briefcase, RefreshCw, DollarSign, Shield, TrendingUp,
   AlertTriangle, Activity, BarChart3, Gauge, Target,
@@ -100,6 +100,40 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   const [orderError, setOrderError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [operatorOverride, setOperatorOverride] = useState(false);
+
+  const isLive = modeResult.data?.is_live ?? false;
+  const liveEnabled = modeResult.data?.live_enabled ?? false;
+  const currentMode = modeResult.data?.mode ?? 'paper';
+  const sessionOpen = sessionResult.data?.trading_allowed ?? false;
+  const sessionBlockReason = sessionResult.data?.block_reason ?? null;
+  const maintenanceDay = sessionResult.data?.maintenance_day ?? false;
+  const killSwitchActive = ksResult.data?.global_kill ?? false;
+  const gridKillActive = gridPortfolioResult.data?.kill_switch_active ?? false;
+  const executeBlocked = killSwitchActive || gridKillActive || !sessionOpen;
+  const executeBlockReason = killSwitchActive
+    ? (ksResult.data?.kill_reason ?? 'Kill switch active')
+    : gridKillActive
+      ? 'Grid portfolio kill switch active'
+      : !sessionOpen
+        ? (sessionBlockReason ?? 'Session closed')
+        : null;
+
+  useEffect(() => {
+    if (executeBlocked) {
+      setOperatorOverride(false);
+    }
+  }, [executeBlocked]);
+  const canExecute = !executeBlocked || operatorOverride;
+
+  const ensureExecutable = useCallback((action: string) => {
+    if (!executeBlocked) return true;
+    if (!operatorOverride) {
+      setOrderError(executeBlockReason ? `Trading blocked: ${executeBlockReason}` : 'Trading blocked by session/kill switch');
+      return false;
+    }
+    logUxEvent('portfolio_override', action, { reason: executeBlockReason ?? 'manual override' });
+    return true;
+  }, [executeBlocked, operatorOverride, executeBlockReason]);
 
   const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
     const token = localStorage.getItem('merid-access');
@@ -249,40 +283,6 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     balResult.refetch();
     riskResult.refetch();
   }, [posResult, ordResult, fillResult, balResult, riskResult]);
-
-  const isLive = modeResult.data?.is_live ?? false;
-  const liveEnabled = modeResult.data?.live_enabled ?? false;
-  const currentMode = modeResult.data?.mode ?? 'paper';
-  const sessionOpen = sessionResult.data?.trading_allowed ?? false;
-  const sessionBlockReason = sessionResult.data?.block_reason ?? null;
-  const maintenanceDay = sessionResult.data?.maintenance_day ?? false;
-  const killSwitchActive = ksResult.data?.global_kill ?? false;
-  const gridKillActive = gridPortfolioResult.data?.kill_switch_active ?? false;
-  const executeBlocked = killSwitchActive || gridKillActive || !sessionOpen;
-  const executeBlockReason = killSwitchActive
-    ? (ksResult.data?.kill_reason ?? 'Kill switch active')
-    : gridKillActive
-      ? 'Grid portfolio kill switch active'
-      : !sessionOpen
-        ? (sessionBlockReason ?? 'Session closed')
-        : null;
-
-  useEffect(() => {
-    if (executeBlocked) {
-      setOperatorOverride(false);
-    }
-  }, [executeBlocked]);
-  const canExecute = !executeBlocked || operatorOverride;
-
-  const ensureExecutable = useCallback((action: string) => {
-    if (!executeBlocked) return true;
-    if (!operatorOverride) {
-      setOrderError(executeBlockReason ? `Trading blocked: ${executeBlockReason}` : 'Trading blocked by session/kill switch');
-      return false;
-    }
-    logUxEvent('portfolio_override', action, { reason: executeBlockReason ?? 'manual override' });
-    return true;
-  }, [executeBlocked, operatorOverride, executeBlockReason]);
 
   const handleModeToggle = useCallback(async () => {
     const targetMode = isLive ? 'paper' : 'live';
