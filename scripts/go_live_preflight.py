@@ -2,7 +2,7 @@
 """
 MERID Go-Live Preflight Check
 ==============================
-Verifies all 8 safety gates required before enabling live Kalshi trading.
+Verifies all 10 safety gates required before enabling live Kalshi trading.
 
 Usage:
     python scripts/go_live_preflight.py
@@ -86,6 +86,17 @@ def gate_4_not_demo() -> Tuple[bool, str]:
         ok,
         detail=f"Current: {settings.KALSHI_USE_DEMO}",
         fix="Set KALSHI_USE_DEMO=false in .env",
+    )
+
+
+def gate_4b_kalshi_env() -> Tuple[bool, str]:
+    from merid.settings import settings
+    ok = settings.KALSHI_ENV == "prod"
+    return _check(
+        "Gate 4b: KALSHI_ENV = 'prod' (production environment)",
+        ok,
+        detail=f"Current: {settings.KALSHI_ENV}",
+        fix="Set KALSHI_ENV=prod in .env",
     )
 
 
@@ -182,6 +193,54 @@ async def gate_8_balance_readable() -> Tuple[bool, str]:
         )
 
 
+async def gate_9_websocket_health() -> Tuple[bool, str]:
+    """Verify Kalshi WebSocket is connected and healthy."""
+    try:
+        from merid.monitoring.dependency_health import check_kalshi_websocket_health
+        health = check_kalshi_websocket_health()
+        ok = health.is_healthy
+        detail = health.message
+        if health.details:
+            detail += f" (uptime: {health.details.get('uptime_s', 0):.0f}s, msgs: {health.details.get('messages_received', 0)})"
+        return _check(
+            "Gate 9: Kalshi WebSocket healthy and connected",
+            ok,
+            detail=detail,
+            fix="Check WebSocket connection status. Restart may be required if connection is stuck.",
+        )
+    except Exception as exc:
+        return _check(
+            "Gate 9: Kalshi WebSocket healthy and connected",
+            False,
+            detail=f"Exception: {exc}",
+            fix="Ensure WebSocket manager is initialized and connected",
+        )
+
+
+async def gate_10_market_catalog() -> Tuple[bool, str]:
+    """Verify market catalog is fresh and populated."""
+    try:
+        from merid.monitoring.dependency_health import check_market_catalog_health
+        health = check_market_catalog_health()
+        ok = health.is_healthy
+        detail = health.message
+        if health.details:
+            detail += f" (age: {health.details.get('age_seconds', 0):.0f}s)"
+        return _check(
+            "Gate 10: Market catalog fresh and populated",
+            ok,
+            detail=detail,
+            fix="Wait for catalog refresh cycle or manually trigger refresh",
+        )
+    except Exception as exc:
+        return _check(
+            "Gate 10: Market catalog fresh and populated",
+            False,
+            detail=f"Exception: {exc}",
+            fix="Check market catalog initialization in startup logs",
+        )
+
+
 async def run_all() -> int:
     SEP = "=" * 51
     print(f"\n{SEP}")
@@ -192,14 +251,15 @@ async def run_all() -> int:
 
     # Synchronous gates
     for fn in [gate_1_trading_mode, gate_2_live_enabled, gate_3_live_unlocked,
-               gate_4_not_demo, gate_5_credentials, gate_6_kill_switch]:
+               gate_4_not_demo, gate_4b_kalshi_env, gate_5_credentials, gate_6_kill_switch]:
         ok, msg = fn()
         results.append((ok, msg))
         print(msg)
 
     # Async gates (require network)
     print("\n  [Network checks — may take a few seconds]")
-    for coro in [gate_7_auth_check(), gate_8_balance_readable()]:
+    for coro in [gate_7_auth_check(), gate_8_balance_readable(),
+                 gate_9_websocket_health(), gate_10_market_catalog()]:
         ok, msg = await coro
         results.append((ok, msg))
         print(msg)
