@@ -14,8 +14,15 @@ from typing import Optional, List, Dict
 from dataclasses import dataclass
 from datetime import datetime
 
-from telegram import Bot
-from telegram.error import TelegramError
+try:  # python-telegram-bot is optional for test environments
+    from telegram import Bot
+    from telegram.error import TelegramError
+    _TELEGRAM_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised when dependency missing
+    Bot = None  # type: ignore[assignment,misc]
+    TelegramError = Exception  # type: ignore[assignment,misc]
+    _TELEGRAM_AVAILABLE = False
+
 from utils.logger import get_logger
 
 logger = get_logger("agents.telegram_agent")
