@@ -281,7 +281,78 @@ class SwarmConsensusAggregator:
                     pass  # No running event loop
         except Exception as exc:
             logger.debug(f"Decision publish error: {exc}")
-    
+
+    def _filter_telegram_proposals(self, proposals: List[AgentProposal]) -> List[AgentProposal]:
+        """
+        Filter Telegram-sourced proposals by CQI quality threshold.
+
+        Telegram hype spikes are prone to manipulation and pump-and-dump schemes.
+        Only accept Telegram signals when domain quality is high (CQI > 0.7).
+
+        Args:
+            proposals: List of agent proposals
+
+        Returns:
+            Filtered list of proposals (Telegram signals filtered by CQI)
+        """
+        filtered = []
+        telegram_cqi_threshold = 0.7
+
+        for proposal in proposals:
+            # Check if this is a Telegram-sourced signal
+            is_telegram = False
+            if hasattr(proposal, "source") and "telegram" in str(proposal.source).lower():
+                is_telegram = True
+            elif "telegram" in proposal.agent_id.lower():
+                is_telegram = True
+            elif "telegram" in proposal.rationale.lower():
+                is_telegram = True
+
+            if not is_telegram:
+                # Non-Telegram signals pass through
+                filtered.append(proposal)
+                continue
+
+            # For Telegram signals, check CQI
+            try:
+                from merid.signals.drift import get_drift_detector
+                detector = get_drift_detector()
+
+                # Get CQI for social_telegram domain
+                cqi = detector.compute_cqi(domain="social_telegram", window_seconds=86400)
+
+                if cqi.quality_index < telegram_cqi_threshold:
+                    logger.warning(
+                        f"Telegram proposal filtered: agent={proposal.agent_id} "
+                        f"CQI={cqi.quality_index:.3f} < threshold={telegram_cqi_threshold}"
+                    )
+                    continue
+
+                # Additional filter: volume spikes with low confidence
+                if hasattr(proposal, "volume_spike") and proposal.confidence < 0.6:
+                    logger.warning(
+                        f"Telegram volume spike filtered: low confidence={proposal.confidence:.2f}"
+                    )
+                    continue
+
+                # Telegram signal passed CQI gate
+                filtered.append(proposal)
+                logger.debug(
+                    f"Telegram proposal passed CQI gate: agent={proposal.agent_id} "
+                    f"CQI={cqi.quality_index:.3f}"
+                )
+
+            except Exception as exc:
+                # On error, be conservative: filter out Telegram signal
+                logger.warning(f"CQI check failed for Telegram proposal, filtering: {exc}")
+                continue
+
+        filtered_count = len(proposals) - len(filtered)
+        if filtered_count > 0:
+            logger.info(f"Filtered {filtered_count} Telegram proposals by CQI gate")
+
+        return filtered
+
     def _aggregate_proposals(
         self,
         asset: str,
@@ -290,7 +361,10 @@ class SwarmConsensusAggregator:
     ) -> ConsensusView:
         """Aggregate proposals into consensus view."""
         now = datetime.now(timezone.utc)
-        
+
+        # NEW: Filter Telegram-sourced proposals by CQI threshold
+        proposals = self._filter_telegram_proposals(proposals)
+
         # Direction counts
         direction_counts = defaultdict(int)
         direction_weights = defaultdict(float)

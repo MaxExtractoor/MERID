@@ -66,11 +66,18 @@ _TICKER_CATEGORY_MAP: List[tuple] = [
     (re.compile(r"^KX(?:JOBS|NFP|NONFARM|PAYROLL|UNEMPLOYMENT)", re.I), "economics", "JOBS"),
     (re.compile(r"^KX(?:FED|FOMC|RATE)", re.I), "economics", "RATES"),
     (re.compile(r"^KXECON", re.I), "economics", None),
+    # Energy / commodities (NEW)
+    (re.compile(r"^KX(?:ERCOT|ELECTRICITY|GRID)", re.I), "energy", "ERCOT"),
+    (re.compile(r"^KX(?:OIL|WTI|BRENT|CRUDE)", re.I), "energy", "OIL"),
+    (re.compile(r"^KX(?:GAS|NATGAS|LNG)", re.I), "energy", "GAS"),
+    (re.compile(r"^KX(?:CARBON|EMISSION)", re.I), "energy", "CARBON"),
+    (re.compile(r"^KX(?:RENEW|SOLAR|WIND)", re.I), "energy", "RENEWABLE"),
+    (re.compile(r"^KXENERGY", re.I), "energy", None),
     # Politics
     (re.compile(r"^KX(?:ELECTION|PRES|SENATE|CONGRESS|GOV|POLITICS|SCOTUS|TRUMP|BIDEN)", re.I), "politics", "ELECTION"),
     # Climate / weather
     (re.compile(r"^KX(?:WEATHER|TEMP|HURRICANE|TORNADO)", re.I), "climate", "WEATHER"),
-    (re.compile(r"^KX(?:CLIMATE|CARBON|EMISSION)", re.I), "climate", "CLIMATE"),
+    (re.compile(r"^KX(?:CLIMATE)", re.I), "climate", "CLIMATE"),
     # Sports — broad patterns
     (re.compile(r"^KX(?:NBA|NBAGAME|NBAPTS|NBASPREAD|NBAPROP)", re.I), "sports", "NBA"),
     (re.compile(r"^KX(?:NFL|NFLGAME|NFLPTS|NFLSPREAD|NFLPROP)", re.I), "sports", "NFL"),
@@ -110,8 +117,14 @@ _ASSET_PATTERNS: Dict[str, List[re.Pattern]] = {
     "NDX": [re.compile(r"\bNASDAQ\b|\bNDX\b|\bQQQ\b", re.I)],
     "DJI": [re.compile(r"\bDow\b|\bDJI\b|\bDJIA\b", re.I)],
     "WEATHER": [re.compile(r"\bweather\b|temperature|hurricane|tornado", re.I)],
-    "CLIMATE": [re.compile(r"\bclimate\b|carbon|emissions", re.I)],
+    "CLIMATE": [re.compile(r"\bclimate\b", re.I)],
     "ELECTION": [re.compile(r"\belection\b|president|congress|senate|governor", re.I)],
+    # Energy assets (NEW)
+    "ERCOT": [re.compile(r"\bERCOT\b|texas\s+grid|electricity\s+price", re.I)],
+    "OIL": [re.compile(r"\boil\b|crude|WTI|brent|petroleum|barrel", re.I)],
+    "GAS": [re.compile(r"\bnatural\s+gas\b|LNG|gas\s+price|natgas", re.I)],
+    "CARBON": [re.compile(r"\bcarbon\b|emission|carbon\s+credit", re.I)],
+    "RENEWABLE": [re.compile(r"\brenewable\b|solar|wind\s+power|green\s+energy", re.I)],
     # Sports assets (detected from title text)
     "NBA": [re.compile(r"\bNBA\b", re.I)],
     "NFL": [re.compile(r"\bNFL\b", re.I)],

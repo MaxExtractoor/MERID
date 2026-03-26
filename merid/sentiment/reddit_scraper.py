@@ -101,8 +101,14 @@ class RedditSentimentService:
         "FED": ["Fed", "Federal Reserve", "FOMC", "Powell", "rate hike"],
         "CPI": ["CPI", "inflation", "consumer price", "PCE"],
         "SPX": ["S&P 500", "SPX", "stock market", "Nasdaq", "Dow"],
+        # Energy assets (NEW)
+        "ERCOT": ["ERCOT", "Texas grid", "electricity price", "power outage"],
+        "OIL": ["oil", "crude oil", "WTI", "Brent", "OPEC", "oil price"],
+        "GAS": ["natural gas", "LNG", "gas price", "natgas", "gas storage"],
+        "CARBON": ["carbon credit", "emission", "carbon price", "carbon trading"],
+        "RENEWABLE": ["renewable energy", "solar power", "wind power", "green energy"],
     }
-    
+
     # Default subreddits to search
     DEFAULT_SUBREDDITS: List[str] = [
         "Bitcoin",
@@ -110,6 +116,12 @@ class RedditSentimentService:
         "Kalshi",
         "ethtrader",
         "Solana",
+        # Energy subreddits (NEW)
+        "energytrading",
+        "oil",
+        "renewableenergy",
+        "energy",
+        "commodities",
     ]
     
     def __new__(cls):
