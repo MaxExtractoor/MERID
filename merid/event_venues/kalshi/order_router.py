@@ -173,6 +173,9 @@ class OrderIntent:
     order_group_id: Optional[str] = None
     self_trade_prevention_type: Optional[str] = None
     post_only: bool = False
+    # Live orderbook params (E1) — populated from the current orderbook snapshot
+    spread_cents: Optional[int] = None
+    depth_at_price: Optional[int] = None
 
 
 @dataclass
@@ -394,6 +397,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             contracts=intent.count,
             price_cents=intent.price_cents,
             edge=intent.edge_pct or 0.0,
+            spread_cents=intent.spread_cents,
+            depth_at_price=intent.depth_at_price,
         )
         if not allowed:
             latency = (time.monotonic() - t0) * 1000
