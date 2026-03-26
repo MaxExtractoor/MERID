@@ -15,6 +15,7 @@ import KalshiRiskFeed from '../components/KalshiRiskFeed';
 import OrderGroupPanel from '../components/OrderGroupPanel';
 import BatchOrderPanel from '../components/BatchOrderPanel';
 import OrderGroupAnalytics from '../components/OrderGroupAnalytics';
+import { logUxEvent } from '../utils/uxTelemetry';
 
 const DRAWDOWN_TIER_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   normal: { label: 'Normal', color: 'text-green-400', bg: 'bg-green-500/20' },
@@ -98,6 +99,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   const [amendPrice, setAmendPrice] = useState<string>('');
   const [orderError, setOrderError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [operatorOverride, setOperatorOverride] = useState(false);
 
   const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
     const token = localStorage.getItem('merid-access');
@@ -117,6 +119,10 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   }, [balance]);
 
   const handleDownsize = useCallback(async () => {
+    if (!ensureExecutable('downsize')) {
+      setDownsizeResult('Blocked: session closed or kill switch active.');
+      return;
+    }
     if (!window.confirm('Trigger manual position downsize? This will reduce position sizes according to current risk parameters.')) return;
     setDownsizing(true);
     setDownsizeResult(null);
@@ -133,11 +139,14 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
       if (res.ok) { posResult.refetch(); riskResult.refetch(); }
     } catch { setDownsizeResult('Request failed.'); }
     setDownsizing(false);
-  }, [authHeaders, posResult, riskResult]);
+  }, [authHeaders, posResult, riskResult, ensureExecutable]);
   const [cancellingOrder, setCancellingOrder] = useState<string | null>(null);
   const [cancellingAll, setCancellingAll] = useState(false);
 
   const handleCancelOrder = useCallback(async (orderId: string) => {
+    if (!ensureExecutable('cancel_order')) {
+      return;
+    }
     setCancellingOrder(orderId);
     setOrderError(null);
     try {
@@ -153,7 +162,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
       setOrderError(err instanceof Error ? err.message : `Cancel order ${orderId} failed`);
     }
     setCancellingOrder(null);
-  }, [authHeaders, ordResult]);
+  }, [authHeaders, ordResult, ensureExecutable]);
 
   const handleAmendOpen = useCallback((orderId: string, currentPrice: number | null) => {
     setAmendOrderId(orderId);
@@ -164,6 +173,9 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     if (!amendOrderId) return;
     const newPriceCents = parseInt(amendPrice, 10);
     if (isNaN(newPriceCents) || newPriceCents < 1 || newPriceCents > 99) return;
+    if (!ensureExecutable('amend_order')) {
+      return;
+    }
     setOrderError(null);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDER_AMEND(amendOrderId)}?price_cents=${newPriceCents}`, {
@@ -177,10 +189,18 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     }
     setAmendOrderId(null);
     setAmendPrice('');
-  }, [amendOrderId, amendPrice, authHeaders, ordResult]);
+  }, [amendOrderId, amendPrice, authHeaders, ordResult, ensureExecutable]);
 
   const handleCancelAllOrders = useCallback(async () => {
-    if (!window.confirm(`Cancel all ${orders.length} open orders?`)) return;
+    if (!ensureExecutable('cancel_all_orders')) {
+      return;
+    }
+    const totalOpen = allOrders.length;
+    const filteredView = assetFilter && orders.length !== totalOpen;
+    const baseMsg = `Cancel ALL ${totalOpen} open orders across all assets?`;
+    const filteredMsg = filteredView ? `${baseMsg}\nFilters are active (${orders.length} showing).` : baseMsg;
+    if (!window.confirm(filteredMsg)) return;
+    if (filteredView && !window.confirm('Filters are active; confirm global cancel across assets.')) return;
     setCancellingAll(true);
     setOrderError(null);
     try {
@@ -196,7 +216,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
       setOrderError(err instanceof Error ? err.message : 'Batch cancel failed');
     }
     setCancellingAll(false);
-  }, [authHeaders, orders.length, ordResult]);
+  }, [authHeaders, orders.length, ordResult, allOrders.length, assetFilter, ensureExecutable]);
 
   const handleExportFills = useCallback(async () => {
     setExporting(true);
@@ -236,6 +256,33 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   const sessionOpen = sessionResult.data?.trading_allowed ?? false;
   const sessionBlockReason = sessionResult.data?.block_reason ?? null;
   const maintenanceDay = sessionResult.data?.maintenance_day ?? false;
+  const killSwitchActive = ksResult.data?.global_kill ?? false;
+  const gridKillActive = gridPortfolioResult.data?.kill_switch_active ?? false;
+  const executeBlocked = killSwitchActive || gridKillActive || !sessionOpen;
+  const executeBlockReason = killSwitchActive
+    ? (ksResult.data?.kill_reason ?? 'Kill switch active')
+    : gridKillActive
+      ? 'Grid portfolio kill switch active'
+      : !sessionOpen
+        ? (sessionBlockReason ?? 'Session closed')
+        : null;
+
+  useEffect(() => {
+    if (executeBlocked) {
+      setOperatorOverride(false);
+    }
+  }, [executeBlocked]);
+  const canExecute = !executeBlocked || operatorOverride;
+
+  const ensureExecutable = useCallback((action: string) => {
+    if (!executeBlocked) return true;
+    if (!operatorOverride) {
+      setOrderError(executeBlockReason ? `Trading blocked: ${executeBlockReason}` : 'Trading blocked by session/kill switch');
+      return false;
+    }
+    logUxEvent('portfolio_override', action, { reason: executeBlockReason ?? 'manual override' });
+    return true;
+  }, [executeBlocked, operatorOverride, executeBlockReason]);
 
   const handleModeToggle = useCallback(async () => {
     const targetMode = isLive ? 'paper' : 'live';
@@ -326,6 +373,26 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
           <AlertTriangle className="w-4 h-4 shrink-0" />
           <span>{modeError}</span>
           <button type="button" onClick={() => setModeError(null)} className="ml-auto" aria-label="Dismiss">×</button>
+        </div>
+      )}
+
+      {executeBlocked && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>Trading blocked: {executeBlockReason ?? 'session closed or kill switch active'}.</span>
+          <label className="ml-auto flex items-center gap-2 text-xs text-amber-200">
+            <input
+              type="checkbox"
+              checked={operatorOverride}
+              onChange={(e) => {
+                setOperatorOverride(e.target.checked);
+                if (e.target.checked) {
+                  logUxEvent('portfolio_override_ack', executeBlockReason ?? 'unknown');
+                }
+              }}
+            />
+            <span>Override once (I understand the risk)</span>
+          </label>
         </div>
       )}
 
@@ -584,11 +651,12 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                   <button
                     type="button"
                     onClick={handleCancelAllOrders}
-                    disabled={cancellingAll}
+                    disabled={cancellingAll || !canExecute}
+                    title={canExecute ? 'Cancel all open orders' : (executeBlockReason ?? 'Trading blocked')}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 transition-colors disabled:opacity-50"
                   >
                     <Trash2 className="w-3 h-3" />
-                    {cancellingAll ? 'Cancelling…' : `Cancel All (${orders.length})`}
+                    {cancellingAll ? 'Cancelling…' : `Cancel All (${allOrders.length})`}
                   </button>
                 </div>
               )}
@@ -633,7 +701,8 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                                 <button
                                   type="button"
                                   onClick={() => handleAmendOpen(o.order_id, o.price)}
-                                  className="p-1 rounded hover:bg-blue-500/20 text-gray-600 hover:text-blue-400 transition-colors"
+                                  disabled={!canExecute}
+                                  className="p-1 rounded hover:bg-blue-500/20 text-gray-600 hover:text-blue-400 transition-colors disabled:opacity-40"
                                   title="Amend price"
                                 >
                                   <Edit2 className="w-3.5 h-3.5" />
@@ -641,7 +710,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                                 <button
                                   type="button"
                                   onClick={() => handleCancelOrder(o.order_id)}
-                                  disabled={cancellingOrder === o.order_id}
+                                  disabled={cancellingOrder === o.order_id || !canExecute}
                                   className="p-1 rounded hover:bg-red-500/20 text-gray-600 hover:text-red-400 transition-colors disabled:opacity-50"
                                   title="Cancel order"
                                 >
@@ -809,7 +878,8 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                         <button
                           type="button"
                           onClick={handleDownsize}
-                          disabled={downsizing}
+                          disabled={downsizing || !canExecute}
+                          title={canExecute ? 'Force downsize' : (executeBlockReason ?? 'Trading blocked')}
                           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 transition-colors disabled:opacity-50"
                         >
                           <ArrowDownRight className="w-3 h-3" />

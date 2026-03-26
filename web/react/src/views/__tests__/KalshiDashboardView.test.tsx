@@ -5,11 +5,11 @@
 import { render, screen, fireEvent } from '@testing-library/react';
 
 // eslint-disable-next-line no-var
-var apiDataImpl: (ep: string) => { data: unknown; loading: boolean; refetch: () => void } =
+var apiDataImpl: (ep: string, opts?: unknown) => { data: unknown; loading: boolean; refetch: () => void } =
   () => ({ data: null, loading: false, refetch: jest.fn() });
 
 jest.mock('../../hooks/useApiData', () => ({
-  useApiData: (ep: string) => apiDataImpl(ep),
+  useApiData: (ep: string, opts?: unknown) => apiDataImpl(ep, opts),
 }));
 
 const mockUseApiData = {
@@ -136,11 +136,12 @@ const MOCK_HEALTH = {
 function setupMocks(overrides: Record<string, unknown> = {}) {
   mockUseApiData.mockImplementation((endpoint: unknown) => {
     if (typeof endpoint !== 'string') return { data: null, loading: false, refetch: jest.fn() };
+    if (endpoint === '') return { data: null, loading: false, refetch: jest.fn() };
     if (endpoint.includes('/kalshi/markets') && !endpoint.includes('orderbook')) {
       return { data: overrides.markets ?? MOCK_MARKETS, loading: false, refetch: jest.fn() };
     }
     if (endpoint.includes('orderbook')) {
-      return { data: { ticker: 'X', yes_bids: [], yes_asks: [], spread_cents: null, midpoint: null }, loading: false, refetch: jest.fn() };
+      return { data: { ticker: 'KXBTC-26FEB15-1H-T95000', yes_bids: [], yes_asks: [], spread_cents: 2, midpoint: 0.55 }, loading: false, refetch: jest.fn() };
     }
     if (endpoint.includes('/kalshi/catalog') && !endpoint.includes('refresh')) {
       return { data: overrides.catalog ?? MOCK_CATALOG, loading: false, refetch: jest.fn() };
@@ -297,6 +298,33 @@ describe('KalshiDashboardView', () => {
       // ETH: spread = 0.47 - 0.43 = 0.04 = 4 cents => '4¢'
       const spreadBadges = screen.getAllByText(/¢/);
       expect(spreadBadges.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe('Orderbook peek', () => {
+    it('only shows orderbook when peek is activated per card', () => {
+      render(<KalshiDashboardView />);
+      expect(screen.queryByText(/Mid:/i)).not.toBeInTheDocument();
+      const peekButtons = screen.getAllByText('Peek');
+      fireEvent.click(peekButtons[0]);
+      expect(screen.getByText(/Mid:/i)).toBeInTheDocument();
+    });
+  });
+
+  describe('Pagination', () => {
+    it('limits visible markets per page', () => {
+      const largeMarkets = {
+        markets: Array.from({ length: 80 }).map((_, i) => ({
+          ...MOCK_MARKETS.markets[0],
+          ticker: `KXBTC-TEST-${i}`,
+          question: `Test market ${i}`,
+        })),
+      };
+      setupMocks({ markets: largeMarkets });
+      render(<KalshiDashboardView />);
+      expect(screen.getByText(/Showing 60 of 80/)).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Next'));
+      expect(screen.getByText(/Page 2/)).toBeInTheDocument();
     });
   });
 

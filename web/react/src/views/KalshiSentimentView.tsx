@@ -367,6 +367,8 @@ function SwarmSentimentPanel() {
   }, [assets]);
 
   const signals = signalsData?.signals ?? [];
+  const hasAssets = !!assets && assetList.length > 0;
+  const hasSignals = signals.length > 0;
 
   if (assetsLoading && !assets) {
     return (
@@ -377,7 +379,7 @@ function SwarmSentimentPanel() {
     );
   }
 
-  if (!assets || assetList.length === 0) {
+  if (!hasAssets && !hasSignals) {
     return (
       <div className="bg-slate-900/80 rounded-2xl border border-amber-800/40 p-4 flex items-center gap-2 text-amber-400 text-xs">
         <AlertTriangle className="w-4 h-4 flex-shrink-0" />
@@ -410,48 +412,55 @@ function SwarmSentimentPanel() {
       </div>
 
       {/* Asset sentiment cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-        {assetList.slice(0, 10).map((a) => {
-          const score = a.combined_score ?? 0;
-          const label = a.label ?? 'neutral';
-          const conf = a.confidence ?? 0;
-          const contrarian = a.is_contrarian ?? false;
-          const reduce = a.should_reduce_size ?? false;
-          const labelColor = label === 'positive' ? 'text-green-400' : label === 'negative' ? 'text-red-400' : 'text-slate-400';
-          const scoreBg = label === 'positive' ? 'bg-green-500/10' : label === 'negative' ? 'bg-red-500/10' : 'bg-slate-800/60';
+      {hasAssets ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+          {assetList.slice(0, 10).map((a) => {
+            const score = a.combined_score ?? 0;
+            const label = a.label ?? 'neutral';
+            const conf = a.confidence ?? 0;
+            const contrarian = a.is_contrarian ?? false;
+            const reduce = a.should_reduce_size ?? false;
+            const labelColor = label === 'positive' ? 'text-green-400' : label === 'negative' ? 'text-red-400' : 'text-slate-400';
+            const scoreBg = label === 'positive' ? 'bg-green-500/10' : label === 'negative' ? 'bg-red-500/10' : 'bg-slate-800/60';
 
-          return (
-            <div key={a.sym} className={`rounded-lg border border-slate-700/50 p-2.5 ${scoreBg}`}>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-bold text-white">{a.sym}</span>
-                <div className="flex items-center gap-1">
-                  {contrarian && <span className="text-[9px] bg-purple-600/20 text-purple-300 px-1 rounded">CTR</span>}
-                  {reduce && <span className="text-[9px] bg-red-600/20 text-red-300 px-1 rounded">RED</span>}
+            return (
+              <div key={a.sym} className={`rounded-lg border border-slate-700/50 p-2.5 ${scoreBg}`}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-white">{a.sym}</span>
+                  <div className="flex items-center gap-1">
+                    {contrarian && <span className="text-[9px] bg-purple-600/20 text-purple-300 px-1 rounded">CTR</span>}
+                    {reduce && <span className="text-[9px] bg-red-600/20 text-red-300 px-1 rounded">RED</span>}
+                  </div>
                 </div>
-              </div>
-              <div className={`text-lg font-bold font-mono ${labelColor}`}>
-                {score >= 0 ? '+' : ''}{score.toFixed(3)}
-              </div>
-              <div className="flex items-center justify-between mt-1">
-                <span className={`text-[10px] font-semibold capitalize ${labelColor}`}>{label}</span>
-                <span className="text-[10px] text-slate-500">{(conf * 100).toFixed(0)}%</span>
-              </div>
-              {a.fg_index != null && (
-                <div className="mt-1 text-[10px] text-slate-500">
-                  FG {a.fg_index} · {(a.fg_regime ?? '').replace(/_/g, ' ')}
+                <div className={`text-lg font-bold font-mono ${labelColor}`}>
+                  {score >= 0 ? '+' : ''}{score.toFixed(3)}
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+                <div className="flex items-center justify-between mt-1">
+                  <span className={`text-[10px] font-semibold capitalize ${labelColor}`}>{label}</span>
+                  <span className="text-[10px] text-slate-500">{(conf * 100).toFixed(0)}%</span>
+                </div>
+                {a.fg_index != null && (
+                  <div className="mt-1 text-[10px] text-slate-500">
+                    FG {a.fg_index} · {(a.fg_regime ?? '').replace(/_/g, ' ')}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+          Asset metadata unavailable — showing live signals below.
+        </div>
+      )}
 
       {/* Active signals */}
-      {signals.length > 0 && (
+      {hasSignals && (
         <div>
           <div className="flex items-center gap-2 mb-2">
             <Activity className="w-3.5 h-3.5 text-amber-400" />
             <span className="text-xs font-semibold text-slate-300">Active Signals ({signals.length})</span>
+            {!hasAssets && <span className="text-[10px] text-amber-300">(assets missing)</span>}
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
             {signals.slice(0, 6).map((s: any, i: number) => {
