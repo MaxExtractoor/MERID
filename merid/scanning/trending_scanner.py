@@ -282,11 +282,11 @@ class TrendingScanner:
                 items = items[: self.MAX_ITEMS_PER_DOMAIN]
                 if not items:
                     logger.warning("Domain %s produced 0 items; inserting placeholder", domain)
-                    items = self._placeholder_item(domain)
+                    items = self._make_placeholder_items(domain)
                 domain_items[domain] = items
             except Exception as exc:
                 logger.error("Domain scan failed for %s: %s", domain, exc, exc_info=True)
-                domain_items[domain] = self._placeholder_item(domain)
+                domain_items[domain] = self._make_placeholder_items(domain)
 
         top_opps = self._build_top_opportunities(domain_items)
         coverage_complete = all(
@@ -333,6 +333,25 @@ class TrendingScanner:
             return list(pipeline._recent_insights)
         except Exception:
             return []
+
+    def _make_placeholder_items(self, domain: str) -> List[DomainItem]:
+        """Return a single placeholder DomainItem for a given domain.
+
+        Used when a domain scanner raises an exception or produces 0 items,
+        so that coverage_complete is never trivially False due to errors.
+        """
+        return [
+            DomainItem(
+                domain=domain,
+                title=f"{domain.replace('_', ' ').title()}: scanning…",
+                summary=(
+                    f"Live data for the {domain} domain is temporarily "
+                    "unavailable. Heuristic fallback will apply on the next run."
+                ),
+                sentiment=_MIXED,
+                source="placeholder",
+            )
+        ]
 
     # ── Domain scanners ───────────────────────────────────────────────
 

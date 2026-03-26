@@ -1,11 +1,13 @@
 """Tests for merid.scanning.trending_scanner.
 
-Covers all 5 areas:
+Covers all 7 sections:
 §1 Data classes — DomainItem, TopOpportunity, ScanResult
 §2 TrendingScanner.run() — coverage completeness and domain invariants
 §3 Domain scanners — each of the 10 required domains produces ≥ 1 item
 §4 TopOpportunity ranking — ordering, count, non-empty tickers
 §5 Output formatting — to_dict and format_text correctness
+§6 Singleton accessor
+§7 DOMAINS constant validation
 """
 
 import pytest
