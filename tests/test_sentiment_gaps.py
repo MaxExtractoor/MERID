@@ -270,7 +270,7 @@ class TestMarketContextBlend:
     def test_asset_only_market(self):
         s = _make_hashtag(asset="BTC", score=0.6, volume=100)
         self.bus.update_hashtags([s])
-        with patch.object(self.bus, "_get_fg", return_value=50), \
+        with patch.object(self.bus, "_get_fg", return_value=(50, False)), \
              patch.object(self.bus, "_get_social_score", return_value=(0.0, 0.5)):
             ctx = self.bus.get_market_context("MKT-1", asset="BTC", category="crypto")
         assert ctx.asset_context is not None
@@ -303,7 +303,7 @@ class TestMarketContextBlend:
             label="positive", timestamp=datetime.now(timezone.utc),
         )
         self.bus.update_news([agg])
-        with patch.object(self.bus, "_get_fg", return_value=50), \
+        with patch.object(self.bus, "_get_fg", return_value=(50, False)), \
              patch.object(self.bus, "_get_social_score", return_value=(0.0, 0.5)):
             ctx = self.bus.get_market_context("MKT-3", event_id="EVT-BTC",
                                               asset="BTC", category="crypto")
@@ -342,7 +342,7 @@ class TestMonitorStatsAccumulation:
 
         with patch.object(m, "_get_hashtag_agent", return_value=mock_agent), \
              patch.object(m, "_get_bus", return_value=mock_bus), \
-             patch.object(m, "_get_fg", return_value=50):
+             patch.object(m, "_get_fg", return_value=(50, False)):
             loop = asyncio.new_event_loop()
             try:
                 for _ in range(3):
@@ -427,7 +427,7 @@ class TestKalshiProbAdjustment:
             timestamp=datetime.now(timezone.utc),
         )
         bus.update_news([agg])
-        with patch.object(bus, "_get_fg", return_value=fg), \
+        with patch.object(bus, "_get_fg", return_value=(fg, False)), \
              patch.object(bus, "_get_social_score", return_value=(combined, 0.8)):
             return bus.get_asset_context("BTC")
 
@@ -499,7 +499,7 @@ class TestHashtagAgentSingletonReset:
 
     def test_history_does_not_bleed_after_reset(self):
         agent1 = HashtagAgent()
-        agent1._history["#BTC"].push(0.5, 100)
+        agent1._history_push("#BTC", 0.5, 100)
         assert len(agent1._history) == 1
 
         # Simulate singleton reset
@@ -535,7 +535,7 @@ class TestBusConcurrentAccess:
         def reader():
             for _ in range(50):
                 try:
-                    with patch.object(bus, "_get_fg", return_value=50), \
+                    with patch.object(bus, "_get_fg", return_value=(50, False)), \
                          patch.object(bus, "_get_social_score", return_value=(0.0, 0.5)):
                         bus.get_asset_context("BTC")
                 except Exception as e:

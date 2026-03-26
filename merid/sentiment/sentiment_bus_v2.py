@@ -14,8 +14,9 @@ Agents, risk layer, and UI all read from here — nothing writes orders.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -69,6 +70,7 @@ class AssetSentimentContext:
     top_tags: List[str]
     provider_breakdown: Dict[str, float]
     timestamp: datetime
+    fg_is_synthetic: bool = False  # True when FG came from sin-wave fallback
 
     def should_reduce_size(self) -> bool:
         return self.fg_regime in ("extreme_fear", "extreme_greed")
@@ -113,6 +115,7 @@ class AssetSentimentContext:
             "should_reduce_size": self.should_reduce_size(),
             "is_contrarian": self.is_contrarian(),
             "kalshi_prob_adjustment": self.kalshi_prob_adjustment(),
+            "fg_is_synthetic": self.fg_is_synthetic,
             "timestamp": self.timestamp.isoformat(),
         }
 
@@ -242,15 +245,16 @@ class SentimentBusV2:
         if self._initialized:
             return
 
-        # Hashtag state: asset/event_id → latest HashtagContext
-        self._hashtag_contexts: Dict[str, HashtagContext] = {}
-        # Hashtag rolling windows: tag → _ScoreWindow
-        self._hashtag_windows: Dict[str, _ScoreWindow] = defaultdict(_ScoreWindow)
+        # Hashtag state: asset/event_id → latest HashtagContext (capped at 1000 keys)
+        self._hashtag_contexts: OrderedDict[str, HashtagContext] = OrderedDict()
+        # Hashtag rolling windows: tag → _ScoreWindow (capped at 1000 keys)
+        self._hashtag_windows: OrderedDict[str, _ScoreWindow] = OrderedDict()
+        self._ctx_max = 1000  # max distinct keys for hashtag + news dicts
 
         # News state: key ("{cat}:{asset_or_event}") → latest NewsContext
-        self._news_contexts: Dict[str, NewsContext] = {}
+        self._news_contexts: OrderedDict[str, NewsContext] = OrderedDict()
         # News rolling windows: key → _ScoreWindow
-        self._news_windows: Dict[str, _ScoreWindow] = defaultdict(_ScoreWindow)
+        self._news_windows: OrderedDict[str, _ScoreWindow] = OrderedDict()
 
         # Asset sentiment cache: asset → AssetSentimentContext
         self._asset_cache: Dict[str, AssetSentimentContext] = {}
@@ -263,7 +267,7 @@ class SentimentBusV2:
         self._w_hashtag = float(0.20)
         self._w_fg = float(0.15)   # FG contributes as a normalized overlay
 
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()
         self._initialized = True
         logger.info("SentimentBusV2 initialized")
 
@@ -283,52 +287,65 @@ class SentimentBusV2:
 
         now = datetime.now(timezone.utc)
 
-        for key, items in groups.items():
-            total_vol = sum(i.volume for i in items) if items else 0
-            if total_vol == 0:
-                wt_score = sum(i.score for i in items) / max(1, len(items))
-            else:
-                wt_score = sum(i.score * i.volume for i in items) / total_vol
+        with self._lock:
+            for key, items in groups.items():
+                total_vol = sum(i.volume for i in items) if items else 0
+                if total_vol == 0:
+                    wt_score = sum(i.score for i in items) / max(1, len(items))
+                else:
+                    wt_score = sum(i.score * i.volume for i in items) / total_vol
 
-            avg_conf = sum(i.confidence for i in items) / max(1, len(items))
+                avg_conf = sum(i.confidence for i in items) / max(1, len(items))
 
-            # Update rolling window
-            self._hashtag_windows[key].push(wt_score, total_vol)
+                # Update rolling window (LRU-evict oldest key if at cap)
+                if key not in self._hashtag_windows:
+                    if len(self._hashtag_windows) >= self._ctx_max:
+                        self._hashtag_windows.popitem(last=False)
+                    self._hashtag_windows[key] = _ScoreWindow()
+                else:
+                    self._hashtag_windows.move_to_end(key)
+                self._hashtag_windows[key].push(wt_score, total_vol)
 
-            # Per-provider breakdown
-            prov: Dict[str, List[float]] = _dd(list)
-            for i in items:
-                prov[i.provider].append(i.score)
-            provider_scores = {p: round(sum(v) / len(v), 4) for p, v in prov.items()}
+                # Per-provider breakdown
+                prov: Dict[str, List[float]] = _dd(list)
+                for i in items:
+                    prov[i.provider].append(i.score)
+                provider_scores = {p: round(sum(v) / len(v), 4) for p, v in prov.items()}
 
-            # Direction
-            if wt_score > 0.1:
-                direction = "bullish"
-            elif wt_score < -0.1:
-                direction = "bearish"
-            else:
-                direction = "neutral"
+                # Direction
+                if wt_score > 0.1:
+                    direction = "bullish"
+                elif wt_score < -0.1:
+                    direction = "bearish"
+                else:
+                    direction = "neutral"
 
-            top_tags = list(dict.fromkeys(
-                i.tag for i in items if not i.tag.startswith("reddit:")
-            ))[:6]
+                top_tags = list(dict.fromkeys(
+                    i.tag for i in items if not i.tag.startswith("reddit:")
+                ))[:6]
 
-            self._hashtag_contexts[key] = HashtagContext(
-                key=key,
-                score=round(wt_score, 4),
-                volume=total_vol,
-                confidence=round(avg_conf, 3),
-                top_tags=top_tags,
-                direction=direction,
-                signals=[],  # signals generated by HashtagMonitor
-                provider_scores=provider_scores,
-                timestamp=now,
-            )
+                # LRU-evict oldest entry if at cap
+                if key not in self._hashtag_contexts:
+                    if len(self._hashtag_contexts) >= self._ctx_max:
+                        self._hashtag_contexts.popitem(last=False)
+                else:
+                    self._hashtag_contexts.move_to_end(key)
+                self._hashtag_contexts[key] = HashtagContext(
+                    key=key,
+                    score=round(wt_score, 4),
+                    volume=total_vol,
+                    confidence=round(avg_conf, 3),
+                    top_tags=top_tags,
+                    direction=direction,
+                    signals=[],  # signals generated by HashtagMonitor
+                    provider_scores=provider_scores,
+                    timestamp=now,
+                )
 
-        # Invalidate asset cache for affected assets
-        for key in groups:
-            self._asset_cache.pop(key, None)
-            self._event_cache.pop(key, None)
+            # Invalidate asset cache for affected assets
+            for key in groups:
+                self._asset_cache.pop(key, None)
+                self._event_cache.pop(key, None)
 
         # Bridge: push aggregated social scores into MarketMoodBus
         try:
@@ -350,25 +367,39 @@ class SentimentBusV2:
     def update_news(self, aggregated: List[Any]) -> None:
         """Ingest a batch of AggregatedNewsSentiment objects."""
         now = datetime.now(timezone.utc)
-        for agg in aggregated:
-            key = agg.key  # "{category}:{asset_or_event}"
-            self._news_windows[key].push(agg.score, agg.headline_count)
-            self._news_contexts[key] = NewsContext(
-                key=key,
-                score=round(agg.score, 4),
-                confidence=round(agg.confidence, 3),
-                headline_count=agg.headline_count,
-                label=agg.label,
-                provider_scores=agg.provider_scores,
-                timestamp=now,
-            )
-            # Invalidate asset/event caches
-            asset = agg.asset
-            event_id = agg.event_id
-            if asset:
-                self._asset_cache.pop(asset, None)
-            if event_id:
-                self._event_cache.pop(event_id, None)
+        with self._lock:
+            for agg in aggregated:
+                key = agg.key  # "{category}:{asset_or_event}"
+                # LRU-evict oldest window entry if at cap
+                if key not in self._news_windows:
+                    if len(self._news_windows) >= self._ctx_max:
+                        self._news_windows.popitem(last=False)
+                    self._news_windows[key] = _ScoreWindow()
+                else:
+                    self._news_windows.move_to_end(key)
+                self._news_windows[key].push(agg.score, agg.headline_count)
+                # LRU-evict oldest context entry if at cap
+                if key not in self._news_contexts:
+                    if len(self._news_contexts) >= self._ctx_max:
+                        self._news_contexts.popitem(last=False)
+                else:
+                    self._news_contexts.move_to_end(key)
+                self._news_contexts[key] = NewsContext(
+                    key=key,
+                    score=round(agg.score, 4),
+                    confidence=round(agg.confidence, 3),
+                    headline_count=agg.headline_count,
+                    label=agg.label,
+                    provider_scores=agg.provider_scores,
+                    timestamp=now,
+                )
+                # Invalidate asset/event caches
+                asset = agg.asset
+                event_id = agg.event_id
+                if asset:
+                    self._asset_cache.pop(asset, None)
+                if event_id:
+                    self._event_cache.pop(event_id, None)
 
         # Bridge: push news scores into MarketMoodBus
         try:
@@ -388,35 +419,47 @@ class SentimentBusV2:
         logger.debug("[bus-v2] update_news: %d aggregates ingested", len(aggregated))
 
     def update_signals(self, signals: List[Any]) -> None:
-        """Attach HashtagSignal objects to the relevant HashtagContext."""
+        """Attach HashtagSignal objects to the relevant HashtagContext.
+
+        Replaces all existing signals for each affected key with the new
+        batch from this cycle so that stale signals don't accumulate.
+        """
+        # Group incoming signals by key so each context is updated once
+        from collections import defaultdict as _dd
+        by_key: Dict[str, List[Any]] = _dd(list)
         for sig in signals:
-            key = sig.asset_or_event
-            if key in self._hashtag_contexts:
-                self._hashtag_contexts[key].signals = [
-                    s for s in self._hashtag_contexts[key].signals
-                    if s.asset_or_event != key
-                ] + [sig]
-            # Invalidate caches
-            self._asset_cache.pop(key, None)
-            self._event_cache.pop(key, None)
+            by_key[sig.asset_or_event].append(sig)
+
+        with self._lock:
+            for key, sigs in by_key.items():
+                if key in self._hashtag_contexts:
+                    self._hashtag_contexts[key].signals = list(sigs)
+                # Invalidate caches
+                self._asset_cache.pop(key, None)
+                self._event_cache.pop(key, None)
 
     # ── Context builders ──────────────────────────────────────────────
 
-    def _get_fg(self, asset: str) -> int:
-        """Fetch fear/greed index for an asset (0-100)."""
+    def _get_fg(self, asset: str) -> Tuple[int, bool]:
+        """Fetch fear/greed index for an asset.
+
+        Returns (fg_index 0-100, is_synthetic).  is_synthetic is True when
+        the real API is unavailable and a fallback sin-wave value is used.
+        """
         try:
-            from merid.sentiment.cfgi_client import quick_fg
-            return quick_fg(asset) or 50
+            from merid.sentiment.cfgi_client import get_cfgi_client
+            data = get_cfgi_client().get_fear_greed(asset)
+            return data.fgi, data.is_synthetic
         except Exception:
             pass
         try:
             from merid.swarm.market_mood_bus import get_market_mood_bus
             ctx = get_market_mood_bus().get_context(asset, "15m")
             if ctx:
-                return int(getattr(ctx, "fg_index", 50))
+                return int(getattr(ctx, "fg_index", 50)), False
         except Exception:
             pass
-        return 50
+        return 50, False
 
     def _fg_regime(self, fg: int) -> str:
         if fg <= 20:
@@ -454,109 +497,125 @@ class SentimentBusV2:
         Combines FG + social (MarketMoodBus) + news + hashtag with
         Kalman smoothing. Cached until next update_hashtags/update_news.
         """
-        if asset in self._asset_cache:
-            return self._asset_cache[asset]
+        with self._lock:
+            cached = self._asset_cache.get(asset)
+        if cached is not None:
+            return cached
 
         now = datetime.now(timezone.utc)
-        fg = self._get_fg(asset)
+        fg, fg_is_synthetic = self._get_fg(asset)
         fg_regime = self._fg_regime(fg)
         social_score, social_conf = self._get_social_score(asset)
 
-        # News score
-        news_key = f"crypto:{asset}"
-        news_ctx = self._news_contexts.get(news_key)
-        news_score = news_ctx.score if news_ctx else 0.0
-        news_conf = news_ctx.confidence if news_ctx else 0.3
+        with self._lock:
+            # Re-check cache after acquiring lock (another thread may have populated it)
+            cached = self._asset_cache.get(asset)
+            if cached is not None:
+                return cached
 
-        # Hashtag score
-        htag_ctx = self._hashtag_contexts.get(asset)
-        hashtag_score = htag_ctx.score if htag_ctx else 0.0
-        hashtag_conf = htag_ctx.confidence if htag_ctx else 0.3
-        top_tags = htag_ctx.top_tags if htag_ctx else []
-        signals = htag_ctx.signals if htag_ctx else []
-        provider_breakdown = htag_ctx.provider_scores if htag_ctx else {}
+            # News score
+            news_key = f"crypto:{asset}"
+            news_ctx = self._news_contexts.get(news_key)
+            news_score = news_ctx.score if news_ctx else 0.0
+            news_conf = news_ctx.confidence if news_ctx else 0.3
 
-        # FG normalized to -1..1
-        fg_norm = (fg - 50) / 50.0
+            # Hashtag score
+            htag_ctx = self._hashtag_contexts.get(asset)
+            hashtag_score = htag_ctx.score if htag_ctx else 0.0
+            hashtag_conf = htag_ctx.confidence if htag_ctx else 0.3
+            top_tags = list(htag_ctx.top_tags) if htag_ctx else []
+            signals = list(htag_ctx.signals) if htag_ctx else []
+            provider_breakdown = dict(htag_ctx.provider_scores) if htag_ctx else {}
 
-        # Weighted blend
-        combined = (
-            self._w_social * social_score
-            + self._w_news * news_score
-            + self._w_hashtag * hashtag_score
-            + self._w_fg * fg_norm
-        )
+            # FG normalized to -1..1
+            fg_norm = (fg - 50) / 50.0
 
-        # Kalman smoothed from rolling window
-        win = self._hashtag_windows.get(asset)
-        kalman = win.kalman_smooth() if win and win.count > 1 else combined
+            # Weighted blend
+            combined = (
+                self._w_social * social_score
+                + self._w_news * news_score
+                + self._w_hashtag * hashtag_score
+                + self._w_fg * fg_norm
+            )
 
-        # Overall confidence
-        confidence = (social_conf + news_conf + hashtag_conf) / 3.0
+            # Kalman smoothed from rolling window
+            win = self._hashtag_windows.get(asset)
+            kalman = win.kalman_smooth() if win and win.count > 1 else combined
 
-        ctx = AssetSentimentContext(
-            asset=asset,
-            fg_index=fg,
-            fg_regime=fg_regime,
-            social_score=round(social_score, 4),
-            news_score=round(news_score, 4),
-            hashtag_score=round(hashtag_score, 4),
-            kalman_smoothed=round(kalman, 4),
-            combined_score=round(combined, 4),
-            confidence=round(confidence, 3),
-            signals=signals,
-            top_tags=top_tags,
-            provider_breakdown=provider_breakdown,
-            timestamp=now,
-        )
-        self._asset_cache[asset] = ctx
-        return ctx
+            # Overall confidence
+            confidence = (social_conf + news_conf + hashtag_conf) / 3.0
+
+            ctx = AssetSentimentContext(
+                asset=asset,
+                fg_index=fg,
+                fg_regime=fg_regime,
+                social_score=round(social_score, 4),
+                news_score=round(news_score, 4),
+                hashtag_score=round(hashtag_score, 4),
+                kalman_smoothed=round(kalman, 4),
+                combined_score=round(combined, 4),
+                confidence=round(confidence, 3),
+                signals=signals,
+                top_tags=top_tags,
+                provider_breakdown=provider_breakdown,
+                timestamp=now,
+                fg_is_synthetic=fg_is_synthetic,
+            )
+            self._asset_cache[asset] = ctx
+            return ctx
 
     def get_event_context(self, event_id: str, category: str = "", asset: Optional[str] = None) -> EventSentimentContext:
         """Build sentiment context for a specific Kalshi event."""
-        if event_id in self._event_cache:
-            return self._event_cache[event_id]
+        with self._lock:
+            cached = self._event_cache.get(event_id)
+        if cached is not None:
+            return cached
 
         now = datetime.now(timezone.utc)
 
-        # News for this event
-        news_key = f"{category}:{event_id}"
-        news_ctx = self._news_contexts.get(news_key)
-        # Fallback to category-level news
-        if news_ctx is None and category:
-            cat_key = f"{category}:{asset or 'general'}"
-            news_ctx = self._news_contexts.get(cat_key)
-        news_score = news_ctx.score if news_ctx else 0.0
-        news_conf = news_ctx.confidence if news_ctx else 0.3
-        headline_count = news_ctx.headline_count if news_ctx else 0
+        with self._lock:
+            cached = self._event_cache.get(event_id)
+            if cached is not None:
+                return cached
 
-        # Hashtag for this event
-        htag_ctx = self._hashtag_contexts.get(event_id)
-        if htag_ctx is None and asset:
-            htag_ctx = self._hashtag_contexts.get(asset)
-        hashtag_score = htag_ctx.score if htag_ctx else 0.0
-        hashtag_conf = htag_ctx.confidence if htag_ctx else 0.3
-        signals = htag_ctx.signals if htag_ctx else []
+            # News for this event
+            news_key = f"{category}:{event_id}"
+            news_ctx = self._news_contexts.get(news_key)
+            # Fallback to category-level news
+            if news_ctx is None and category:
+                cat_key = f"{category}:{asset or 'general'}"
+                news_ctx = self._news_contexts.get(cat_key)
+            news_score = news_ctx.score if news_ctx else 0.0
+            news_conf = news_ctx.confidence if news_ctx else 0.3
+            headline_count = news_ctx.headline_count if news_ctx else 0
 
-        combined = 0.5 * news_score + 0.5 * hashtag_score
-        confidence = (news_conf + hashtag_conf) / 2.0
-        label = "positive" if combined > 0.05 else ("negative" if combined < -0.05 else "neutral")
+            # Hashtag for this event
+            htag_ctx = self._hashtag_contexts.get(event_id)
+            if htag_ctx is None and asset:
+                htag_ctx = self._hashtag_contexts.get(asset)
+            hashtag_score = htag_ctx.score if htag_ctx else 0.0
+            hashtag_conf = htag_ctx.confidence if htag_ctx else 0.3
+            signals = list(htag_ctx.signals) if htag_ctx else []
 
-        ctx = EventSentimentContext(
-            event_id=event_id,
-            category=category,
-            asset=asset,
-            news_score=round(news_score, 4),
-            hashtag_score=round(hashtag_score, 4),
-            combined_score=round(combined, 4),
-            confidence=round(confidence, 3),
-            label=label,
-            signals=signals,
-            headline_count=headline_count,
-            timestamp=now,
-        )
-        self._event_cache[event_id] = ctx
-        return ctx
+            combined = 0.5 * news_score + 0.5 * hashtag_score
+            confidence = (news_conf + hashtag_conf) / 2.0
+            label = "positive" if combined > 0.05 else ("negative" if combined < -0.05 else "neutral")
+
+            ctx = EventSentimentContext(
+                event_id=event_id,
+                category=category,
+                asset=asset,
+                news_score=round(news_score, 4),
+                hashtag_score=round(hashtag_score, 4),
+                combined_score=round(combined, 4),
+                confidence=round(confidence, 3),
+                label=label,
+                signals=signals,
+                headline_count=headline_count,
+                timestamp=now,
+            )
+            self._event_cache[event_id] = ctx
+            return ctx
 
     def get_market_context(
         self,

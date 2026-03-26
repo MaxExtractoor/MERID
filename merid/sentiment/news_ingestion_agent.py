@@ -371,8 +371,8 @@ class NewsIngestionAgent:
         if self._bus is not None:
             return self._bus
         try:
-            from merid.sentiment.sentiment_bus import get_sentiment_bus
-            self._bus = get_sentiment_bus()
+            from merid.sentiment.sentiment_bus_v2 import get_sentiment_bus_v2
+            self._bus = get_sentiment_bus_v2()
         except Exception:
             pass
         return self._bus
