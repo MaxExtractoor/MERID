@@ -39,6 +39,25 @@ _last_discrepancies: List["PositionDiscrepancy"] = []
 _reconciliation_has_run: bool = False
 _last_reconciliation_ts: float = 0.0
 
+# ── Phantom position kill switch ─────────────────────────────────────────
+# Set to True to halt all new orders when phantom positions are detected.
+_phantom_kill_switch: bool = False
+_phantom_kill_lock = threading.Lock()
+
+
+def is_phantom_kill_switch_active() -> bool:
+    """Return True if phantom position kill switch is armed."""
+    with _phantom_kill_lock:
+        return _phantom_kill_switch
+
+
+def arm_phantom_kill_switch(reason: str = "") -> None:
+    """Arm the phantom position kill switch (halt new orders)."""
+    global _phantom_kill_switch
+    with _phantom_kill_lock:
+        _phantom_kill_switch = True
+    logger.critical(f"PHANTOM KILL SWITCH ARMED — {reason or 'phantom positions detected'}")
+
 
 @dataclass
 class PositionDiscrepancy:
@@ -54,6 +73,7 @@ class PositionDiscrepancy:
     delta_pnl: float = 0.0
     severity: str = "info"        # info, warning, critical
     reason: str = ""              # human-readable explanation
+    discrepancy_type: str = "drift"  # drift | phantom | missing
     timestamp: float = field(default_factory=time.time)
 
     def __post_init__(self):
@@ -70,9 +90,13 @@ class PositionDiscrepancy:
             reasons.append(f"qty delta {self.delta_qty:+.4f} exceeds 0.01")
 
         if self.merid_qty == 0.0 and self.venue_qty != 0.0:
+            # Missing: exchange has it but we don't track it
+            self.discrepancy_type = "missing"
             self.severity = "critical"
             reasons.append(f"venue has position ({self.venue_qty}), MERID has none")
         elif self.venue_qty == 0.0 and self.merid_qty != 0.0:
+            # Phantom: we track it but it's not on the exchange
+            self.discrepancy_type = "phantom"
             self.severity = "critical"
             reasons.append(f"MERID has position ({self.merid_qty}), venue has none")
 
@@ -84,6 +108,16 @@ class PositionDiscrepancy:
                 reasons.append(f"entry price delta {pct:.1f}%")
 
         self.reason = "; ".join(reasons) if reasons else "minor drift"
+
+    @property
+    def is_phantom(self) -> bool:
+        """True when MERID tracks a position the exchange does not have."""
+        return self.discrepancy_type == "phantom"
+
+    @property
+    def is_missing(self) -> bool:
+        """True when the exchange has a position MERID does not track."""
+        return self.discrepancy_type == "missing"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -97,6 +131,7 @@ class PositionDiscrepancy:
             "delta_price": round(self.delta_price, 4),
             "severity": self.severity,
             "reason": self.reason,
+            "discrepancy_type": self.discrepancy_type,
             "timestamp": self.timestamp,
         }
 

@@ -26,6 +26,11 @@ from utils.logger import get_logger
 
 logger = get_logger("core.consensus")
 
+# ── Module-level constants ────────────────────────────────────────────────
+
+CONSENSUS_QUORUM_THRESHOLD: float = 0.67  # 2/3 majority required
+MAX_AGENT_WEIGHT: float = 0.40            # No single agent may hold >40% of total weight
+
 
 @dataclass
 class Vote:
@@ -80,7 +85,7 @@ class ConsensusEngine:
         self.trust_scores: Dict[str, float] = defaultdict(lambda: 1.0)
         
         # Consensus parameters
-        self.quorum_threshold = 0.67  # 2/3 majority
+        self.quorum_threshold = CONSENSUS_QUORUM_THRESHOLD  # 2/3 majority
         self.min_votes = 3  # Minimum votes for consensus
         
         # State
@@ -304,10 +309,33 @@ class ConsensusEngine:
         
         votes = list(self.pending_votes.values())
         self.pending_votes.clear()
+
+        # D2: Drop stale votes (older than vote_window seconds)
+        now_ts = time.time()
+        votes = [v for v in votes if (now_ts - v.timestamp) <= self.vote_window]
+
+        if not votes:
+            return None
+
+        # D2: Cap per-agent weight so no single agent dominates
+        raw_total = sum(v.weight for v in votes)
+        if raw_total > 0:
+            capped_weights: Dict[str, float] = {}
+            for v in votes:
+                agent_share = v.weight / raw_total
+                if agent_share > MAX_AGENT_WEIGHT:
+                    capped_weights[v.agent_id] = MAX_AGENT_WEIGHT * raw_total
+                else:
+                    capped_weights[v.agent_id] = v.weight
+        else:
+            capped_weights = {v.agent_id: v.weight for v in votes}
+
+        def effective_weight(vote: Vote) -> float:
+            return capped_weights.get(vote.agent_id, vote.weight)
         
         # Calculate weighted votes
-        bullish_weight = sum(v.weight for v in votes if v.signal == "bullish")
-        bearish_weight = sum(v.weight for v in votes if v.signal == "bearish")
+        bullish_weight = sum(effective_weight(v) for v in votes if v.signal == "bullish")
+        bearish_weight = sum(effective_weight(v) for v in votes if v.signal == "bearish")
         total_weight = bullish_weight + bearish_weight
         
         if total_weight == 0:
