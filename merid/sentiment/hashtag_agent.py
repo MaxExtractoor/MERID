@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -93,13 +93,22 @@ class _RateLimiter:
     def __init__(self, calls_per_minute: int = 30) -> None:
         self._interval = 60.0 / max(1, calls_per_minute)
         self._last_call = 0.0
+        self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
-        now = time.monotonic()
-        wait = self._interval - (now - self._last_call)
+        async with self._lock:
+            now = time.monotonic()
+            wait = self._interval - (now - self._last_call)
+            if wait > 0:
+                # Reserve the slot before releasing the lock so concurrent
+                # coroutines queue up rather than all seeing the same stale
+                # _last_call and bypassing the rate limit together.
+                self._last_call = now + wait
+            else:
+                wait = 0.0
+                self._last_call = now
         if wait > 0:
             await asyncio.sleep(wait)
-        self._last_call = time.monotonic()
 
 
 # ── Twitter/X thin wrapper ────────────────────────────────────────────────
@@ -233,16 +242,29 @@ class HashtagAgent:
         self._bus = bus
         self._max_events = max_events_per_cycle
         self._max_tags = max_tags_per_event
-        self._history: Dict[str, _TagHistory] = defaultdict(_TagHistory)
+        # Bounded LRU-style history: cap at 500 unique tag keys to prevent
+        # unbounded growth across long-running deployments.
+        self._history: OrderedDict[str, _TagHistory] = OrderedDict()
+        self._history_max = 500
         self._last_events: List[Dict[str, Any]] = []
         self._last_cycle_ts: float = 0.0
+
+    def _history_push(self, tag: str, score: float, volume: int) -> None:
+        """Push to tag history with LRU eviction."""
+        if tag not in self._history:
+            if len(self._history) >= self._history_max:
+                self._history.popitem(last=False)  # evict oldest
+            self._history[tag] = _TagHistory()
+        else:
+            self._history.move_to_end(tag)
+        self._history[tag].push(score, volume)
 
     def _get_bus(self) -> Optional[Any]:
         if self._bus is not None:
             return self._bus
         try:
-            from merid.sentiment.sentiment_bus import get_sentiment_bus
-            self._bus = get_sentiment_bus()
+            from merid.sentiment.sentiment_bus_v2 import get_sentiment_bus_v2
+            self._bus = get_sentiment_bus_v2()
         except Exception:
             pass
         return self._bus
@@ -374,7 +396,7 @@ class HashtagAgent:
             for tag in q["hashtags"][:4]:
                 try:
                     score, vol = await self._twitter.sentiment_for_hashtag(tag)
-                    self._history[tag].push(score, vol)
+                    self._history_push(tag, score, vol)
                     out.append(HashtagSentiment(
                         tag=tag,
                         score=score,
@@ -396,7 +418,7 @@ class HashtagAgent:
                         q["subreddits"], q["keywords"]
                     )
                     reddit_tag = f"reddit:{cat}:{asset or 'general'}"
-                    self._history[reddit_tag].push(score, vol)
+                    self._history_push(reddit_tag, score, vol)
                     out.append(HashtagSentiment(
                         tag=reddit_tag,
                         score=score,
@@ -441,7 +463,7 @@ class HashtagAgent:
             for tag in cfg.hashtags[:4]:
                 try:
                     score, vol = await self._twitter.sentiment_for_hashtag(tag)
-                    self._history[tag].push(score, vol)
+                    self._history_push(tag, score, vol)
                     out.append(HashtagSentiment(
                         tag=tag,
                         score=score,
@@ -502,8 +524,13 @@ class HashtagAgent:
             wt_score = sum(i.score * i.volume for i in items) / total_vol
             tags = [i.tag for i in items if not i.tag.startswith("reddit:")]
 
-            # Check for volume spike
-            hist = self._history.get(items[0].tag)
+            # Check for volume spike using the first non-reddit tag's history,
+            # or fall back to the aggregated key so reddit-only groups still work.
+            spike_tag = next(
+                (i.tag for i in items if not i.tag.startswith("reddit:")),
+                None,
+            ) or items[0].tag
+            hist = self._history.get(spike_tag)
             avg_vol = hist.avg_volume if hist else 0.0
             is_spike = avg_vol > 0 and total_vol > volume_spike_threshold * avg_vol
 

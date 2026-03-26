@@ -264,7 +264,7 @@ class TestGetAssetContext:
         self.bus = _reset_bus()
 
     def _patch_fg(self, value: int = 50):
-        return patch.object(self.bus, "_get_fg", return_value=value)
+        return patch.object(self.bus, "_get_fg", return_value=(value, False))
 
     def _patch_social(self, score: float = 0.0, conf: float = 0.5):
         return patch.object(self.bus, "_get_social_score", return_value=(score, conf))
@@ -496,7 +496,7 @@ class TestGenerateSignals:
         """Pre-populate history so current volume is a spike."""
         tag = "#BTC"
         for _ in range(5):
-            self.agent._history[tag].push(0.1, 10)  # avg_volume = 10
+            self.agent._history_push(tag, 0.1, 10)  # avg_volume = 10
         sents = [HashtagSentiment(
             tag=tag, score=0.1, volume=30,  # 3x avg → spike at threshold 2.5
             category="crypto", asset="BTC", event_id=None,
@@ -558,7 +558,7 @@ class TestAssetSentimentContextHelpers:
 
     def _make_ctx(self, fg_index: int, combined_score: float) -> AssetSentimentContext:
         bus = _reset_bus()
-        with patch.object(bus, "_get_fg", return_value=fg_index), \
+        with patch.object(bus, "_get_fg", return_value=(fg_index, False)), \
              patch.object(bus, "_get_social_score", return_value=(combined_score, 0.7)):
             # Inject matching hashtag score so combined ≈ combined_score
             s = _make_hashtag_sentiment(asset="BTC", score=combined_score, volume=100)
