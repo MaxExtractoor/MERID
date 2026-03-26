@@ -3,6 +3,7 @@
 Combines REST operations with WebSocket real-time updates for complete
 order group state management.
 """
+from __future__ import annotations
 
 import asyncio
 import json
