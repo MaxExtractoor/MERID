@@ -66,7 +66,9 @@ class KalshiWebSocket(EventVenueStream):
         self._messages_received: int = 0
         self._errors_received: int = 0
         self._reconnect_count: int = 0
-        self._last_message_ts: float = 0.0
+        self._last_message_ts: float = 0.0  # deprecated: use last_data_ts
+        self._last_frame_ts: float = 0.0    # ANY frame (ping/pong/data)
+        self._last_data_ts: float = 0.0     # market data only
         self._connect_ts: float = 0.0
 
         # ── Order group state tracking ───────────────────────────────────
@@ -103,8 +105,17 @@ class KalshiWebSocket(EventVenueStream):
             )
             self._running = True
             self._reconnect_delay = 1.0
-            self._connect_ts = time.monotonic()
-            logger.info("Connected to Kalshi WebSocket")
+            now = time.monotonic()
+            self._connect_ts = now
+            self._last_frame_ts = now  # connection itself is a "frame"
+            self._last_data_ts = now
+
+            # Diagnostic logging for troubleshooting stale connections
+            logger.info(
+                f"Connected to Kalshi WebSocket: url={self.config.ws_url} "
+                f"env={'demo' if 'demo' in self.config.ws_url.lower() else 'live'} "
+                f"auth={'yes' if self._auth_token else 'no'}"
+            )
 
         except (ConnectionError, RuntimeError, ValueError) as e:
             logger.error(f"Failed to connect to Kalshi WebSocket: {e}")
@@ -166,9 +177,15 @@ class KalshiWebSocket(EventVenueStream):
             message["params"]["event_ticker"] = event_ticker
             self._subscriptions.add(f"event:{event_ticker}")
 
+        logger.info(
+            f"Subscribing to Kalshi ticker: "
+            f"markets={len(market_ids) if market_ids else 0}, "
+            f"event={event_ticker if event_ticker else 'none'}, "
+            f"sub_id={message['id']}, "
+            f"cmd={json.dumps(message)[:200]}"
+        )
         await self._ws.send(json.dumps(message))
-        logger.info(f"Subscribed to Kalshi ticker for {len(market_ids) if market_ids else 0} markets" +
-                   (f", event={event_ticker}" if event_ticker else ""))
+        logger.info(f"Subscription sent successfully (id={message['id']})")
 
     async def subscribe_trades(
         self,
@@ -348,6 +365,11 @@ class KalshiWebSocket(EventVenueStream):
         )
         # Start periodic event-loop lag measurement
         self._start_lag_monitor()
+        # Start staleness monitor for auto-reconnect
+        staleness_task = asyncio.create_task(
+            self._monitor_staleness(),
+            name="kalshi-ws-staleness",
+        )
 
         while self._running:
             try:
@@ -355,7 +377,10 @@ class KalshiWebSocket(EventVenueStream):
                     if not self._running:
                         break
 
-                    self._last_message_ts = time.monotonic()
+                    now = time.monotonic()
+                    # Track ANY frame received (this includes application data)
+                    self._last_frame_ts = now
+                    self._last_message_ts = now  # backward compat
                     self._messages_received += 1
 
                     try:
@@ -372,6 +397,11 @@ class KalshiWebSocket(EventVenueStream):
                     # ── Sequence check ─────────────────────────────────
                     if not self._check_sequence(data):
                         continue
+
+                    # Track data message timestamp (market-relevant data only)
+                    channel = data.get("type") or data.get("channel")
+                    if channel in ("ticker", "trade", "orderbook_snapshot", "orderbook_delta", "order_group_updates"):
+                        self._last_data_ts = now
 
                     # ── Enqueue for async processing ───────────────────
                     try:
@@ -392,6 +422,68 @@ class KalshiWebSocket(EventVenueStream):
                 if self._running:
                     logger.error(f"Kalshi WebSocket error: {e}")
                     await self._reconnect()
+
+        # Cleanup staleness monitor
+        staleness_task.cancel()
+        try:
+            await staleness_task
+        except asyncio.CancelledError:
+            pass
+
+    # ── Staleness monitor for auto-reconnect ──────────────────────────
+
+    async def _monitor_staleness(self) -> None:
+        """Monitor connection staleness and trigger reconnect if needed.
+
+        Since the websockets library handles ping/pong automatically and will
+        disconnect on ping timeout, if the connection is still open after 30s,
+        we can infer ping/pong is working. We update last_frame_ts based on
+        this inference and separately track last_data_ts for market activity.
+        """
+        import os
+        # Configurable threshold: default 60s (3x the ping interval)
+        stale_threshold = float(os.environ.get("KALSHI_WS_STALE_THRESHOLD", "60"))
+        check_interval = 10.0  # check every 10s
+        ping_interval = 20.0   # matches websockets.connect ping_interval
+
+        logger.info(f"Staleness monitor started: stale_threshold={stale_threshold}s check_interval={check_interval}s")
+
+        while self._running:
+            await asyncio.sleep(check_interval)
+
+            if not self._running or not self._ws:
+                break
+
+            now = time.monotonic()
+
+            # If connection is still open and it's been > ping_interval since last frame,
+            # we can infer that ping/pong is working (otherwise connection would be closed).
+            # Update last_frame_ts to reflect this implicit liveness signal.
+            if self._ws and not self._ws.closed:
+                frame_idle = now - self._last_frame_ts if self._last_frame_ts else 0
+                if frame_idle > ping_interval:
+                    # Connection is alive (ping/pong working), update frame timestamp
+                    self._last_frame_ts = now
+                    logger.debug(f"Inferred WS liveness from open connection (ping/pong working)")
+
+            # Now check if connection is truly stale
+            frame_idle = now - self._last_frame_ts if self._last_frame_ts else 0
+            data_idle = now - self._last_data_ts if self._last_data_ts else 0
+
+            # Only trigger reconnect if we haven't seen ANY activity (frames) for > threshold
+            if self._last_frame_ts > 0 and frame_idle > stale_threshold:
+                logger.error(
+                    f"Kalshi WS connection stale: no frames for {frame_idle:.1f}s "
+                    f"(threshold={stale_threshold}s, last_data_ago={data_idle:.1f}s, "
+                    f"subscriptions={len(self._subscriptions)}) — triggering reconnect"
+                )
+                # Trigger reconnect
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+                # The listen loop will catch the error and call _reconnect
+                break
 
     # ── Async message processor ────────────────────────────────────────
 
@@ -519,21 +611,35 @@ class KalshiWebSocket(EventVenueStream):
             self._last_seq.clear()
 
             # Resubscribe to all channels
-            ticker_ids = [s for s in self._subscriptions if not s.startswith("orderbook:")]
+            ticker_ids = [s for s in self._subscriptions if not s.startswith("orderbook:") and not s.startswith("event:")]
+            event_tickers = [s.replace("event:", "") for s in self._subscriptions if s.startswith("event:")]
+
             if ticker_ids:
                 await self.subscribe_quotes(ticker_ids)
+                logger.info(f"Resubscribed to {len(ticker_ids)} ticker quotes")
+            if event_tickers:
+                for event_ticker in event_tickers:
+                    await self.subscribe_quotes(event_ticker=event_ticker)
+                logger.info(f"Resubscribed to {len(event_tickers)} event tickers")
             if self._trade_tickers:
-                await self.subscribe_trades(list(self._trade_tickers))
-            for ob_ticker in self._orderbook_tickers:
-                await self.subscribe_orderbook(ob_ticker)
+                trade_list = [t for t in self._trade_tickers if not t.startswith("event:")]
+                if trade_list:
+                    await self.subscribe_trades(trade_list)
+                logger.info(f"Resubscribed to {len(trade_list)} trade channels")
+            if self._orderbook_tickers:
+                for ob_ticker in self._orderbook_tickers:
+                    await self.subscribe_orderbook(ob_ticker)
+                logger.info(f"Resubscribed to {len(self._orderbook_tickers)} orderbook deltas")
             if self._order_group_updates_enabled:
                 await self.subscribe_order_group_updates()
+                logger.info("Resubscribed to order_group_updates")
 
             logger.info(
-                f"Reconnected successfully — resubscribed to "
-                f"{len(ticker_ids)} quotes, {len(self._trade_tickers)} trades, "
-                f"{len(self._orderbook_tickers)} orderbooks" +
-                (", order_group_updates" if self._order_group_updates_enabled else "")
+                f"Reconnected successfully — total subscriptions: "
+                f"quotes={len(ticker_ids) + len(event_tickers)}, "
+                f"trades={len(self._trade_tickers)}, "
+                f"orderbooks={len(self._orderbook_tickers)}, "
+                f"order_groups={'yes' if self._order_group_updates_enabled else 'no'}"
             )
         except (ConnectionError, RuntimeError, ValueError) as e:
             logger.error(f"Kalshi reconnection failed: {e}")
@@ -549,8 +655,15 @@ class KalshiWebSocket(EventVenueStream):
 
         channel = data.get("type") or data.get("channel")
 
-        # Skip subscription confirmations
-        if channel in ("subscribed", "unsubscribed", None):
+        # Log subscription confirmations for diagnostics
+        if channel == "subscribed":
+            sub_id = data.get("id")
+            channels = data.get("channels", [])
+            logger.info(f"Subscription confirmed: id={sub_id} channels={channels}")
+            return None
+
+        # Skip unsubscription confirmations
+        if channel in ("unsubscribed", None):
             return None
 
         if channel == "ticker":
@@ -673,6 +786,8 @@ class KalshiWebSocket(EventVenueStream):
         now = time.monotonic()
         uptime = now - self._connect_ts if self._connect_ts else 0
         last_msg_ago = now - self._last_message_ts if self._last_message_ts else None
+        last_frame_ago = now - self._last_frame_ts if self._last_frame_ts else None
+        last_data_ago = now - self._last_data_ts if self._last_data_ts else None
 
         # Processing time stats
         avg_process_ms = (
@@ -688,6 +803,11 @@ class KalshiWebSocket(EventVenueStream):
         )
         max_lag_ms = max(lag_samples) * 1000 if lag_samples else 0
 
+        # Staleness status
+        import os
+        stale_threshold = float(os.environ.get("KALSHI_WS_STALE_THRESHOLD", "60"))
+        is_stale = last_frame_ago is not None and last_frame_ago > stale_threshold
+
         return {
             "connected": self._ws is not None and self._running,
             "uptime_s": round(uptime, 1),
@@ -697,7 +817,11 @@ class KalshiWebSocket(EventVenueStream):
             "seq_gaps": self._seq_gaps,
             "queue_depth": self._msg_queue.qsize(),
             "queue_max": self._msg_queue.maxsize,
-            "last_msg_ago_s": round(last_msg_ago, 1) if last_msg_ago else None,
+            "last_msg_ago_s": round(last_msg_ago, 1) if last_msg_ago else None,  # deprecated
+            "last_frame_ago_s": round(last_frame_ago, 1) if last_frame_ago else None,
+            "last_data_ago_s": round(last_data_ago, 1) if last_data_ago else None,
+            "is_stale": is_stale,
+            "stale_threshold_s": stale_threshold,
             "ob_cached_markets": len(self._ob_initialised),
             "subscriptions": len(self._subscriptions),
             "perf": {
