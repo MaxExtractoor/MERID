@@ -38,7 +38,8 @@ export default function LiveNotifications() {
           ? 'warning'
           : 'info');
     const timestampRaw = note.timestamp ?? new Date().toISOString();
-    const timestamp = Number.isNaN(Date.parse(timestampRaw)) ? Date.now() : Date.parse(timestampRaw);
+    const parsedTime = Date.parse(timestampRaw);
+    const timestamp = Number.isNaN(parsedTime) ? Date.now() : parsedTime;
 
     return {
       id: note.id ?? `temp-${timestamp}`,

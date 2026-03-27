@@ -138,7 +138,7 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
             <SectionHeader label={section.label} collapsed={collapsed} />
             <div className="space-y-1">
               {section.items.map((item) => (
-                <NavItem key={item.name} item={item} current={current} onChange={onChange} collapsed={collapsed} isLive={modeData ? isLive : undefined} />
+                <NavItem key={item.name} item={item} current={current} onChange={onChange} collapsed={collapsed} isLive={modeData?.is_live ?? false} />
               ))}
             </div>
           </div>

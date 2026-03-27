@@ -171,9 +171,10 @@ export default function KalshiTerminalView() {
     if (selectedEdge.ev_cents <= 0 || selectedEdge.confidence < 0.3) return null;
     const bankroll = balance?.available ?? 100;
     const kellyBet = sizing.effective_fraction * selectedEdge.confidence * bankroll;
-    const priceCents = (selectedMarket.outcomes[0]?.price ?? 0.5) * 100;
+    const priceCents = (selectedMarket.outcomes?.[0]?.price ?? 0.5) * 100;
     const suggestedSide: 'yes' | 'no' = selectedEdge.model_prob > selectedEdge.implied_prob ? 'yes' : 'no';
-    return { contracts: Math.max(1, Math.floor(kellyBet / (priceCents / 100))), side: suggestedSide };
+    const denominator = priceCents / 100;
+    return { contracts: Math.max(1, Math.floor(denominator > 0 ? kellyBet / denominator : 1)), side: suggestedSide };
   }, [selectedEdge, sizing, selectedMarket, balance]);
 
   const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
@@ -588,8 +589,8 @@ export default function KalshiTerminalView() {
                         {f.side.toUpperCase()}
                       </span>
                       <span className="font-mono text-gray-500 truncate max-w-[90px]">{f.ticker}</span>
-                      <span className="font-mono text-white">{f.size}×{(f.price * 100).toFixed(0)}¢</span>
-                      <span className="text-gray-600 ml-auto">${f.fee.toFixed(2)} fee</span>
+                      <span className="font-mono text-white">{f.size}×{((f.price ?? 0) * 100).toFixed(0)}¢</span>
+                      <span className="text-gray-600 ml-auto">${(f.fee ?? 0).toFixed(2)} fee</span>
                       <span className="text-gray-600 whitespace-nowrap">
                         {new Date(f.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </span>

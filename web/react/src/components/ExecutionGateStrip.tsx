@@ -77,7 +77,7 @@ export default function ExecutionGateStrip() {
     ? (risk.total_exposure / risk.max_exposure) * 100
     : 0;
   const dailyLossPct = risk && risk.max_daily_loss > 0
-    ? (Math.abs(risk.daily_pnl) / risk.max_daily_loss) * 100
+    ? (Math.abs(risk.daily_pnl ?? 0) / risk.max_daily_loss) * 100
     : 0;
   const nearExposureLimit = exposurePct >= 75;
   const nearDailyLossLimit = dailyLossPct >= 75;

@@ -111,7 +111,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   const balanceUsd = useMemo(() => {
     if (!balance) return null;
     if (typeof balance.usd === 'number') {
-      return Math.abs(balance.usd) > 100000 ? balance.usd / 100 : balance.usd;
+      return balance.usd;
     }
     return (balance.available ?? 0) + (balance.locked ?? 0);
   }, [balance]);
@@ -551,7 +551,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                     <tr><td colSpan={6} className="text-center py-8 text-gray-500">No positions</td></tr>
                   ) : (
                     positions.map((p, i) => (
-                      <tr key={`${p.ticker}-${i}`} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                      <tr key={p.ticker} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                         <td className="p-3 font-mono text-white">{p.ticker}</td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded text-xs ${
@@ -718,7 +718,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                     <tr><td colSpan={7} className="text-center py-8 text-gray-500">No recent fills</td></tr>
                   ) : (
                     fills.map((f) => {
-                      const net = f.size * f.price - f.fee;
+                      const net = f.size * (f.price ?? 0) - (f.fee ?? 0);
                       return (
                         <tr key={f.trade_id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                           <td className="p-3 text-gray-400 text-xs">
@@ -787,7 +787,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                         <div className="flex items-center gap-4">
                           <span className="text-sm text-white">${(notional ?? 0).toFixed(2)}</span>
                           <span className="text-xs text-gray-500">
-                            {risk.category_contracts[cat] ?? 0} contracts
+                            {risk.category_contracts?.[cat] ?? 0} contracts
                           </span>
                         </div>
                       </div>

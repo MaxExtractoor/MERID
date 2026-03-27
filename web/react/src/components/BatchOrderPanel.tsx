@@ -331,7 +331,10 @@ export function BatchOrderPanel({
               min={1}
               placeholder="Qty"
               value={order.count}
-              onChange={(e) => updateOrder(order.id, 'count', parseInt(e.target.value) || 0)}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                updateOrder(order.id, 'count', Number.isNaN(val) ? 0 : val);
+              }}
               style={{ ...styles.input, width: '70px' }}
             />
 
@@ -343,7 +346,10 @@ export function BatchOrderPanel({
                 max={99}
                 placeholder="Price"
                 value={order.price_cents || ''}
-                onChange={(e) => updateOrder(order.id, 'price_cents', parseInt(e.target.value) || null)}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value);
+                  updateOrder(order.id, 'price_cents', Number.isNaN(val) ? null : val);
+                }}
                 style={{ ...styles.input, width: '60px' }}
               />
               <span style={styles.centsLabel}>¢</span>

@@ -96,7 +96,9 @@ export default function DataTableEnhanced<T>({
     }
     setSelectedRows(newSelected);
 
-    const selectedData = Array.from(newSelected).map((i) => sortedData[i]);
+    const selectedData = Array.from(newSelected)
+      .map((i) => sortedData[i])
+      .filter((row) => row !== undefined);
     onRowSelect?.(selectedData);
   };
 
