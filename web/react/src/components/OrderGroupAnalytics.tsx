@@ -351,7 +351,9 @@ export function OrderGroupAnalytics({
       <div style={styles.stats}>
         {normalizedData.map(group => {
           const latest = group.filtered[group.filtered.length - 1];
-          const peak = Math.max(...group.filtered.map(p => p.utilization_pct));
+          const peak = group.filtered.length > 0 
+            ? Math.max(...group.filtered.map(p => p.utilization_pct))
+            : 0;
           return (
             <div key={group.order_group_id} style={styles.statCard}>
               <div style={styles.statHeader}>

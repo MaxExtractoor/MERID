@@ -387,11 +387,13 @@ export default function Overview() {
   });
   // Only sync once on first load if server is already in a known mode
   const [modeSynced, setModeSynced] = useState(false);
-  if (!modeSynced && venueModeData?.mode) {
-    const serverMode = venueModeData.mode.toLowerCase().includes('paper') ? 'paper' : 'live';
-    if (serverMode !== gridStartMode) setGridStartMode(serverMode);
-    setModeSynced(true);
-  }
+  useEffect(() => {
+    if (!modeSynced && venueModeData?.mode) {
+      const serverMode = venueModeData.mode.toLowerCase().includes('paper') ? 'paper' : 'live';
+      if (serverMode !== gridStartMode) setGridStartMode(serverMode);
+      setModeSynced(true);
+    }
+  }, [venueModeData?.mode, gridStartMode, modeSynced]);
 
   const callRebootAction = useCallback(async (action: 'catalog' | 'grid-start' | 'grid-stop', endpoint: string, body?: object) => {
     setBusyAction(action);

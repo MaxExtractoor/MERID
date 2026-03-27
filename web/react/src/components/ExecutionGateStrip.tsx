@@ -1,5 +1,5 @@
 import { ShieldAlert, ShieldCheck, AlertTriangle, TrendingUp, Activity, Radio, RefreshCw } from 'lucide-react';
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { useKalshiMode } from '../context/KalshiModeContext';
@@ -58,9 +58,18 @@ export default function ExecutionGateStrip() {
       setReloadStatus('err');
     } finally {
       setReloading(false);
-      setTimeout(() => setReloadStatus('idle'), 4000);
     }
   }, []);
+
+  useEffect(() => {
+    let timeoutId: NodeJS.Timeout | null = null;
+    if (reloadStatus !== 'idle') {
+      timeoutId = setTimeout(() => setReloadStatus('idle'), 4000);
+    }
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [reloadStatus]);
 
   if (!gate) return null;
 
@@ -77,7 +86,7 @@ export default function ExecutionGateStrip() {
     ? (risk.total_exposure / risk.max_exposure) * 100
     : 0;
   const dailyLossPct = risk && risk.max_daily_loss > 0
-    ? (Math.abs(risk.daily_pnl) / risk.max_daily_loss) * 100
+    ? (Math.abs(risk.daily_pnl ?? 0) / risk.max_daily_loss) * 100
     : 0;
   const nearExposureLimit = exposurePct >= 75;
   const nearDailyLossLimit = dailyLossPct >= 75;

@@ -489,8 +489,8 @@ export function RiskProtectionsCard() {
       </div>
       
       <div className="text-xs text-slate-500">
-        Circuit: {data.circuit_breaker?.state || 'N/A'} | 
-        Errors: {data.circuit_breaker?.error_count || 0}/{data.circuit_breaker?.threshold || 0}
+        Circuit: {data.circuit_breaker?.state ?? 'N/A'} | 
+        Errors: {data.circuit_breaker?.error_count ?? 0}/{data.circuit_breaker?.threshold ?? 0}
       </div>
       
       <div className="mt-3 text-xs text-slate-400">

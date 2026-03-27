@@ -71,12 +71,14 @@ export default function TopBar({ onMenuClick }: TopBarProps) {
               ? 'from-emerald-500/10 via-green-500/10 to-teal-500/10 border border-emerald-500/30 shadow-emerald-500/20'
               : 'from-red-500/10 via-red-500/10 to-rose-500/10 border border-red-500/30 shadow-red-500/20'
           }`}>
-            {balData?.available != null && (
-              <span className="text-slate-300 text-sm font-medium">
-                {balData.available.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
-              </span>
+            {typeof balData?.available === 'number' && (
+              <>
+                <span className="text-slate-300 text-sm font-medium">
+                  {balData.available.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+                </span>
+                <span className="text-slate-600">·</span>
+              </>
             )}
-            {balData?.available != null && <span className="text-slate-600">·</span>}
             <span className="text-slate-300 text-sm font-medium">P&L:</span>
             <span className={`font-bold text-lg ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
               {pnlPositive ? '+' : ''}{dailyPnl.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}

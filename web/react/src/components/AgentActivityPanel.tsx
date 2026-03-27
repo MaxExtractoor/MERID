@@ -102,10 +102,10 @@ export default function AgentActivityPanel() {
                   </div>
 
                   <div className="text-xs text-slate-500">
-                    {agent.active_markets != null
+                    {typeof agent.active_markets === 'number'
                       ? `${agent.active_markets} markets`
                       : agent.current_task || agent.last_action || '—'}
-                    {agent.win_rate != null && agent.win_rate > 0 && (
+                    {typeof agent.win_rate === 'number' && agent.win_rate > 0 && (
                       <span className="ml-2 text-emerald-500">{agent.win_rate.toFixed(1)}% win</span>
                     )}
                   </div>

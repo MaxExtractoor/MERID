@@ -2,6 +2,11 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, PauseCircle, Trash, Copy, RefreshCw, Terminal } from 'lucide-react';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
+let _msgCounter = 0;
+function generateMsgId(): string {
+  return `msg-${Date.now()}-${++_msgCounter}`;
+}
+
 function authHeaders(headers?: HeadersInit): HeadersInit {
   const token = localStorage.getItem('merid-access');
   return {
@@ -46,7 +51,7 @@ export default function ConsoleViewer() {
     if (isPaused) return;
     
     const newMessage: ConsoleMessage = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: generateMsgId(),
       timestamp: new Date(),
       type,
       source,
@@ -266,7 +271,7 @@ export default function ConsoleViewer() {
       {/* Status bar */}
       <div className="px-4 py-1.5 border-t border-slate-800 bg-slate-900/30 text-xs text-slate-500 flex justify-between">
         <span>{messages.length} messages</span>
-        <span>{isPaused ? 'Paused' : selectedMode === 'orders' || selectedMode === 'risk' ? 'WebSocket Connected' : 'Polling every 5s'}</span>
+        <span>{isPaused ? 'Paused' : selectedMode === 'orders' || selectedMode === 'risk' ? 'WebSocket Connected' : `Polling every ${DEFAULTS.POLLING_INTERVALS.BACKGROUND / 1000}s`}</span>
       </div>
     </div>
   );

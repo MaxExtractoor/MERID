@@ -586,7 +586,7 @@ export default function KalshiGridView() {
               </div>
               <ul className="space-y-1">
                 {gridHealth.issues.map((issue, i) => (
-                  <li key={i} className="text-xs text-amber-300/80 flex items-start gap-2">
+                  <li key={`${issue}-${i}`} className="text-xs text-amber-300/80 flex items-start gap-2">
                     <span className="text-amber-500 mt-0.5">•</span>{issue}
                   </li>
                 ))}
@@ -987,7 +987,7 @@ export default function KalshiGridView() {
                     </thead>
                     <tbody>
                       {agentSignals.slice(-10).reverse().map((s, i) => (
-                        <tr key={i} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                        <tr key={`${s.ts}-${s.market_id}-${i}`} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                           <td className="p-2 text-gray-400">{new Date(s.ts).toLocaleTimeString()}</td>
                           <td className="p-2 text-gray-300 truncate max-w-[200px]" title={s.market_id}>{s.market_id}</td>
                           <td className="p-2">
@@ -1035,7 +1035,7 @@ export default function KalshiGridView() {
                     </thead>
                     <tbody>
                       {agentOrders.slice(-10).reverse().map((o, i) => (
-                        <tr key={i} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                        <tr key={`${o.ts}-${o.market_id}-${i}`} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                           <td className="p-2 text-gray-400">{new Date(o.ts).toLocaleTimeString()}</td>
                           <td className="p-2 text-gray-300 truncate max-w-[200px]" title={o.market_id}>{o.market_id}</td>
                           <td className="p-2">
@@ -1095,7 +1095,7 @@ export default function KalshiGridView() {
               </thead>
               <tbody>
                 {fills.slice(0, 20).map((f, i) => (
-                  <tr key={i} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                  <tr key={`${f.ts}-${f.agent}-${f.market_id}-${i}`} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                     <td className="p-2 text-gray-400">{new Date(f.ts).toLocaleTimeString()}</td>
                     <td className="p-2 text-gray-300">{f.agent}</td>
                     <td className="p-2 text-gray-300 truncate max-w-[200px]" title={f.market_id}>{f.market_id}</td>

@@ -48,9 +48,6 @@ export default function DataTableEnhanced<T>({
     );
   }, [data, columns, filterText]);
 
-  // Ensure sortedData is always an array
-  const ensureArray = (arr: unknown): T[] => Array.isArray(arr) ? arr : [];
-
   // Sort data
   const sortedData = useMemo(() => {
     if (!sortKey) return filteredData;
@@ -76,7 +73,7 @@ export default function DataTableEnhanced<T>({
     return dataArray.slice(startIndex, startIndex + pageSize);
   }, [sortedData, currentPage, pageSize, showPagination]);
 
-  const totalPages = Math.ceil((Array.isArray(sortedData) ? sortedData.length : 0) / pageSize);
+  const totalPages = Math.max(1, Math.ceil((Array.isArray(sortedData) ? sortedData.length : 0) / pageSize));
 
   const handleSort = (key: keyof T) => {
     if (sortKey === key) {
@@ -96,7 +93,9 @@ export default function DataTableEnhanced<T>({
     }
     setSelectedRows(newSelected);
 
-    const selectedData = Array.from(newSelected).map((i) => sortedData[i]);
+    const selectedData = Array.from(newSelected)
+      .map((i) => sortedData[i])
+      .filter((row) => row !== undefined);
     onRowSelect?.(selectedData);
   };
 
@@ -205,7 +204,7 @@ export default function DataTableEnhanced<T>({
       {showPagination && totalPages > 1 && (
         <div className="flex items-center justify-between mt-4">
           <div className="text-sm text-slate-400">
-            Showing {((currentPage - 1) * pageSize) + 1} to{" "}
+            Showing {Math.min(((currentPage - 1) * pageSize) + 1, sortedData.length)} to{" "}
             {Math.min(currentPage * pageSize, sortedData.length)} of{" "}
             {sortedData.length} entries
           </div>

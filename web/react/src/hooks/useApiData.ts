@@ -71,13 +71,14 @@ export function useApiData<T>(
           ? `${API_BASE_URL}${endpoint}`
           : endpoint;
 
+      const token = localStorage.getItem("merid-access");
       const response = await fetch(url, {
         signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           // Add auth token if available
-          ...(localStorage.getItem("merid-access") && {
-            Authorization: `Bearer ${localStorage.getItem("merid-access")}`,
+          ...(token && {
+            Authorization: `Bearer ${token}`,
           }),
         },
       });

@@ -21,10 +21,10 @@ interface ExecutionGateData {
 
 /**
  * Hook to check execution gate status for use in trading controls.
- * Returns { blocked, gateState, reasons, topHint } so controls can grey out + show tooltips.
+ * Returns { blocked, gateState, reasons, topHint, error, hasData } so controls can grey out + show tooltips.
  */
 export function useExecutionGate() {
-  const { data } = useApiData<ExecutionGateData>(
+  const { data, error } = useApiData<ExecutionGateData>(
     API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
@@ -39,5 +39,7 @@ export function useExecutionGate() {
     reasons,
     blockSummary: reasons.map(r => r.message).join('; ') || 'Checking safety...',
     topHint,
+    error: error?.message ?? null,
+    hasData: !!data,
   };
 }
