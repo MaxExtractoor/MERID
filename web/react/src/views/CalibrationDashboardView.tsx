@@ -288,25 +288,25 @@ const CalibrationDashboardView: React.FC = () => {
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Predicted Edge</span>
-                <span className="text-gray-300 font-mono">{(recalibration.avg_predicted_edge * 100).toFixed(1)}%</span>
+                <span className="text-gray-300 font-mono">{((recalibration.avg_predicted_edge ?? 0) * 100).toFixed(1)}%</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Realized Edge</span>
-                <span className="text-gray-300 font-mono">{(recalibration.avg_realized_edge * 100).toFixed(1)}%</span>
+                <span className="text-gray-300 font-mono">{((recalibration.avg_realized_edge ?? 0) * 100).toFixed(1)}%</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Bias</span>
-                <span className={`font-mono font-semibold ${recalibration.edge_bias > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                  {recalibration.edge_bias > 0 ? '+' : ''}{(recalibration.edge_bias * 100).toFixed(2)}%
+                <span className={`font-mono font-semibold ${(recalibration.edge_bias ?? 0) > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                  {(recalibration.edge_bias ?? 0) > 0 ? '+' : ''}{((recalibration.edge_bias ?? 0) * 100).toFixed(2)}%
                 </span>
               </div>
               {Object.keys(recalibration.adjustments || {}).length > 0 && (
                 <div className="mt-2 pt-2 border-t border-gray-700/50">
                   <div className="text-[10px] text-gray-500 uppercase mb-1">Adjustments</div>
-                  {Object.entries(recalibration.adjustments).map(([phase, change]) => (
+                  {Object.entries(recalibration.adjustments || {}).map(([phase, change]) => (
                     <div key={phase} className="flex justify-between text-[10px]">
                       <span className="text-gray-400">{phase}</span>
-                      <span className="text-gray-300 font-mono">{String(change)}</span>
+                      <span className="text-gray-300 font-mono">{typeof change === 'number' ? change.toFixed(2) : String(change)}</span>
                     </div>
                   ))}
                 </div>
@@ -330,7 +330,7 @@ const CalibrationDashboardView: React.FC = () => {
           {critiques.length > 0 ? (
             <div className="space-y-1.5 max-h-48 overflow-y-auto">
               {critiques.slice().reverse().map((c: any, idx: number) => (
-                <div key={idx} className="flex items-start gap-2 text-[10px] py-1 border-b border-gray-800/30">
+                <div key={`${c.critique_type}-${c.timestamp || idx}`} className="flex items-start gap-2 text-[10px] py-1 border-b border-gray-800/30">
                   <span className={`shrink-0 px-1.5 py-0.5 rounded font-medium ${
                     c.severity >= 0.8 ? 'bg-red-500/20 text-red-400' :
                     c.severity >= 0.5 ? 'bg-amber-500/20 text-amber-400' :
@@ -339,7 +339,7 @@ const CalibrationDashboardView: React.FC = () => {
                     {c.critique_type}
                   </span>
                   <span className="text-gray-400 truncate flex-1">{c.reason}</span>
-                  <span className="text-gray-600 shrink-0">w={c.weight_adjustment?.toFixed(1)}</span>
+                  <span className="text-gray-600 shrink-0">w={c.weight_adjustment?.toFixed(1) ?? 'N/A'}</span>
                 </div>
               ))}
             </div>

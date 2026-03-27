@@ -58,11 +58,11 @@ export default function KalshiOrderbookPanel({ ticker, depth = 5 }: KalshiOrderb
 
   const bids = (data?.yes_bids ?? []).slice(0, depth);
   const asks = (data?.yes_asks ?? []).slice(0, depth);
-  const maxQty = Math.max(
+  const quantities = [
     ...bids.map(l => l.quantity),
     ...asks.map(l => l.quantity),
-    1,
-  );
+  ];
+  const maxQty = quantities.length > 0 ? Math.max(...quantities) : 1;
 
   return (
     <div className="bg-slate-800 rounded-xl p-3">

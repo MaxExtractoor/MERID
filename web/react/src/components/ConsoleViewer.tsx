@@ -46,7 +46,7 @@ export default function ConsoleViewer() {
     if (isPaused) return;
     
     const newMessage: ConsoleMessage = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: Math.random().toString(36).substring(2, 11),
       timestamp: new Date(),
       type,
       source,
@@ -266,7 +266,7 @@ export default function ConsoleViewer() {
       {/* Status bar */}
       <div className="px-4 py-1.5 border-t border-slate-800 bg-slate-900/30 text-xs text-slate-500 flex justify-between">
         <span>{messages.length} messages</span>
-        <span>{isPaused ? 'Paused' : selectedMode === 'orders' || selectedMode === 'risk' ? 'WebSocket Connected' : 'Polling every 5s'}</span>
+        <span>{isPaused ? 'Paused' : selectedMode === 'orders' || selectedMode === 'risk' ? 'WebSocket Connected' : `Polling every ${DEFAULTS.POLLING_INTERVALS.BACKGROUND / 1000}s`}</span>
       </div>
     </div>
   );

@@ -1353,7 +1353,6 @@ const KalshiDashboardView: React.FC = () => {
                 const raw = volHistoryResult.data.history;
                 const smoothed = volSmoothedResult.data?.smoothed ?? [];
                 const maxVol = Math.max(...raw.map(p => p.volume), 1);
-                const w = 100 / raw.length;
                 return (
                   <div className="bg-slate-800 rounded-lg p-3">
                     <div className="flex items-center justify-between mb-2">
@@ -1365,7 +1364,7 @@ const KalshiDashboardView: React.FC = () => {
                         {/* Raw volume bars */}
                         {raw.map((p, i) => {
                           const h = (p.volume / maxVol) * 100;
-                          return <rect key={i} x={i * w} y={100 - h} width={w * 0.8} height={h} fill="#f59e0b" opacity="0.4" />;
+                          return <rect key={i} x={i} y={100 - h} width={0.8} height={h} fill="#f59e0b" opacity="0.4" />;
                         })}
                         {/* Smoothed line */}
                         {smoothed.length > 1 && (
