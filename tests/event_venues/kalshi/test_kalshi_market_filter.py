@@ -292,13 +292,11 @@ class TestEdgeDeadZone:
         assert "dead zone" in reason
 
     def test_edge_at_boundary_passes(self):
-        """Market with mid exactly at the dead-zone boundary passes."""
+        """Market whose mid is outside the dead-zone boundary passes."""
         cfg = MarketFilterConfig(min_edge_dead_zone_pct=3.0)
         filt = MarketFilter(cfg)
-        m = _market(bid=46, ask=50)  # mid=48, dist_from_50=2, but wait...
-        # mid=48, abs(48-50)=2 < 3 → still in dead zone
-        # Let's use bid=43, ask=47 → mid=45, abs(45-50)=5 >= 3 → passes
-        m = _market(bid=43, ask=47)  # mid=45, 5 away from 50 — passes
+        # mid=45: abs(45-50)=5 >= 3 → outside dead zone, passes
+        m = _market(bid=43, ask=47)
         passed, reason = filt.evaluate(m)
         assert passed is True
 

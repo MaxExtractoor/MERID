@@ -331,7 +331,8 @@ class MarketFilter:
         kept: List[MarketCandidate] = []
         dropped = 0
         for asset_candidates in by_asset.values():
-            # Sort by distance from spot (ascending); None distances go last
+            # Sort nearest-to-spot first; candidates without distance data go last.
+            # Tuple key: (True if distance is None, distance or 0) — None sorts after real values.
             asset_candidates.sort(
                 key=lambda m: (m.distance_from_spot_pct is None, m.distance_from_spot_pct or 0.0)
             )
