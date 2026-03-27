@@ -4,9 +4,13 @@ export async function login(email: string, password: string) {
   const res = await client.post("/auth/login", { email, password });
   // if token in body:
   const token = res.data.access_token;
-  if (token) {
+  if (token && typeof token === "string" && token.trim().length > 0) {
     localStorage.setItem("merid-access", token);
     client.defaults.headers.common["Authorization"] = `Bearer ${token}`;
+  } else {
+    // Clear any stale auth state if login returned no token
+    localStorage.removeItem("merid-access");
+    delete client.defaults.headers.common["Authorization"];
   }
 }
 
