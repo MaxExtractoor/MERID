@@ -83,6 +83,7 @@ class OpinionStrategy(ABC):
     min_edge: float = 0.02          # Minimum |edge| to emit an opinion
     min_market_prob: float = 0.01   # Skip markets below this
     max_market_prob: float = 0.99   # Skip markets above this
+    max_confidence: float = 0.95    # Hard cap on emitted confidence
 
     @abstractmethod
     def estimate(
@@ -103,6 +104,24 @@ class OpinionStrategy(ABC):
         """Check if market probability is too extreme to opine on."""
         return market_prob <= self.min_market_prob or market_prob >= self.max_market_prob
 
+    def _apply_confidence_clamp(
+        self,
+        confidence: float,
+        explanation: "OpinionExplanation",
+    ) -> float:
+        """Clamp confidence to max_confidence and annotate rationale when active.
+
+        When the clamp fires, appends ``confidence_clamped_at_{max}`` to the
+        explanation rationale.  When it does NOT fire, the rationale is left
+        untouched — no phantom "fallback" or "clamped" tag is ever added.
+        """
+        if confidence > self.max_confidence:
+            explanation.rationale = (
+                f"{explanation.rationale}|confidence_clamped_at_{self.max_confidence}"
+            )
+            return self.max_confidence
+        return confidence
+
 
 class HashBiasStrategy(OpinionStrategy):
     """Deterministic hash-based bias strategy (baseline).
@@ -114,9 +133,10 @@ class HashBiasStrategy(OpinionStrategy):
 
     name = "hash_bias"
 
-    def __init__(self, bias_range: float = 0.10, min_edge: float = 0.02):
+    def __init__(self, bias_range: float = 0.10, min_edge: float = 0.02, max_confidence: float = 0.95):
         self.bias_range = bias_range  # Total range (±half)
         self.min_edge = min_edge
+        self.max_confidence = max_confidence
 
     def estimate(
         self,
@@ -151,9 +171,12 @@ class HashBiasStrategy(OpinionStrategy):
             rationale="hash_deterministic_bias",
         )
 
+        raw_confidence = round(0.4 + abs(edge) * 4, 2)
+        confidence = self._apply_confidence_clamp(raw_confidence, explanation)
+
         return OpinionEstimate(
             agent_prob=round(agent_prob, 4),
-            confidence=round(0.4 + abs(edge) * 4, 2),
+            confidence=confidence,
             edge=round(edge, 4),
             reasoning_tag="hash_bias",
             signal_sources=["market_implied_prob", "agent_model"],
@@ -171,9 +194,10 @@ class MeanReversionStrategy(OpinionStrategy):
 
     name = "mean_reversion"
 
-    def __init__(self, reversion_strength: float = 0.15, min_edge: float = 0.02):
+    def __init__(self, reversion_strength: float = 0.15, min_edge: float = 0.02, max_confidence: float = 0.95):
         self.reversion_strength = reversion_strength
         self.min_edge = min_edge
+        self.max_confidence = max_confidence
 
     def estimate(
         self,
@@ -210,9 +234,12 @@ class MeanReversionStrategy(OpinionStrategy):
                       else "mild_mean_reversion",
         )
 
+        raw_confidence = round(0.3 + abs(edge) * 3, 2)
+        confidence = self._apply_confidence_clamp(raw_confidence, explanation)
+
         return OpinionEstimate(
             agent_prob=round(agent_prob, 4),
-            confidence=round(0.3 + abs(edge) * 3, 2),
+            confidence=confidence,
             edge=round(edge, 4),
             reasoning_tag="mean_reversion",
             signal_sources=["market_implied_prob", "mean_reversion_model"],
@@ -250,10 +277,12 @@ class CalibrationAwareStrategy(OpinionStrategy):
         blend_weight: float = 0.20,
         base_rates: Optional[Dict[str, float]] = None,
         min_edge: float = 0.02,
+        max_confidence: float = 0.95,
     ):
         self.blend_weight = blend_weight  # How much to weight the base rate vs market
         self.base_rates = base_rates or self.DEFAULT_BASE_RATES
         self.min_edge = min_edge
+        self.max_confidence = max_confidence
 
     def estimate(
         self,
@@ -294,9 +323,12 @@ class CalibrationAwareStrategy(OpinionStrategy):
                       else "calibration_minor_adjustment",
         )
 
+        raw_confidence = round(0.35 + abs(edge) * 3.5, 2)
+        confidence = self._apply_confidence_clamp(raw_confidence, explanation)
+
         return OpinionEstimate(
             agent_prob=round(agent_prob, 4),
-            confidence=round(0.35 + abs(edge) * 3.5, 2),
+            confidence=confidence,
             edge=round(edge, 4),
             reasoning_tag=f"calibration_aware({category})",
             signal_sources=["market_implied_prob", "category_base_rate"],

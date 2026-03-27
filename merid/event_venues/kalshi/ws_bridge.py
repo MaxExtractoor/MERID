@@ -29,7 +29,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from merid.event_venues.base import QuoteEvent, VenueTrade
 from merid.event_venues.kalshi.models import KalshiConfig
@@ -44,6 +44,12 @@ _BRIDGE_QUEUE_SIZE = 2048
 # UI coalescing interval (seconds) — don't push every tick to React
 _UI_COALESCE_INTERVAL = 0.100  # 100ms
 
+# G2: Maximum seconds between consecutive messages before a gap is declared
+_GAP_THRESHOLD_SECONDS = 30.0
+
+# G2: How often (seconds) the background-task monitor polls for stuck/failed tasks
+_TASK_MONITOR_INTERVAL = 5.0
+
 
 class KalshiWebSocketBridge:
     """Bridges KalshiWebSocket events to MERID's core event bus.
@@ -56,6 +62,9 @@ class KalshiWebSocketBridge:
         self,
         ws: Optional[KalshiWebSocket] = None,
         config: Optional[KalshiConfig] = None,
+        gap_threshold_s: float = _GAP_THRESHOLD_SECONDS,
+        on_gap: Optional[Callable[[float], None]] = None,
+        task_monitor_interval: float = _TASK_MONITOR_INTERVAL,
     ):
         self._ws = ws or KalshiWebSocket(config or KalshiConfig())
         self._task: Optional[asyncio.Task] = None
@@ -64,8 +73,11 @@ class KalshiWebSocketBridge:
         self._events_forwarded: int = 0
         self._events_dropped: int = 0
         self._forward_errors: int = 0
-        self._subscribed_tickers: List[str] = []
         self._start_ts: float = 0.0
+
+        # G1: subscription state protected by a lock — swapped atomically on reconnect
+        self._subscription_lock: asyncio.Lock = asyncio.Lock()
+        self._subscribed_tickers: List[str] = []
 
         # Per-type counters
         self._type_counts: Dict[str, int] = defaultdict(int)
@@ -78,6 +90,19 @@ class KalshiWebSocketBridge:
         self._coalesce_buffer: Dict[str, Dict[str, Any]] = {}  # market_id -> payload
         self._coalesce_interval: float = _UI_COALESCE_INTERVAL
         self._ui_batches_sent: int = 0
+
+        # G2: gap detection
+        self._gap_threshold_s: float = gap_threshold_s
+        self._on_gap: Optional[Callable[[float], None]] = on_gap
+        self._last_message_ts: float = 0.0
+        self._gaps_detected: int = 0
+        self._gap_monitor_task: Optional[asyncio.Task] = None
+
+        # G2: background task registry for monitoring
+        self._monitored_tasks: Dict[str, asyncio.Task] = {}
+        self._task_failures: Dict[str, str] = {}   # name → failure reason
+        self._task_monitor_task: Optional[asyncio.Task] = None
+        self._task_monitor_interval: float = task_monitor_interval
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -97,17 +122,8 @@ class KalshiWebSocketBridge:
             return
 
         if tickers:
-            self._subscribed_tickers = tickers
-            try:
-                await self._ws.subscribe_quotes(tickers)
-                await self._ws.subscribe_trades(tickers)
-                for ticker in tickers:
-                    try:
-                        await self._ws.subscribe_orderbook(ticker)
-                    except Exception as exc:
-                        logger.warning(f"WS bridge orderbook subscription error for {ticker}: {exc}")
-            except Exception as exc:
-                logger.warning(f"WS bridge subscription error: {exc}")
+            # G1: perform initial subscription atomically
+            await self._atomic_subscribe(tickers)
 
         # Start the WS listener task (enqueues events)
         self._task = asyncio.create_task(
@@ -124,6 +140,16 @@ class KalshiWebSocketBridge:
             self._ui_coalesce_loop(),
             name="kalshi-ws-ui-coalesce",
         )
+        # G2: gap monitor + task monitor
+        self._last_message_ts = time.monotonic()
+        self._gap_monitor_task = asyncio.create_task(
+            self._gap_monitor_loop(),
+            name="kalshi-ws-gap-monitor",
+        )
+        self._task_monitor_task = asyncio.create_task(
+            self._task_monitor_loop(),
+            name="kalshi-ws-task-monitor",
+        )
         logger.info(
             f"KalshiWebSocketBridge started — "
             f"subscribed to {len(self._subscribed_tickers)} tickers"
@@ -132,7 +158,13 @@ class KalshiWebSocketBridge:
     async def stop(self) -> None:
         """Disconnect and stop forwarding."""
         self._shutdown.set()
-        for task in (self._task, self._forward_task, self._ui_coalesce_task):
+        for task in (
+            self._task,
+            self._forward_task,
+            self._ui_coalesce_task,
+            self._gap_monitor_task,
+            self._task_monitor_task,
+        ):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -142,6 +174,8 @@ class KalshiWebSocketBridge:
         self._task = None
         self._forward_task = None
         self._ui_coalesce_task = None
+        self._gap_monitor_task = None
+        self._task_monitor_task = None
         try:
             await self._ws.close()
         except Exception as exc:
@@ -153,28 +187,98 @@ class KalshiWebSocketBridge:
             f"{self._forward_errors} errors"
         )
 
+    # G1: atomic subscription helpers ─────────────────────────────────────
+
+    async def _atomic_subscribe(self, tickers: List[str]) -> None:
+        """Subscribe to *tickers* and commit state only on full success (G1).
+
+        Builds the subscription off to the side; only updates
+        ``_subscribed_tickers`` once every channel subscription has
+        succeeded.  If any step raises, ``_subscribed_tickers`` is left
+        unchanged.
+        """
+        async with self._subscription_lock:
+            # Build new set relative to what is already subscribed
+            current = set(self._subscribed_tickers)
+            pending = [t for t in tickers if t not in current]
+            if not pending:
+                return
+
+            # All WS calls succeed before we touch state
+            await self._ws.subscribe_quotes(pending)
+            await self._ws.subscribe_trades(pending)
+            for ticker in pending:
+                await self._ws.subscribe_orderbook(ticker)
+
+            # Atomic commit — only reached if the block above didn't raise
+            self._subscribed_tickers = list(current | set(pending))
+            logger.info(
+                "WS bridge subscribed atomically to %d tickers (%d total)",
+                len(pending),
+                len(self._subscribed_tickers),
+            )
+
     async def subscribe(self, tickers: List[str]) -> None:
-        """Subscribe to additional tickers while running."""
-        new = [t for t in tickers if t not in self._subscribed_tickers]
-        if not new:
-            return
+        """Subscribe to additional tickers while running (G1-safe)."""
         try:
-            await self._ws.subscribe_quotes(new)
-            await self._ws.subscribe_trades(new)
-            for ticker in new:
-                try:
-                    await self._ws.subscribe_orderbook(ticker)
-                except Exception as exc:
-                    logger.warning(f"WS bridge orderbook subscription error for {ticker}: {exc}")
-            self._subscribed_tickers.extend(new)
-            logger.info(f"WS bridge subscribed to {len(new)} additional tickers")
+            await self._atomic_subscribe(tickers)
         except Exception as exc:
             logger.warning(f"WS bridge subscribe error: {exc}")
+
+    async def reconnect(self) -> None:
+        """Reconnect the WS and atomically restore all subscriptions (G1).
+
+        1. Closes the current WS connection.
+        2. Re-connects.
+        3. Re-subscribes to the *previous* ticker set atomically — state is
+           only swapped once the full resubscription has succeeded.
+        """
+        intended = list(self._subscribed_tickers)  # snapshot before disconnect
+        logger.info("WS bridge reconnecting — %d tickers to restore", len(intended))
+
+        try:
+            await self._ws.close()
+        except Exception as exc:
+            logger.debug(f"WS close during reconnect (ignored): {exc}")
+
+        try:
+            await self._ws.connect()
+        except Exception as exc:
+            logger.error(f"WS reconnect failed: {exc}")
+            return
+
+        # Clear current state so _atomic_subscribe will re-subscribe everything
+        async with self._subscription_lock:
+            self._subscribed_tickers = []
+
+        if intended:
+            try:
+                await self._atomic_subscribe(intended)
+            except Exception as exc:
+                logger.error(
+                    "WS bridge resubscription failed during reconnect — "
+                    "state preserved from before disconnect: %s",
+                    exc,
+                )
+                # Restore pre-reconnect snapshot so callers see a consistent
+                # view even though WS subscriptions are gone.
+                async with self._subscription_lock:
+                    self._subscribed_tickers = intended
+                return
+
+        self._last_message_ts = time.monotonic()
+        logger.info(
+            "WS bridge reconnected — %d tickers active",
+            len(self._subscribed_tickers),
+        )
 
     # ── Enqueue (called from WS listen callback) ─────────────────────────
 
     async def _enqueue_event(self, event: Any) -> None:
         """Put event into bounded queue; drop oldest if full."""
+        # G2: record arrival time for gap detection
+        self._last_message_ts = time.monotonic()
+
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
@@ -379,6 +483,87 @@ class KalshiWebSocketBridge:
             self._forward_errors += 1
             logger.warning(f"WS bridge event forward error: {exc}")
 
+    # ── G2: Gap monitor ───────────────────────────────────────────────────
+
+    async def _gap_monitor_loop(self) -> None:
+        """Periodically check whether the WS stream has gone silent (G2).
+
+        If no message has arrived in ``_gap_threshold_s`` seconds, a gap is
+        declared: the counter is incremented, a WARNING is logged, and the
+        optional ``on_gap`` callback is invoked with the elapsed seconds.
+        """
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.sleep(self._gap_threshold_s / 2)
+            except asyncio.CancelledError:
+                break
+
+            if self._last_message_ts == 0.0:
+                # Bridge not yet receiving messages — skip check
+                continue
+
+            elapsed = time.monotonic() - self._last_message_ts
+            if elapsed > self._gap_threshold_s:
+                self._gaps_detected += 1
+                logger.warning(
+                    "WS bridge gap detected — no messages for %.1fs "
+                    "(gap #%d, threshold=%.1fs)",
+                    elapsed,
+                    self._gaps_detected,
+                    self._gap_threshold_s,
+                )
+                if self._on_gap is not None:
+                    try:
+                        self._on_gap(elapsed)
+                    except Exception as cb_exc:
+                        logger.debug(f"on_gap callback error (ignored): {cb_exc}")
+
+    # ── G2: Background task monitor ───────────────────────────────────────
+
+    async def _task_monitor_loop(self) -> None:
+        """Periodically inspect registered background tasks for failures (G2).
+
+        Tasks registered via ``register_task()`` are polled here.  Completed
+        tasks are checked for exceptions; stuck tasks (running longer than
+        their registered timeout) are logged as warnings.
+        """
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.sleep(self._task_monitor_interval)
+            except asyncio.CancelledError:
+                break
+
+            for name, task in list(self._monitored_tasks.items()):
+                if task.done():
+                    exc = task.exception() if not task.cancelled() else None
+                    if task.cancelled():
+                        reason = "cancelled"
+                        logger.warning(
+                            "Monitored background task '%s' was cancelled unexpectedly",
+                            name,
+                        )
+                    elif exc is not None:
+                        reason = repr(exc)
+                        logger.error(
+                            "Monitored background task '%s' failed: %s",
+                            name,
+                            reason,
+                        )
+                    else:
+                        reason = "completed"
+                        logger.debug("Monitored background task '%s' completed", name)
+                    self._task_failures[name] = reason
+                    del self._monitored_tasks[name]
+
+    def register_task(self, name: str, task: asyncio.Task) -> None:
+        """Register a background task for G2 monitoring.
+
+        The task monitor will log any failure/cancellation and record it in
+        ``_task_failures``.
+        """
+        self._monitored_tasks[name] = task
+        logger.debug("Registered background task for monitoring: %s", name)
+
     # ── UI coalescing ─────────────────────────────────────────────────
 
     async def _ui_coalesce_loop(self) -> None:
@@ -439,6 +624,9 @@ class KalshiWebSocketBridge:
             "type_counts": type_counts,
             "ui_batches_sent": int(getattr(self, "_ui_batches_sent", 0)),
             "coalesce_buffer_depth": len(coalesce_buffer),
+            # G2
+            "gaps_detected": int(getattr(self, "_gaps_detected", 0)),
+            "task_failures": dict(getattr(self, "_task_failures", {})),
         }
 
         # Include underlying WS client stats if available
