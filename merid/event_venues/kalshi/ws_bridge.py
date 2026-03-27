@@ -64,6 +64,7 @@ class KalshiWebSocketBridge:
         config: Optional[KalshiConfig] = None,
         gap_threshold_s: float = _GAP_THRESHOLD_SECONDS,
         on_gap: Optional[Callable[[float], None]] = None,
+        task_monitor_interval: float = _TASK_MONITOR_INTERVAL,
     ):
         self._ws = ws or KalshiWebSocket(config or KalshiConfig())
         self._task: Optional[asyncio.Task] = None
@@ -101,6 +102,7 @@ class KalshiWebSocketBridge:
         self._monitored_tasks: Dict[str, asyncio.Task] = {}
         self._task_failures: Dict[str, str] = {}   # name → failure reason
         self._task_monitor_task: Optional[asyncio.Task] = None
+        self._task_monitor_interval: float = task_monitor_interval
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -527,7 +529,7 @@ class KalshiWebSocketBridge:
         """
         while not self._shutdown.is_set():
             try:
-                await asyncio.sleep(_TASK_MONITOR_INTERVAL)
+                await asyncio.sleep(self._task_monitor_interval)
             except asyncio.CancelledError:
                 break
 

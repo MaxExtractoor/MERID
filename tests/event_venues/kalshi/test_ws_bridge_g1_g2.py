@@ -217,7 +217,7 @@ async def test_enqueue_event_updates_last_message_ts():
 async def test_monitor_detects_failed_task():
     """Task monitor records a failed task in _task_failures."""
     ws = make_mock_ws()
-    bridge = KalshiWebSocketBridge(ws=ws)
+    bridge = KalshiWebSocketBridge(ws=ws, task_monitor_interval=0.01)
 
     async def failing():
         raise ValueError("boom")
@@ -226,12 +226,12 @@ async def test_monitor_detects_failed_task():
     bridge.register_task("my-failing-task", task)
 
     # Let the task fail
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.02)
 
-    # Run one monitor cycle with very short interval
+    # Run one monitor cycle
     bridge._shutdown.clear()
     monitor = asyncio.create_task(bridge._task_monitor_loop())
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
     monitor.cancel()
     try:
         await monitor
@@ -246,7 +246,7 @@ async def test_monitor_detects_failed_task():
 async def test_monitor_detects_cancelled_task():
     """Task monitor records a cancelled task in _task_failures."""
     ws = make_mock_ws()
-    bridge = KalshiWebSocketBridge(ws=ws)
+    bridge = KalshiWebSocketBridge(ws=ws, task_monitor_interval=0.01)
 
     async def hanging():
         await asyncio.sleep(9999)
@@ -254,11 +254,11 @@ async def test_monitor_detects_cancelled_task():
     task = asyncio.create_task(hanging())
     bridge.register_task("hanging-task", task)
     task.cancel()
-    await asyncio.sleep(0.01)  # let it be cancelled
+    await asyncio.sleep(0.02)  # let it be cancelled
 
     bridge._shutdown.clear()
     monitor = asyncio.create_task(bridge._task_monitor_loop())
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
     monitor.cancel()
     try:
         await monitor
