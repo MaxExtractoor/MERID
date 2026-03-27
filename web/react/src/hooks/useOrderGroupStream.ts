@@ -267,10 +267,11 @@ export function useOrderGroupStream(
 
   // Reconnect when groupIds change
   useEffect(() => {
-    if (isConnected) {
+    if (isConnected && groupIds) {
       disconnect();
       connect();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupIds?.join(',')]);
 
   return {

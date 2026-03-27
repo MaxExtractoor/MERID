@@ -51,31 +51,44 @@ export default function LiveNotifications() {
     };
   }, []);
 
-  const fetchNotifications = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.NOTIFICATIONS}`, {
-        headers: authHeaders(),
-      });
-      if (!response.ok) {
-        setIsConnected(false);
-        return;
-      }
-      const data = await response.json();
-      const normalized = Array.isArray(data.notifications)
-        ? data.notifications.map((note: RawNotification) => normalizeNotification(note))
-        : [];
-      setNotifications(normalized);
-      setIsConnected(true);
-    } catch {
-      setIsConnected(false);
-    }
-  }, [normalizeNotification]);
-
   useEffect(() => {
-    fetchNotifications();
-    const interval = setInterval(fetchNotifications, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
-    return () => clearInterval(interval);
-  }, [fetchNotifications]);
+    let isMounted = true;
+    const controller = new AbortController();
+
+    const fetchFn = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.NOTIFICATIONS}`, {
+          headers: authHeaders(),
+          signal: controller.signal,
+        });
+        if (!isMounted) return;
+        if (!response.ok) {
+          setIsConnected(false);
+          return;
+        }
+        const data = await response.json();
+        if (!isMounted) return;
+        const normalized = Array.isArray(data.notifications)
+          ? data.notifications.map((note: RawNotification) => normalizeNotification(note))
+          : [];
+        setNotifications(normalized);
+        setIsConnected(true);
+      } catch (e) {
+        if (!isMounted) return;
+        if (e instanceof Error && e.name !== 'AbortError') {
+          setIsConnected(false);
+        }
+      }
+    };
+
+    fetchFn();
+    const interval = setInterval(fetchFn, DEFAULTS.POLLING_INTERVALS.BACKGROUND);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      controller.abort();
+    };
+  }, [normalizeNotification, authHeaders]);
 
   useEffect(() => {
     const count = notifications.filter(n => !n.read).length;

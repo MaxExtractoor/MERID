@@ -39,19 +39,27 @@ function LevelRow({ level, side, maxQty }: { level: OrderbookLevel; side: 'bid' 
 }
 
 export default function KalshiOrderbookPanel({ ticker, depth = 5 }: KalshiOrderbookPanelProps) {
-  const endpoint = ticker ? API_ENDPOINTS.KALSHI_ORDERBOOK(ticker) : '';
-  const { data, loading } = useApiData<OrderbookData>(
-    endpoint,
+  if (!ticker) return null;
+
+  const { data, loading, error } = useApiData<OrderbookData>(
+    API_ENDPOINTS.KALSHI_ORDERBOOK(ticker),
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
-
-  if (!ticker) return null;
 
   if (loading && !data) {
     return (
       <div className="bg-slate-800 rounded-xl p-3">
         <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Orderbook</h4>
         <div className="h-32 flex items-center justify-center text-xs text-gray-600">Loading…</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-slate-800 rounded-xl p-3">
+        <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Orderbook</h4>
+        <div className="text-rose-400 text-xs p-4">Failed to load orderbook: {error.message || 'Unknown error'}</div>
       </div>
     );
   }

@@ -12,7 +12,7 @@
  *   <BatchOrderPanel onOrdersPlaced={() => refetchPositions()} />
  */
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { 
   Plus, Trash2, Send, Loader2, AlertTriangle, 
   CheckCircle, Package, Layers 
@@ -75,6 +75,21 @@ export function BatchOrderPanel({
   const [selectedGroupId, setSelectedGroupId] = useState<string>(
     defaultOrderGroupId || 'none'
   );
+
+  // Auto-clear error and success messages
+  useEffect(() => {
+    if (submitError) {
+      const timer = setTimeout(() => setSubmitError(null), 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [submitError]);
+
+  useEffect(() => {
+    if (submitSuccess) {
+      const timer = setTimeout(() => setSubmitSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [submitSuccess]);
 
   // Create empty order template
   function createEmptyOrder(groupId?: string): BatchOrderItem {
@@ -183,12 +198,21 @@ export function BatchOrderPanel({
 
       const result = await response.json();
       
+      // Check for partial failures
+      const placedCount = result.placed?.length || 0;
+      const failedCount = result.failed?.length || 0;
+      
+      if (failedCount > 0) {
+        const failedTickers = result.failed?.map((f: { ticker?: string }) => f.ticker).join(', ') || 'unknown';
+        throw new Error(`Only ${placedCount}/${orders.length} orders placed. Failed: ${failedTickers}`);
+      }
+      
       logUxEvent('batch_order_submit', 'success', { 
-        count: orders.length, 
+        count: placedCount, 
         group_id: selectedGroupId,
         contracts: orders.reduce((sum, o) => sum + o.count, 0)
       });
-      setSubmitSuccess(`Placed ${result.placed?.length || orders.length} orders successfully`);
+      setSubmitSuccess(`Placed ${placedCount} orders successfully`);
       onOrdersPlaced?.();
       
       // Clear form after success

@@ -88,10 +88,34 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // Auto-clear success and error messages after 5 seconds
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
   const [selectedGroupId, setSelectedGroupId] = useState<string>(initialGroupId || '');
 
-  const yesOutcome = outcomes.find(o => o.name.toLowerCase() === 'yes') ?? outcomes[0];
-  const noOutcome = outcomes.find(o => o.name.toLowerCase() === 'no') ?? outcomes[1];
+  const yesOutcome = outcomes.find(o => o.name.toLowerCase() === 'yes') ?? outcomes[0] ?? null;
+  const noOutcome = outcomes.find(o => o.name.toLowerCase() === 'no') ?? outcomes[1] ?? null;
+
+  // Guard: invalid market data
+  if (!yesOutcome || !noOutcome) {
+    return (
+      <div className="bg-slate-800 rounded-xl p-4">
+        <div className="text-rose-400 text-sm">Error: Invalid market data. Missing outcomes.</div>
+      </div>
+    );
+  }
 
   const activeOutcome = side === 'yes' ? yesOutcome : noOutcome;
   const priceCents = useMemo(() => {

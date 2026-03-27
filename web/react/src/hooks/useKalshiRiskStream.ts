@@ -78,6 +78,7 @@ export function useKalshiRiskStream(): UseKalshiRiskStreamReturn {
           retriesRef.current += 1;
           const jitter = Math.random() * 1000;
           const timeout = Math.min(1000 * 2 ** Math.min(retriesRef.current, 8), 30_000) + jitter;
+          if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
           reconnectTimerRef.current = setTimeout(connect, timeout);
         };
 
@@ -96,12 +97,12 @@ export function useKalshiRiskStream(): UseKalshiRiskStreamReturn {
             // Risk summary updates
             if (data.event_type === 'risk_summary') {
               setSummary({
-                total_equity: data.total_equity ?? 0,
-                total_pnl: data.total_pnl ?? 0,
-                unrealized_pnl: data.unrealized_pnl ?? 0,
-                position_count: data.position_count ?? 0,
-                exposure: data.exposure ?? 0,
-                timestamp: data.timestamp ?? Date.now() / 1000,
+                total_equity: typeof data.total_equity === 'number' ? data.total_equity : 0,
+                total_pnl: typeof data.total_pnl === 'number' ? data.total_pnl : 0,
+                unrealized_pnl: typeof data.unrealized_pnl === 'number' ? data.unrealized_pnl : 0,
+                position_count: typeof data.position_count === 'number' ? data.position_count : 0,
+                exposure: typeof data.exposure === 'number' ? data.exposure : 0,
+                timestamp: typeof data.timestamp === 'number' ? data.timestamp : Date.now() / 1000,
               });
               return;
             }
@@ -144,6 +145,7 @@ export function useKalshiRiskStream(): UseKalshiRiskStreamReturn {
         // WebSocket constructor failed — retry
         retriesRef.current += 1;
         const timeout = Math.min(1000 * 2 ** retriesRef.current, 30_000);
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = setTimeout(connect, timeout);
       }
     };

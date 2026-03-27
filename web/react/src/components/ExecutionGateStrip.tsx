@@ -51,6 +51,7 @@ export default function ExecutionGateStrip() {
   const handleConfigReload = useCallback(async () => {
     setReloading(true);
     setReloadStatus('idle');
+    let timeoutId: NodeJS.Timeout | null = null;
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.CONFIG_RELOAD}`, { method: 'POST' });
       setReloadStatus(res.ok ? 'ok' : 'err');
@@ -58,8 +59,18 @@ export default function ExecutionGateStrip() {
       setReloadStatus('err');
     } finally {
       setReloading(false);
-      setTimeout(() => setReloadStatus('idle'), 4000);
+      timeoutId = setTimeout(() => setReloadStatus('idle'), 4000);
     }
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      // Cleanup any pending status resets on unmount
+      setReloadStatus('idle');
+    };
   }, []);
 
   if (!gate) return null;

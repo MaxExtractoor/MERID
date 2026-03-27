@@ -92,7 +92,7 @@ export function useLaneSentimentSnapshot() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetch = useCallback(async () => {
+  const fetchSnapshot = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -109,12 +109,12 @@ export function useLaneSentimentSnapshot() {
   }, []);
 
   useEffect(() => {
-    fetch();
-    const interval = setInterval(fetch, 30000);
+    fetchSnapshot();
+    const interval = setInterval(fetchSnapshot, 30000);
     return () => clearInterval(interval);
-  }, [fetch]);
+  }, [fetchSnapshot]);
 
-  return { snapshot, loading, error, refetch: fetch };
+  return { snapshot, loading, error, refetch: fetchSnapshot };
 }
 
 
@@ -128,7 +128,7 @@ export function useSentimentBundle(asset: string): UseSentimentBundleReturn {
     setError(null);
     try {
       const url = `${API_BASE_URL}${API_ENDPOINTS.KALSHI_SENTIMENT_BUNDLE(asset)}`;
-      const resp = await fetch(url);
+      const resp = await window.fetch(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data: BundleResponse = await resp.json();
       setBundle(data.bundle);
@@ -158,7 +158,7 @@ export function useMultiSentimentBundle(assets: string[]) {
     setLoading(true);
     try {
       const url = `${API_BASE_URL}${API_ENDPOINTS.KALSHI_SENTIMENT_BUNDLE_MULTI}?assets=${assetsKey}`;
-      const resp = await fetch(url);
+      const resp = await window.fetch(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       setBundles(data.bundles || {});
@@ -186,7 +186,7 @@ export function useThresholdOptimizer() {
     setOptimizing(true);
     try {
       const url = `${API_BASE_URL}${API_ENDPOINTS.KALSHI_SENTIMENT_OPTIMIZE_THRESHOLDS(asset)}?days=${days}`;
-      const resp = await fetch(url, { method: 'POST' });
+      const resp = await window.fetch(url, { method: 'POST' });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data: OptimizationResult = await resp.json();
       setResult(data);
