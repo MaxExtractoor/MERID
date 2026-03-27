@@ -112,14 +112,15 @@ def test_gate_stays_shadow_when_brier_above_threshold(gate, store):
 
 def test_gate_demotes_to_shadow_when_brier_rises(gate, store):
     """Live agent is demoted back to shadow when Brier exceeds live_to_shadow threshold."""
-    # Promote first
+    # Promote first with perfect predictions
     for _ in range(3):
         store.record("a1", "MKT", 0.9, 1)   # score ≈ 0.01
     assert gate.evaluate("a1") == "live"
 
-    # Now add many bad predictions to push rolling Brier above 0.25
+    # Now add many terrible predictions (Brier=1.0 each) to spike rolling average
+    # well above the demote threshold of 0.25
     for _ in range(20):
-        store.record("a1", "MKT", 0.5, 0)   # score = 0.25
+        store.record("a1", "MKT", 0.0, 1)   # score = (0-1)^2 = 1.0
 
     mode = gate.evaluate("a1")
     assert mode == "shadow"

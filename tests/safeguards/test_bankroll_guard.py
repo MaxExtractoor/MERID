@@ -38,9 +38,10 @@ def test_check_order_blocked_when_equity_below_zero(risk):
 
 
 def test_check_order_allowed_when_equity_positive(risk):
-    """Orders are allowed when bankroll is positive."""
-    risk._state.peak_equity_usd = 1000.0
-    risk._state.current_equity_usd = 500.0
+    """Orders are allowed when bankroll is positive and not in drawdown."""
+    # Use values where drawdown is negligible (< 10% halt threshold)
+    risk._state.peak_equity_usd = 600.0
+    risk._state.current_equity_usd = 590.0  # ~1.7% drawdown — well under thresholds
 
     ok, reason = risk.check_order("KXBTC", "crypto", 10, 50)
 
@@ -62,10 +63,8 @@ def test_bankroll_guard_not_triggered_before_first_equity_update(risk):
 
 def test_phantom_kill_switch_blocks_check_order(risk, monkeypatch):
     """When the phantom kill switch is armed, check_order is blocked."""
-    monkeypatch.setattr(
-        "merid.reconciliation._phantom_kill_switch",
-        True,
-    )
+    import merid.reconciliation as recon
+    monkeypatch.setattr(recon, "_phantom_kill_switch", True)
 
     ok, reason = risk.check_order("KXBTC", "crypto", 10, 50)
 
@@ -75,10 +74,8 @@ def test_phantom_kill_switch_blocks_check_order(risk, monkeypatch):
 
 def test_phantom_kill_switch_inactive_allows_order(risk, monkeypatch):
     """When the phantom kill switch is NOT armed, check_order proceeds normally."""
-    monkeypatch.setattr(
-        "merid.reconciliation._phantom_kill_switch",
-        False,
-    )
+    import merid.reconciliation as recon
+    monkeypatch.setattr(recon, "_phantom_kill_switch", False)
 
     ok, reason = risk.check_order("KXBTC", "crypto", 10, 50)
 
@@ -87,8 +84,8 @@ def test_phantom_kill_switch_inactive_allows_order(risk, monkeypatch):
 
 def test_arm_phantom_kill_switch_then_check_order(risk):
     """arm_phantom_kill_switch + check_order integration test."""
-    from merid.reconciliation import arm_phantom_kill_switch, _phantom_kill_lock
     import merid.reconciliation as recon
+    from merid.reconciliation import arm_phantom_kill_switch, _phantom_kill_lock
 
     original = recon._phantom_kill_switch
     try:
