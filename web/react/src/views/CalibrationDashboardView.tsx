@@ -329,8 +329,8 @@ const CalibrationDashboardView: React.FC = () => {
           </h3>
           {critiques.length > 0 ? (
             <div className="space-y-1.5 max-h-48 overflow-y-auto">
-              {critiques.slice().reverse().map((c: any, idx: number) => (
-                <div key={`${c.critique_type}-${c.timestamp || idx}`} className="flex items-start gap-2 text-[10px] py-1 border-b border-gray-800/30">
+              {critiques.slice().reverse().map((c: any) => (
+                <div key={`${c.critique_type}-${c.timestamp || c.reason}`} className="flex items-start gap-2 text-[10px] py-1 border-b border-gray-800/30">
                   <span className={`shrink-0 px-1.5 py-0.5 rounded font-medium ${
                     c.severity >= 0.8 ? 'bg-red-500/20 text-red-400' :
                     c.severity >= 0.5 ? 'bg-amber-500/20 text-amber-400' :

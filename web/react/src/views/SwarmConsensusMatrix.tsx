@@ -223,8 +223,8 @@ function ConsensusDetail({ view }: { view: ConsensusView }) {
       {view.confidence_factors.length > 0 && (
         <div className="space-y-1">
           <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Confidence Factors</div>
-          {view.confidence_factors.map((f, i) => (
-            <div key={i} className="flex items-center gap-2 text-xs text-emerald-300">
+          {view.confidence_factors.map((f) => (
+            <div key={f} className="flex items-center gap-2 text-xs text-emerald-300">
               <span>✓</span><span>{f}</span>
             </div>
           ))}
@@ -235,8 +235,8 @@ function ConsensusDetail({ view }: { view: ConsensusView }) {
       {view.disagreement_flags.length > 0 && (
         <div className="space-y-1">
           <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Disagreements</div>
-          {view.disagreement_flags.map((f, i) => (
-            <div key={i} className="flex items-center gap-2 text-xs text-amber-300">
+          {view.disagreement_flags.map((f) => (
+            <div key={f} className="flex items-center gap-2 text-xs text-amber-300">
               <span>⚠</span><span>{f}</span>
             </div>
           ))}
