@@ -174,7 +174,8 @@ export default function KalshiTerminalView() {
     const priceCents = (selectedMarket.outcomes?.[0]?.price ?? 0.5) * 100;
     const suggestedSide: 'yes' | 'no' = selectedEdge.model_prob > selectedEdge.implied_prob ? 'yes' : 'no';
     const denominator = priceCents / 100;
-    return { contracts: Math.max(1, Math.floor(denominator > 0 ? kellyBet / denominator : 1)), side: suggestedSide };
+    const contracts = denominator > 0 ? Math.max(1, Math.floor(kellyBet / denominator)) : 1;
+    return { contracts, side: suggestedSide };
   }, [selectedEdge, sizing, selectedMarket, balance]);
 
   const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {

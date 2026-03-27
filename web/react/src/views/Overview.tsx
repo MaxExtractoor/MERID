@@ -393,7 +393,7 @@ export default function Overview() {
       if (serverMode !== gridStartMode) setGridStartMode(serverMode);
       setModeSynced(true);
     }
-  }, [venueModeData?.mode, gridStartMode, modeSynced]);
+  }, [venueModeData?.mode, modeSynced]);
 
   const callRebootAction = useCallback(async (action: 'catalog' | 'grid-start' | 'grid-stop', endpoint: string, body?: object) => {
     setBusyAction(action);

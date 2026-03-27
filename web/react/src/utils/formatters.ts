@@ -268,7 +268,9 @@ export function formatDelta(value: number, baseline?: number, mode?: 'percent' |
 
   if (mode === 'percent') {
     const sign = deltaPercent >= 0 ? '+' : '';
-    const percentStr = deltaPercent === Infinity || deltaPercent === -Infinity
+    const percentStr = Number.isNaN(deltaPercent)
+      ? 'N/A'
+      : deltaPercent === Infinity || deltaPercent === -Infinity
       ? '∞%'
       : `${sign}${deltaPercent.toFixed(2)}%`;
     return {
