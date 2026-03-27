@@ -13,6 +13,8 @@ This module provides:
 3. **Consecutive-loser kill-switch**: auto-halt after N consecutive losing
    brackets before the strategy resumes.
 4. **Unhedged delta cap**: limit total directional exposure across brackets.
+5. **Per-asset-per-hour cap**: hard upper bound on dollar exposure per asset
+   within a rolling one-hour window, sized for a small (~$16) bankroll.
 
 Usage::
 
@@ -33,6 +35,23 @@ from utils.logger import get_logger
 logger = get_logger("merid.event_venues.kalshi.bracket_risk")
 
 
+# ── Per-asset defaults (cents, sized for ~$16 bankroll) ──────────────────
+# Values represent max dollar exposure per asset per market hour.
+# Derived as ~14–16% of bankroll for the most liquid asset (BTC), scaled
+# down by relative volatility and liquidity for smaller assets.
+# BTC: ~$2.30 (highest liquidity, most price-efficient)
+# ETH: ~$1.80 (second most liquid, slightly higher vol)
+# SOL/XRP: ~$0.90 (mid-tier liquidity, higher vol)
+# DOGE: ~$0.60 (lowest liquidity, highest vol relative to size)
+_DEFAULT_PER_ASSET_HOUR_CAPS_CENTS: Dict[str, float] = {
+    "BTC": 230.0,
+    "ETH": 180.0,
+    "SOL": 90.0,
+    "XRP": 90.0,
+    "DOGE": 60.0,
+}
+
+
 # ── Configuration ────────────────────────────────────────────────────────
 
 @dataclass
@@ -50,6 +69,12 @@ class BracketRiskConfig:
 
     # Cross-bracket: max combined notional on same hour (cents)
     max_notional_per_hour_cents: float = 25000.0  # $250
+
+    # Per-asset-per-hour notional cap (cents).  Keys are asset names (e.g. "BTC").
+    # Defaults are sized for a ~$16 bankroll.  Override to scale with account size.
+    per_asset_hour_caps_cents: Dict[str, float] = field(
+        default_factory=lambda: dict(_DEFAULT_PER_ASSET_HOUR_CAPS_CENTS)
+    )
 
     # Consecutive loser kill-switch
     max_consecutive_losers: int = 5
@@ -88,6 +113,12 @@ class BracketState:
     open_by_hour: Dict[str, List[str]] = field(default_factory=dict)
     contracts_by_hour: Dict[str, int] = field(default_factory=dict)
     notional_by_hour: Dict[str, float] = field(default_factory=dict)
+
+    # Per-asset-per-hour notional: asset -> (hour_key -> notional_cents)
+    # hour_key format: "YYYY-MM-DDTHH" (UTC)
+    asset_hour_notional: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # Per-asset-per-hour market list for top-consumer logging: asset -> (hour_key -> [ticker, ...])
+    asset_hour_markets: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)
 
     # All open bracket IDs
     open_brackets: Set[str] = field(default_factory=set)
@@ -130,6 +161,41 @@ class BracketRiskManager:
     @property
     def halted(self) -> bool:
         return self._state.halted
+
+    # ── Per-asset hourly cap helpers ─────────────────────────────────
+
+    def _asset_hour_notional(self, asset: str, hour_key: str) -> float:
+        """Return current per-asset notional (cents) for the given hour."""
+        return self._state.asset_hour_notional.get(asset, {}).get(hour_key, 0.0)
+
+    def _log_asset_cap_status(self, asset: str, hour_key: str, incoming_notional: float) -> None:
+        """Log exposure used vs cap and top-3 consuming markets for the asset.
+
+        Only logs when utilization after this order would exceed 80% of cap
+        (approaching limit) or when the order is being rejected (> 100%).
+        """
+        cfg = self._config
+        cap = cfg.per_asset_hour_caps_cents.get(asset.upper())
+        if cap is None or cap <= 0:
+            return
+        used = self._asset_hour_notional(asset, hour_key)
+        projected = used + incoming_notional
+        utilization_pct = projected / cap * 100
+        if utilization_pct < 80.0:
+            return  # quiet below 80% — only log when approaching or over cap
+        top_markets = (
+            self._state.asset_hour_markets
+            .get(asset, {})
+            .get(hour_key, [])
+        )[:3]
+        logger.info(
+            "[bracket-risk] %s/%s exposure: %.0f¢ used + %.0f¢ incoming = %.0f¢ / %.0f¢ cap "
+            "(%.0f%%) | top markets: %s",
+            asset.upper(), hour_key,
+            used, incoming_notional, projected, cap,
+            utilization_pct,
+            top_markets or ["(none)"],
+        )
 
     # ── Pre-trade check ──────────────────────────────────────────────
 
@@ -190,7 +256,20 @@ class BracketRiskManager:
                 f"exceeds cap {cfg.max_notional_per_hour_cents:.0f}c"
             )
 
-        # 7. Unhedged delta cap
+        # 7. Per-asset-per-hour notional cap (hard upper bound, resets each market hour)
+        asset_upper = order.underlying.upper()
+        if asset_upper in cfg.per_asset_hour_caps_cents:
+            asset_cap = cfg.per_asset_hour_caps_cents[asset_upper]
+            asset_used = self._asset_hour_notional(asset_upper, order.hour_key)
+            if asset_used + notional > asset_cap:
+                self._log_asset_cap_status(asset_upper, order.hour_key, notional)
+                return False, (
+                    f"{asset_upper}/1h notional {asset_used:.0f}¢ + {notional:.0f}¢ "
+                    f"would exceed cap {asset_cap:.0f}¢"
+                )
+            self._log_asset_cap_status(asset_upper, order.hour_key, notional)
+
+        # 8. Unhedged delta cap
         delta_change = order.contracts if order.side == "buy" else -order.contracts
         new_delta = st.net_delta + delta_change
         if abs(new_delta) > cfg.max_unhedged_delta:
@@ -221,6 +300,19 @@ class BracketRiskManager:
         st.notional_by_hour[order.hour_key] = (
             st.notional_by_hour.get(order.hour_key, 0.0) + notional
         )
+
+        # Per-asset-per-hour tracking (keyed by order's market hour_key)
+        asset_upper = order.underlying.upper()
+        if asset_upper not in st.asset_hour_notional:
+            st.asset_hour_notional[asset_upper] = {}
+        st.asset_hour_notional[asset_upper][order.hour_key] = (
+            st.asset_hour_notional[asset_upper].get(order.hour_key, 0.0) + notional
+        )
+        if asset_upper not in st.asset_hour_markets:
+            st.asset_hour_markets[asset_upper] = {}
+        if order.hour_key not in st.asset_hour_markets[asset_upper]:
+            st.asset_hour_markets[asset_upper][order.hour_key] = []
+        st.asset_hour_markets[asset_upper][order.hour_key].append(order.ticker)
 
         # Delta
         delta_change = order.contracts if order.side == "buy" else -order.contracts
@@ -315,13 +407,38 @@ class BracketRiskManager:
             "net_delta": st.net_delta,
             "hours_with_exposure": len(st.open_by_hour),
             "contracts_by_hour": dict(st.contracts_by_hour),
+            "asset_exposure": self._asset_exposure_summary(),
             "config": {
                 "max_loss_per_contract_pct": self._config.max_loss_per_contract_pct,
                 "max_loss_per_bracket_cents": self._config.max_loss_per_bracket_cents,
                 "max_contracts_per_hour": self._config.max_contracts_per_hour,
                 "max_notional_per_hour_cents": self._config.max_notional_per_hour_cents,
+                "per_asset_hour_caps_cents": dict(self._config.per_asset_hour_caps_cents),
                 "max_consecutive_losers": self._config.max_consecutive_losers,
                 "max_unhedged_delta": self._config.max_unhedged_delta,
                 "max_open_brackets": self._config.max_open_brackets,
             },
         }
+
+    def _asset_exposure_summary(self) -> Dict[str, Any]:
+        """Return per-asset exposure vs cap across all tracked hours."""
+        result: Dict[str, Any] = {}
+        for asset, cap in self._config.per_asset_hour_caps_cents.items():
+            hours_data: Dict[str, Any] = {}
+            for hour_key, notional in self._state.asset_hour_notional.get(asset, {}).items():
+                top3 = (
+                    self._state.asset_hour_markets
+                    .get(asset, {})
+                    .get(hour_key, [])
+                )[:3]
+                hours_data[hour_key] = {
+                    "used_cents": round(notional, 2),
+                    "cap_cents": cap,
+                    "utilization_pct": round(notional / cap * 100, 1) if cap > 0 else 0.0,
+                    "top_markets": top3,
+                }
+            result[asset] = {
+                "cap_cents": cap,
+                "hours": hours_data,
+            }
+        return result

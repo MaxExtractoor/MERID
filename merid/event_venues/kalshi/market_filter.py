@@ -1,4 +1,4 @@
-"""Market Selection Filter — Liquidity, spread, and overlap checks.
+"""Market Selection Filter — Liquidity, spread, overlap, and edge checks.
 
 Filters Kalshi crypto hourly markets by quality criteria before
 attaching agents:
@@ -8,6 +8,10 @@ attaching agents:
 3. **Overlap detection**: Groups temporally overlapping brackets on the
    same underlying into a single risk bucket
 4. **Settlement recency**: Prefer markets settling soon for tighter pricing
+5. **Strike distance**: Keep only strikes within `spot_band_pct` of spot
+6. **Edge dead-zone**: Skip markets where win probability is too close to 50%
+   (within `min_edge_dead_zone_pct`) to avoid coin-flip bleed
+7. **Candidate limit**: Return at most `max_candidates_per_asset` per asset
 
 Usage::
 
@@ -64,6 +68,21 @@ class MarketFilterConfig:
     # are considered overlapping (same risk bucket)
     overlap_window_seconds: int = 3600
 
+    # ── Tighter-market settings ────────────────────────────────────────
+
+    # Maximum distance from spot price as a percentage of spot.
+    # 0.0 = disabled.  Recommended: 12.5 for intraday (15M/1H).
+    spot_band_pct: float = 12.5
+
+    # "Dead zone" around 50% win-probability: markets whose mid-price is
+    # within this many percentage points of 50¢ are skipped (coin-flip bleed).
+    # 0.0 = disabled.  E.g. 3.0 skips markets with mid in [47¢, 53¢].
+    min_edge_dead_zone_pct: float = 3.0
+
+    # Maximum candidates to return per underlying asset after all other
+    # filters.  The candidates closest to spot are preferred.  0 = no limit.
+    max_candidates_per_asset: int = 5
+
 
 DEFAULT_FILTER_CONFIG = MarketFilterConfig()
 
@@ -84,10 +103,24 @@ class MarketCandidate:
     spread_cents: int = 0
     mid_price_cents: int = 0
     category: str = ""
+    # Strike price of the contract (underlying units, e.g. USD for BTC)
+    strike_price: Optional[float] = None
+    # Current spot price of the underlying (same units as strike_price)
+    spot_price: Optional[float] = None
 
     @property
     def has_book(self) -> bool:
         return self.best_bid_cents > 0 and self.best_ask_cents > 0
+
+    @property
+    def distance_from_spot_pct(self) -> Optional[float]:
+        """Absolute percentage distance of strike from spot.
+
+        Returns None if strike_price or spot_price is not available or spot is zero.
+        """
+        if self.strike_price is None or self.spot_price is None or self.spot_price == 0:
+            return None
+        return abs(self.strike_price - self.spot_price) / self.spot_price * 100.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -101,6 +134,8 @@ class MarketCandidate:
             "best_ask_cents": self.best_ask_cents,
             "spread_cents": self.spread_cents,
             "mid_price_cents": self.mid_price_cents,
+            "strike_price": self.strike_price,
+            "spot_price": self.spot_price,
         }
 
 
@@ -115,6 +150,9 @@ class FilterResult:
     rejected_price: int = 0
     rejected_underlying: int = 0
     rejected_timeframe: int = 0
+    rejected_distance: int = 0       # struck too far from spot
+    rejected_edge_deadzone: int = 0  # mid-price too close to 50¢
+    capped_per_asset: int = 0        # dropped by max_candidates_per_asset limit
     candidates: List[MarketCandidate] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -127,6 +165,9 @@ class FilterResult:
             "rejected_price": self.rejected_price,
             "rejected_underlying": self.rejected_underlying,
             "rejected_timeframe": self.rejected_timeframe,
+            "rejected_distance": self.rejected_distance,
+            "rejected_edge_deadzone": self.rejected_edge_deadzone,
+            "capped_per_asset": self.capped_per_asset,
             "candidates": [c.to_dict() for c in self.candidates],
         }
 
@@ -202,12 +243,32 @@ class MarketFilter:
             if mid > cfg.max_price_cents:
                 return False, f"price {mid}c > {cfg.max_price_cents}c"
 
+        # Strike distance check — skip if strike too far from spot
+        if cfg.spot_band_pct > 0:
+            dist = market.distance_from_spot_pct
+            if dist is not None and dist > cfg.spot_band_pct:
+                return False, (
+                    f"distance {dist:.1f}% from spot exceeds band ±{cfg.spot_band_pct}%"
+                )
+
+        # Edge dead-zone check — skip near-50% coin-flips
+        if cfg.min_edge_dead_zone_pct > 0 and mid > 0:
+            dist_from_50 = abs(mid - 50)
+            if dist_from_50 < cfg.min_edge_dead_zone_pct:
+                return False, (
+                    f"mid {mid}c within dead zone ±{cfg.min_edge_dead_zone_pct}c of 50c"
+                )
+
         return True, ""
 
     def filter_markets(
         self, markets: List[MarketCandidate],
     ) -> FilterResult:
         """Filter a list of markets and return qualifying candidates.
+
+        Applies quality gates via :meth:`evaluate`, then limits candidates
+        to ``max_candidates_per_asset`` per underlying (preferring those
+        closest to spot when ``spot_price`` is available).
 
         Args:
             markets: Raw market candidates to evaluate.
@@ -236,8 +297,48 @@ class MarketFilter:
                     result.rejected_underlying += 1
                 elif "timeframe" in reason:
                     result.rejected_timeframe += 1
+                elif "distance" in reason:
+                    result.rejected_distance += 1
+                elif "dead zone" in reason:
+                    result.rejected_edge_deadzone += 1
+
+        # Per-asset candidate cap: keep the top N closest to spot
+        if cfg.max_candidates_per_asset > 0:
+            result.candidates, capped = self._cap_candidates_per_asset(
+                result.candidates, cfg.max_candidates_per_asset
+            )
+            result.capped_per_asset += capped
+            result.passed = len(result.candidates)
 
         return result
+
+    @staticmethod
+    def _cap_candidates_per_asset(
+        candidates: List[MarketCandidate], max_per_asset: int
+    ) -> Tuple[List[MarketCandidate], int]:
+        """Keep at most *max_per_asset* candidates per underlying.
+
+        Candidates with ``distance_from_spot_pct`` available are sorted
+        nearest-first; those without distance data retain their original order.
+
+        Returns:
+            (kept, dropped_count)
+        """
+        by_asset: Dict[str, List[MarketCandidate]] = {}
+        for m in candidates:
+            by_asset.setdefault(m.underlying.upper(), []).append(m)
+
+        kept: List[MarketCandidate] = []
+        dropped = 0
+        for asset_candidates in by_asset.values():
+            # Sort nearest-to-spot first; candidates without distance data go last.
+            # Tuple key: (True if distance is None, distance or 0) — None sorts after real values.
+            asset_candidates.sort(
+                key=lambda m: (m.distance_from_spot_pct is None, m.distance_from_spot_pct or 0.0)
+            )
+            kept.extend(asset_candidates[:max_per_asset])
+            dropped += max(0, len(asset_candidates) - max_per_asset)
+        return kept, dropped
 
     def group_overlapping(
         self, markets: List[MarketCandidate],
