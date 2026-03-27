@@ -76,7 +76,7 @@ export default function DataTableEnhanced<T>({
     return dataArray.slice(startIndex, startIndex + pageSize);
   }, [sortedData, currentPage, pageSize, showPagination]);
 
-  const totalPages = Math.ceil((Array.isArray(sortedData) ? sortedData.length : 0) / pageSize);
+  const totalPages = Math.max(1, Math.ceil((Array.isArray(sortedData) ? sortedData.length : 0) / pageSize));
 
   const handleSort = (key: keyof T) => {
     if (sortKey === key) {
@@ -207,7 +207,7 @@ export default function DataTableEnhanced<T>({
       {showPagination && totalPages > 1 && (
         <div className="flex items-center justify-between mt-4">
           <div className="text-sm text-slate-400">
-            Showing {((currentPage - 1) * pageSize) + 1} to{" "}
+            Showing {Math.min(((currentPage - 1) * pageSize) + 1, sortedData.length)} to{" "}
             {Math.min(currentPage * pageSize, sortedData.length)} of{" "}
             {sortedData.length} entries
           </div>

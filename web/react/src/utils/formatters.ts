@@ -1,6 +1,9 @@
 // Data formatting utilities for MERID dashboard
 
 export function formatCurrency(value: number, currency = "USD", digits?: number): string {
+  if (typeof value !== 'number' || isNaN(value)) {
+    return '$0.00';
+  }
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency,
@@ -10,10 +13,16 @@ export function formatCurrency(value: number, currency = "USD", digits?: number)
 }
 
 export function formatPercent(value: number, digits = 2): string {
+  if (typeof value !== 'number' || isNaN(value)) {
+    return '0.00%';
+  }
   return `${(value * 100).toFixed(digits)}%`;
 }
 
 export function formatNumber(value: number, digits?: number): string {
+  if (typeof value !== 'number' || isNaN(value)) {
+    return '0';
+  }
   // If digits is specified, use fixed precision
   if (digits !== undefined) {
     return new Intl.NumberFormat("en-US", {
@@ -107,6 +116,9 @@ export function formatTime(iso: string | Date, format?: string, includeSeconds?:
 }
 
 export function formatDuration(seconds: number, format?: string): string {
+  if (typeof seconds !== 'number' || isNaN(seconds) || seconds < 0) {
+    return '0s';
+  }
   const totalSeconds = Math.floor(seconds);
   const secs = totalSeconds % 60;
   const minutes = Math.floor(totalSeconds / 60) % 60;
@@ -139,6 +151,9 @@ export function formatDuration(seconds: number, format?: string): string {
 }
 
 export function formatFileSize(bytes: number, unitType?: string): string {
+  if (typeof bytes !== 'number' || isNaN(bytes) || bytes < 0) {
+    return '0 B';
+  }
   const units = unitType === 'binary'
     ? ["B", "KiB", "MiB", "GiB", "TiB"]
     : ["B", "KB", "MB", "GB", "TB"];
@@ -223,6 +238,16 @@ export interface DeltaFormatted {
 }
 
 export function formatDelta(value: number, baseline?: number, mode?: 'percent' | 'value'): DeltaFormatted {
+  // Validate inputs
+  if (typeof value !== 'number' || isNaN(value)) {
+    return {
+      value: formatCurrency(0),
+      percent: '0.00%',
+      color: 'text-gray-500',
+      icon: '→',
+    };
+  }
+  
   // Calculate actual delta
   let deltaValue: number;
   let deltaPercent: number;

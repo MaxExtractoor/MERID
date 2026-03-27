@@ -166,8 +166,8 @@ export default function VenueHealthGrid() {
                   <span className="text-gray-500 flex items-center gap-1">
                     <AlertTriangle className="w-3 h-3" /> Errors
                   </span>
-                  <span className={`font-medium ${venue.errorRate > 1 ? 'text-red-400' : venue.errorRate > 0 ? 'text-amber-400' : 'text-green-400'}`}>
-                    {(venue.errorRate ?? 0).toFixed(1)}%
+                  <span className={`font-medium ${(typeof venue.errorRate === 'number' ? venue.errorRate : 0) > 1 ? 'text-red-400' : (typeof venue.errorRate === 'number' ? venue.errorRate : 0) > 0 ? 'text-amber-400' : 'text-green-400'}`}>
+                    {(typeof venue.errorRate === 'number' ? venue.errorRate : 0).toFixed(1)}%
                   </span>
                 </div>
                 <div>
