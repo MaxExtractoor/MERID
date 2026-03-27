@@ -41,8 +41,19 @@ class KalshiTrader:
             logger.warning(f"VenueGate unavailable - blocking live trading: {exc}")
             return False
 
-    def _pre_order_check(self, ticker: str, count: int, price_cents: int, category: str | None = None) -> tuple[bool, str]:
+    def _pre_order_check(
+        self,
+        ticker: str,
+        count: int,
+        price_cents: int,
+        category: str | None = None,
+        spread_cents: int | None = None,
+        depth_at_price: int | None = None,
+    ) -> tuple[bool, str]:
         """Run kill-switch + KalshiRiskManager checks before placing any order.
+
+        Pass ``spread_cents`` and ``depth_at_price`` from the live orderbook
+        snapshot so that E1 orderbook checks are applied.
 
         Returns (allowed, reason).  Fail-closed: any import/runtime error blocks the order.
         """
@@ -66,6 +77,8 @@ class KalshiTrader:
                 category=category,
                 contracts=count,
                 price_cents=price_cents,
+                spread_cents=spread_cents,
+                depth_at_price=depth_at_price,
             )
             if not allowed:
                 logger.warning("Order blocked by KalshiRiskManager: %s", reason)

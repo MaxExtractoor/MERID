@@ -407,6 +407,10 @@ class KalshiRiskConfig:
     min_edge: float = 0.02
     min_post_fee_edge: float = 0.01
 
+    # Live orderbook checks (E1) — applied when caller supplies real params
+    max_spread_cents: int = 10        # Reject if bid-ask spread exceeds this
+    min_depth_contracts: int = 5      # Reject if available depth below this
+
     # Rate limit awareness
     max_orders_per_minute: int = 30
     max_orders_per_hour: int = 300
@@ -488,6 +492,8 @@ class KalshiRiskManager:
         price_cents: int,
         edge: float = 0.0,
         existing_position: int = 0,
+        spread_cents: Optional[int] = None,
+        depth_at_price: Optional[int] = None,
     ) -> Tuple[bool, str]:
         """Run all pre-trade risk checks.
 
@@ -498,11 +504,25 @@ class KalshiRiskManager:
             price_cents: Price per contract in cents
             edge: Estimated edge
             existing_position: Current position in this contract
+            spread_cents: Live bid-ask spread from orderbook snapshot (optional)
+            depth_at_price: Available depth at the desired price level (optional)
 
         Returns:
             (allowed, reason) — True if order passes all checks
         """
         now = datetime.now(timezone.utc)
+
+        # 0. Phantom kill switch (F2) — block new orders when phantom positions detected
+        try:
+            from merid.reconciliation import is_phantom_kill_switch_active
+            if is_phantom_kill_switch_active():
+                return False, "phantom_kill_switch:phantom positions detected — orders halted pending reconciliation"
+        except Exception:
+            pass  # Don't block if reconciliation module unavailable
+
+        # 0b. Bankroll zero guard (E2) — block risk-increasing orders when equity ≤ 0
+        if self._state.current_equity_usd <= 0 and self._state.peak_equity_usd > 0:
+            return False, f"bankroll_zero:current equity {self._state.current_equity_usd:.2f} is at or below zero"
 
         # 1. Kill switch
         if self._state.kill_switch_active:
@@ -567,6 +587,18 @@ class KalshiRiskManager:
             return False, f"Rate limit: {self._state.orders_this_minute} orders this minute"
         if self._state.orders_this_hour >= self._config.max_orders_per_hour:
             return False, f"Rate limit: {self._state.orders_this_hour} orders this hour"
+
+        # 10. Live orderbook checks (E1) — applied only when caller supplies real params
+        if spread_cents is not None and spread_cents > self._config.max_spread_cents:
+            return False, (
+                f"Spread {spread_cents}¢ exceeds max {self._config.max_spread_cents}¢ "
+                f"(live orderbook check)"
+            )
+        if depth_at_price is not None and depth_at_price < self._config.min_depth_contracts:
+            return False, (
+                f"Depth {depth_at_price} contracts below minimum "
+                f"{self._config.min_depth_contracts} (live orderbook check)"
+            )
 
         return True, "OK"
 
