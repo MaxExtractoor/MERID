@@ -47,7 +47,7 @@ export function useLocalStorage<T>(
     (value: T | ((prev: T) => T) | null) => {
       try {
         // Allow value to be a function so we have the same API as useState
-        const valueToStore = value instanceof Function ? value(storedValue) : value;
+        const valueToStore = typeof value === 'function' ? value(storedValue) : value;
         
         // Handle null - remove from localStorage
         if (valueToStore === null) {
@@ -101,6 +101,8 @@ export function useLocalStorage<T>(
         setStoredValue(serializer.read(e.newValue));
       } catch (error) {
         console.warn(`Error parsing localStorage change for key "${key}":`, error);
+        // Reset to initialValue on parse error to prevent stale state
+        setStoredValue(initialValue);
       }
     };
 

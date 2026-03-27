@@ -116,13 +116,16 @@ export function useSystemHealth() {
 export function usePnLSummary() {
   const [pnl, setPnL] = useState<PnLSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
     async function fetchPnL() {
       try {
         const data = await api.getPnLSummary();
         setPnL(data);
+        setError(null);
       } catch (e) {
+        setError(e instanceof Error ? e : new Error('Failed to fetch P&L'));
         logUiErrorThrottled('useDashboard', 'Failed to fetch P&L', e);
       } finally {
         setLoading(false);
@@ -134,19 +137,22 @@ export function usePnLSummary() {
     return () => { clearTimeout(t); clearInterval(interval); };
   }, []);
 
-  return { pnl, loading };
+  return { pnl, loading, error };
 }
 
 export function useAgentsSummary() {
   const [agents, setAgents] = useState<AgentsSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
     async function fetchAgents() {
       try {
         const data = await api.getAgentSummary();
         setAgents(data);
+        setError(null);
       } catch (e) {
+        setError(e instanceof Error ? e : new Error('Failed to fetch agents'));
         logUiErrorThrottled('useDashboard', 'Failed to fetch agents', e);
       } finally {
         setLoading(false);
@@ -158,19 +164,22 @@ export function useAgentsSummary() {
     return () => { clearTimeout(t); clearInterval(interval); };
   }, []);
 
-  return { agents, loading };
+  return { agents, loading, error };
 }
 
 export function useTradingSummary() {
   const [trading, setTrading] = useState<TradingSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
     async function fetchTrading() {
       try {
         const data = await retryOnce(() => api.getTradingSummary());
         setTrading(data);
+        setError(null);
       } catch (e) {
+        setError(e instanceof Error ? e : new Error('Failed to fetch trading'));
         logUiErrorThrottled('useDashboard', 'Failed to fetch trading', e);
       } finally {
         setLoading(false);
@@ -182,7 +191,7 @@ export function useTradingSummary() {
     return () => { clearTimeout(t); clearInterval(interval); };
   }, []);
 
-  return { trading, loading };
+  return { trading, loading, error };
 }
 
 interface HealthStatus {
@@ -278,13 +287,25 @@ export function SystemHealthCard() {
 
 // P&L Card Component with Sparkline
 export function PnLCard() {
-  const { pnl, loading } = usePnLSummary();
+  const { pnl, loading, error } = usePnLSummary();
 
   if (loading) {
     return (
       <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800 animate-pulse">
         <div className="h-4 bg-slate-700 rounded mb-2"></div>
         <div className="h-8 bg-slate-700 rounded"></div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-slate-900/70 rounded-xl p-4 border border-rose-500/30">
+        <div className="flex items-center gap-2 mb-2">
+          <AlertCircle className="w-5 h-5 text-rose-400" />
+          <h3 className="text-sm font-medium text-slate-400">P&L Analytics</h3>
+        </div>
+        <div className="text-xs text-rose-400">{error.message || 'Failed to load P&L data'}</div>
       </div>
     );
   }
@@ -334,13 +355,25 @@ export function PnLCard() {
 
 // Trading Operations Card
 export function TradingOperationsCard() {
-  const { trading, loading } = useTradingSummary();
+  const { trading, loading, error } = useTradingSummary();
 
   if (loading) {
     return (
       <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800 animate-pulse">
         <div className="h-4 bg-slate-700 rounded mb-2"></div>
         <div className="h-8 bg-slate-700 rounded"></div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-slate-900/70 rounded-xl p-4 border border-rose-500/30">
+        <div className="flex items-center gap-2 mb-2">
+          <AlertCircle className="w-5 h-5 text-rose-400" />
+          <h3 className="text-sm font-medium text-slate-400">Trading Operations</h3>
+        </div>
+        <div className="text-xs text-rose-400">{error.message || 'Failed to load trading data'}</div>
       </div>
     );
   }
@@ -489,13 +522,25 @@ export function KalshiHealthCard() {
 
 // Agent Status Card
 export function AgentStatusCard() {
-  const { agents, loading } = useAgentsSummary();
+  const { agents, loading, error } = useAgentsSummary();
 
   if (loading) {
     return (
       <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800 animate-pulse">
         <div className="h-4 bg-slate-700 rounded mb-2"></div>
         <div className="h-8 bg-slate-700 rounded"></div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-slate-900/70 rounded-xl p-4 border border-rose-500/30">
+        <div className="flex items-center gap-2 mb-2">
+          <AlertCircle className="w-5 h-5 text-rose-400" />
+          <h3 className="text-sm font-medium text-slate-400">Agent Status</h3>
+        </div>
+        <div className="text-xs text-rose-400">{error.message || 'Failed to load agent data'}</div>
       </div>
     );
   }

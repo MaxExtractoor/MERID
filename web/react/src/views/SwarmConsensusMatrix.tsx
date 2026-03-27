@@ -251,7 +251,7 @@ function ConsensusDetail({ view }: { view: ConsensusView }) {
           </div>
           <div className="space-y-2">
             {view.raw_proposals.map((p, i) => (
-              <div key={i} className="rounded-lg bg-slate-900/50 border border-slate-700/30 p-3">
+              <div key={p.agent_id} className="rounded-lg bg-slate-900/50 border border-slate-700/30 p-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="text-base">{archetypeIcon(p.agent_archetype)}</span>

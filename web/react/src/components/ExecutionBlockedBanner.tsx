@@ -37,8 +37,8 @@ export function ExecutionBlockedBanner() {
 
   if (!data || !data.blocked) return null;
 
-  const criticalReasons = data.reasons.filter(r => r.severity === 'critical');
-  const warningReasons = data.reasons.filter(r => r.severity === 'warning');
+  const criticalReasons = (data.reasons ?? []).filter(r => r.severity === 'critical');
+  const warningReasons = (data.reasons ?? []).filter(r => r.severity === 'warning');
 
   return (
     <div className="bg-red-950/95 border-b-2 border-red-600/70 px-4 py-3 space-y-2">
