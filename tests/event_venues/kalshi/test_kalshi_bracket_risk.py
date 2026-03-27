@@ -20,7 +20,7 @@ def _order(
     hour_key: str = "2026-02-16T03",
     side: str = "sell",
     contracts: int = 5,
-    price_cents: int = 55,
+    price_cents: int = 40,
     max_loss_cents: float = 500.0,
 ) -> BracketOrder:
     return BracketOrder(
@@ -218,7 +218,8 @@ class TestCrossBracketCorrelation:
         assert ok is False
 
     def test_different_hours_independent(self):
-        cfg = BracketRiskConfig(max_contracts_per_hour=20)
+        # Disable per-asset caps — this test focuses on cross-bracket independence only
+        cfg = BracketRiskConfig(max_contracts_per_hour=20, per_asset_hour_caps_cents={})
         mgr = BracketRiskManager(cfg)
         mgr.record_bracket_open(_order(bracket_id="b1", hour_key="2026-02-16T03", contracts=15))
         # Different hour — should pass
@@ -249,3 +250,80 @@ class TestSummary:
         assert s["total_brackets"] == 1
         assert s["winning_brackets"] == 1
         assert s["total_pnl_usd"] == 1.0
+
+
+# ── Per-asset-per-hour cap ───────────────────────────────────────────
+
+class TestPerAssetHourlyCap:
+    def test_btc_cap_default(self):
+        """Default BTC cap is 230¢."""
+        cfg = BracketRiskConfig()
+        assert cfg.per_asset_hour_caps_cents["BTC"] == 230.0
+
+    def test_eth_sol_xrp_doge_defaults(self):
+        """Verify all default per-asset caps."""
+        caps = BracketRiskConfig().per_asset_hour_caps_cents
+        assert caps["ETH"] == 180.0
+        assert caps["SOL"] == 90.0
+        assert caps["XRP"] == 90.0
+        assert caps["DOGE"] == 60.0
+
+    def test_order_blocked_when_asset_cap_exceeded(self):
+        """Order is blocked when its notional would push over the asset cap."""
+        # BTC cap = 230¢. Order notional = 5 × 50 = 250¢ > 230¢.
+        mgr = BracketRiskManager()
+        ok, reason = mgr.check_bracket_order(
+            _order(contracts=5, price_cents=50)  # 250¢ > 230¢ BTC cap
+        )
+        assert ok is False
+        assert "230" in reason or "cap" in reason.lower()
+
+    def test_two_orders_accumulate_per_hour(self):
+        """Two orders in the same hour accumulate toward the asset cap."""
+        mgr = BracketRiskManager()
+        o1 = _order(bracket_id="b1", contracts=4, price_cents=40)  # 160¢
+        o2 = _order(bracket_id="b2", contracts=4, price_cents=40)  # 160¢ → total 320¢ > 230¢
+        ok, _ = mgr.check_bracket_order(o1)
+        assert ok is True
+        mgr.record_bracket_open(o1)
+        ok, reason = mgr.check_bracket_order(o2)
+        assert ok is False
+        assert "cap" in reason.lower()
+
+    def test_different_hours_reset_asset_cap(self):
+        """Each market hour window resets the per-asset cap."""
+        mgr = BracketRiskManager()
+        o1 = _order(bracket_id="b1", hour_key="2026-02-16T03", contracts=5, price_cents=40)  # 200¢
+        mgr.record_bracket_open(o1)
+        # Different hour — cap is fresh
+        o2 = _order(bracket_id="b2", hour_key="2026-02-16T04", contracts=5, price_cents=40)  # 200¢
+        ok, reason = mgr.check_bracket_order(o2)
+        assert ok is True
+
+    def test_uncapped_asset_passes(self):
+        """Assets not in the per_asset_hour_caps_cents dict are uncapped."""
+        cfg = BracketRiskConfig(per_asset_hour_caps_cents={"BTC": 230.0})
+        mgr = BracketRiskManager(cfg)
+        # ETH has no cap in this custom config; use 10 contracts to stay under hour limits
+        ok, reason = mgr.check_bracket_order(
+            _order(underlying="ETH", contracts=10, price_cents=40)  # 400¢ — no per-asset cap
+        )
+        assert ok is True
+
+    def test_summary_exposes_asset_exposure(self):
+        """summary() includes per-asset exposure data."""
+        mgr = BracketRiskManager()
+        mgr.record_bracket_open(_order())
+        s = mgr.summary()
+        assert "asset_exposure" in s
+        assert "BTC" in s["asset_exposure"]
+        btc = s["asset_exposure"]["BTC"]
+        assert "cap_cents" in btc
+        assert btc["cap_cents"] == 230.0
+
+    def test_per_asset_caps_in_config_summary(self):
+        """Config section of summary includes per_asset_hour_caps_cents."""
+        mgr = BracketRiskManager()
+        s = mgr.summary()
+        assert "per_asset_hour_caps_cents" in s["config"]
+        assert s["config"]["per_asset_hour_caps_cents"]["BTC"] == 230.0
