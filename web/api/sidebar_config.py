@@ -27,10 +27,10 @@ router = APIRouter(prefix="/api/v1/ui", tags=["ui"])
 # ═══════════════════════════════════════════════════════════════════════════
 
 SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
-    # ── §1 Live Trading ───────────────────────────────────────
+    # ── §1 Trading ────────────────────────────────────────────
     {
-        "id": "live-trading",
-        "label": "Live Trading",
+        "id": "trading",
+        "label": "Trading",
         "items": [
             {
                 "id": "overview",
@@ -46,6 +46,42 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 "workflow_phase": "monitoring",
                 "links_to": ["kalshi-dashboard", "kill-switch"],
             },
+            {
+                "id": "positions",
+                "label": "Positions",
+                "href": "positions",
+                "icon": "TrendingUp",
+                "color": "text-cyan-400",
+                "endpoints": [
+                    "/api/v1/kalshi/positions",
+                    "/api/v1/kalshi/orders",
+                    "/api/v1/kalshi/fills",
+                ],
+                "workflow_phase": "execution",
+                "links_to": ["kalshi-portfolio", "orders"],
+                "mode_aware": True,
+            },
+            {
+                "id": "orders",
+                "label": "Orders",
+                "href": "orders",
+                "icon": "ClipboardList",
+                "color": "text-teal-300",
+                "endpoints": [
+                    "/api/v1/kalshi/orders",
+                    "/api/v1/kalshi/fills",
+                ],
+                "workflow_phase": "execution",
+                "links_to": ["kalshi-portfolio", "kill-switch"],
+                "mode_aware": True,
+            },
+        ],
+    },
+    # ── §2 Kalshi Suite ───────────────────────────────────────
+    {
+        "id": "kalshi-suite",
+        "label": "Kalshi Suite",
+        "items": [
             {
                 "id": "kalshi-terminal",
                 "label": "Terminal",
@@ -97,42 +133,6 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 "mode_aware": True,
             },
             {
-                "id": "positions",
-                "label": "Positions",
-                "href": "positions",
-                "icon": "TrendingUp",
-                "color": "text-cyan-400",
-                "endpoints": [
-                    "/api/v1/kalshi/positions",
-                    "/api/v1/kalshi/orders",
-                    "/api/v1/kalshi/fills",
-                ],
-                "workflow_phase": "execution",
-                "links_to": ["kalshi-portfolio", "orders"],
-                "mode_aware": True,
-            },
-            {
-                "id": "orders",
-                "label": "Orders",
-                "href": "orders",
-                "icon": "ClipboardList",
-                "color": "text-teal-300",
-                "endpoints": [
-                    "/api/v1/kalshi/orders",
-                    "/api/v1/kalshi/fills",
-                ],
-                "workflow_phase": "execution",
-                "links_to": ["kalshi-portfolio", "kill-switch"],
-                "mode_aware": True,
-            },
-        ],
-    },
-    # ── §2 Swarm Intelligence ─────────────────────────────────
-    {
-        "id": "swarm-intelligence",
-        "label": "Swarm Intelligence",
-        "items": [
-            {
                 "id": "kalshi-grid",
                 "label": "Agent Grid",
                 "href": "kalshi-grid",
@@ -151,6 +151,13 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                     "kalshi:orderbook_delta",
                 ],
             },
+        ],
+    },
+    # ── §3 Prediction Markets ─────────────────────────────────
+    {
+        "id": "prediction-markets",
+        "label": "Prediction Markets",
+        "items": [
             {
                 "id": "swarm-consensus",
                 "label": "Swarm Matrix",
@@ -163,21 +170,6 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 ],
                 "workflow_phase": "strategy",
                 "links_to": ["kalshi-grid", "kalshi-performance", "calibration-dashboard"],
-            },
-            {
-                "id": "kalshi-performance",
-                "label": "Performance",
-                "href": "kalshi-performance",
-                "icon": "Award",
-                "color": "text-emerald-400",
-                "endpoints": [
-                    "/api/v1/kalshi-grid/performance/agents",
-                    "/api/v1/kalshi-grid/performance/summary",
-                    "/api/v1/kalshi-grid/performance/top",
-                    "/api/v1/kalshi-grid/performance/calibration",
-                ],
-                "workflow_phase": "monitoring",
-                "links_to": ["kalshi-grid", "kalshi-portfolio"],
             },
             {
                 "id": "calibration-dashboard",
@@ -193,6 +185,28 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 ],
                 "workflow_phase": "monitoring",
                 "links_to": ["kalshi-performance", "kalshi-grid"],
+            },
+        ],
+    },
+    # ── §4 Agents & Swarms ────────────────────────────────────
+    {
+        "id": "agents-swarms",
+        "label": "Agents & Swarms",
+        "items": [
+            {
+                "id": "kalshi-performance",
+                "label": "Performance",
+                "href": "kalshi-performance",
+                "icon": "Award",
+                "color": "text-emerald-400",
+                "endpoints": [
+                    "/api/v1/kalshi-grid/performance/agents",
+                    "/api/v1/kalshi-grid/performance/summary",
+                    "/api/v1/kalshi-grid/performance/top",
+                    "/api/v1/kalshi-grid/performance/calibration",
+                ],
+                "workflow_phase": "monitoring",
+                "links_to": ["kalshi-grid", "kalshi-portfolio"],
             },
             {
                 "id": "lane-control",
@@ -210,10 +224,10 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
             },
         ],
     },
-    # ── §3 Analytics ──────────────────────────────────────────
+    # ── §5 Risk & Analytics ───────────────────────────────────
     {
-        "id": "analytics",
-        "label": "Analytics",
+        "id": "risk-analytics",
+        "label": "Risk & Analytics",
         "items": [
             {
                 "id": "kalshi-sentiment",
@@ -240,13 +254,6 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
                 "workflow_phase": "strategy",
                 "links_to": ["kalshi-dashboard", "kalshi-portfolio"],
             },
-        ],
-    },
-    # ── §4 Command Center ─────────────────────────────────────
-    {
-        "id": "command-center",
-        "label": "Command Center",
-        "items": [
             {
                 "id": "operator",
                 "label": "Operator",
@@ -280,7 +287,7 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
             },
         ],
     },
-    # ── §5 System ─────────────────────────────────────────────
+    # ── §6 System ─────────────────────────────────────────────
     {
         "id": "system",
         "label": "System",

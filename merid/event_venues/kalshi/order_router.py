@@ -599,6 +599,49 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             latency_ms=round(latency, 2),
         )
 
+    # ── E-3: Venue availability check ──────────────────────────────────────
+    try:
+        from merid.event_venues.kalshi.exchange_availability import (
+            get_exchange_availability,
+        )
+        avail = get_exchange_availability()
+        if not avail.trading_open_now():
+            latency = (time.monotonic() - t0) * 1000
+            logger.warning(
+                "[order-router] Order blocked — Kalshi venue not available: %s",
+                intent.ticker,
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason="venue_unavailable:kalshi_maintenance",
+                latency_ms=round(latency, 2),
+            )
+    except Exception as _avail_exc:
+        logger.debug("[order-router] Exchange availability check skipped: %s", _avail_exc)
+
+    # ── E-2: RTI settlement-window buy-block ────────────────────────────────
+    try:
+        from merid.event_venues.kalshi.settlement_execution_guard import (
+            evaluate_settlement_order,
+        )
+        guard_result = evaluate_settlement_order(intent)
+        if not guard_result.allowed:
+            latency = (time.monotonic() - t0) * 1000
+            logger.warning(
+                "[order-router] Order blocked by settlement guard: %s — %s",
+                intent.ticker,
+                guard_result.reason,
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=guard_result.reason or "settlement_window_block",
+                latency_ms=round(latency, 2),
+            )
+    except Exception as _sg_exc:
+        logger.debug("[order-router] Settlement guard check skipped: %s", _sg_exc)
+
     if _is_live_mode(mode):
         return await _route_live(intent, mode, t0)
 

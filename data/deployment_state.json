@@ -1,0 +1,206 @@
+{
+  "schema_version": "1",
+  "updated_at": "2026-03-27T05:00:00+00:00",
+  "agents": {
+    "BTC_15M": {
+      "agent_name": "BTC_15M",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "BTC_HOURLY": {
+      "agent_name": "BTC_HOURLY",
+      "mode": "HALTED",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": "emergency_halt_2026-03-27T04:44Z",
+      "last_rollback_at": "2026-03-27T04:44:00+00:00",
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "BTC_DAILY": {
+      "agent_name": "BTC_DAILY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "BTC_WEEKLY": {
+      "agent_name": "BTC_WEEKLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "ETH_15M": {
+      "agent_name": "ETH_15M",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "ETH_HOURLY": {
+      "agent_name": "ETH_HOURLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "ETH_DAILY": {
+      "agent_name": "ETH_DAILY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "ETH_WEEKLY": {
+      "agent_name": "ETH_WEEKLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "SOL_15M": {
+      "agent_name": "SOL_15M",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "SOL_HOURLY": {
+      "agent_name": "SOL_HOURLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "SOL_DAILY": {
+      "agent_name": "SOL_DAILY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "SOL_WEEKLY": {
+      "agent_name": "SOL_WEEKLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "XRP_15M": {
+      "agent_name": "XRP_15M",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "XRP_HOURLY": {
+      "agent_name": "XRP_HOURLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "XRP_DAILY": {
+      "agent_name": "XRP_DAILY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "XRP_WEEKLY": {
+      "agent_name": "XRP_WEEKLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "DOGE_15M": {
+      "agent_name": "DOGE_15M",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "DOGE_HOURLY": {
+      "agent_name": "DOGE_HOURLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "DOGE_DAILY": {
+      "agent_name": "DOGE_DAILY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "DOGE_WEEKLY": {
+      "agent_name": "DOGE_WEEKLY",
+      "mode": "PAPER",
+      "promoted_at": null,
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    }
+  }
+}

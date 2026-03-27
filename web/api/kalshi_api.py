@@ -174,6 +174,7 @@ def _enrich_from_ticker(ticker: str) -> Dict[str, Any]:
     # Inline prefix-based fallback
     _PREFIX_MAP = {
         "KXBTC": ("crypto", "BTC"), "KXETH": ("crypto", "ETH"), "KXSOL": ("crypto", "SOL"),
+        "KXXRP": ("crypto", "XRP"), "KXDOGE": ("crypto", "DOGE"),
         "KXAVAX": ("crypto", "AVAX"), "INXD": ("equity", "SPX"), "NASDAQ": ("equity", "NDX"),
         "FED": ("macro", "FED"), "CPI": ("macro", "CPI"), "GDP": ("macro", "GDP"),
         "PRES": ("politics", "PRES"), "HOUSE": ("politics", "HOUSE"), "SENATE": ("politics", "SENATE"),
@@ -1422,12 +1423,7 @@ def _get_default_order_mode() -> str:
         return "paper"
 
 
-@router.post("/orders",
-    summary="Place Kalshi Order",
-    description="Place a Kalshi order through MERID. Runs risk pre-check, then routes to KalshiVenueClient. In paper mode, returns a simulated fill without hitting Kalshi.",
-    response_description="Order placement result with fill info",
-    tags=["kalshi", "orders"],
-)
+@router.post("/orders")
 async def place_order(
     ticker: str,
     side: str,            # "yes" or "no"
@@ -1436,7 +1432,7 @@ async def place_order(
     price_cents: int,
     order_type: str = "limit",
     time_in_force: str = "gtc",
-    mode: Optional[str] = None,  # "paper" or "live" — defaults to MERID_PM_TRADING_MODE from settings
+    mode: str = "paper",  # "paper" or "live" — defaults to paper for safety
 ) -> Dict[str, Any]:
     """Place a Kalshi order through MERID.
 

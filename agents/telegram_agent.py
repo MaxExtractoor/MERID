@@ -14,8 +14,14 @@ from typing import Optional, List, Dict
 from dataclasses import dataclass
 from datetime import datetime
 
-from telegram import Bot
-from telegram.error import TelegramError
+try:
+    from telegram import Bot
+    from telegram.error import TelegramError
+    _TELEGRAM_AVAILABLE = True
+except ImportError:
+    Bot = None  # type: ignore[assignment,misc]
+    TelegramError = Exception  # type: ignore[assignment,misc]
+    _TELEGRAM_AVAILABLE = False
 from utils.logger import get_logger
 
 logger = get_logger("agents.telegram_agent")
@@ -47,8 +53,8 @@ class TelegramAgent:
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
 
-        # Enable when credentials are present
-        if self.bot_token and self.chat_id:
+        # Enable when credentials are present and telegram library available
+        if _TELEGRAM_AVAILABLE and self.bot_token and self.chat_id:
             try:
                 self.bot = Bot(token=self.bot_token)
                 self.enabled = True
@@ -60,7 +66,10 @@ class TelegramAgent:
         else:
             self.enabled = False
             self.bot = None
-            logger.info("Telegram agent DISABLED — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable")
+            if not _TELEGRAM_AVAILABLE:
+                logger.debug("Telegram agent DISABLED — python-telegram-bot not installed")
+            else:
+                logger.info("Telegram agent DISABLED — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable")
         
         self.recent_messages: List[TelegramMessage] = []
         self.last_post_time = 0

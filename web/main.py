@@ -2077,8 +2077,22 @@ async def _app_lifespan(application: FastAPI):
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
         from merid.event_venues.kalshi.market_catalog import get_market_catalog as _get_cat
         _ws_bridge = get_ws_bridge()
-        # Subscribe to top active tickers from catalog (up to 50)
-        _active_tickers = [m.ticker for m in _get_cat().get_all_markets()[:50]]
+        # Spread WS orderbook subscriptions evenly across all 5 crypto assets
+        # so that BTC priority fetch cannot crowd out SOL/XRP/DOGE (D-1 fix).
+        _CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+        _TICKERS_PER_ASSET = 10
+        _cat = _get_cat()
+        _active_tickers: list = []
+        for _asset in _CRYPTO_ASSETS:
+            _asset_markets = _cat.get_markets_by_asset(_asset)
+            _active_tickers.extend(
+                [m.ticker for m in _asset_markets[:_TICKERS_PER_ASSET]]
+            )
+        # De-duplicate while preserving order, then fall back to broad catalog
+        _seen: set = set()
+        _active_tickers = [t for t in _active_tickers if not (t in _seen or _seen.add(t))]
+        if not _active_tickers:
+            _active_tickers = [m.ticker for m in _cat.get_all_markets()[:50]]
         task = asyncio.create_task(
             _ws_bridge.start(_active_tickers or None), name="kalshi-ws-bridge"
         )

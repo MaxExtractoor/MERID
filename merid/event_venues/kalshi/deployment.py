@@ -6,6 +6,7 @@ Manages the promotion of individual agents from PAPER to LIVE mode with:
 - Shadow mode: run live + paper side-by-side for comparison
 - Automatic rollback on degradation alerts
 - Audit log of all mode transitions
+- Persistence to/from data/deployment_state.json
 
 Usage::
 
@@ -18,15 +19,24 @@ Usage::
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.deployment")
+
+# Default path to the deployment state seed file.
+_DEFAULT_STATE_FILE = Path(__file__).resolve().parents[5] / "data" / "deployment_state.json"
+DEPLOYMENT_STATE_FILE = Path(
+    os.getenv("MERID_DEPLOYMENT_STATE_FILE", str(_DEFAULT_STATE_FILE))
+)
 
 
 class AgentMode(str, Enum):
@@ -115,15 +125,76 @@ class DeploymentController:
         self._config = config or DEFAULT_DEPLOYMENT_CONFIG
         self._agents: Dict[str, AgentDeployment] = {}
         self._log: List[TransitionLog] = []
+        # Eagerly seed from deployment_state.json if present
+        self._load_state_file()
 
     @property
     def config(self) -> DeploymentConfig:
         return self._config
 
+    # ── Persistence ──────────────────────────────────────────────────────
+
+    def _load_state_file(self, path: Optional[Path] = None) -> None:
+        """Seed agent states from the deployment_state.json file.
+
+        This is a *seed* operation: agents already registered in memory take
+        precedence; agents present in the file but not yet in memory are added
+        with their persisted mode (useful for HALTED states that must survive
+        restarts).
+
+        Silently skips if the file is absent or malformed.
+        """
+        state_path = path or DEPLOYMENT_STATE_FILE
+        try:
+            if not state_path.exists():
+                return
+            with state_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            for name, raw in (data.get("agents") or {}).items():
+                if name not in self._agents:
+                    dep = AgentDeployment(agent_name=name)
+                    try:
+                        dep.mode = AgentMode(raw.get("mode", "PAPER"))
+                    except ValueError:
+                        dep.mode = AgentMode.PAPER
+                    dep.promoted_at = raw.get("promoted_at")
+                    dep.rollback_count = int(raw.get("rollback_count", 0))
+                    dep.last_rollback_reason = raw.get("last_rollback_reason")
+                    dep.last_rollback_at = raw.get("last_rollback_at")
+                    dep.live_trades = int(raw.get("live_trades", 0))
+                    dep.shadow_trades = int(raw.get("shadow_trades", 0))
+                    self._agents[name] = dep
+            logger.info(
+                "[deploy] Seeded %d agents from %s", len(data.get("agents", {})), state_path
+            )
+        except Exception as exc:
+            logger.warning("[deploy] Could not load deployment state file %s: %s", state_path, exc)
+
+    def save_state_file(self, path: Optional[Path] = None) -> None:
+        """Persist current agent states to the deployment_state.json file.
+
+        Non-fatal: logs a warning on failure.
+        """
+        state_path = path or DEPLOYMENT_STATE_FILE
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            agents_dict = {name: dep.to_dict() for name, dep in self._agents.items()}
+            payload = {
+                "schema_version": "1",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "agents": agents_dict,
+            }
+            with state_path.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            logger.debug("[deploy] Saved deployment state (%d agents) → %s", len(agents_dict), state_path)
+        except Exception as exc:
+            logger.warning("[deploy] Could not save deployment state to %s: %s", state_path, exc)
+
     # ── Agent registration ───────────────────────────────────────────
 
     def register_agent(self, agent_name: str) -> AgentDeployment:
-        """Register an agent (starts in PAPER mode)."""
+        """Register an agent.  If a persisted state exists, that mode is used;
+        otherwise the agent starts in PAPER mode."""
         if agent_name not in self._agents:
             self._agents[agent_name] = AgentDeployment(agent_name=agent_name)
         return self._agents[agent_name]
@@ -132,6 +203,7 @@ class DeploymentController:
         """Get current mode for an agent."""
         dep = self._agents.get(agent_name)
         return dep.mode if dep else AgentMode.PAPER
+
 
     def is_live(self, agent_name: str) -> bool:
         return self.get_mode(agent_name) in (AgentMode.LIVE, AgentMode.SHADOW)
@@ -231,6 +303,7 @@ class DeploymentController:
         dep.promoted_at = datetime.now(timezone.utc).isoformat()
         self._log_transition(agent_name, old_mode.value, "LIVE", "Promoted to live")
         logger.info(f"[deploy] {agent_name}: {old_mode.value} → LIVE")
+        self.save_state_file()
         return True, "OK"
 
     # ── Rollback ─────────────────────────────────────────────────────
@@ -259,6 +332,7 @@ class DeploymentController:
         dep.last_rollback_at = datetime.now(timezone.utc).isoformat()
         self._log_transition(agent_name, old_mode.value, "PAPER", f"Rollback: {reason}")
         logger.warning(f"[deploy] ROLLBACK {agent_name}: {old_mode.value} → PAPER ({reason})")
+        self.save_state_file()
         return True, f"Rolled back to PAPER: {reason}"
 
     def halt(self, agent_name: str, reason: str = "manual") -> tuple[bool, str]:
@@ -271,6 +345,7 @@ class DeploymentController:
         dep.mode = AgentMode.HALTED
         self._log_transition(agent_name, old_mode.value, "HALTED", f"Halted: {reason}")
         logger.warning(f"[deploy] HALTED {agent_name}: {reason}")
+        self.save_state_file()
         return True, f"Halted: {reason}"
 
     # ── Auto-rollback check ──────────────────────────────────────────

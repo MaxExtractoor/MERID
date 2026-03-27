@@ -31,16 +31,23 @@ interface SidebarProps {
 
 /* ── Sidebar groups aligned to the Kalshi swarm workflow ──────────── */
 
-const tradingCore = [
+const trading = [
   { name: 'Overview', href: 'overview', icon: LayoutDashboard, color: 'text-blue-400' },
+  { name: 'Positions & Orders', href: 'positions', icon: TrendingUp, color: 'text-cyan-400' },
+];
+
+const kalshiSuite = [
   { name: 'Terminal', href: 'kalshi-terminal', icon: Monitor, color: 'text-orange-400' },
-  { name: 'Markets', href: 'kalshi-dashboard', icon: Search, color: 'text-orange-300' },
-  { name: 'Portfolio', href: 'kalshi-portfolio', icon: Briefcase, color: 'text-orange-300' },
-  { name: 'Positions', href: 'positions', icon: TrendingUp, color: 'text-cyan-400' },
+  { name: 'Kalshi Dashboard', href: 'kalshi-dashboard', icon: Search, color: 'text-orange-300' },
+  { name: 'Kalshi Portfolio', href: 'kalshi-portfolio', icon: Briefcase, color: 'text-orange-300' },
   { name: 'Orders', href: 'orders', icon: ClipboardList, color: 'text-teal-300' },
 ];
 
-const swarmIntelligence = [
+const predictionMarkets = [
+  { name: 'Sports & Props', href: 'sports', icon: Target, color: 'text-violet-400' },
+];
+
+const agentsSwarms = [
   { name: 'Agent Grid', href: 'kalshi-grid', icon: LayoutGrid, color: 'text-orange-500' },
   { name: 'Swarm Matrix', href: 'swarm-consensus', icon: Grid, color: 'text-cyan-500' },
   { name: 'Performance', href: 'kalshi-performance', icon: Award, color: 'text-emerald-400' },
@@ -48,14 +55,12 @@ const swarmIntelligence = [
   { name: 'Lane Control', href: 'lane-control', icon: GitBranch, color: 'text-violet-400' },
 ];
 
-const analytics = [
+const riskAnalytics = [
   { name: 'Fear/Greed', href: 'kalshi-sentiment', icon: Activity, color: 'text-rose-400' },
   { name: 'Vol & Sizing', href: 'kalshi-vol-dashboard', icon: Gauge, color: 'text-purple-400' },
-];
-
-const operatorSection = [
-  { name: 'Operator', href: 'operator', icon: Sliders, color: 'text-indigo-400' },
+  { name: 'Analytics & Backtests', href: 'analytics', icon: Award, color: 'text-emerald-400' },
   { name: 'Kill Switch', href: 'kill-switch', icon: ShieldAlert, color: 'text-red-400' },
+  { name: 'Operator', href: 'operator', icon: Sliders, color: 'text-indigo-400' },
 ];
 
 const system = [
@@ -63,7 +68,7 @@ const system = [
   { name: 'Settings', href: 'settings', icon: SettingsIcon, color: 'text-gray-400' },
 ];
 
-function NavItem({ item, current, onChange, collapsed, isLive }: { item: typeof tradingCore[0]; current: View; onChange: (v: View) => void; collapsed: boolean; isLive?: boolean }) {
+function NavItem({ item, current, onChange, collapsed, isLive }: { item: typeof trading[0]; current: View; onChange: (v: View) => void; collapsed: boolean; isLive?: boolean }) {
   const Icon = item.icon;
   const isActive = current === item.href;
   const showModeDot = item.href === 'kalshi-dashboard' || item.href === 'kalshi-grid' || item.href === 'kalshi-terminal';
@@ -110,10 +115,11 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
   const { data: modeData, isLive } = useKalshiMode();
 
   const primarySections = [
-    { label: 'Trading', items: tradingCore },
-    { label: 'Swarm Intelligence', items: swarmIntelligence },
-    { label: 'Analytics', items: analytics },
-    { label: 'Operator', items: operatorSection },
+    { label: 'Trading', items: trading },
+    { label: 'Kalshi Suite', items: kalshiSuite },
+    { label: 'Prediction Markets', items: predictionMarkets },
+    { label: 'Agents & Swarms', items: agentsSwarms },
+    { label: 'Risk & Analytics', items: riskAnalytics },
     { label: 'System', items: system },
   ];
 
