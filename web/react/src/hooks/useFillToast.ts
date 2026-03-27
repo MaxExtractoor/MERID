@@ -23,19 +23,24 @@ export function useFillToast() {
   const { toast } = useToast();
   const seenIds = useRef<Set<string>>(new Set());
   const initialised = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const poll = useCallback(async () => {
     try {
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
       const token = localStorage.getItem('merid-access');
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_FILLS}`, {
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
+        signal: controller.signal,
       });
       if (!res.ok) return;
       const data = await res.json() as { fills?: KalshiFill[] };
-      const fills: KalshiFill[] = data.fills ?? [];
+      const fills: KalshiFill[] = Array.isArray(data.fills) ? data.fills : [];
 
       if (!initialised.current) {
         // Seed seen IDs on first load — don't toast for existing fills
@@ -64,14 +69,20 @@ export function useFillToast() {
           durationMs: 8000,
         });
       }
-    } catch {
-      // best effort — never throw from a background poller
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      console.error('[useFillToast] Poll failed:', err);
     }
   }, [toast]);
 
   useEffect(() => {
     void poll();
     const interval = setInterval(() => void poll(), DEFAULTS.POLLING_INTERVALS.STANDARD);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
   }, [poll]);
 }
