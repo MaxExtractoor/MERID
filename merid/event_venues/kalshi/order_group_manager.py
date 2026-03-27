@@ -647,15 +647,15 @@ class KalshiOrderGroupManager:
 
 
 # Singleton accessor
-_order_group_manager_instance: Optional[OrderGroupManager] = None
+_order_group_manager_instance: Optional[KalshiOrderGroupManager] = None
 
 
-def get_order_group_manager() -> Optional[OrderGroupManager]:
+def get_order_group_manager() -> Optional[KalshiOrderGroupManager]:
     """Get the global order group manager singleton (if initialized)."""
     return _order_group_manager_instance
 
 
-def set_order_group_manager(manager: OrderGroupManager) -> None:
+def set_order_group_manager(manager: KalshiOrderGroupManager) -> None:
     """Set the global order group manager singleton."""
     global _order_group_manager_instance
     _order_group_manager_instance = manager

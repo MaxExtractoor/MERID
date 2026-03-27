@@ -122,6 +122,7 @@ export const API_ENDPOINTS = {
   KALSHI_RISK: "/api/v1/kalshi/risk",
   KALSHI_HEALTH: "/api/v1/kalshi/health",
   KALSHI_KILL_SWITCH: "/api/v1/kalshi/kill-switch",
+  KALSHI_WS: "/api/v1/kalshi/ws",
   KALSHI_ORDERBOOK: (ticker: string) => `/api/v1/kalshi/markets/${ticker}/orderbook`,
   KALSHI_EVENT: (event: string) => `/api/v1/kalshi/events/${event}`,
   KALSHI_EXPORT: "/api/v1/kalshi/export",

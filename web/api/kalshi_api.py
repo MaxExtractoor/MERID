@@ -174,6 +174,7 @@ def _enrich_from_ticker(ticker: str) -> Dict[str, Any]:
     # Inline prefix-based fallback
     _PREFIX_MAP = {
         "KXBTC": ("crypto", "BTC"), "KXETH": ("crypto", "ETH"), "KXSOL": ("crypto", "SOL"),
+        "KXXRP": ("crypto", "XRP"), "KXDOGE": ("crypto", "DOGE"),
         "KXAVAX": ("crypto", "AVAX"), "INXD": ("equity", "SPX"), "NASDAQ": ("equity", "NDX"),
         "FED": ("macro", "FED"), "CPI": ("macro", "CPI"), "GDP": ("macro", "GDP"),
         "PRES": ("politics", "PRES"), "HOUSE": ("politics", "HOUSE"), "SENATE": ("politics", "SENATE"),
