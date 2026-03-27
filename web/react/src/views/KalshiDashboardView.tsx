@@ -1170,11 +1170,11 @@ const KalshiDashboardView: React.FC = () => {
                     <div className="relative h-8 bg-slate-700 rounded overflow-hidden mb-2">
                       <div
                         className="absolute h-full bg-green-500/30 rounded-l"
-                        style={{ left: 0, width: `${bid}%` }}
+                        style={{ left: 0, width: `${Math.min(100, bid)}%` }}
                       />
                       <div
                         className="absolute h-full bg-red-500/30 rounded-r"
-                        style={{ left: `${ask}%`, width: `${100 - ask}%` }}
+                        style={{ left: `${Math.min(100, ask)}%`, width: `${Math.max(0, 100 - ask)}%` }}
                       />
                       <div
                         className="absolute h-full bg-yellow-500/20"
