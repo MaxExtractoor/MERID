@@ -36,7 +36,13 @@ logger = get_logger("merid.event_venues.kalshi.bracket_risk")
 
 
 # ── Per-asset defaults (cents, sized for ~$16 bankroll) ──────────────────
-
+# Values represent max dollar exposure per asset per market hour.
+# Derived as ~14–16% of bankroll for the most liquid asset (BTC), scaled
+# down by relative volatility and liquidity for smaller assets.
+# BTC: ~$2.30 (highest liquidity, most price-efficient)
+# ETH: ~$1.80 (second most liquid, slightly higher vol)
+# SOL/XRP: ~$0.90 (mid-tier liquidity, higher vol)
+# DOGE: ~$0.60 (lowest liquidity, highest vol relative to size)
 _DEFAULT_PER_ASSET_HOUR_CAPS_CENTS: Dict[str, float] = {
     "BTC": 230.0,
     "ETH": 180.0,
@@ -163,12 +169,20 @@ class BracketRiskManager:
         return self._state.asset_hour_notional.get(asset, {}).get(hour_key, 0.0)
 
     def _log_asset_cap_status(self, asset: str, hour_key: str, incoming_notional: float) -> None:
-        """Log exposure used vs cap and top-3 consuming markets for the asset."""
+        """Log exposure used vs cap and top-3 consuming markets for the asset.
+
+        Only logs when utilization after this order would exceed 80% of cap
+        (approaching limit) or when the order is being rejected (> 100%).
+        """
         cfg = self._config
         cap = cfg.per_asset_hour_caps_cents.get(asset.upper())
-        if cap is None:
+        if cap is None or cap <= 0:
             return
         used = self._asset_hour_notional(asset, hour_key)
+        projected = used + incoming_notional
+        utilization_pct = projected / cap * 100
+        if utilization_pct < 80.0:
+            return  # quiet below 80% — only log when approaching or over cap
         top_markets = (
             self._state.asset_hour_markets
             .get(asset, {})
@@ -178,8 +192,8 @@ class BracketRiskManager:
             "[bracket-risk] %s/%s exposure: %.0f¢ used + %.0f¢ incoming = %.0f¢ / %.0f¢ cap "
             "(%.0f%%) | top markets: %s",
             asset.upper(), hour_key,
-            used, incoming_notional, used + incoming_notional, cap,
-            (used + incoming_notional) / cap * 100 if cap > 0 else 0.0,
+            used, incoming_notional, projected, cap,
+            utilization_pct,
             top_markets or ["(none)"],
         )
 
