@@ -64,13 +64,16 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
     if (!data?.points?.length) return [];
     let pts = data.points;
     if (categoryFilter) {
-      pts = pts.filter(p => (p.category ?? '').toLowerCase().includes(categoryFilter));
+      pts = pts.filter(p => {
+        const cat = p.category ?? '';
+        return typeof cat === 'string' && cat.toLowerCase().includes(categoryFilter);
+      });
     }
     return pts.map(p => ({
       time: new Date(p.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      equity: Number((p.equity ?? 0).toFixed(2)),
-      pnl: Number((p.cumulative_pnl ?? 0).toFixed(2)),
-      dailyPnl: Number((p.daily_pnl ?? 0).toFixed(2)),
+      equity: Number((typeof p.equity === 'number' ? p.equity : 0).toFixed(2)),
+      pnl: Number((typeof p.cumulative_pnl === 'number' ? p.cumulative_pnl : 0).toFixed(2)),
+      dailyPnl: Number((typeof p.daily_pnl === 'number' ? p.daily_pnl : 0).toFixed(2)),
     }));
   }, [data, categoryFilter]);
 

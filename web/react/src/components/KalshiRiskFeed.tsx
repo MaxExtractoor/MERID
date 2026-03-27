@@ -217,21 +217,21 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, on
         <div className="flex items-center gap-3 px-4 py-1.5 border-b border-slate-800/50 text-[10px]">
           <div>
             <span className="text-gray-500">Equity</span>{' '}
-            <span className="text-white font-mono">${(wsSummary.total_equity ?? 0).toFixed(2)}</span>
+            <span className="text-white font-mono">${(typeof wsSummary.total_equity === 'number' ? wsSummary.total_equity : 0).toFixed(2)}</span>
           </div>
           <div>
             <span className="text-gray-500">PnL</span>{' '}
-            <span className={`font-mono ${(wsSummary.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              {(wsSummary.total_pnl ?? 0) >= 0 ? '+' : ''}${(wsSummary.total_pnl ?? 0).toFixed(2)}
+            <span className={`font-mono ${(typeof wsSummary.total_pnl === 'number' ? wsSummary.total_pnl : 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {(typeof wsSummary.total_pnl === 'number' ? wsSummary.total_pnl : 0) >= 0 ? '+' : ''}${(typeof wsSummary.total_pnl === 'number' ? wsSummary.total_pnl : 0).toFixed(2)}
             </span>
           </div>
           <div>
             <span className="text-gray-500">Positions</span>{' '}
-            <span className="text-white font-mono">{wsSummary.position_count ?? 0}</span>
+            <span className="text-white font-mono">{typeof wsSummary.position_count === 'number' ? wsSummary.position_count : 0}</span>
           </div>
           <div>
             <span className="text-gray-500">Exposure</span>{' '}
-            <span className="text-white font-mono">${(wsSummary.exposure ?? 0).toFixed(2)}</span>
+            <span className="text-white font-mono">${(typeof wsSummary.exposure === 'number' ? wsSummary.exposure : 0).toFixed(2)}</span>
           </div>
         </div>
       )}

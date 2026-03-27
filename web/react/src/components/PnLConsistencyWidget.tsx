@@ -68,8 +68,8 @@ export default function PnLConsistencyWidget() {
         {paper && !paper.error && (
           <span className="whitespace-nowrap">
             <span className="text-slate-500">Paper:</span>{' '}
-            <span className={`font-mono font-medium ${(paper.total ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              ${(paper.total ?? 0).toFixed(2)}
+            <span className={`font-mono font-medium ${(typeof paper.total === 'number' ? paper.total : 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              ${(typeof paper.total === 'number' ? paper.total : 0).toFixed(2)}
             </span>
           </span>
         )}
@@ -78,8 +78,8 @@ export default function PnLConsistencyWidget() {
         {risk && !risk.error && (
           <span className="whitespace-nowrap">
             <span className="text-slate-500">Risk:</span>{' '}
-            <span className={`font-mono font-medium ${(risk.daily_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              ${(risk.daily_pnl ?? 0).toFixed(2)}
+            <span className={`font-mono font-medium ${(typeof risk.daily_pnl === 'number' ? risk.daily_pnl : 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              ${(typeof risk.daily_pnl === 'number' ? risk.daily_pnl : 0).toFixed(2)}
             </span>
           </span>
         )}
@@ -88,8 +88,8 @@ export default function PnLConsistencyWidget() {
         {equity && !equity.error && typeof equity.pnl === 'number' && (
           <span className="whitespace-nowrap">
             <span className="text-slate-500">Equity:</span>{' '}
-            <span className={`font-mono font-medium ${equity.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              ${equity.pnl.toFixed(2)}
+            <span className={`font-mono font-medium ${(typeof equity.pnl === 'number' ? equity.pnl : 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              ${(typeof equity.pnl === 'number' ? equity.pnl : 0).toFixed(2)}
             </span>
           </span>
         )}
