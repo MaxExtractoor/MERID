@@ -48,9 +48,6 @@ export default function DataTableEnhanced<T>({
     );
   }, [data, columns, filterText]);
 
-  // Ensure sortedData is always an array
-  const ensureArray = (arr: unknown): T[] => Array.isArray(arr) ? arr : [];
-
   // Sort data
   const sortedData = useMemo(() => {
     if (!sortKey) return filteredData;
