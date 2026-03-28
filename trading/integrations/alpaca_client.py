@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
-from typing import Dict
+from typing import Any, Dict
 
-from alpaca_trade_api import REST
 from utils.logger import get_logger
 
 logger = get_logger("trading.integrations.alpaca")
@@ -28,14 +27,22 @@ def _resolve_credentials() -> tuple[str, str]:
 
 
 @lru_cache(maxsize=1)
-def get_alpaca_client() -> REST:
+def get_alpaca_client() -> Any:
     """Return a cached Alpaca REST client."""
     from merid.settings import settings
-    
+
     if settings.KALSHI_ONLY:
         logger.info("Alpaca client SKIPPED (Kalshi-only mode)")
         return None
-    
+
+    try:
+        from alpaca_trade_api import REST
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "alpaca_trade_api is not installed. "
+            "Install it with: pip install alpaca-trade-api"
+        ) from exc
+
     key, secret = _resolve_credentials()
     base_url = _resolve_alpaca_base_url()
     logger.info("Initializing Alpaca REST client (env=%s)", "live" if "api.alpaca" in base_url else "paper")
