@@ -315,3 +315,4 @@ async def test_chaos_status_reflects_activity() -> None:
     assert s["poll_count"] == 1
     assert s["settlement_count"] == 2
     assert s["seen_ids_count"] == 2
+

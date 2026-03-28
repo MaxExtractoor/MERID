@@ -419,3 +419,4 @@ def get_continuous_trader(
     if _trader is None:
         _trader = KalshiContinuousTrader(catalog=catalog, strategy=strategy)
     return _trader
+
