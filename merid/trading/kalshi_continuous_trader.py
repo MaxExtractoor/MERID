@@ -75,6 +75,10 @@ class TradingCandidate(MarketCandidate):
             category=candidate.category,
             strike_price=candidate.strike_price,
             spot_price=candidate.spot_price,
+            best_yes_bid=candidate.best_yes_bid,
+            best_yes_ask=candidate.best_yes_ask,
+            best_no_bid=candidate.best_no_bid,
+            best_no_ask=candidate.best_no_ask,
             group_id=group_id or f"{candidate.underlying}_{candidate.timeframe}",
             tags=tags or [],
         )
