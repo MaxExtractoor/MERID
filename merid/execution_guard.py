@@ -262,6 +262,30 @@ class ExecutionGuard:
     def kill_switch_active(self) -> bool:
         return self._global_kill_switch
 
+    def get_kill_switch_status(self) -> Dict[str, Any]:
+        """Get global kill switch status for API consumption."""
+        return {
+            "active": self._global_kill_switch,
+            "reason": self._global_kill_reason,
+            "activated_at": None,  # Could be extracted from persisted state if needed
+        }
+
+    def get_domain_kill_switch_status(self, domain: str) -> Dict[str, Any]:
+        """Get per-domain kill switch status for API consumption."""
+        cap = self._domain_caps.get(domain)
+        if cap:
+            return {
+                "domain": domain,
+                "active": cap.kill_switch,
+                "daily_notional_usd": cap.notional_usd,
+                "max_daily_notional_usd": cap.max_daily_notional_usd,
+            }
+        return {
+            "domain": domain,
+            "active": False,
+            "error": "domain not found",
+        }
+
     # ── Promotion enforcement ────────────────────────────────────────
 
     def sync_promotion_report(self):
@@ -308,6 +332,71 @@ class ExecutionGuard:
 
     def get_cqi(self, domain: str) -> float:
         return self._last_cqi.get(domain, 0.5)  # Default neutral
+
+    def get_cqi_throttle_status(self) -> Dict[str, Any]:
+        """Get CQI throttle status across all domains for API consumption."""
+        return {
+            "config": {
+                "full_execution_above": self._cqi_config.full_execution_above,
+                "block_below": self._cqi_config.block_below,
+                "min_throttle_pct": self._cqi_config.min_throttle_pct,
+            },
+            "domain_cqi_scores": {k: round(v, 4) for k, v in self._last_cqi.items()},
+            "throttle_active": any(
+                cqi < self._cqi_config.full_execution_above
+                for cqi in self._last_cqi.values()
+            ),
+        }
+
+    def get_domain_caps_status(self) -> Dict[str, Any]:
+        """Get per-domain daily caps status for API consumption."""
+        return {
+            "domains": {
+                domain: {
+                    "notional_usd": cap.notional_usd,
+                    "max_daily_notional_usd": cap.max_daily_notional_usd,
+                    "utilization_pct": (cap.notional_usd / cap.max_daily_notional_usd * 100)
+                        if cap.max_daily_notional_usd > 0 else 0.0,
+                    "kill_switch": cap.kill_switch,
+                }
+                for domain, cap in self._domain_caps.items()
+            }
+        }
+
+    def get_cooldown_status(self) -> Dict[str, Any]:
+        """Get execution cooldown status for API consumption."""
+        current_time = time.time()
+        return {
+            "cooldown_seconds": self._cooldown_seconds,
+            "last_execution": self._last_execution_time,
+            "seconds_since_last": round(current_time - self._last_execution_time, 2)
+                if self._last_execution_time > 0 else None,
+            "cooldown_active": (current_time - self._last_execution_time) < self._cooldown_seconds
+                if self._last_execution_time > 0 else False,
+        }
+
+    def get_circuit_breaker_status(self) -> Dict[str, Any]:
+        """Get circuit breaker status for all registered breakers."""
+        try:
+            from merid.resilience.circuit_breaker import get_all_breakers
+            breakers = get_all_breakers()
+            return {
+                "breakers": {
+                    name: breaker.get_stats()
+                    for name, breaker in breakers.items()
+                },
+                "total_breakers": len(breakers),
+                "open_breakers": sum(
+                    1 for b in breakers.values()
+                    if b._state.value == "open"
+                ),
+            }
+        except ImportError:
+            return {
+                "breakers": {},
+                "total_breakers": 0,
+                "error": "circuit_breaker module not available",
+            }
 
     # ── Pre-trade check ───────────────────────────────────────────────
 

@@ -552,6 +552,65 @@ class PositionSizer:
             "current_exposure": current_exposure_contracts,
         }
 
+    # ── API Methods for Position Sizing Dashboard ──────────────────────────
+
+    def get_kelly_metrics(self) -> Dict[str, Any]:
+        """Get Kelly criterion metrics for API consumption."""
+        return {
+            "kelly_fraction": self._config.kelly_fraction,
+            "effective_fraction": self.effective_fraction,
+            "manual_override_factor": self._manual_override_factor,
+            "realized_vol": round(self._realized_vol * 100, 2),  # as percentage
+            "target_vol": round(self._target_vol * 100, 2),  # as percentage
+            "vol_scale": round(self.vol_scale, 3),
+            "atr_value": round(self._atr_value, 2),
+            "atr_fraction": round(self._atr_fraction * 100, 2),  # as percentage
+            "kelly_utilization_pct": round(self._kelly_util_pct, 2),
+        }
+
+    def get_adjustment_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get recent sizing adjustment history."""
+        # Return empty list for now - could be enhanced to track history
+        return []
+
+    def get_adjustment_summary(self) -> Dict[str, Any]:
+        """Get summary of sizing adjustments."""
+        return {
+            "manual_override_active": self._manual_override_factor < 1.0,
+            "manual_override_factor": self._manual_override_factor,
+            "effective_kelly_fraction": self.effective_fraction,
+        }
+
+    def get_decision_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get recent sizing decision history."""
+        return []
+
+    def get_volatility_metrics(self) -> Dict[str, Any]:
+        """Get volatility-related metrics."""
+        return {
+            "realized_vol_pct": round(self._realized_vol * 100, 2),
+            "target_vol_pct": round(self._target_vol * 100, 2),
+            "vol_scale": round(self.vol_scale, 3),
+            "atr_value": round(self._atr_value, 2),
+            "atr_fraction_pct": round(self._atr_fraction * 100, 2),
+        }
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get current sizer configuration."""
+        cfg = self._config
+        return {
+            "kelly_fraction": cfg.kelly_fraction,
+            "min_contracts": cfg.min_contracts,
+            "max_contracts": cfg.max_contracts,
+            "max_bankroll_pct": cfg.max_bankroll_pct,
+            "min_bankroll_pct": cfg.min_bankroll_pct,
+            "pf_min_for_scaling": cfg.pf_min_for_scaling,
+            "pf_full_kelly_at": cfg.pf_full_kelly_at,
+            "expectancy_min_cents": cfg.expectancy_min_cents,
+            "max_contracts_per_underlying_per_hour": cfg.max_contracts_per_underlying_per_hour,
+            "min_trades_for_scaling": cfg.min_trades_for_scaling,
+        }
+
 
 # ── Kelly utilization tracker ────────────────────────────────────────────
 

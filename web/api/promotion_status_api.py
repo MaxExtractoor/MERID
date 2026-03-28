@@ -105,28 +105,39 @@ async def get_promotion_status() -> Dict[str, Any]:
         except ImportError:
             logger.warning("Promotion report not available")
 
-        # Try merid.risk.promotion_engine
+        # Try merid.risk.promotion_engine (BTC-only)
         try:
             from merid.risk.promotion_engine import get_promotion_engine
             engine = get_promotion_engine()
 
             if hasattr(engine, 'get_domain_eligibility'):
                 domains_status = {}
-                for domain in ["crypto", "prediction", "betting"]:
-                    domains_status[domain] = engine.get_domain_eligibility(domain)
+                # PromotionEngine only handles "crypto" (BTC) domain
+                # Don't try "prediction" or "betting" as they'll fail
+                try:
+                    crypto_status = engine.get_domain_eligibility("crypto")
+                    domains_status["crypto"] = crypto_status
+                except Exception as e:
+                    logger.warning(f"Failed to get crypto domain eligibility: {e}")
+                    domains_status["crypto"] = {
+                        "eligible": False,
+                        "error": str(e),
+                    }
 
                 eligible_count = sum(1 for d in domains_status.values() if d.get("eligible"))
 
                 return {
                     "timestamp": datetime.utcnow().isoformat(),
                     "auto_promotion_enabled": True,
+                    "promotion_source": "promotion_engine_btc_only",
                     "domains": domains_status,
                     "eligible_count": eligible_count,
                     "total_domains": len(domains_status),
                     "last_sync": datetime.utcnow().isoformat(),
+                    "note": "PromotionEngine only provides BTC (crypto) domain status",
                 }
-        except:
-            pass
+        except ImportError:
+            logger.warning("Promotion engine not available")
 
         # Fallback: Return placeholder data
         return {
