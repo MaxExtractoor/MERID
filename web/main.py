@@ -145,6 +145,7 @@ from web.api.swarm_bus_api import router as swarm_bus_api_router
 from web.api.sentiment_api import router as sentiment_api_router
 from web.api.xtf_api import router as xtf_api_router
 from web.api.auto_promoter_api import router as auto_promoter_api_router
+from web.api.promotion_coverage_api import router as promotion_coverage_api_router
 
 # Mock API routers for testing - REMOVED FOR LIVE-ONLY MODE
 # from web.api.mock_simulation import router as mock_simulation_router
@@ -494,6 +495,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(sentiment_api_router)
     application.include_router(xtf_api_router)
     application.include_router(auto_promoter_api_router)
+    application.include_router(promotion_coverage_api_router)
 
     # Register fallback stubs last so concrete implementations win route precedence.
     application.include_router(missing_endpoints_router)
