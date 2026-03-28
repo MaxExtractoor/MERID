@@ -218,19 +218,42 @@ async def get_cfb_rti_health() -> dict:
     ``gate_active``
         ``true`` when ``KALSHI_ENV=live`` and ``MERID_ALLOW_NULL_CFB``
         is not set (i.e., the safety gate is in force).
+    ``cfb_rti_enabled``
+        ``false`` when ``MERID_CFB_RTI_ENABLED`` is not set; in that case
+        ``status`` will be ``"disabled-by-config"`` and the gate is never
+        enforced regardless of ``KALSHI_ENV``.
     """
     import os
 
     try:
-        from merid.data.settlement_rti_buffer import get_rti_buffer
-
-        buf = get_rti_buffer()
-        health = buf.health_dict()
+        from merid.data.settlement_rti_buffer import get_rti_buffer, is_cfb_rti_enabled
 
         kalshi_env = os.getenv("KALSHI_ENV", "paper").lower()
         allow_null = os.getenv("MERID_ALLOW_NULL_CFB", "0") == "1"
+        cfb_enabled = is_cfb_rti_enabled()
+
+        if not cfb_enabled:
+            return {
+                "status": "disabled-by-config",
+                "cfb_rti_enabled": False,
+                "adapter": None,
+                "tick_count": 0,
+                "last_tick": None,
+                "kalshi_env": kalshi_env,
+                "gate_active": False,
+                "message": (
+                    "CFB RTI disabled by config (MERID_CFB_RTI_ENABLED=false). "
+                    "Set MERID_CFB_RTI_ENABLED=true to enable."
+                ),
+                "timestamp": time.time(),
+            }
+
+        buf = get_rti_buffer()
+        health = buf.health_dict()  # type: ignore[union-attr]
+
         gate_active = kalshi_env == "live" and not allow_null
 
+        health["cfb_rti_enabled"] = True
         health["kalshi_env"] = kalshi_env
         health["gate_active"] = gate_active
         return health
