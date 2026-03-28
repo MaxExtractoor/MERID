@@ -1762,6 +1762,11 @@ class LaneOrchestrator:
         ("ETH", "1h"):   "PHASE_2",
         ("BTC", "4h"):   "PHASE_2",
         ("SOL", "15m"):  "PHASE_3",
+        ("SOL", "1h"):   "PHASE_3",
+        ("XRP", "15m"):  "PHASE_3",
+        ("XRP", "1h"):   "PHASE_3",
+        ("DOGE", "15m"): "PHASE_3",
+        ("DOGE", "1h"):  "PHASE_3",
     }
 
     def __init__(self, base_equity: float = 0.0) -> None:

@@ -94,18 +94,19 @@ class OrchestratorAgentManager:
             except Exception as exc:
                 logger.warning(f"Telegram agent failed to initialize (non-fatal): {exc}")
         
-        # Grab reference to Kalshi agent grid (already started by _app_lifespan Phase 0.5).
-        # The grid internally manages its own PortfolioRiskAgent — no need to duplicate.
+        # Kalshi Agent Grid is started by main.py lifespan - just grab reference
+        # DO NOT start it here to avoid duplicate startup
         try:
             from merid.prediction.agent_grid import get_agent_grid
             self.kalshi_agent_grid = get_agent_grid()
-            if not self.kalshi_agent_grid._running:
-                await self.kalshi_agent_grid.start()
-                logger.info("✅ Kalshi agent grid started (fallback)")
+            if self.kalshi_agent_grid._running:
+                logger.info("✅ Kalshi agent grid already running (started by main.py)")
             else:
-                logger.info("✅ Kalshi agent grid already running (started by lifespan)")
+                # Fallback: start it if main.py didn't
+                await self.kalshi_agent_grid.start()
+                logger.info("⚠️  Kalshi agent grid started (fallback - should be in main.py)")
         except Exception as exc:
-            logger.warning(f"Kalshi agent grid not available (graceful degradation): {exc}")
+            logger.error(f"Kalshi agent grid not available: {exc}", exc_info=True)
         
         # Start price feed monitoring (if configured)
         # price_feed_task = asyncio.create_task(

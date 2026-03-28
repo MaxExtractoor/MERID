@@ -212,7 +212,20 @@ async def lifespan(app: FastAPI):
 
     await asyncio.sleep(0)
 
-    # Start OrchestratorAgentManager (news monitor, twitter, telegram, Kalshi grid)
+    # Start Kalshi Agent Grid (CRITICAL - must start before orchestrator manager)
+    try:
+        logger.info("Starting Kalshi Agent Grid...")
+        from merid.prediction.agent_grid import get_agent_grid
+        agent_grid = get_agent_grid()
+        await agent_grid.start()
+        app.state.agent_grid = agent_grid
+        logger.info(f"✅ Kalshi Agent Grid started: {len(agent_grid.agents)} trading agents operational")
+    except Exception as e:
+        logger.error(f"CRITICAL: Kalshi Agent Grid failed to start: {e}", exc_info=True)
+
+    await asyncio.sleep(0)
+
+    # Start OrchestratorAgentManager (news monitor, twitter, telegram, etc.)
     try:
         logger.info("Starting orchestrator agent manager...")
         from web.startup_agents import get_orchestrator_manager
@@ -225,17 +238,14 @@ async def lifespan(app: FastAPI):
 
     await asyncio.sleep(0)
 
-    # Start PortfolioRiskAgent (cross-asset exposure caps, drawdown, margin monitoring)
+    # PortfolioRiskAgent is started by AgentGrid - no need to start separately
+    # Store reference in app.state if agent_grid is available
     try:
-        logger.info("Starting portfolio risk agent...")
-        from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
-        from merid.prediction.agent_grid_config import PortfolioRiskConfig
-        portfolio_risk = PortfolioRiskAgent(config=PortfolioRiskConfig())
-        await portfolio_risk.start()
-        app.state.portfolio_risk_agent = portfolio_risk
-        logger.info("✅ Portfolio risk agent started")
+        if hasattr(app.state, "agent_grid"):
+            app.state.portfolio_risk_agent = app.state.agent_grid._portfolio_risk
+            logger.info("✅ Portfolio risk agent reference stored from Agent Grid")
     except Exception as e:
-        logger.warning(f"Portfolio risk agent not started (non-fatal): {e}")
+        logger.debug(f"Could not store portfolio risk agent reference: {e}")
 
     await asyncio.sleep(0)  # Final yield before completing startup
 
