@@ -16,7 +16,6 @@ Tools:
 from __future__ import annotations
 
 import time
-from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from merid.guardrails.tools import (
@@ -153,7 +152,7 @@ async def _kalshi_get_market_state(ticker: str = "") -> ToolResult:
         result = await client.get_market_result(ticker)
 
         if not result.success:
-            error_code = ToolErrorCode.VENUE_DOWN if result.circuit_open else ToolErrorCode.INTERNAL
+            error_code = ToolErrorCode.VENUE_DOWN if result.metadata.get("circuit_open") else ToolErrorCode.INTERNAL
             return ToolResult.fail(
                 error_code,
                 f"Kalshi API error: {result.error}",
@@ -364,37 +363,34 @@ async def _kalshi_place_order(
     _is_shadow = (_agent_mode is not None and _agent_mode.value == "SHADOW")
 
     try:
-        from merid.event_venues.base import VenueOrder
+        from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
-        order = VenueOrder(
-            market_id=ticker,
-            side=action,
-            size=Decimal(count),
-            price=Decimal(price_cents) / 100 if price_cents else None,
-            order_type="limit" if price_cents else "market",
-            outcome_id=side,
+        intent = OrderIntent(
+            ticker=ticker,
+            side=side,       # "yes" or "no"
+            action=action,   # "buy" or "sell"
+            price_cents=price_cents,
+            count=count,
         )
 
-        client = _get_client()
-        result = await client.place_order_result(order)
+        result = await route_order_async(intent)
 
-        if not result.success:
-            error_code = ToolErrorCode.VENUE_DOWN if result.circuit_open else ToolErrorCode.INTERNAL
+        if result.status == "rejected":
             return ToolResult.fail(
-                error_code,
-                f"Order rejected: {result.error}",
+                ToolErrorCode.INTERNAL,
+                f"Order rejected: {result.reason or 'unknown'}",
                 tool_name="kalshi_place_order",
             )
 
-        placed = result.data
+        placed = result.fill or {}
         payload = {
-            "order_id": placed.order_id if placed else "",
+            "order_id": placed.get("order_id", ""),
             "ticker": ticker,
             "side": side,
             "action": action,
             "price_cents": price_cents,
             "count": count,
-            "status": placed.status if placed else "unknown",
+            "status": result.status,
             "simulated": False,
             "shadow": _is_shadow,
         }
