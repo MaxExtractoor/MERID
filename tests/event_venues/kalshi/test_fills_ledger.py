@@ -177,3 +177,4 @@ async def test_summary_structure(ledger: KalshiFillsLedger) -> None:
     assert "realized_pnl" in s
     assert "positions" in s
     assert s["fill_count"] == 1
+

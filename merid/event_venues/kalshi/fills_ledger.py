@@ -188,3 +188,4 @@ def get_fills_ledger() -> KalshiFillsLedger:
     if _ledger is None:
         _ledger = KalshiFillsLedger()
     return _ledger
+

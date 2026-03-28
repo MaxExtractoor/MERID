@@ -122,3 +122,4 @@ def test_reconnect_count_exposed_in_stats(ws: KalshiWebSocket) -> None:
     assert "reconnect_count" in ws.stats()
     ws._reconnect_count = 3
     assert ws.stats()["reconnect_count"] == 3
+

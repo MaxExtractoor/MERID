@@ -309,3 +309,4 @@ class TestTraderStatus:
         assert s["config"]["max_group_notional"] == 25.0
         assert s["config"]["min_confidence"] == 0.6
         assert s["config"]["bankroll_fraction"] == 0.02
+

@@ -265,3 +265,4 @@ def get_settlement_poller(
             client = KalshiVenueClient(KalshiConfig())
         _poller = KalshiSettlementPoller(client=client, redis_client=redis_client)
     return _poller
+
