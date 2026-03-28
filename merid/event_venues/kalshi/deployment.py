@@ -73,7 +73,7 @@ class DeploymentConfig:
     max_error_rate_pct: float = 5.0
 
     # Shadow mode
-    min_shadow_trades_before_full_live: int = 100
+    min_shadow_trades_before_full_live: int = 5
 
     # Auto-rollback thresholds
     auto_rollback_on_pf_below: float = 0.9
