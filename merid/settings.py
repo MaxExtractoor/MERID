@@ -161,6 +161,20 @@ class Settings(BaseSettings):
     KALSHI_API_HOST: Optional[str] = Field(default="https://api.elections.kalshi.com/trade-api/v2", description="Kalshi API host")
     
     # =============================================================================
+    # CFB RTI SETTINGS (CF Benchmarks Real-Time Index)
+    # =============================================================================
+    # Set MERID_CFB_RTI_ENABLED=true only after subscribing to the CF Benchmarks
+    # RTI feed.  When false (default), all CFB RTI client code is bypassed and
+    # trading runs without the settlement feed.  Re-enable by setting this to true.
+    MERID_CFB_RTI_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Enable CF Benchmarks RTI settlement feed. Default false — set true "
+            "after subscribing to the paid CFB RTI feed."
+        ),
+    )
+
+    # =============================================================================
     # PREDICTION MARKET SETTINGS (Kalshi-first)
     # =============================================================================
     KALSHI_ONLY: bool = Field(default=True, description="Kalshi-only mode: restricts UI/API to 8 canonical Kalshi views")

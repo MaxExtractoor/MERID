@@ -7,11 +7,18 @@ compliance. This module provides:
   Benchmarks and buffers the most recent value.
 - ``require_cfb_for_live_trading()`` — safety gate that blocks live
   Kalshi trading unless the RTI feed is healthy (only enforced when
-  ``KALSHI_ENV=live``).
-- ``get_rti_buffer()`` — process-wide singleton accessor.
+  ``KALSHI_ENV=live`` and ``MERID_CFB_RTI_ENABLED=true``).
+- ``get_rti_buffer()`` — process-wide singleton accessor (returns ``None``
+  when ``MERID_CFB_RTI_ENABLED=false``).
+- ``is_cfb_rti_enabled()`` — reads the ``MERID_CFB_RTI_ENABLED`` flag.
 
 Environment variables
 ---------------------
+``MERID_CFB_RTI_ENABLED``
+    ``false`` (default) — all CFB RTI client code is bypassed; trading runs
+    without the settlement feed.  Set to ``true`` after subscribing to the
+    CF Benchmarks paid feed to restore full fail-closed behavior.
+
 ``MERID_CFB_RTI_POLL_URL``
     Full URL to the CF Benchmarks RTI endpoint, e.g.
     ``https://api.cfbenchmarks.com/v1/rtis/BRTI/value``.
@@ -303,9 +310,43 @@ class SettlementRtiBuffer:
 _singleton: Optional[SettlementRtiBuffer] = None
 _singleton_lock = threading.Lock()
 
+# Log the CFB RTI status once at module import time so it appears at startup.
+_cfb_enabled_at_import: bool = os.getenv("MERID_CFB_RTI_ENABLED", "false").lower() in (
+    "1", "true", "yes"
+)
+if not _cfb_enabled_at_import:
+    logger.warning(
+        "CFB RTI disabled by config (MERID_CFB_RTI_ENABLED=false); "
+        "trading will run without CFB settlement feed. "
+        "Set MERID_CFB_RTI_ENABLED=true after subscribing to re-enable."
+    )
 
-def get_rti_buffer() -> SettlementRtiBuffer:
-    """Return (and lazily create) the process-wide ``SettlementRtiBuffer``."""
+
+def is_cfb_rti_enabled() -> bool:
+    """Return ``True`` when the CFB RTI feed is enabled via config.
+
+    Reads ``MERID_CFB_RTI_ENABLED`` from the environment each call so that
+    test monkeypatching takes effect without restarting the process.  In
+    production the value is stable after startup.
+
+    Returns
+    -------
+    bool
+        ``True``  — CFB RTI is active; full fail-closed behavior applies.
+        ``False`` — CFB RTI is disabled by config; all client/gate code is
+                    bypassed and trading runs without the settlement feed.
+    """
+    return os.getenv("MERID_CFB_RTI_ENABLED", "false").lower() in ("1", "true", "yes")
+
+
+def get_rti_buffer() -> Optional[SettlementRtiBuffer]:
+    """Return (and lazily create) the process-wide ``SettlementRtiBuffer``.
+
+    Returns ``None`` when ``MERID_CFB_RTI_ENABLED=false`` so callers can
+    branch without attempting any network connection to CF Benchmarks.
+    """
+    if not is_cfb_rti_enabled():
+        return None
     global _singleton
     with _singleton_lock:
         if _singleton is None:
@@ -326,6 +367,7 @@ def require_cfb_for_live_trading() -> None:
 
     Behaviour
     ---------
+    - Skipped entirely when ``MERID_CFB_RTI_ENABLED=false`` (default).
     - Only active when ``KALSHI_ENV=live``.
     - Skipped when ``MERID_ALLOW_NULL_CFB=1`` (acknowledged bypass).
     - Uses the process-wide ``SettlementRtiBuffer`` singleton.
@@ -334,9 +376,18 @@ def require_cfb_for_live_trading() -> None:
     Raises
     ------
     CfbRtiUnhealthyError
-        When ``KALSHI_ENV=live``, ``MERID_ALLOW_NULL_CFB`` is not set,
-        and the RTI buffer has no healthy tick.
+        When ``MERID_CFB_RTI_ENABLED=true``, ``KALSHI_ENV=live``,
+        ``MERID_ALLOW_NULL_CFB`` is not set, and the RTI buffer has no
+        healthy tick.
     """
+    if not is_cfb_rti_enabled():
+        # CFB RTI is disabled by config — skip the gate entirely.
+        logger.info(
+            "CFB RTI disabled by config; skipping CFB health gate "
+            "(set MERID_CFB_RTI_ENABLED=true to enforce)"
+        )
+        return
+
     kalshi_env = os.getenv("KALSHI_ENV", "paper").lower()
     if kalshi_env != "live":
         return  # gate only active in live mode
@@ -348,7 +399,7 @@ def require_cfb_for_live_trading() -> None:
         return
 
     buf = get_rti_buffer()
-    if not buf.is_healthy():
+    if buf is None or not buf.is_healthy():
         raise CfbRtiUnhealthyError(
             "CFB RTI feed is unhealthy (no ticks received). "
             "Set MERID_CFB_RTI_ADAPTER=simulation for dev/paper, or "

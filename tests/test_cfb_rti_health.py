@@ -11,6 +11,9 @@ Covers:
     * raises ``CfbRtiUnhealthyError`` in live mode when the only tick is stale.
 - Rolling buffer caps at RTI_BUFFER_SIZE.
 - ``get_rti_buffer()`` returns the same singleton on repeated calls.
+- ``MERID_CFB_RTI_ENABLED=false``: gate skipped, no RTI client created,
+  ``get_rti_buffer()`` returns ``None``.
+- ``MERID_CFB_RTI_ENABLED=true``: existing fail-closed behavior preserved.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from merid.data.settlement_rti_buffer import (
     RtiTick,
     SettlementRtiBuffer,
     get_rti_buffer,
+    is_cfb_rti_enabled,
     require_cfb_for_live_trading,
 )
 
@@ -173,6 +177,7 @@ class TestRequireCfbForLiveTrading:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("KALSHI_ENV", "live")
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
         monkeypatch.delenv("MERID_ALLOW_NULL_CFB", raising=False)
 
         empty_buf = _sim_buffer()
@@ -184,6 +189,7 @@ class TestRequireCfbForLiveTrading:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("KALSHI_ENV", "live")
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
         monkeypatch.delenv("MERID_ALLOW_NULL_CFB", raising=False)
 
         stale_buf = _sim_buffer()
@@ -196,6 +202,7 @@ class TestRequireCfbForLiveTrading:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("KALSHI_ENV", "live")
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
         monkeypatch.delenv("MERID_ALLOW_NULL_CFB", raising=False)
 
         healthy_buf = _sim_buffer()
@@ -207,6 +214,7 @@ class TestRequireCfbForLiveTrading:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("KALSHI_ENV", "live")
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
         monkeypatch.delenv("MERID_ALLOW_NULL_CFB", raising=False)
 
         empty_buf = _sim_buffer()
@@ -221,6 +229,7 @@ class TestRequireCfbForLiveTrading:
 
 class TestGetRtiBuffer:
     def test_same_instance_returned_twice(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
         monkeypatch.setenv("MERID_CFB_RTI_ADAPTER", "simulation")
         import merid.data.settlement_rti_buffer as _mod
         # Reset singleton so env change takes effect
@@ -230,6 +239,7 @@ class TestGetRtiBuffer:
         assert buf_a is buf_b
 
     def test_singleton_is_settlement_rti_buffer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
         monkeypatch.setenv("MERID_CFB_RTI_ADAPTER", "simulation")
         import merid.data.settlement_rti_buffer as _mod
         monkeypatch.setattr(_mod, "_singleton", None)
@@ -286,3 +296,109 @@ class TestLiveAdapterFetch:
 
         assert tick is None
         assert buf.tick_count == 0
+
+
+# ---------------------------------------------------------------------------
+# MERID_CFB_RTI_ENABLED flag — disabled (default)
+# ---------------------------------------------------------------------------
+
+class TestCfbRtiDisabledByConfig:
+    """When MERID_CFB_RTI_ENABLED=false (default), all CFB code is bypassed."""
+
+    def test_is_cfb_rti_enabled_false_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MERID_CFB_RTI_ENABLED", raising=False)
+        assert is_cfb_rti_enabled() is False
+
+    def test_is_cfb_rti_enabled_false_explicit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for val in ("false", "False", "0", "no"):
+            monkeypatch.setenv("MERID_CFB_RTI_ENABLED", val)
+            assert is_cfb_rti_enabled() is False
+
+    def test_get_rti_buffer_returns_none_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MERID_CFB_RTI_ENABLED", raising=False)
+        assert get_rti_buffer() is None
+
+    def test_get_rti_buffer_returns_none_explicit_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "false")
+        assert get_rti_buffer() is None
+
+    def test_require_cfb_does_not_raise_when_disabled_live_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live trading must NOT be blocked when CFB RTI is disabled."""
+        monkeypatch.setenv("KALSHI_ENV", "live")
+        monkeypatch.delenv("MERID_ALLOW_NULL_CFB", raising=False)
+        monkeypatch.delenv("MERID_CFB_RTI_ENABLED", raising=False)
+        # Even with an empty singleton, the gate must not raise.
+        require_cfb_for_live_trading()
+
+    def test_require_cfb_does_not_raise_disabled_with_empty_buffer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("KALSHI_ENV", "live")
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "false")
+        monkeypatch.delenv("MERID_ALLOW_NULL_CFB", raising=False)
+        import merid.data.settlement_rti_buffer as _mod
+        empty_buf = _sim_buffer()
+        monkeypatch.setattr(_mod, "_singleton", empty_buf)
+        require_cfb_for_live_trading()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# MERID_CFB_RTI_ENABLED flag — enabled
+# ---------------------------------------------------------------------------
+
+class TestCfbRtiEnabledByConfig:
+    """When MERID_CFB_RTI_ENABLED=true, existing fail-closed behavior is preserved."""
+
+    def test_is_cfb_rti_enabled_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for val in ("true", "True", "1", "yes"):
+            monkeypatch.setenv("MERID_CFB_RTI_ENABLED", val)
+            assert is_cfb_rti_enabled() is True
+
+    def test_get_rti_buffer_not_none_when_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
+        monkeypatch.setenv("MERID_CFB_RTI_ADAPTER", "simulation")
+        import merid.data.settlement_rti_buffer as _mod
+        monkeypatch.setattr(_mod, "_singleton", None)
+        buf = get_rti_buffer()
+        assert buf is not None
+        assert isinstance(buf, SettlementRtiBuffer)
+
+    def test_require_cfb_raises_when_enabled_live_no_ticks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When enabled and KALSHI_ENV=live, empty buffer still blocks trading."""
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
+        monkeypatch.setenv("KALSHI_ENV", "live")
+        monkeypatch.delenv("MERID_ALLOW_NULL_CFB", raising=False)
+        import merid.data.settlement_rti_buffer as _mod
+        empty_buf = _sim_buffer()
+        monkeypatch.setattr(_mod, "_singleton", empty_buf)
+        with pytest.raises(CfbRtiUnhealthyError):
+            require_cfb_for_live_trading()
+
+    def test_require_cfb_passes_when_enabled_live_healthy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When enabled and healthy, live trading is allowed."""
+        monkeypatch.setenv("MERID_CFB_RTI_ENABLED", "true")
+        monkeypatch.setenv("KALSHI_ENV", "live")
+        monkeypatch.delenv("MERID_ALLOW_NULL_CFB", raising=False)
+        import merid.data.settlement_rti_buffer as _mod
+        healthy_buf = _sim_buffer()
+        healthy_buf._push(_fresh_tick())
+        monkeypatch.setattr(_mod, "_singleton", healthy_buf)
+        require_cfb_for_live_trading()  # must not raise
