@@ -188,3 +188,105 @@ class TestVenueConfigBaseUrl:
         config = load_agent_grid_config(path=str(cfg_file))
         assert config.venue.base_url == "https://trading-api.kalshi.com/trade-api/v2"
         assert config.venue.name == "kalshi"
+
+
+# ======================================================================
+# §4 MarketCandidate — best_no_bid / best_yes_bid attribute regression
+# ======================================================================
+
+class TestMarketCandidateBestNoBid:
+    """Regression: MarketCandidate must carry best_yes_bid, best_yes_ask,
+    best_no_bid, best_no_ask as Optional[float] fields.
+
+    AttributeError: 'MarketCandidate' object has no attribute 'best_no_bid'
+    would fire in _compute_edge when these fields are absent.
+    """
+
+    def test_market_candidate_has_best_no_bid(self):
+        """MarketCandidate must accept best_no_bid as a constructor kwarg."""
+        from merid.event_venues.kalshi.market_filter import MarketCandidate
+        c = MarketCandidate(
+            ticker="KXBTC-15M-26MAR25-T95000",
+            underlying="BTC",
+            timeframe="15m",
+            best_bid_cents=54,
+            best_ask_cents=56,
+            mid_price_cents=55,
+            best_yes_bid=0.54,
+            best_yes_ask=0.56,
+            best_no_bid=0.44,
+            best_no_ask=0.46,
+        )
+        assert c.best_no_bid == 0.44
+
+    def test_market_candidate_best_fields_default_to_none(self):
+        """All four best_yes/no fields must default to None."""
+        from merid.event_venues.kalshi.market_filter import MarketCandidate
+        c = MarketCandidate(ticker="X", underlying="BTC", timeframe="15m")
+        assert c.best_yes_bid is None
+        assert c.best_yes_ask is None
+        assert c.best_no_bid is None
+        assert c.best_no_ask is None
+
+    def test_trading_candidate_propagates_best_no_bid(self):
+        """TradingCandidate.from_candidate must copy best_no_bid from base."""
+        from merid.event_venues.kalshi.market_filter import MarketCandidate
+        from merid.trading.kalshi_continuous_trader import TradingCandidate
+        base = MarketCandidate(
+            ticker="KXBTC-15M-26MAR25-T95000",
+            underlying="BTC",
+            timeframe="15m",
+            best_yes_bid=0.54,
+            best_yes_ask=0.56,
+            best_no_bid=0.44,
+            best_no_ask=0.46,
+        )
+        tc = TradingCandidate.from_candidate(base)
+        assert tc.best_yes_bid == 0.54
+        assert tc.best_yes_ask == 0.56
+        assert tc.best_no_bid == 0.44
+        assert tc.best_no_ask == 0.46
+
+    def test_compute_edge_style_no_attribute_error(self):
+        """Accessing best_no_bid (as _compute_edge does) must not raise AttributeError."""
+        from merid.event_venues.kalshi.market_filter import MarketCandidate
+
+        c = MarketCandidate(
+            ticker="KXBTC-15M-26MAR25-T95000",
+            underlying="BTC",
+            timeframe="15m",
+            best_bid_cents=54,
+            best_ask_cents=56,
+            mid_price_cents=55,
+            best_yes_bid=0.54,
+            best_yes_ask=0.56,
+            best_no_bid=0.44,
+            best_no_ask=0.46,
+        )
+
+        # Simulate the _compute_edge access pattern that caused the AttributeError
+        edge = None
+        if c.best_no_bid is not None:
+            # In a Kalshi binary market: implied_yes_ask ≈ 1 - best_no_bid
+            implied_yes_ask = 1.0 - c.best_no_bid
+            if c.best_yes_bid is not None:
+                edge = implied_yes_ask - c.best_yes_bid
+
+        assert edge is not None
+        assert isinstance(edge, float)
+        assert abs(edge - (1.0 - 0.44 - 0.54)) < 1e-9  # 0.02
+
+    def test_to_dict_includes_best_no_bid(self):
+        """MarketCandidate.to_dict() must include all four best_yes/no fields."""
+        from merid.event_venues.kalshi.market_filter import MarketCandidate
+        c = MarketCandidate(
+            ticker="X", underlying="BTC", timeframe="15m",
+            best_yes_bid=0.54, best_yes_ask=0.56,
+            best_no_bid=0.44, best_no_ask=0.46,
+        )
+        d = c.to_dict()
+        assert "best_yes_bid" in d
+        assert "best_yes_ask" in d
+        assert "best_no_bid" in d
+        assert "best_no_ask" in d
+        assert d["best_no_bid"] == 0.44
