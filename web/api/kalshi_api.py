@@ -1422,12 +1422,7 @@ def _get_default_order_mode() -> str:
         return "paper"
 
 
-@router.post("/orders",
-    summary="Place Kalshi Order",
-    description="Place a Kalshi order through MERID. Runs risk pre-check, then routes to KalshiVenueClient. In paper mode, returns a simulated fill without hitting Kalshi.",
-    response_description="Order placement result with fill info",
-    tags=["kalshi", "orders"],
-)
+@router.post("/orders")
 async def place_order(
     ticker: str,
     side: str,            # "yes" or "no"
@@ -1436,18 +1431,14 @@ async def place_order(
     price_cents: int,
     order_type: str = "limit",
     time_in_force: str = "gtc",
-    mode: Optional[str] = None,  # "paper" or "live" — defaults to MERID_PM_TRADING_MODE from settings
+    mode: str = "paper",  # "paper" or "live"
 ) -> Dict[str, Any]:
     """Place a Kalshi order through MERID.
 
     Runs risk pre-check, then routes to KalshiVenueClient.
     In paper mode, returns a simulated fill without hitting Kalshi.
-    Defaults to MERID_PM_TRADING_MODE from settings (paper if not configured).
+    Defaults to paper mode if not specified.
     """
-    # Use configured default if not explicitly provided
-    if mode is None:
-        mode = _get_default_order_mode()
-        logger.info(f"Using default order mode from settings: {mode}")
     # Validate inputs
     if side not in ("yes", "no"):
         raise HTTPException(400, f"Invalid side: {side!r}, must be 'yes' or 'no'")
