@@ -304,6 +304,22 @@ class KalshiMarketCatalog:
                 f"Catalog refreshed: {len(enriched)} markets, "
                 f"{len(cat_idx)} categories, {len(asset_idx)} assets"
             )
+
+            # Per-asset/timeframe INFO logging on every refresh so operators
+            # can confirm crypto assets are flowing through the catalog.
+            _CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+            for _asset in _CRYPTO_ASSETS:
+                _asset_mkts = asset_idx.get(_asset, [])
+                if _asset_mkts:
+                    _15m = sum(1 for m in _asset_mkts if m.timeframe == "15m")
+                    _daily = sum(1 for m in _asset_mkts if m.timeframe == "daily")
+                    logger.info(
+                        "Catalog %s: total=%d  15m=%d  daily=%d",
+                        _asset, len(_asset_mkts), _15m, _daily,
+                    )
+                else:
+                    logger.debug("Catalog %s: 0 markets detected", _asset)
+
             return len(enriched)
 
     # ── Enrichment ───────────────────────────────────────────────────────

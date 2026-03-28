@@ -447,7 +447,10 @@ class KalshiWebSocket(EventVenueStream):
             # Force a reconnect by closing the socket; the listen loop
             # will catch the resulting exception and call _reconnect.
             if self._ws:
-                asyncio.get_running_loop().create_task(self._ws.close())
+                try:
+                    asyncio.get_running_loop().create_task(self._ws.close())
+                except RuntimeError:
+                    pass  # no running event loop in sync/test context
         elif code in _WARN_ERROR_CODES:
             logger.warning(
                 f"Kalshi WS error code={code} msg={msg!r} ctx={context} "

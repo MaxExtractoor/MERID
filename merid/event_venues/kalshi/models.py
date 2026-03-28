@@ -7,6 +7,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from utils.logger import get_logger
+
+logger = get_logger("merid.event_venues.kalshi.models")
+
 
 @dataclass
 class KalshiOutcome:
