@@ -149,6 +149,18 @@ class MarketCandidate:
             "best_no_ask": self.best_no_ask,
         }
 
+    def __getattr__(self, name: str) -> Any:
+        """
+        Gracefully handle missing best_* fields for legacy instances.
+
+        Older pickled/constructed objects might not carry the best_yes/no fields;
+        return None for those attributes instead of raising AttributeError so
+        downstream edge calculations remain safe.
+        """
+        if name in ("best_yes_bid", "best_yes_ask", "best_no_bid", "best_no_ask"):
+            return None
+        raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
+
 
 @dataclass
 class FilterResult:

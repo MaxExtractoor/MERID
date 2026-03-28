@@ -228,6 +228,16 @@ class TestMarketCandidateBestNoBid:
         assert c.best_no_bid is None
         assert c.best_no_ask is None
 
+    def test_market_candidate_missing_best_fields_returns_none(self):
+        """Legacy instances missing best_* attrs must not raise AttributeError."""
+        from merid.event_venues.kalshi.market_filter import MarketCandidate
+        c = MarketCandidate(ticker="X", underlying="BTC", timeframe="15m")
+        # Simulate a legacy instance without the attribute in __dict__
+        delattr(c, "best_no_bid")
+        delattr(c, "best_yes_bid")
+        assert c.best_no_bid is None
+        assert c.best_yes_bid is None
+
     def test_trading_candidate_propagates_best_no_bid(self):
         """TradingCandidate.from_candidate must copy best_no_bid from base."""
         from merid.event_venues.kalshi.market_filter import MarketCandidate
