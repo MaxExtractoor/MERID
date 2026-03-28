@@ -123,6 +123,16 @@ class AgentGrid:
         # Start market catalog
         await self._catalog.start()
 
+        # Validate catalog has markets after startup
+        markets = self._catalog.get_all_markets()
+        if not markets:
+            logger.error("CRITICAL: Market catalog is empty after startup - no markets available for trading")
+            raise RuntimeError(
+                "Market catalog failed to load markets. Cannot start agent grid without market data. "
+                "Check Kalshi API connectivity and credentials."
+            )
+        logger.info(f"✓ Market catalog loaded: {len(markets)} markets discovered")
+
         # Start portfolio risk agent first
         await self._portfolio_risk.start()
 
@@ -134,7 +144,8 @@ class AgentGrid:
                 _dc.register_agent(_a.agent_id)
             logger.info("✓ DeploymentController: %d agents registered (all PAPER)", len(self._agents))
         except Exception as _dce:
-            logger.warning("DeploymentController registration failed (non-fatal): %s", _dce)
+            logger.error("CRITICAL: DeploymentController registration failed: %s", _dce, exc_info=True)
+            raise RuntimeError(f"Failed to register agents with DeploymentController: {_dce}") from _dce
 
         # Start trading agents
         logger.info(f"Starting {len(self._agents)} Kalshi trading agents...")

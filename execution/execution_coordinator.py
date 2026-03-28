@@ -124,15 +124,26 @@ class ExecutionCoordinator:
             intent = await self._create_trade_intent(decision)
             
             # Run risk checks if enabled
+            risk_approved = False
             if self.enable_risk_checks:
                 risk_approved = await self._run_risk_checks(intent)
-                intent.risk_checked = risk_approved
-                
+                intent.risk_checked = True  # Mark that check was performed
+
                 if not risk_approved:
                     logger.warning(f"Risk check failed for {decision.symbol}, skipping execution")
+                    # Publish rejection event for audit trail
+                    await publish_event("execution_rejected", {
+                        "symbol": decision.symbol,
+                        "reason": "risk_check_failed",
+                        "intent_id": intent.intent_id,
+                        "timestamp": time.time(),
+                        "decision": decision.to_dict()
+                    })
                     return
             else:
+                # Risk checks disabled - mark as checked with approval
                 intent.risk_checked = True
+                risk_approved = True
             
             # Store pending trade
             self._pending_trades[intent.intent_id] = intent
