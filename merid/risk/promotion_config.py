@@ -1,15 +1,62 @@
 """
-BTC Lane Promotion Config — data-driven phase ladder.
+Multi-Asset Promotion Config — data-driven phase ladder for crypto assets.
 
+Supports BTC, ETH, SOL, XRP, and DOGE as first-class assets across all phases.
 All risk clamps, timeframe unlocks, and asset unlocks live here.
 Nothing is hardcoded in lane or risk-dial logic; change this file to
 evolve system behaviour across phases.
+
+Asset/Timeframe Universe:
+- Assets: BTC, ETH, SOL, XRP, DOGE
+- Timeframes: 15m, 1h, 4h, 1d (daily)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Set
+
+
+# ── Canonical Asset and Timeframe Universe ──────────────────────────────────
+
+# All crypto assets supported by the promotion system
+SUPPORTED_ASSETS: List[str] = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+
+# All timeframes supported for crypto promotions
+SUPPORTED_TIMEFRAMES: List[str] = ["15m", "1h", "4h", "1d"]
+
+# Asset categories (for reporting and filtering)
+ASSET_CATEGORIES = {
+    "BTC": "major",
+    "ETH": "major",
+    "SOL": "alt",
+    "XRP": "alt",
+    "DOGE": "meme",
+}
+
+
+def validate_asset(asset: str) -> bool:
+    """Check if asset is supported."""
+    return asset in SUPPORTED_ASSETS
+
+
+def validate_timeframe(timeframe: str) -> bool:
+    """Check if timeframe is supported."""
+    return timeframe in SUPPORTED_TIMEFRAMES
+
+
+def validate_asset_timeframe_combo(asset: str, timeframe: str) -> tuple[bool, str]:
+    """
+    Validate asset × timeframe combination.
+
+    Returns:
+        (is_valid, error_message)
+    """
+    if not validate_asset(asset):
+        return False, f"Unsupported asset: {asset}. Supported: {SUPPORTED_ASSETS}"
+    if not validate_timeframe(timeframe):
+        return False, f"Unsupported timeframe: {timeframe}. Supported: {SUPPORTED_TIMEFRAMES}"
+    return True, ""
 
 
 @dataclass(frozen=True)

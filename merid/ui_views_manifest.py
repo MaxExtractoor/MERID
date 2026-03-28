@@ -480,6 +480,90 @@ VIEWS: List[ViewConfig] = [
         ],
     ),
 
+    # ── NEW: Protection & Visibility Views (Production Readiness) ──
+
+    ViewConfig(
+        id="risk-control", route="risk-control", title="Risk Control Panel",
+        section="management",
+        kalshi_only=True,  # CRITICAL: Emergency controls and protection layers
+        components=[
+            ComponentBinding("KillSwitchControls", [
+                ApiBinding("GET", "/api/v1/risk-control/kill-switches/status", polling_ms=5000),
+                ApiBinding("POST", "/api/v1/risk-control/kill-switches/activate", required=False),
+                ApiBinding("POST", "/api/v1/risk-control/kill-switches/deactivate", required=False),
+                ApiBinding("POST", "/api/v1/risk-control/emergency/stop-all", required=False),
+            ]),
+            ComponentBinding("CircuitBreakers", [
+                ApiBinding("GET", "/api/v1/risk-control/circuit-breakers/status", polling_ms=10000),
+                ApiBinding("POST", "/api/v1/risk-control/circuit-breakers/reset", required=False),
+            ]),
+            ComponentBinding("ProtectionLayers", [
+                ApiBinding("GET", "/api/v1/risk-control/protection-layers", polling_ms=15000),
+            ]),
+            ComponentBinding("LimitOverrides", [
+                ApiBinding("GET", "/api/v1/risk-control/limits/overrides"),
+                ApiBinding("POST", "/api/v1/risk-control/limits/override", required=False),
+            ]),
+            ComponentBinding("ControlHealth", [
+                ApiBinding("GET", "/api/v1/risk-control/health"),
+            ]),
+        ],
+    ),
+
+    ViewConfig(
+        id="position-sizing", route="position-sizing", title="Position Sizing",
+        section="management",
+        components=[
+            ComponentBinding("KellyMetrics", [
+                ApiBinding("GET", "/api/v1/position-sizing/kelly-metrics", polling_ms=30000),
+            ]),
+            ComponentBinding("SizingMethods", [
+                ApiBinding("GET", "/api/v1/position-sizing/methods"),
+            ]),
+            ComponentBinding("SizeAdjustments", [
+                ApiBinding("GET", "/api/v1/position-sizing/adjustments/recent", polling_ms=10000),
+                ApiBinding("GET", "/api/v1/position-sizing/adjustments/summary"),
+            ]),
+            ComponentBinding("SizingDecisions", [
+                ApiBinding("GET", "/api/v1/position-sizing/decisions/recent"),
+            ]),
+            ComponentBinding("VolatilityMetrics", [
+                ApiBinding("GET", "/api/v1/position-sizing/volatility", polling_ms=60000),
+            ]),
+            ComponentBinding("SizingConfig", [
+                ApiBinding("GET", "/api/v1/position-sizing/config"),
+            ]),
+        ],
+    ),
+
+    ViewConfig(
+        id="promotion-status", route="promotion-status", title="Promotion Status",
+        section="management",
+        components=[
+            ComponentBinding("PromotionOverview", [
+                ApiBinding("GET", "/api/v1/promotion/status", polling_ms=30000),
+            ]),
+            ComponentBinding("DomainPromotion", [
+                ApiBinding("GET", "/api/v1/promotion/domain/{domain}"),
+            ]),
+            ComponentBinding("AgentPromotion", [
+                ApiBinding("GET", "/api/v1/promotion/agents", polling_ms=30000),
+                ApiBinding("GET", "/api/v1/promotion/agents/{agent_id}"),
+                ApiBinding("POST", "/api/v1/promotion/agents/action", required=False),
+            ]),
+            ComponentBinding("PromotionHistory", [
+                ApiBinding("GET", "/api/v1/promotion/history"),
+            ]),
+            ComponentBinding("GauntletConfig", [
+                ApiBinding("GET", "/api/v1/promotion/gauntlet/config"),
+            ]),
+            ComponentBinding("PromotionOverrides", [
+                ApiBinding("GET", "/api/v1/promotion/overrides"),
+                ApiBinding("POST", "/api/v1/promotion/override", required=False),
+            ]),
+        ],
+    ),
+
     # ── System ──────────────────────────────────────────────────────
 
     ViewConfig(
