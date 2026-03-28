@@ -864,7 +864,7 @@ class BTC15MLane:
             from merid.sentiment.sentiment_bundle import combine_sentiment
             from merid.sentiment.fibonacci_smoothing import quick_fib_smooth
 
-            bundle = combine_sentiment("BTC")
+            bundle = combine_sentiment(self.config.asset)
 
             # Rolling history for ATR proxy (used by _evaluate_risk)
             self._sentiment_history.append(bundle.combined)
@@ -885,7 +885,7 @@ class BTC15MLane:
             fg_is_synthetic = False
             try:
                 from merid.sentiment.cfgi_client import get_cfgi_client
-                fg_data = get_cfgi_client().get_fear_greed("BTC", use_cache=True)
+                fg_data = get_cfgi_client().get_fear_greed(self.config.asset, use_cache=True)
                 fg_is_synthetic = fg_data.is_synthetic
             except Exception as _e:
                 logger.debug("cfgi_is_synthetic: %s", _e)
@@ -1012,8 +1012,8 @@ class BTC15MLane:
             proposals.append(
                 AgentProposal(
                     agent_id="sentiment_agent",
-                    asset="BTC",
-                    timeframe="15m",
+                    asset=self.config.asset,
+                    timeframe=self.config.timeframe,
                     direction=direction,
                     probability=prob,
                     confidence=conf,
@@ -1045,8 +1045,8 @@ class BTC15MLane:
             proposals.append(
                 AgentProposal(
                     agent_id="fg_contrarian_agent",
-                    asset="BTC",
-                    timeframe="15m",
+                    asset=self.config.asset,
+                    timeframe=self.config.timeframe,
                     direction=fg_direction,
                     probability=0.5 + (fg_conf - 0.3) * 0.5,
                     confidence=fg_conf,
@@ -1062,7 +1062,7 @@ class BTC15MLane:
             for proposal in proposals:
                 self._consensus_agg.submit_proposal(proposal)
 
-            consensus_view = self._consensus_agg.get_consensus("BTC", "15m")
+            consensus_view = self._consensus_agg.get_consensus(self.config.asset, self.config.timeframe)
 
             if consensus_view is None:
                 return {"status": "forming", "direction": "neutral"}
@@ -1744,24 +1744,50 @@ def get_btc15m_lane(config: Optional[BTC15MLaneConfig] = None) -> BTC15MLane:
 
 class LaneOrchestrator:
     """
-    Manages a fleet of BTC15MLane instances across assets and timeframes.
+    Manages a fleet of BTC15MLane instances across all supported assets and
+    timeframes (BTC, ETH, SOL, XRP, DOGE × 15m, 1h, 4h, 1d).
 
     The primary lane (BTC 15m) starts immediately in paper mode.
-    Additional lanes (BTC 1h, ETH 15m, …) are spawned as background tasks
-    only when the shared PromotionEngine advances to a phase that unlocks them.
+    Additional lanes are spawned as background tasks only when the shared
+    PromotionEngine advances to a phase that unlocks them per
+    LANE_UNLOCK_REQUIREMENTS.
 
     Each spawned lane starts in paper mode; per-lane live promotion is
     independent and handled inside BTC15MLane._maybe_enable_live().
     """
 
-    # Maps (asset, timeframe) → minimum phase name required to spawn
+    # Maps (asset, timeframe) → minimum phase name required to spawn.
+    # Source of truth: SUPPORTED_ASSETS × SUPPORTED_TIMEFRAMES in btc_promotion_config.
+    # PHASE_0: BTC 15m only (paper, always available)
+    # PHASE_1: BTC adds 1h; no new assets
+    # PHASE_2: ETH and BTC 4h unlock
+    # PHASE_3: SOL, XRP, DOGE unlock across all timeframes; BTC/ETH gain 1d
     LANE_UNLOCK_REQUIREMENTS: Dict[Tuple[str, str], str] = {
+        # ── BTC ──────────────────────────────────────────────────────
         ("BTC", "15m"):  "PHASE_0",   # always available
         ("BTC", "1h"):   "PHASE_1",
+        ("BTC", "4h"):   "PHASE_2",
+        ("BTC", "1d"):   "PHASE_3",
+        # ── ETH ──────────────────────────────────────────────────────
         ("ETH", "15m"):  "PHASE_2",
         ("ETH", "1h"):   "PHASE_2",
-        ("BTC", "4h"):   "PHASE_2",
+        ("ETH", "4h"):   "PHASE_3",
+        ("ETH", "1d"):   "PHASE_3",
+        # ── SOL ──────────────────────────────────────────────────────
         ("SOL", "15m"):  "PHASE_3",
+        ("SOL", "1h"):   "PHASE_3",
+        ("SOL", "4h"):   "PHASE_3",
+        ("SOL", "1d"):   "PHASE_3",
+        # ── XRP ──────────────────────────────────────────────────────
+        ("XRP", "15m"):  "PHASE_3",
+        ("XRP", "1h"):   "PHASE_3",
+        ("XRP", "4h"):   "PHASE_3",
+        ("XRP", "1d"):   "PHASE_3",
+        # ── DOGE ─────────────────────────────────────────────────────
+        ("DOGE", "15m"): "PHASE_3",
+        ("DOGE", "1h"):  "PHASE_3",
+        ("DOGE", "4h"):  "PHASE_3",
+        ("DOGE", "1d"):  "PHASE_3",
     }
 
     def __init__(self, base_equity: float = 0.0) -> None:
