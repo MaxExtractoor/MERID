@@ -20,6 +20,7 @@ logger = get_logger("merid.prediction.agent_grid_config")
 _DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "config", "kalshi_agent_grid.yaml"
 )
+DEFAULT_KALSHI_BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
 
 
 # ── Typed config models ────────────────────────────────────────────────
@@ -28,7 +29,7 @@ _DEFAULT_CONFIG_PATH = os.path.join(
 class VenueConfig:
     """Top-level venue settings."""
     name: str = "kalshi"
-    base_url: str = "https://trading-api.kalshi.com/trade-api/v2"
+    base_url: str = DEFAULT_KALSHI_BASE_URL
     use_demo: bool = False
     max_notional_per_expiry_usd: Decimal = Decimal("5000")
     max_open_markets_per_asset: int = 20
@@ -242,7 +243,7 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
     v = raw.get("venue", {})
     venue = VenueConfig(
         name=v.get("name", "kalshi"),
-        base_url=v.get("base_url", VenueConfig.base_url),
+        base_url=v.get("base_url", DEFAULT_KALSHI_BASE_URL),
         use_demo=v.get("use_demo", False),
         max_notional_per_expiry_usd=Decimal(str(v.get("max_notional_per_expiry_usd", 5000))),
         max_open_markets_per_asset=v.get("max_open_markets_per_asset", 20),
