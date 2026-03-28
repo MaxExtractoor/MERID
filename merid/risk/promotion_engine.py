@@ -1,11 +1,19 @@
 """
 PromotionEngine — reads realised performance and advances the phase ladder.
 
-Call `maybe_promote(perf)` periodically (e.g. once per day or once per lane
-cycle) to let the engine unlock higher phases when criteria are met.
+Supports BTC, ETH, SOL, XRP, and DOGE across all configured timeframes
+(15m, 1h, 4h, 1d).  Call `maybe_promote(perf)` periodically (e.g. once
+per day or once per lane cycle) to let the engine unlock higher phases
+when criteria are met.
 
-Demotion is intentionally conservative: the engine never drops more than one
-phase per evaluation to avoid thrashing during short drawdown spikes.
+Demotion is intentionally conservative: the engine never drops more than
+one phase per evaluation to avoid thrashing during short drawdown spikes.
+
+Use `get_coverage_matrix()` to inspect which (asset, timeframe) pairs are
+currently unlocked, and `is_combination_supported(asset, timeframe)` to
+validate that a requested pair exists in the canonical list before acting.
+Unsupported combinations raise ValueError immediately rather than silently
+defaulting to BTC/15m behaviour.
 """
 
 from __future__ import annotations
@@ -24,6 +32,8 @@ from merid.risk.btc_promotion_config import (
     StrategyStats,
     BacktestReport,
     validate_before_lift,
+    SUPPORTED_ASSETS,
+    SUPPORTED_TIMEFRAMES,
 )
 
 logger = logging.getLogger(__name__)
@@ -358,11 +368,68 @@ class PromotionEngine:
     def can_go_live(self) -> bool:
         return self.current_phase.allow_live
 
+    def is_combination_supported(self, asset: str, timeframe: str) -> bool:
+        """
+        Returns True iff (asset, timeframe) is in the canonical supported set.
+
+        Callers should invoke this before is_asset_unlocked / is_timeframe_unlocked
+        to fail fast on completely unknown combinations rather than getting a
+        silent False from a typo.
+        """
+        return asset in SUPPORTED_ASSETS and timeframe in SUPPORTED_TIMEFRAMES
+
+    def assert_combination_supported(self, asset: str, timeframe: str) -> None:
+        """
+        Raise ValueError for unsupported (asset, timeframe) combinations.
+
+        Use this at entrypoints to prevent silent BTC-only fallback.
+        """
+        if asset not in SUPPORTED_ASSETS:
+            raise ValueError(
+                f"Unsupported asset '{asset}'. "
+                f"Supported assets: {SUPPORTED_ASSETS}"
+            )
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError(
+                f"Unsupported timeframe '{timeframe}'. "
+                f"Supported timeframes: {SUPPORTED_TIMEFRAMES}"
+            )
+
+    def get_coverage_matrix(self) -> dict:
+        """
+        Return the full asset × timeframe coverage matrix for the current phase.
+
+        Each entry contains:
+          - unlocked: whether the phase unlocks this combination
+          - asset_unlocked: whether the asset alone is unlocked
+          - timeframe_unlocked: whether the timeframe alone is unlocked
+
+        Operators can call this to spot gaps at a glance.
+        """
+        matrix: dict = {}
+        for asset in SUPPORTED_ASSETS:
+            matrix[asset] = {}
+            asset_ok = asset in self.current_phase.unlocked_assets
+            for tf in SUPPORTED_TIMEFRAMES:
+                tf_ok = tf in self.current_phase.unlocked_timeframes
+                matrix[asset][tf] = {
+                    "unlocked": asset_ok and tf_ok,
+                    "asset_unlocked": asset_ok,
+                    "timeframe_unlocked": tf_ok,
+                }
+        return matrix
+
     def get_status(self) -> dict:
+        phase = self.current_phase
         return {
-            "current_phase": self.current_phase.name,
+            "current_phase": phase.name,
             "last_eval": self._last_eval.isoformat() if self._last_eval else None,
             "history_count": len(self._history),
+            "supported_assets": list(SUPPORTED_ASSETS),
+            "supported_timeframes": list(SUPPORTED_TIMEFRAMES),
+            "unlocked_assets": list(phase.unlocked_assets),
+            "unlocked_timeframes": list(phase.unlocked_timeframes),
+            "coverage_matrix": self.get_coverage_matrix(),
             "last_result": (
                 {
                     "promoted": self._history[-1].promoted,

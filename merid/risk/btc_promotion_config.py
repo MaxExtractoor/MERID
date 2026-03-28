@@ -1,9 +1,13 @@
 """
-BTC Lane Promotion Config — data-driven phase ladder.
+Crypto Asset Promotion Config — data-driven phase ladder for Kalshi crypto.
 
-All risk clamps, timeframe unlocks, and asset unlocks live here.
-Nothing is hardcoded in lane or risk-dial logic; change this file to
-evolve system behaviour across phases.
+Supports BTC, ETH, SOL, XRP, and DOGE across all configured timeframes
+(15m, 1h, 4h, 1d).  All risk clamps, timeframe unlocks, and asset unlocks
+live here.  Nothing is hardcoded in lane or risk-dial logic; change this
+file to evolve system behaviour across phases.
+
+SUPPORTED_ASSETS and SUPPORTED_TIMEFRAMES are the single source of truth
+for which asset × timeframe combinations the PromotionEngine can manage.
 """
 
 from __future__ import annotations
@@ -127,6 +131,17 @@ PHASES: List[PromotionPhase] = [
 
 # Convenience lookup
 PHASE_BY_NAME: dict[str, PromotionPhase] = {p.name: p for p in PHASES}
+
+# ---------------------------------------------------------------------------
+# Canonical supported assets and timeframes for Kalshi crypto promotions.
+# These are the single source of truth consumed by PromotionEngine,
+# LaneOrchestrator, and any downstream API/UI that needs to display the
+# full coverage matrix.
+# ---------------------------------------------------------------------------
+
+SUPPORTED_ASSETS: List[str] = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+
+SUPPORTED_TIMEFRAMES: List[str] = ["15m", "1h", "4h", "1d"]
 
 
 # ---------------------------------------------------------------------------
