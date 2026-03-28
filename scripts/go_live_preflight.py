@@ -183,7 +183,7 @@ async def gate_8_balance_readable() -> Tuple[bool, str]:
 
 
 def gate_9_cfb_rti_healthy() -> Tuple[bool, str]:
-    """Gate 9: CFB RTI feed healthy (enforced only when KALSHI_ENV=live).
+    """Gate 9: CFB RTI feed healthy (skipped when MERID_CFB_RTI_ENABLED=false).
 
     Kalshi settles crypto contracts via 60-second averaged CF Benchmarks RTIs
     (CFTC requirement). Live trading is blocked when the RTI buffer has no
@@ -192,11 +192,28 @@ def gate_9_cfb_rti_healthy() -> Tuple[bool, str]:
 
     Bypasses
     --------
+    - ``MERID_CFB_RTI_ENABLED=false`` (default) — gate is entirely skipped;
+      trading runs without the CFB settlement feed.
     - Non-live environments (``KALSHI_ENV != live``) always pass.
     - ``MERID_ALLOW_NULL_CFB=1`` acknowledges no-data and unblocks trading
       (non-prod only).
     """
     import os
+
+    try:
+        from merid.data.settlement_rti_buffer import is_cfb_rti_enabled
+        cfb_enabled = is_cfb_rti_enabled()
+    except Exception:
+        cfb_enabled = os.getenv("MERID_CFB_RTI_ENABLED", "false").lower() in (
+            "1", "true", "yes"
+        )
+
+    if not cfb_enabled:
+        return _check(
+            "Gate 9: CFB RTI feed healthy",
+            True,
+            detail="MERID_CFB_RTI_ENABLED=false — gate skipped (CFB disabled by config)",
+        )
 
     kalshi_env = os.getenv("KALSHI_ENV", "paper").lower()
     if kalshi_env != "live":
