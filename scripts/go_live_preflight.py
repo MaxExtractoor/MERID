@@ -182,6 +182,81 @@ async def gate_8_balance_readable() -> Tuple[bool, str]:
         )
 
 
+def gate_9_cfb_rti_healthy() -> Tuple[bool, str]:
+    """Gate 9: CFB RTI feed healthy (enforced only when KALSHI_ENV=live).
+
+    Kalshi settles crypto contracts via 60-second averaged CF Benchmarks RTIs
+    (CFTC requirement). Live trading is blocked when the RTI buffer has no
+    ticks, which typically means MERID_CFB_RTI_POLL_URL is unset or the CF
+    Benchmarks API is unreachable.
+
+    Bypasses
+    --------
+    - Non-live environments (``KALSHI_ENV != live``) always pass.
+    - ``MERID_ALLOW_NULL_CFB=1`` acknowledges no-data and unblocks trading
+      (non-prod only).
+    """
+    import os
+
+    kalshi_env = os.getenv("KALSHI_ENV", "paper").lower()
+    if kalshi_env != "live":
+        return _check(
+            "Gate 9: CFB RTI feed healthy",
+            True,
+            detail=f"KALSHI_ENV={kalshi_env!r} — gate not enforced outside live mode",
+        )
+
+    allow_null = os.getenv("MERID_ALLOW_NULL_CFB", "0") == "1"
+    if allow_null:
+        return _check(
+            "Gate 9: CFB RTI feed healthy",
+            True,
+            detail="MERID_ALLOW_NULL_CFB=1 — safety gate bypassed (non-prod only)",
+        )
+
+    try:
+        from merid.data.settlement_rti_buffer import SettlementRtiBuffer
+
+        # Probe the live adapter with a single synchronous fetch; we don't
+        # start the background thread here to keep the preflight fast.
+        buf = SettlementRtiBuffer(
+            adapter_type=os.getenv("MERID_CFB_RTI_ADAPTER", "live"),
+            poll_url=os.getenv("MERID_CFB_RTI_POLL_URL", ""),
+            api_key=os.getenv("CFB_API_KEY"),
+            poll_interval_s=60.0,
+        )
+        tick = buf.poll_once()
+        ok = tick is not None
+        detail = (
+            f"Tick received: {tick.index_name}={tick.value:.2f}" if ok
+            else "No tick — check MERID_CFB_RTI_POLL_URL and network connectivity"
+        )
+        return _check(
+            "Gate 9: CFB RTI feed healthy",
+            ok,
+            detail=detail,
+            fix=(
+                "Set MERID_CFB_RTI_POLL_URL and CFB_API_KEY for live mode, or "
+                "set MERID_CFB_RTI_ADAPTER=simulation for paper/dev"
+            ),
+        )
+    except ValueError as exc:
+        # Missing poll URL
+        return _check(
+            "Gate 9: CFB RTI feed healthy",
+            False,
+            detail=str(exc),
+            fix="Set MERID_CFB_RTI_POLL_URL=https://api.cfbenchmarks.com/v1/... in .env",
+        )
+    except Exception as exc:
+        return _check(
+            "Gate 9: CFB RTI feed healthy",
+            False,
+            detail=f"Exception: {exc}",
+            fix="Check MERID_CFB_RTI_POLL_URL, CFB_API_KEY, and network access to CF Benchmarks",
+        )
+
+
 async def run_all() -> int:
     SEP = "=" * 51
     print(f"\n{SEP}")
@@ -192,7 +267,8 @@ async def run_all() -> int:
 
     # Synchronous gates
     for fn in [gate_1_trading_mode, gate_2_live_enabled, gate_3_live_unlocked,
-               gate_4_not_demo, gate_5_credentials, gate_6_kill_switch]:
+               gate_4_not_demo, gate_5_credentials, gate_6_kill_switch,
+               gate_9_cfb_rti_healthy]:
         ok, msg = fn()
         results.append((ok, msg))
         print(msg)

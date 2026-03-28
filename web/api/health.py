@@ -189,3 +189,55 @@ async def test_agent_selftest(agent_id: str) -> dict:
             "response": None,
             "error": f"Unexpected error: {str(exc)[:200]}"
         }
+
+
+@router.get("/health/cfb_rti")
+async def get_cfb_rti_health() -> dict:
+    """CFB RTI (CF Benchmarks Real-Time Index) feed health.
+
+    Returns the current state of the RTI buffer used by the Kalshi live
+    trading safety gate.  Useful for monitoring, alerting, and diagnosing
+    "no ticks" issues before they block order submission.
+
+    Response fields
+    ---------------
+    ``status``
+        ``"healthy"`` — at least one non-stale tick is buffered.
+        ``"no_data"`` — buffer empty or all ticks are stale.
+        ``"error"``   — unable to inspect the buffer.
+    ``adapter``
+        ``"live"`` or ``"simulation"``.
+    ``tick_count``
+        Number of ticks currently held in the rolling buffer.
+    ``last_tick``
+        Most-recent tick details (index_name, value, age_seconds), or
+        ``null`` when no ticks are present.
+    ``kalshi_env``
+        Current ``KALSHI_ENV`` value — gate is only enforced when
+        this is ``"live"``.
+    ``gate_active``
+        ``true`` when ``KALSHI_ENV=live`` and ``MERID_ALLOW_NULL_CFB``
+        is not set (i.e., the safety gate is in force).
+    """
+    import os
+
+    try:
+        from merid.data.settlement_rti_buffer import get_rti_buffer
+
+        buf = get_rti_buffer()
+        health = buf.health_dict()
+
+        kalshi_env = os.getenv("KALSHI_ENV", "paper").lower()
+        allow_null = os.getenv("MERID_ALLOW_NULL_CFB", "0") == "1"
+        gate_active = kalshi_env == "live" and not allow_null
+
+        health["kalshi_env"] = kalshi_env
+        health["gate_active"] = gate_active
+        return health
+    except Exception as exc:
+        logger.error("CFB RTI health check failed: %s", exc)
+        return {
+            "status": "error",
+            "error": str(exc),
+            "timestamp": time.time(),
+        }
