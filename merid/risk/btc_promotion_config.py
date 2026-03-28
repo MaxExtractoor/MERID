@@ -119,7 +119,7 @@ PHASES: List[PromotionPhase] = [
         max_open_trades=5,
         # Unlocks
         unlocked_timeframes=["15m", "1h", "4h", "1d"],
-        unlocked_assets=["BTC", "ETH", "SOL"],
+        unlocked_assets=["BTC", "ETH", "SOL", "XRP", "DOGE"],
         allow_live=True,
         compound_equity=True,
     ),
