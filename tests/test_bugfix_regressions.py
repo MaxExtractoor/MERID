@@ -119,3 +119,72 @@ class TestCoerceDt:
         dt_z = _coerce_dt("2026-02-14T20:00:00Z")
         dt_plus = _coerce_dt("2026-02-14T20:00:00+00:00")
         assert dt_z == dt_plus
+
+
+# ======================================================================
+# §3 VenueConfig — base_url keyword argument regression
+# ======================================================================
+
+class TestVenueConfigBaseUrl:
+    """Regression: VenueConfig.__init__() must accept base_url keyword argument.
+
+    Traceback was: TypeError: VenueConfig.__init__() got an unexpected keyword
+    argument 'base_url', originating in load_agent_grid_config.
+    """
+
+    def test_venue_config_accepts_base_url(self):
+        """VenueConfig must accept base_url as a constructor keyword argument."""
+        from merid.prediction.agent_grid_config import VenueConfig
+        from decimal import Decimal
+        # Exact same call pattern as load_agent_grid_config for Kalshi
+        vc = VenueConfig(
+            name="kalshi",
+            base_url="https://trading-api.kalshi.com/trade-api/v2",
+            use_demo=False,
+            max_notional_per_expiry_usd=Decimal("5000"),
+            max_open_markets_per_asset=20,
+        )
+        assert vc.base_url == "https://trading-api.kalshi.com/trade-api/v2"
+
+    def test_venue_config_base_url_default(self):
+        """VenueConfig.base_url default must be the production trading API URL."""
+        from merid.prediction.agent_grid_config import VenueConfig
+        vc = VenueConfig()
+        assert vc.base_url == "https://trading-api.kalshi.com/trade-api/v2"
+
+    def test_venue_config_base_url_overridable(self):
+        """VenueConfig.base_url must be overridable to the demo URL."""
+        from merid.prediction.agent_grid_config import VenueConfig
+        demo_url = "https://demo-api.kalshi.com/trade-api/v2"
+        vc = VenueConfig(base_url=demo_url)
+        assert vc.base_url == demo_url
+
+    def test_load_agent_grid_config_uses_base_url(self, tmp_path):
+        """load_agent_grid_config must parse base_url from YAML without TypeError."""
+        import yaml
+        from merid.prediction.agent_grid_config import load_agent_grid_config
+
+        cfg_data = {
+            "venue": {
+                "name": "kalshi",
+                "base_url": "https://trading-api.kalshi.com/trade-api/v2",
+                "use_demo": False,
+                "max_notional_per_expiry_usd": 5000,
+                "max_open_markets_per_asset": 20,
+            },
+            "session": {
+                "maintenance_day": 3,
+                "maintenance_start_et": "03:00",
+                "maintenance_end_et": "05:00",
+            },
+            "agents": [],
+            "portfolio_risk": {},
+        }
+
+        cfg_file = tmp_path / "test_kalshi_grid.yaml"
+        cfg_file.write_text(yaml.dump(cfg_data), encoding="utf-8")
+
+        # Must not raise TypeError
+        config = load_agent_grid_config(path=str(cfg_file))
+        assert config.venue.base_url == "https://trading-api.kalshi.com/trade-api/v2"
+        assert config.venue.name == "kalshi"
