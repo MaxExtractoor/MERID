@@ -107,6 +107,13 @@ class MarketCandidate:
     strike_price: Optional[float] = None
     # Current spot price of the underlying (same units as strike_price)
     spot_price: Optional[float] = None
+    # Per-side best prices from the Kalshi order book (decimal, 0.0–1.0).
+    # In a binary YES/NO market: best_yes_ask ≈ 1 - best_no_bid and vice versa.
+    # These fields are populated by enrichment steps; None means no data yet.
+    best_yes_bid: Optional[float] = None
+    best_yes_ask: Optional[float] = None
+    best_no_bid: Optional[float] = None
+    best_no_ask: Optional[float] = None
 
     @property
     def has_book(self) -> bool:
@@ -136,6 +143,10 @@ class MarketCandidate:
             "mid_price_cents": self.mid_price_cents,
             "strike_price": self.strike_price,
             "spot_price": self.spot_price,
+            "best_yes_bid": self.best_yes_bid,
+            "best_yes_ask": self.best_yes_ask,
+            "best_no_bid": self.best_no_bid,
+            "best_no_ask": self.best_no_ask,
         }
 
 
