@@ -52,12 +52,35 @@ class SessionGuard:
 
     def __init__(self, config: Optional[SessionConfig] = None):
         self._config = config or SessionConfig()
-        # Parse maintenance window times
-        parts_start = self._config.maintenance_start_et.split(":")
-        parts_end = self._config.maintenance_end_et.split(":")
-        self._maint_start = time(int(parts_start[0]), int(parts_start[1]))
-        self._maint_end = time(int(parts_end[0]), int(parts_end[1]))
-        self._maint_day = self._config.maintenance_day
+        # Parse and validate maintenance window times
+        try:
+            parts_start = self._config.maintenance_start_et.split(":")
+            parts_end = self._config.maintenance_end_et.split(":")
+            if len(parts_start) != 2 or len(parts_end) != 2:
+                raise ValueError("Time format must be HH:MM")
+
+            hour_start, min_start = int(parts_start[0]), int(parts_start[1])
+            hour_end, min_end = int(parts_end[0]), int(parts_end[1])
+
+            # Validate time ranges
+            if not (0 <= hour_start <= 23 and 0 <= min_start <= 59):
+                raise ValueError(f"Invalid start time: {hour_start}:{min_start}")
+            if not (0 <= hour_end <= 23 and 0 <= min_end <= 59):
+                raise ValueError(f"Invalid end time: {hour_end}:{min_end}")
+
+            self._maint_start = time(hour_start, min_start)
+            self._maint_end = time(hour_end, min_end)
+            self._maint_day = self._config.maintenance_day
+
+            logger.info(
+                f"Session guard initialized: maintenance {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][self._maint_day]} "
+                f"{self._maint_start.strftime('%H:%M')}–{self._maint_end.strftime('%H:%M')} ET"
+            )
+        except (ValueError, IndexError) as e:
+            raise ValueError(
+                f"Invalid session config - maintenance_start_et='{self._config.maintenance_start_et}', "
+                f"maintenance_end_et='{self._config.maintenance_end_et}': {e}"
+            ) from e
 
     def is_trading_allowed(self, now_utc: Optional[datetime] = None) -> bool:
         """Return True if Kalshi is open for trading right now."""
