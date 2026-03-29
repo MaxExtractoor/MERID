@@ -1,4 +1,6 @@
 import asyncio
+import importlib.util
+import pathlib
 import sys
 import time
 from types import SimpleNamespace
@@ -6,11 +8,13 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import TelegramError
 
-# Stub heavy optional dependencies before importing the agent package
-sys.modules.setdefault("neo4j", SimpleNamespace(GraphDatabase=None))
-sys.modules.setdefault("db.neo4j", SimpleNamespace(memory=None, GraphDatabase=None))
-
-from agents import telegram_agent
+# Import telegram_agent directly to avoid loading the full agents package
+# (which has many heavy transitive dependencies not needed for these tests)
+_agent_file = pathlib.Path(__file__).parent.parent.parent / "agents" / "telegram_agent.py"
+_spec = importlib.util.spec_from_file_location("agents.telegram_agent", _agent_file)
+telegram_agent = importlib.util.module_from_spec(_spec)
+sys.modules["agents.telegram_agent"] = telegram_agent
+_spec.loader.exec_module(telegram_agent)
 
 
 class DummyBot:
