@@ -124,6 +124,8 @@ class GraphService:
             password: Database password
             database: Database name (default: neo4j)
         """
+        if not _NEO4J_AVAILABLE or GraphDatabase is None:
+            raise RuntimeError("neo4j driver unavailable")
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
         self.database = database
         

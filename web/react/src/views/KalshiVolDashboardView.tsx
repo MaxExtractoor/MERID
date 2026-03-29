@@ -325,7 +325,7 @@ const KalshiVolDashboardView: React.FC = () => {
                 (health?.rate_limits?.orders_this_minute ?? 0) >= 25 ? 'text-red-400' :
                 (health?.rate_limits?.orders_this_minute ?? 0) >= 15 ? 'text-yellow-400' : 'text-white'
               }`}>
-                {health?.rate_limits?.orders_this_minute ?? 0}/{health?.rate_limits?.max_per_minute ?? 30}
+                {health?.rate_limits?.orders_this_minute ?? 0}/{health?.rate_limits?.max_per_minute ?? 30}/min
               </p>
             </div>
             <div>

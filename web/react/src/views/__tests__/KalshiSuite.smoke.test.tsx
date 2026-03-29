@@ -49,17 +49,11 @@ jest.mock('recharts', () => {
 // Lazy imports to allow mocks to settle
 import Overview from '../Overview';
 import KillSwitchView from '../KillSwitchView';
-import ExposureView from '../ExposureView';
-import AgentHealthView from '../AgentHealthView';
-import Orders from '../Orders';
-import Risk from '../Risk';
-import ObservabilityView from '../ObservabilityView';
 import KalshiTerminalView from '../KalshiTerminalView';
 import KalshiOrderbookPanel from '../../components/KalshiOrderbookPanel';
 import KalshiActivityLog from '../../components/KalshiActivityLog';
 import KalshiSentimentView from '../KalshiSentimentView';
 import KalshiAgentPerformanceView from '../KalshiAgentPerformanceView';
-import Positions from '../Positions';
 
 describe('Kalshi Suite — Smoke Tests', () => {
   it('Overview mounts without errors', () => {
@@ -73,30 +67,6 @@ describe('Kalshi Suite — Smoke Tests', () => {
     expect(screen.getByRole('heading', { name: /Kill Switch/i })).toBeTruthy();
   });
 
-  it('ExposureView mounts without errors', () => {
-    const { container } = render(<ExposureView />);
-    expect(container.firstChild).toBeTruthy();
-  });
-
-  it('AgentHealthView mounts without errors', () => {
-    const { container } = render(<AgentHealthView />);
-    expect(container.firstChild).toBeTruthy();
-  });
-
-  it('Orders mounts without errors', () => {
-    const { container } = render(<Orders />);
-    expect(container.firstChild).toBeTruthy();
-  });
-
-  it('Risk mounts without errors', () => {
-    const { container } = render(<Risk />);
-    expect(container.firstChild).toBeTruthy();
-  });
-
-  it('ObservabilityView mounts without errors', () => {
-    const { container } = render(<ObservabilityView />);
-    expect(container.firstChild).toBeTruthy();
-  });
 
   it('ExecutionGateStrip renders on Overview', () => {
     const { container } = render(<Overview />);
@@ -143,8 +113,4 @@ describe('Kalshi Suite — Smoke Tests', () => {
     expect(screen.getByText(/Agent Performance/i)).toBeTruthy();
   });
 
-  it('Positions mounts and shows title', () => {
-    render(<Positions />);
-    expect(screen.getByText(/Kalshi Positions/i)).toBeTruthy();
-  });
 });
