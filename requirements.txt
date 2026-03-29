@@ -47,6 +47,9 @@ slowapi==0.1.9
 prometheus-client==0.21.0
 cachetools==5.5.0
 
+# ── Notifications ───────────────────────────────────────────────
+python-telegram-bot==20.7
+
 # ── System Monitoring ───────────────────────────────────────────
 psutil==7.2.1
 
