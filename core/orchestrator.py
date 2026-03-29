@@ -17,8 +17,41 @@ from memory.store import reality_memory
 from swarm.performance import performance_ledger
 from swarm.spawner import SwarmSpawner
 from utils.logger import get_logger
-from voting.engine import blind_vote
 from hardening.watchdog import watchdog
+from core.consensus_math import Vote, compute_consensus
+
+try:
+    from voting.engine import blind_vote  # type: ignore
+except Exception:  # pragma: no cover - compatibility fallback
+    def blind_vote(votes_with_agents, threshold=CONSENSUS_THRESHOLD):
+        weighted_votes = []
+        summaries = []
+        for response, agent in votes_with_agents:
+            vote_raw = str(response.get("vote", "reject")).strip().lower()
+            vote_int = 1 if vote_raw in {"accept", "approve", "yes", "buy", "long", "1", "true"} else -1
+            confidence = float(response.get("confidence", 0.0) or 0.0)
+            agent_id = getattr(agent, "agent_id", response.get("agent_id", "unknown"))
+            trust = float(getattr(agent, "trust", response.get("trust", 1.0) or 1.0))
+            weighted_votes.append(
+                Vote(
+                    agent_id=agent_id,
+                    vote=vote_int,
+                    trust=trust,
+                    confidence=confidence,
+                    source=str(response.get("source", "unknown")),
+                    source_srw=float(response.get("source_srw", 1.0) or 1.0),
+                )
+            )
+            summaries.append(
+                {
+                    "agent": agent_id,
+                    "vote": vote_int,
+                    "confidence": confidence,
+                    "reasoning": str(response.get("reasoning", "")),
+                }
+            )
+        result = compute_consensus(weighted_votes, threshold=threshold)
+        return {"consensus": result.consensus_score, "approved": result.approved, "summaries": summaries}
 
 
 class MeridCore:

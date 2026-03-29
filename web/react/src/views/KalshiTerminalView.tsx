@@ -333,7 +333,7 @@ export default function KalshiTerminalView() {
                 type="text"
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Ticker / keyword…"
+                placeholder="Search markets"
                 className="w-full pl-8 pr-7 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white placeholder-gray-600 focus:border-orange-500 focus:outline-none"
               />
               {searchQuery && (
@@ -517,7 +517,7 @@ export default function KalshiTerminalView() {
           ) : (
             <div className="bg-slate-800/60 rounded-xl p-5 text-center border border-slate-700/50">
               <Search className="w-6 h-6 text-gray-600 mx-auto mb-1.5" />
-              <p className="text-xs text-gray-500">Select a market to place an order</p>
+              <p className="text-xs text-gray-500">Select a market to trade</p>
             </div>
           )}
 

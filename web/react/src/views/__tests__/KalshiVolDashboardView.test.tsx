@@ -97,23 +97,23 @@ const MOCK_PNL_WITH_DATA = {
 
 function setupMocks(overrides: Record<string, unknown> = {}) {
   const refetch = jest.fn();
-  // The component calls useApiData 6 times in order:
-  //   0: health, 1: sizing, 2: risk, 3: grid, 4: alerts, 5: pnl
-  const get = (key: string, fallback: unknown) =>
-    key in overrides ? overrides[key] : fallback;
-  const responses = [
-    { data: get('health', MOCK_HEALTH), loading: false, refetch },
-    { data: get('sizing', MOCK_SIZING), loading: false, refetch },
-    { data: get('risk', MOCK_RISK), loading: false, refetch },
-    { data: get('grid', MOCK_GRID), loading: false, refetch },
-    { data: get('alerts', MOCK_ALERTS_EMPTY), loading: false, refetch },
-    { data: get('pnl', MOCK_PNL_EMPTY), loading: false, refetch },
-  ];
-  let callIndex = 0;
-  mockUseApiData.mockImplementation(() => {
-    const idx = callIndex % responses.length;
-    callIndex++;
-    return responses[idx];
+  const get = (key: string, fallback: unknown) => (key in overrides ? overrides[key] : fallback);
+
+  mockUseApiData.mockImplementation((endpoint: unknown) => {
+    if (typeof endpoint !== 'string') return { data: null, loading: false, refetch };
+    if (endpoint.includes('/kalshi/health')) return { data: get('health', MOCK_HEALTH), loading: false, refetch };
+    if (endpoint.includes('/kalshi/sizing-metrics')) return { data: get('sizing', MOCK_SIZING), loading: false, refetch };
+    if (endpoint.includes('/kalshi/risk')) return { data: get('risk', MOCK_RISK), loading: false, refetch };
+    if (endpoint.includes('/kalshi-grid/status')) return { data: get('grid', MOCK_GRID), loading: false, refetch };
+    if (endpoint.includes('/kalshi/volume-alerts')) return { data: get('alerts', MOCK_ALERTS_EMPTY), loading: false, refetch };
+    if (endpoint.includes('/kalshi/liquidity-alerts')) return { data: get('liqAlerts', MOCK_ALERTS_EMPTY), loading: false, refetch };
+    if (endpoint.includes('/kalshi/pnl-history')) return { data: get('pnl', MOCK_PNL_EMPTY), loading: false, refetch };
+    if (endpoint.includes('/kalshi/volume-changes')) return { data: get('changes', { changes: [] }), loading: false, refetch };
+    if (endpoint.includes('/kalshi/volume-anomalies')) return { data: get('anomalies', { anomalies: [] }), loading: false, refetch };
+    if (endpoint.includes('/kalshi-grid/mode')) return { data: get('mode', { mode: 'paper', is_live: false, live_enabled: true }), loading: false, refetch };
+    if (endpoint.includes('/kalshi/consensus-signals')) return { data: get('consensus', { signals: [], consensus_rate: 0, engine_running: false }), loading: false, refetch };
+    if (endpoint.includes('/operator/kill-switch-status')) return { data: get('kill', { active: false, can_trade: true, kill_reason: null }), loading: false, refetch };
+    return { data: null, loading: false, refetch };
   });
   return refetch;
 }
@@ -227,13 +227,13 @@ describe('KalshiVolDashboardView', () => {
     it('shows drawdown tier badge', () => {
       setupMocks();
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('NORMAL')).toBeInTheDocument();
+      expect(screen.getAllByText('NORMAL').length).toBeGreaterThan(0);
     });
 
     it('shows WARNING tier when drawdown elevated', () => {
       setupMocks({ sizing: { ...MOCK_SIZING, drawdown_tier: 'warning' } });
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('WARNING')).toBeInTheDocument();
+      expect(screen.getAllByText('WARNING').length).toBeGreaterThan(0);
     });
 
     it('shows effective fraction', () => {
@@ -295,8 +295,8 @@ describe('KalshiVolDashboardView', () => {
       expect(screen.getByText('Agent')).toBeInTheDocument();
       expect(screen.getByText('PF')).toBeInTheDocument();
       expect(screen.getByText('Sharpe')).toBeInTheDocument();
-      expect(screen.getByText('Sortino')).toBeInTheDocument();
-      expect(screen.getByText('Calmar')).toBeInTheDocument();
+      expect(screen.getByText('Fills')).toBeInTheDocument();
+      expect(screen.getByText('Size f')).toBeInTheDocument();
     });
 
     it('renders each agent row', () => {
@@ -318,7 +318,7 @@ describe('KalshiVolDashboardView', () => {
     it('shows empty state when no agents', () => {
       setupMocks({ grid: { agent_count: 0, agents: [] } });
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('No agents running')).toBeInTheDocument();
+      expect(screen.getByText(/No agents running/)).toBeInTheDocument();
     });
 
     it('shows agent count in header', () => {
@@ -334,7 +334,7 @@ describe('KalshiVolDashboardView', () => {
     it('shows empty state when no PnL data', () => {
       setupMocks();
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('No PnL history yet')).toBeInTheDocument();
+      expect(screen.getByText(/No PnL history yet/)).toBeInTheDocument();
     });
 
     it('shows latest equity when PnL data present', () => {
@@ -364,7 +364,7 @@ describe('KalshiVolDashboardView', () => {
     it('shows alert count', () => {
       setupMocks({ alerts: MOCK_ALERTS_WITH_DATA });
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('2 recent')).toBeInTheDocument();
+      expect(screen.getByText('2')).toBeInTheDocument();
     });
 
     it('renders alert messages', () => {

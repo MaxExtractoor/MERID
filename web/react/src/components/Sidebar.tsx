@@ -17,6 +17,8 @@ import {
   Grid,
   TrendingUp,
   ClipboardList,
+  Shield,
+  BarChart3,
 } from 'lucide-react';
 import type { View } from '../types/views';
 import { useKalshiMode } from '../context/KalshiModeContext';
@@ -56,6 +58,9 @@ const analytics = [
 const operatorSection = [
   { name: 'Operator', href: 'operator', icon: Sliders, color: 'text-indigo-400' },
   { name: 'Kill Switch', href: 'kill-switch', icon: ShieldAlert, color: 'text-red-400' },
+  { name: 'Risk Control', href: 'risk-control', icon: Shield, color: 'text-orange-400' },
+  { name: 'Position Sizing', href: 'position-sizing', icon: BarChart3, color: 'text-sky-400' },
+  { name: 'Promotion', href: 'promotion-status', icon: Award, color: 'text-amber-400' },
 ];
 
 const system = [
