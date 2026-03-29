@@ -358,6 +358,15 @@ async def agent_orders(name: str, limit: int = Query(50, ge=1, le=200)) -> Dict[
     return {"agent": name, "orders": orders, "count": len(orders)}
 
 
+@router.get("/agents/{name}/trace/{decision_trace_id}")
+async def agent_decision_trace(name: str, decision_trace_id: str) -> Dict[str, Any]:
+    """Return plan→risk→order→fill trace fragments for a decision_trace_id."""
+    agent = _get_grid().get_agent(name)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    return {"agent": name, **agent.get_decision_trace(decision_trace_id)}
+
+
 @router.get("/fills")
 async def all_fills(limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
     """Get all fills across all agents, normalized for KalshiGridView FillEntry shape."""
@@ -456,6 +465,85 @@ async def session_status() -> Dict[str, Any]:
     """Session guard status (trading hours, maintenance window)."""
     grid = _get_grid()
     return grid.summary().get("session", {})
+
+
+@router.get("/execution-health")
+async def execution_health(
+    window_minutes: int = Query(15, ge=1, le=240),
+) -> Dict[str, Any]:
+    """Execution funnel health at a glance: signals → orders → fills + risk rejections."""
+    import datetime as _dt
+
+    grid = _get_grid()
+    now = _dt.datetime.now(_dt.timezone.utc)
+    cutoff = now - _dt.timedelta(minutes=window_minutes)
+
+    def _ts_ok(row: Dict[str, Any]) -> bool:
+        ts = row.get("ts")
+        if not ts:
+            return False
+        try:
+            return _dt.datetime.fromisoformat(ts.replace("Z", "+00:00")) >= cutoff
+        except Exception:
+            return False
+
+    signals = 0
+    orders_attempted = 0
+    orders_sent = 0
+    fills = 0
+    rejected_by_risk = 0
+    per_asset: Dict[str, Dict[str, int]] = {}
+
+    for agent in grid.agents:
+        agent_asset = (agent.config.assets[0] if agent.config.assets else "ALL").upper()
+        agent_tf = agent.config.timeframes[0] if agent.config.timeframes else "unknown"
+        key = f"{agent_asset}:{agent_tf}"
+        bucket = per_asset.setdefault(
+            key,
+            {"signals": 0, "orders_attempted": 0, "orders_sent": 0, "fills": 0, "risk_rejections": 0},
+        )
+
+        s_rows = [s for s in agent.get_signals(500) if _ts_ok(s)]
+        o_rows = [o for o in agent.get_orders(500) if _ts_ok(o)]
+        f_rows = [f for f in agent.get_fills(500) if _ts_ok(f)]
+
+        s_count = len(s_rows)
+        o_count = len(o_rows)
+        sent_count = sum(1 for o in o_rows if o.get("success"))
+        fill_count = len(f_rows)
+        risk_count = sum(1 for o in o_rows if "Risk blocked" in str(o.get("error", "")))
+
+        signals += s_count
+        orders_attempted += o_count
+        orders_sent += sent_count
+        fills += fill_count
+        rejected_by_risk += risk_count
+
+        bucket["signals"] += s_count
+        bucket["orders_attempted"] += o_count
+        bucket["orders_sent"] += sent_count
+        bucket["fills"] += fill_count
+        bucket["risk_rejections"] += risk_count
+
+    state = "orders_filled" if fills > 0 else (
+        "orders_pending" if orders_sent > 0 else (
+            "signals_rejected_by_risk" if rejected_by_risk > 0 else (
+                "no_signals" if signals == 0 else "signals_not_routed"
+            )
+        )
+    )
+
+    return {
+        "timestamp": now.isoformat(),
+        "window_minutes": window_minutes,
+        "signals": signals,
+        "orders_attempted": orders_attempted,
+        "orders_sent": orders_sent,
+        "fills": fills,
+        "risk_rejections": rejected_by_risk,
+        "state": state,
+        "per_asset_timeframe": per_asset,
+    }
 
 
 # ── Control endpoints ──────────────────────────────────────────────────

@@ -14,6 +14,7 @@ export interface KalshiPosition {
   ticker: string;
   outcome: string;
   size: number;
+  status?: string;
   avg_price: number;
   unrealized_pnl: number;
   realized_pnl: number;
@@ -58,6 +59,24 @@ export interface KalshiRiskSummary {
   open_market_count: number;
   recent_breaches: Array<{ ts: string; check: string; reason: string }>;
   limits: Record<string, number>;
+}
+
+export interface KalshiExecutionHealth {
+  timestamp: string;
+  window_minutes: number;
+  signals: number;
+  orders_attempted: number;
+  orders_sent: number;
+  fills: number;
+  risk_rejections: number;
+  state: 'no_signals' | 'signals_rejected_by_risk' | 'signals_not_routed' | 'orders_pending' | 'orders_filled';
+  per_asset_timeframe: Record<string, {
+    signals: number;
+    orders_attempted: number;
+    orders_sent: number;
+    fills: number;
+    risk_rejections: number;
+  }>;
 }
 
 export interface SizingMetrics {

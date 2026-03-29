@@ -217,6 +217,7 @@ async def _kalshi_place_order(
     price_cents: int = 0,
     count: int = 1,
     agent_name: str = "",
+    decision_trace_id: str = "",
 ) -> ToolResult:
     """Place a YES/NO order on Kalshi."""
     t0 = time.time()
@@ -371,6 +372,8 @@ async def _kalshi_place_order(
             action=action,   # "buy" or "sell"
             price_cents=price_cents,
             count=count,
+            order_type="market" if price_cents <= 0 else "limit",
+            decision_trace_id=decision_trace_id or None,
         )
 
         result = await route_order_async(intent)

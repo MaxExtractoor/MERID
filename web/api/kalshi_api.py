@@ -905,6 +905,7 @@ async def get_positions() -> Dict[str, Any]:
                         "avg_price": float(p.entry_price),
                         "unrealized_pnl": float(p.pnl),
                         "realized_pnl": 0.0,
+                        "status": "active" if float(p.size) != 0 else "flat",
                     }
                     for p in positions
                 ],
@@ -927,6 +928,7 @@ async def get_positions() -> Dict[str, Any]:
                         "avg_price": p.get("average_price", 0) / 100.0 if p.get("average_price") else 0,
                         "unrealized_pnl": p.get("market_exposure", 0) / 100.0 if p.get("market_exposure") else 0,
                         "realized_pnl": p.get("realized_pnl", 0) / 100.0 if p.get("realized_pnl") else 0,
+                        "status": "active" if (p.get("total_traded", p.get("position", 0)) or 0) else "flat",
                     }
                     for p in positions
                 ],
@@ -5046,5 +5048,4 @@ async def get_twitter_stream_rolling(
     except Exception as exc:
         logger.warning("twitter/stream/rolling/%s failed: %s", asset, exc)
         return {"asset": asset, "count": 0, "rolling_compound": 0.0, "error": str(exc)}
-
 

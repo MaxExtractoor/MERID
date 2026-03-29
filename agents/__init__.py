@@ -24,9 +24,18 @@ from agents.strategy_agent import StrategyAgent
 from agents.meta_agent import MetaAuditAgent
 from agents.reflection_layer import ReflectionLayer, Reflection
 from agents.registry import load_agents
-from agents.twitter_agent import TwitterAgent
-from agents.telegram_agent import TelegramAgent
-from agents.news_monitor_agent import NewsMonitorAgent
+try:
+    from agents.twitter_agent import TwitterAgent
+except Exception:  # optional dependency in some test/CI environments
+    TwitterAgent = None
+try:
+    from agents.telegram_agent import TelegramAgent
+except Exception:  # optional dependency in some test/CI environments
+    TelegramAgent = None
+try:
+    from agents.news_monitor_agent import NewsMonitorAgent
+except Exception:  # optional dependency in some test/CI environments
+    NewsMonitorAgent = None
 from agents.fast_prediction_arbitrage_analyst import register_fast_agent
 from agents.optimization import (
     AgentOptimizer,

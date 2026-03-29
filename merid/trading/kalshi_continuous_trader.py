@@ -1,6 +1,25 @@
 """KalshiContinuousTrader — Continuous prediction-market trading agent.
 
 Architecture:
+  Execution loop (reference map):
+    sentiment/discovery -> signals -> filters -> sizing -> risk ->
+    guard/execution_gate -> route_order_async -> Kalshi -> fills ->
+    positions/PnL -> alerts/UI
+
+  Concrete modules and data objects:
+    - discovery/catalog: merid.event_venues.kalshi.market_catalog.KalshiMarketCatalog
+      -> List[CatalogMarket] / MarketCandidate
+    - filtering: merid.event_venues.kalshi.market_filter.MarketFilter
+      -> List[MarketCandidate]
+    - opinion/signal: merid.prediction.opinion_strategy.OpinionStrategy
+      -> OpinionEstimate(confidence, edge, agent_prob)
+    - sizing: this module (_apply_risk_checks) -> approved notional
+    - risk/gates: DailyRiskState + upstream execution gate/guard stack
+      (core.execution_gate, merid.execution_guard, venue gate in prediction stack)
+    - execution routing: merid.event_venues.kalshi.order_router.OrderIntent / route_order_async
+    - fills/positions/pnl: kalshi fills ledger + position cache + risk summaries
+    - alerts/ui: merid.prediction.alerts + web/api/* dashboards
+
   - Discovers candidates via ``KalshiMarketCatalog`` and ``MarketFilter``.
   - Uses the canonical ``MarketCandidate`` from ``market_filter`` as the
     shared dataclass; no shadow copy is defined here.
@@ -24,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +62,7 @@ _CRYPTO_TIMEFRAMES = ("15m", "1h", "daily")
 _DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"))
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
 _DEFAULT_BANKROLL_FRACTION = float(os.getenv("MERID_BANKROLL_FRACTION", "0.01"))
+_DEGRADED_SPOT_SIZE_MULTIPLIER = 0.5
 
 
 # ── TradingCandidate (thin subclass of canonical MarketCandidate) ──────────
@@ -158,6 +179,8 @@ class KalshiContinuousTrader:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._candidates: List[TradingCandidate] = []
+        self._cycle: int = 0
+        self._last_spot_status: Dict[str, Any] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -313,25 +336,81 @@ class KalshiContinuousTrader:
 
         Returns list of approved intent dicts (does NOT submit orders).
         """
+        self._cycle += 1
         intents = []
+        cycle_counters = {
+            "candidates": len(self._candidates),
+            "approved": 0,
+            "no_estimate": 0,
+            "low_confidence_or_cap": 0,
+            "spot_blocked": 0,
+        }
+
+        # Spot-feed health semantics:
+        # - all spot sources offline/missing => block new intents
+        # - partial coverage => allow with tighter sizing multiplier
+        assets = sorted({c.underlying for c in self._candidates if c.underlying})
+        available_assets = set()
+        if spot_prices:
+            available_assets = {
+                a for a in assets
+                if spot_prices.get(a) is not None and float(spot_prices.get(a) or 0) > 0
+            }
+        all_spot_missing = bool(assets) and len(available_assets) == 0
+        spot_size_multiplier = (
+            _DEGRADED_SPOT_SIZE_MULTIPLIER
+            if (assets and available_assets and len(available_assets) < len(assets))
+            else 1.0
+        )
+        self._last_spot_status = {
+            "cycle": self._cycle,
+            "expected_assets": assets,
+            "available_assets": sorted(available_assets),
+            "state": "offline" if all_spot_missing else ("degraded" if spot_size_multiplier < 1.0 else "healthy"),
+        }
+
         for candidate in self._candidates:
+            decision_trace_id = uuid.uuid4().hex
             if spot_prices:
                 candidate.spot_price = spot_prices.get(candidate.underlying)
+            if all_spot_missing:
+                cycle_counters["spot_blocked"] += 1
+                logger.info(
+                    "cycle=%s decision_trace_id=%s asset=%s timeframe=%s ticker=%s skip=spot_blocked state=%s",
+                    self._cycle, decision_trace_id, candidate.underlying, candidate.timeframe,
+                    candidate.ticker, self._last_spot_status["state"],
+                )
+                continue
 
             mid_prob = candidate.mid_price_cents / 100.0 if candidate.mid_price_cents else 0.5
             estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
             if estimate is None:
+                cycle_counters["no_estimate"] += 1
+                logger.debug(
+                    "cycle=%s decision_trace_id=%s asset=%s timeframe=%s ticker=%s skip=no_estimate",
+                    self._cycle, decision_trace_id, candidate.underlying, candidate.timeframe, candidate.ticker,
+                )
                 continue
 
             notional = self._apply_risk_checks(candidate, estimate, bankroll)
             if notional is None:
+                cycle_counters["low_confidence_or_cap"] += 1
+                logger.debug(
+                    "cycle=%s decision_trace_id=%s asset=%s timeframe=%s ticker=%s skip=risk_or_confidence "
+                    "confidence=%.3f edge=%.4f",
+                    self._cycle, decision_trace_id, candidate.underlying, candidate.timeframe, candidate.ticker,
+                    estimate.confidence, estimate.edge,
+                )
                 continue
+            notional *= spot_size_multiplier
 
             intent = {
                 "ticker": candidate.ticker,
                 "underlying": candidate.underlying,
                 "timeframe": candidate.timeframe,
                 "group_id": candidate.group_id,
+                "cycle": self._cycle,
+                "decision_trace_id": decision_trace_id,
                 "direction": "yes" if estimate.agent_prob > mid_prob else "no",
                 "notional": notional,
                 "confidence": estimate.confidence,
@@ -342,12 +421,31 @@ class KalshiContinuousTrader:
             self._risk.add_notional(candidate.group_id, notional)
             self._risk.trade_count += 1
             intents.append(intent)
+            cycle_counters["approved"] += 1
             logger.info(
-                "ContinuousTrader: INTENT %s %s notional=%.2f conf=%.3f edge=%.4f",
-                intent["direction"], candidate.ticker, notional,
-                estimate.confidence, estimate.edge,
+                "cycle=%s decision_trace_id=%s asset=%s timeframe=%s ContinuousTrader: INTENT %s %s "
+                "notional=%.2f conf=%.3f edge=%.4f spot_state=%s",
+                self._cycle,
+                decision_trace_id,
+                candidate.underlying,
+                candidate.timeframe,
+                intent["direction"],
+                candidate.ticker,
+                notional,
+                estimate.confidence,
+                estimate.edge,
+                self._last_spot_status["state"],
             )
 
+        logger.info(
+            "cycle=%s trader_summary candidates=%s approved=%s no_estimate=%s risk_or_confidence=%s spot_blocked=%s",
+            self._cycle,
+            cycle_counters["candidates"],
+            cycle_counters["approved"],
+            cycle_counters["no_estimate"],
+            cycle_counters["low_confidence_or_cap"],
+            cycle_counters["spot_blocked"],
+        )
         return intents
 
     # ── Daily reset ───────────────────────────────────────────────────────
@@ -398,6 +496,7 @@ class KalshiContinuousTrader:
                 "min_confidence": self._min_confidence,
                 "bankroll_fraction": self._bankroll_fraction,
             },
+            "spot_feed": self._last_spot_status,
         }
 
     @property
@@ -423,4 +522,3 @@ def get_continuous_trader(
     if _trader is None:
         _trader = KalshiContinuousTrader(catalog=catalog, strategy=strategy)
     return _trader
-

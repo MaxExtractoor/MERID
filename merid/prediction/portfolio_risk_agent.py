@@ -15,6 +15,7 @@ Reuses:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
     from merid.prediction.trading_agent import KalshiTradingAgent
 
 logger = get_logger("merid.prediction.portfolio_risk_agent")
+
+ACTIVE_CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
 
 
 @dataclass
@@ -85,6 +88,9 @@ class PortfolioRiskAgent:
         self._max_snapshots = 200
         self._kill_switch_active = False
         self._paused_agents: List[str] = []
+        self._risk_alert_cooldown_seconds = int(os.getenv("MERID_RISK_ALERT_COOLDOWN_SECONDS", "180"))
+        self._min_alert_exposure_usd = Decimal(os.getenv("MERID_RISK_MIN_ALERT_EXPOSURE_USD", "1"))
+        self._last_alert_ts_by_key: Dict[str, float] = {}
 
     def set_agents(self, agents: List["KalshiTradingAgent"]) -> None:
         """Update the list of trading agents to monitor."""
@@ -153,6 +159,8 @@ class PortfolioRiskAgent:
             if pos_result.success:
                 positions = pos_result.payload.get("positions", [])
                 snapshot.open_market_count = len(positions)
+                for asset in ACTIVE_CRYPTO_ASSETS:
+                    snapshot.notional_per_asset.setdefault(asset, Decimal("0"))
 
                 # Aggregate notional per asset
                 for pos in positions:
@@ -212,6 +220,7 @@ class PortfolioRiskAgent:
         # 4. Enforce breaches
         if breaches:
             logger.warning(f"Portfolio risk breaches: {breaches}")
+            self._emit_exposure_risk_alerts(snapshot, breaches)
             await self._enforce_breaches(breaches)
 
         # 5. Auto-rollback check for live agents
@@ -284,6 +293,49 @@ class PortfolioRiskAgent:
             )
 
         return breaches
+
+    def _emit_exposure_risk_alerts(self, snapshot: PortfolioSnapshot, breaches: List[str]) -> None:
+        """Emit deduplicated risk-limit alerts from *real* exposure only."""
+        if snapshot.open_market_count <= 0:
+            return
+        if snapshot.total_notional_usd < self._min_alert_exposure_usd:
+            return
+        now = time.monotonic()
+        cap = self._config.max_notional_per_asset_usd
+        for asset in ACTIVE_CRYPTO_ASSETS:
+            exposure = snapshot.notional_per_asset.get(asset, Decimal("0"))
+            if exposure <= cap:
+                continue
+            if exposure < self._min_alert_exposure_usd:
+                continue
+            key = f"risk_limit:{asset}:portfolio"
+            last = self._last_alert_ts_by_key.get(key)
+            if last is not None and (now - last) < self._risk_alert_cooldown_seconds:
+                continue
+            self._last_alert_ts_by_key[key] = now
+            message = (
+                f"{asset} portfolio capped: exposure=${float(exposure):.2f} / cap=${float(cap):.2f}; "
+                f"positions_count={snapshot.open_market_count}; timeframe=portfolio."
+            )
+            data = {
+                "asset": asset,
+                "timeframe": "portfolio",
+                "exposure_usd": float(exposure),
+                "cap_usd": float(cap),
+                "positions_count": snapshot.open_market_count,
+            }
+            try:
+                mgr = getattr(self, "_alert_manager", None)
+                if mgr is None:
+                    from merid.prediction.alerts import get_alert_manager
+                    mgr = get_alert_manager()
+                mgr.fire_risk_breach(
+                    market_id=f"{asset}:portfolio",
+                    message=message,
+                    data=data,
+                )
+            except Exception as exc:
+                logger.debug("risk alert emit failed (%s): %s", asset, exc)
 
     async def _enforce_breaches(self, breaches: List[str]) -> None:
         """Pause agents when critical breaches detected."""

@@ -37,6 +37,16 @@ async def test_subscribe_adds_orderbook_channels(bridge: KalshiWebSocketBridge) 
 
 
 @pytest.mark.asyncio
+async def test_start_limits_ws_ticker_subscription(monkeypatch, bridge: KalshiWebSocketBridge) -> None:
+    # prevent long-running tasks from executing callbacks
+    bridge._ws.listen = AsyncMock(return_value=None)
+    many = [f"KXBTC-{i}" for i in range(80)]
+    await bridge.start(tickers=many)
+    assert len(bridge._subscribed_tickers) <= 25
+    await bridge.stop()
+
+
+@pytest.mark.asyncio
 async def test_publish_quote_uses_event_type_and_payload(monkeypatch, bridge: KalshiWebSocketBridge) -> None:
     publish = AsyncMock()
     monkeypatch.setattr("core.event_bus.event_stream.publish", publish)

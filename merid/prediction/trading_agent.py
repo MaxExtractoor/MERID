@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -36,6 +37,28 @@ from utils.logger import get_logger
 
 
 _MAX_LOG_ENTRIES = 200
+EXECUTION_LOOP_MAP = """Execution loop (Kalshi crypto):
+discover -> analyze -> consensus -> size -> risk -> route -> execute -> fills -> positions -> PnL -> alerts/UI
+
+Discovery/sentiment:
+  - merid.sentiment.hashtag_agent, merid.sentiment.sentiment_bus_v2
+  - merid.swarm.market_mood_bus, SentimentSignal/Consensus updates
+Planning/consensus:
+  - merid.prediction.strategy (KalshiStrategy)
+  - merid.swarm.consensus_aggregator (SwarmConsensusAggregator)
+Sizing/risk:
+  - merid.prediction.risk (pre-trade checks)
+  - merid.risk.crypto_swarm_risk_btc15m (lane risk)
+  - merid.prediction.portfolio_risk_agent (portfolio exposure from real positions)
+Routing/execution:
+  - merid.prediction.kalshi_tools._kalshi_place_order
+  - merid.event_venues.kalshi.order_router.route_order_async
+Fills/positions/PnL:
+  - order results + fill_log in this agent
+  - merid.event_venues.kalshi.fills_ledger / kalshi_risk summary
+Alerts/UI:
+  - merid.prediction.alerts, web.api.kalshi_api, web.api.kalshi_grid_api
+"""
 
 
 @dataclass
@@ -55,6 +78,7 @@ class AgentState:
     signal_log: List[Dict[str, Any]] = field(default_factory=list)
     order_log: List[Dict[str, Any]] = field(default_factory=list)
     fill_log: List[Dict[str, Any]] = field(default_factory=list)
+    trade_settings_snapshot: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -70,6 +94,7 @@ class AgentState:
             "signal_count": len(self.signal_log),
             "order_count": len(self.order_log),
             "fill_count": len(self.fill_log),
+            "trade_settings_snapshot": self.trade_settings_snapshot,
         }
 
 
@@ -119,6 +144,8 @@ class KalshiTradingAgent:
         self._stop_loss = StopLossRules()
         # position_id -> TrackedPosition for open fills awaiting settlement
         self._tracked_positions: Dict[str, TrackedPosition] = {}
+        self.state.trade_settings_snapshot = self._build_trade_settings_snapshot()
+        self.logger.info("trade_settings_snapshot=%s", self.state.trade_settings_snapshot)
 
     @property
     def agent_id(self) -> str:
@@ -843,6 +870,24 @@ class KalshiTradingAgent:
         side, action = action_map[signal.action]
         size = check.adjusted_size if check.adjusted_size else signal.contracts
         price_cents = signal.limit_price_cents or 0
+        decision_trace_id = uuid.uuid4().hex
+        self.logger.info(
+            "plan_swarm_order trace=%s asset=%s timeframe=%s market=%s desired_size=%s action=%s side=%s",
+            decision_trace_id,
+            (self.config.assets[0] if self.config.assets else "UNKNOWN"),
+            (self.config.timeframes[0] if self.config.timeframes else "unknown"),
+            market.market_id,
+            size,
+            action,
+            side,
+        )
+        self.logger.info(
+            "risk_check_result trace=%s allowed=%s reason=%s adjusted_size=%s",
+            decision_trace_id,
+            check.allowed,
+            check.reason,
+            check.adjusted_size,
+        )
         
         # === BTC 15m Risk Layer Integration ===
         # Evaluate proposal through single-lane risk manager
@@ -1011,6 +1056,7 @@ class KalshiTradingAgent:
                     price_cents=price_cents,
                     count=size,
                     agent_name=self.agent_id,
+                    decision_trace_id=decision_trace_id,
                 )
             result_success = result.success
             result_payload = result.payload
@@ -1023,6 +1069,7 @@ class KalshiTradingAgent:
 
         # Record order
         order_entry = {
+            "decision_trace_id": decision_trace_id,
             "ts": now_ts.isoformat(),
             "market_id": market.market_id,
             "question": market.question[:120] if market.question else "",
@@ -1056,6 +1103,7 @@ class KalshiTradingAgent:
 
             # Record fill (assume immediate for now in MM/Arb)
             fill_entry = {
+                "decision_trace_id": decision_trace_id,
                 "ts": now_ts.isoformat(),
                 "market_id": market.market_id,
                 "side": side,
@@ -1069,6 +1117,14 @@ class KalshiTradingAgent:
                 "fill_id": result_payload.get("order_id") or result_payload.get("fill_id"),
                 "agent": self.config.name,
             }
+            self.logger.info(
+                "fill_received trace=%s market=%s size=%s price_cents=%s fill_id=%s",
+                decision_trace_id,
+                market.market_id,
+                size,
+                fill_entry.get("price_cents"),
+                fill_entry.get("fill_id"),
+            )
             self.state.fill_log.append(fill_entry)
             if len(self.state.fill_log) > _MAX_LOG_ENTRIES:
                 self.state.fill_log = self.state.fill_log[-_MAX_LOG_ENTRIES:]
@@ -1299,8 +1355,9 @@ class KalshiTradingAgent:
                 self.logger.debug("RewardEngine ForecastEvent skipped: %s", exc)
 
             self.logger.info(
-                f"Order placed: {action} {size}x {side} {market.market_id} "
-                f"@{price_cents}c (sim={result_payload.get('simulated', False)})"
+                f"order_sent_to_kalshi trace={decision_trace_id} {action} {size}x {side} {market.market_id} "
+                f"@{price_cents}c (sim={result_payload.get('simulated', False)}) "
+                f"order_id={result_payload.get('order_id', '')}"
             )
         else:
             # Record error in paper session
@@ -1352,6 +1409,38 @@ class KalshiTradingAgent:
     def get_fills(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Return recent fills."""
         return self.state.fill_log[-limit:]
+
+    def get_decision_trace(self, decision_trace_id: str) -> Dict[str, Any]:
+        """Return end-to-end trace fragments for a decision_trace_id."""
+        signals = [s for s in self.state.signal_log if s.get("decision_trace_id") == decision_trace_id]
+        orders = [o for o in self.state.order_log if o.get("decision_trace_id") == decision_trace_id]
+        fills = [f for f in self.state.fill_log if f.get("decision_trace_id") == decision_trace_id]
+        return {
+            "decision_trace_id": decision_trace_id,
+            "signals": signals,
+            "orders": orders,
+            "fills": fills,
+        }
+
+    def _build_trade_settings_snapshot(self) -> Dict[str, Any]:
+        """Centralized per-agent trade settings for startup + reload visibility."""
+        tf = self.config.timeframes[0] if self.config.timeframes else "unknown"
+        asset = self.config.assets[0] if self.config.assets else "ALL"
+        min_order_size_cents = 10 if tf == "15m" else 20
+        min_edge_by_tf = {"15m": 0.01, "1h": 0.015, "daily": 0.02, "weekly": 0.02}
+        swarm_conf_min = float(getattr(self.config, "swarm_confidence_min", 0.2))
+        return {
+            "asset": asset,
+            "timeframe": tf,
+            "swarm_confidence_min": swarm_conf_min,
+            "min_edge": min_edge_by_tf.get(tf, 0.02),
+            "min_expected_value": min_edge_by_tf.get(tf, 0.02),
+            "min_order_size_cents": min_order_size_cents,
+            "per_asset_cap_cents": int(self.config.risk_limits.max_notional_usd * 100),
+            "per_timeframe_cap_cents": int(self.config.risk_limits.max_notional_usd * 100),
+            "max_trades_per_hour": int(self.config.risk_limits.max_orders_per_window),
+            "cooldown_seconds": 0,
+        }
 
     # ── BTC 15m Risk Layer Helpers ────────────────────────────────────────
 

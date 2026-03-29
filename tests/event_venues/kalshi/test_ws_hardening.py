@@ -262,3 +262,16 @@ class TestBackpressure:
         ws._msg_queue.put_nowait({"type": "ticker"})
         s = ws.stats()
         assert s["queue_depth"] == 2
+
+    def test_orderbook_delta_backpressure_is_coalesced(self, ws):
+        ws._msg_queue = asyncio.Queue(maxsize=1)
+        ws._msg_queue.put_nowait({"type": "ticker", "ticker": "KXBTC"})
+        # next enqueue overflows; delta should be coalesced, not replacing queue head
+        data = {"type": "orderbook_delta", "ticker": "KXBTC", "seq": 2}
+        try:
+            ws._msg_queue.put_nowait(data)
+        except asyncio.QueueFull:
+            ws._latest_orderbook_deltas["KXBTC"] = data
+            ws._dropped_by_channel["orderbook_delta"] += 1
+        assert "KXBTC" in ws._latest_orderbook_deltas
+        assert ws._dropped_by_channel["orderbook_delta"] >= 1

@@ -12,6 +12,7 @@ Validates:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, AsyncMock
@@ -310,3 +311,17 @@ class TestTraderStatus:
         assert s["config"]["min_confidence"] == 0.6
         assert s["config"]["bankroll_fraction"] == 0.02
 
+
+class TestSpotDegradedSemantics:
+    def test_trade_cycle_blocks_when_all_spot_missing(self) -> None:
+        catalog = MagicMock()
+        trader = KalshiContinuousTrader(catalog=catalog, strategy=None)
+        trader._candidates = [
+            TradingCandidate.from_candidate(_make_candidate(underlying="BTC", timeframe="15m")),
+            TradingCandidate.from_candidate(_make_candidate(underlying="ETH", timeframe="1h")),
+        ]
+        intents = asyncio.get_event_loop().run_until_complete(
+            trader.trade_cycle(bankroll=100.0, spot_prices={})
+        )
+        assert intents == []
+        assert trader.status()["spot_feed"]["state"] == "offline"
