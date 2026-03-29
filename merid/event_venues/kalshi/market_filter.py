@@ -114,6 +114,19 @@ class MarketCandidate:
     best_yes_ask: Optional[float] = None
     best_no_bid: Optional[float] = None
     best_no_ask: Optional[float] = None
+    # Preferred trading side derived from the order book.
+    # "yes" → YES side offers better edge; "no" → NO side; None → indeterminate.
+    # Populated by enrichment or computed via the best_side property when None.
+    best_side: Optional[str] = None
+
+    # ── Read-only helpers ─────────────────────────────────────────────
+
+    @property
+    def asset(self) -> str:
+        """Alias for ``underlying`` — used by production callers that reference
+        ``candidate.asset`` (e.g. logging, risk, volume-monitor).
+        """
+        return self.underlying
 
     @property
     def has_book(self) -> bool:
@@ -128,6 +141,34 @@ class MarketCandidate:
         if self.strike_price is None or self.spot_price is None or self.spot_price == 0:
             return None
         return abs(self.strike_price - self.spot_price) / self.spot_price * 100.0
+
+    def get_best_side(self) -> Optional[str]:
+        """Return the preferred trading side, computing it from book data if
+        ``best_side`` has not been explicitly set.
+
+        Logic (in priority order):
+        1. Explicit ``best_side`` field value if already set.
+        2. YES/NO bid comparison when both sides of the book are available.
+        3. Mid-price relative to 50¢ as a last resort.
+        4. None when there is insufficient data.
+        """
+        if self.best_side is not None:
+            return self.best_side
+        # Use per-side bids from the order book
+        yb = self.best_yes_bid
+        nb = self.best_no_bid
+        if yb is not None and nb is not None:
+            if yb > nb:
+                return "yes"
+            if nb > yb:
+                return "no"
+        # Fall back to mid-price
+        mid = self.mid_price_cents
+        if mid > 50:
+            return "yes"
+        if mid < 50:
+            return "no"
+        return None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -147,17 +188,20 @@ class MarketCandidate:
             "best_yes_ask": self.best_yes_ask,
             "best_no_bid": self.best_no_bid,
             "best_no_ask": self.best_no_ask,
+            "best_side": self.best_side,
         }
 
     def __getattr__(self, name: str) -> Any:
-        """
-        Gracefully handle missing best_* fields for legacy instances.
+        """Gracefully handle missing fields on legacy (e.g. pickled) instances.
 
-        Older pickled/constructed objects might not carry the best_yes/no fields;
-        return None for those attributes instead of raising AttributeError so
-        downstream edge calculations remain safe.
+        Returns None for known optional attributes instead of raising
+        AttributeError so downstream edge calculations and logging remain safe.
         """
-        if name in ("best_yes_bid", "best_yes_ask", "best_no_bid", "best_no_ask"):
+        _optional_none = (
+            "best_yes_bid", "best_yes_ask", "best_no_bid", "best_no_ask",
+            "best_side", "spot_price", "strike_price",
+        )
+        if name in _optional_none:
             return None
         raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
 
@@ -175,6 +219,7 @@ class FilterResult:
     rejected_timeframe: int = 0
     rejected_distance: int = 0       # struck too far from spot
     rejected_edge_deadzone: int = 0  # mid-price too close to 50¢
+    rejected_no_spot: int = 0        # spot_band_pct active but spot_price missing
     capped_per_asset: int = 0        # dropped by max_candidates_per_asset limit
     candidates: List[MarketCandidate] = field(default_factory=list)
 
@@ -190,6 +235,7 @@ class FilterResult:
             "rejected_timeframe": self.rejected_timeframe,
             "rejected_distance": self.rejected_distance,
             "rejected_edge_deadzone": self.rejected_edge_deadzone,
+            "rejected_no_spot": self.rejected_no_spot,
             "capped_per_asset": self.capped_per_asset,
             "candidates": [c.to_dict() for c in self.candidates],
         }
@@ -269,7 +315,11 @@ class MarketFilter:
         # Strike distance check — skip if strike too far from spot
         if cfg.spot_band_pct > 0:
             dist = market.distance_from_spot_pct
-            if dist is not None and dist > cfg.spot_band_pct:
+            if dist is None:
+                # spot_price not available: note it but let the candidate pass
+                # so we don't silently drop all markets when the price feed is down.
+                return True, "no_spot"
+            if dist > cfg.spot_band_pct:
                 return False, (
                     f"distance {dist:.1f}% from spot exceeds band ±{cfg.spot_band_pct}%"
                 )
@@ -307,6 +357,8 @@ class MarketFilter:
             if passed:
                 result.candidates.append(market)
                 result.passed += 1
+                if reason == "no_spot":
+                    result.rejected_no_spot += 1  # count spot-missing passes for observability
             else:
                 if "volume" in reason:
                     result.rejected_volume += 1
@@ -332,6 +384,20 @@ class MarketFilter:
             )
             result.capped_per_asset += capped
             result.passed = len(result.candidates)
+
+        if result.total_input > 0 and result.passed == 0:
+            logger.warning(
+                "All candidates dropped by distance/edge filters "
+                "(input=%d vol=%d oi=%d spread=%d price=%d dist=%d edge=%d no_spot=%d)",
+                result.total_input,
+                result.rejected_volume,
+                result.rejected_oi,
+                result.rejected_spread,
+                result.rejected_price,
+                result.rejected_distance,
+                result.rejected_edge_deadzone,
+                result.rejected_no_spot,
+            )
 
         return result
 

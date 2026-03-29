@@ -108,7 +108,7 @@ class TestSymbolMapping:
             assert COINBASE_TO_MERID[coinbase] == merid
 
     def test_all_major_symbols_mapped(self):
-        expected = {"BTC", "ETH", "SOL", "AVAX", "LINK", "MATIC", "DOGE"}
+        expected = {"BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK", "MATIC"}
         assert set(MERID_TO_COINBASE.keys()) == expected
 
 

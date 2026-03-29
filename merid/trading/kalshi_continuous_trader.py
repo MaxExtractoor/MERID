@@ -79,6 +79,7 @@ class TradingCandidate(MarketCandidate):
             best_yes_ask=candidate.best_yes_ask,
             best_no_bid=candidate.best_no_bid,
             best_no_ask=candidate.best_no_ask,
+            best_side=candidate.best_side,
             group_id=group_id or f"{candidate.underlying}_{candidate.timeframe}",
             tags=tags or [],
         )
@@ -181,10 +182,49 @@ class KalshiContinuousTrader:
 
     # ── Candidate discovery ───────────────────────────────────────────────
 
+    def _get_spot_prices(self) -> Dict[str, float]:
+        """Fetch current spot prices for all tracked crypto assets.
+
+        Tries the WebSocket feed manager first (zero-latency, no auth).
+        Returns an empty dict if the feed is unavailable — callers must
+        tolerate missing spot prices gracefully.
+        """
+        try:
+            from merid.signals.ws_price_feed import get_ws_feed_manager
+            mgr = get_ws_feed_manager()
+            if mgr.is_active and mgr._feed is not None:
+                prices: Dict[str, float] = {}
+                for asset in _CRYPTO_ASSETS:
+                    update = mgr._feed.latest(asset)
+                    if update and update.price > 0:
+                        prices[asset] = update.price
+                if prices:
+                    return prices
+        except Exception as exc:
+            logger.debug("ContinuousTrader: WS spot fetch failed: %s", exc)
+        return {}
+
     async def _refresh_candidates(self) -> List[TradingCandidate]:
-        """Pull fresh candidates from catalog + filter pipeline."""
+        """Pull fresh candidates from catalog + filter pipeline.
+
+        Spot prices are fetched once and stamped onto every raw candidate
+        before passing them to the market filter.  This lets the filter sort
+        candidates nearest-to-spot first and apply the ``spot_band_pct``
+        distance gate with real data.
+        """
         new_candidates: List[TradingCandidate] = []
         asset_counts: Dict[str, Dict[str, int]] = {}
+
+        spot_prices = self._get_spot_prices()
+        if spot_prices:
+            logger.debug(
+                "ContinuousTrader: spot prices available for %s",
+                sorted(spot_prices.keys()),
+            )
+        else:
+            logger.warning(
+                "ContinuousTrader: no live spot prices — distance filter will be skipped"
+            )
 
         for asset in _CRYPTO_ASSETS:
             for tf in _CRYPTO_TIMEFRAMES:
@@ -193,7 +233,11 @@ class KalshiContinuousTrader:
                     logger.debug("ContinuousTrader: no catalog markets for %s %s", asset, tf)
                     continue
 
-                # Convert catalog → base MarketCandidate list for filter
+                spot = spot_prices.get(asset)
+
+                # Convert catalog → base MarketCandidate list for filter,
+                # stamping the live spot price so the filter can rank and gate
+                # by distance from spot.
                 raw_candidates = [
                     MarketCandidate(
                         ticker=cm.market.market_id,
@@ -204,6 +248,7 @@ class KalshiContinuousTrader:
                         open_interest=int(cm.market.open_interest) if cm.market.open_interest else 0,
                         category=cm.category or "",
                         strike_price=cm.strike_price,
+                        spot_price=spot,
                     )
                     for cm in catalog_markets
                 ]
