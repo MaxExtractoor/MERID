@@ -17,6 +17,9 @@ import LaneControlDashboard from "./views/LaneControlDashboard";
 import SwarmConsensusMatrix from "./views/SwarmConsensusMatrix";
 import CalibrationDashboardView from "./views/CalibrationDashboardView";
 import OperatorDashboard from "./views/OperatorDashboard";
+import RiskControlView from "./views/RiskControlView";
+import PositionSizingView from "./views/PositionSizingView";
+import PromotionStatusView from "./views/PromotionStatusView";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
 import { StubRegistryProvider } from "./components/GlobalStubBanner";
@@ -116,6 +119,9 @@ export default function App() {
               {view === "calibration-dashboard" && <CalibrationDashboardView />}
               {view === "operator" && <OperatorDashboard />}
               {view === "kill-switch" && <KillSwitchView />}
+              {view === "risk-control" && <RiskControlView />}
+              {view === "position-sizing" && <PositionSizingView />}
+              {view === "promotion-status" && <PromotionStatusView />}
               {view === "logs" && <Logs />}
               {view === "settings" && <Settings />}
             </ErrorBoundary>

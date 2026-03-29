@@ -1,4 +1,14 @@
-from neo4j import GraphDatabase
+try:
+    from neo4j import GraphDatabase
+    _NEO4J_AVAILABLE = True
+except ImportError:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "neo4j package not installed — graph memory disabled"
+    )
+    GraphDatabase = None  # type: ignore[assignment,misc]
+    _NEO4J_AVAILABLE = False
+
 from core.env import capabilities
 import uuid
 from datetime import datetime
@@ -6,6 +16,8 @@ from datetime import datetime
 
 class Neo4jMemory:
     def __init__(self):
+        if not _NEO4J_AVAILABLE or GraphDatabase is None:
+            raise RuntimeError("neo4j driver unavailable")
         self.driver = GraphDatabase.driver(
             capabilities.neo4j_uri,
             auth=(capabilities.neo4j_user, capabilities.neo4j_password)

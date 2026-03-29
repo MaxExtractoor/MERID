@@ -185,6 +185,46 @@ Object.defineProperty(global, 'WebSocket', {
   },
 });
 
+// Mock EventSource (SSE)
+Object.defineProperty(global, 'EventSource', {
+  writable: true,
+  value: class EventSource {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSED = 2;
+    readonly CONNECTING = 0;
+    readonly OPEN = 1;
+    readonly CLOSED = 2;
+    readyState = this.OPEN;
+    url = '';
+    withCredentials = false;
+    onopen: ((event: Event) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    private _listeners: Record<string, Array<EventListenerOrEventListenerObject>> = {};
+    constructor(url: string) {
+      this.url = url;
+      setTimeout(() => {
+        if (this.onopen) this.onopen(new Event('open'));
+      }, 0);
+    }
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      if (!this._listeners[type]) this._listeners[type] = [];
+      this._listeners[type].push(listener);
+      return undefined;
+    }
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      const arr = this._listeners[type];
+      if (!arr) return undefined;
+      this._listeners[type] = arr.filter((l) => l !== listener);
+      return undefined;
+    }
+    close() {
+      this.readyState = this.CLOSED;
+    }
+  },
+});
+
 // Mock localStorage
 const localStorageMock = {
   getItem: jest.fn(),

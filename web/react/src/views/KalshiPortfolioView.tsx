@@ -42,7 +42,16 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   const sizingResult = useApiData<SizingMetrics>(API_ENDPOINTS.KALSHI_SIZING_METRICS, { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW });
   const ksResult = useApiData<{ global_kill: boolean; can_trade: boolean; kill_reason: string | null }>(API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH });
   const modeResult = useApiData<{ mode: string; is_live: boolean; live_enabled: boolean }>(API_ENDPOINTS.KALSHI_GRID_MODE, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
-  const sessionResult = useApiData<{ trading_allowed: boolean; block_reason: string | null; current_et: string; maintenance_day: boolean; maintenance_window: string }>(API_ENDPOINTS.KALSHI_GRID_SESSION, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
+  const sessionResult = useApiData<{
+    trading_allowed?: boolean;
+    session_open?: boolean;
+    ws_connected?: boolean;
+    ws_lag_ms?: number;
+    block_reason?: string | null;
+    current_et?: string;
+    maintenance_day?: boolean;
+    maintenance_window?: string;
+  }>(API_ENDPOINTS.KALSHI_GRID_SESSION, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
   const gridPortfolioResult = useApiData<{ equity_usd: number; daily_pnl_usd: number; open_interest: number; position_count: number; kill_switch_active: boolean; margin_utilization: number }>(API_ENDPOINTS.KALSHI_GRID_PORTFOLIO, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
   const orderGroupsResult = useApiData<{
     groups: Array<{
@@ -233,7 +242,9 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   const isLive = modeResult.data?.is_live ?? false;
   const liveEnabled = modeResult.data?.live_enabled ?? false;
   const currentMode = modeResult.data?.mode ?? 'paper';
-  const sessionOpen = sessionResult.data?.trading_allowed ?? false;
+  const sessionOpen = sessionResult.data?.trading_allowed ?? sessionResult.data?.session_open ?? false;
+  const wsConnected = sessionResult.data?.ws_connected;
+  const wsLagMs = sessionResult.data?.ws_lag_ms;
   const sessionBlockReason = sessionResult.data?.block_reason ?? null;
   const maintenanceDay = sessionResult.data?.maintenance_day ?? false;
 
@@ -349,6 +360,14 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                 <Clock className="w-3 h-3" />
                 {sessionOpen ? 'Session open' : 'Session closed'}
               </span>
+              {typeof wsConnected === 'boolean' && (
+                <span className={`flex items-center gap-1 text-xs ${
+                  wsConnected ? 'text-cyan-400' : 'text-gray-500'
+                }`}>
+                  <Activity className="w-3 h-3" />
+                  {wsConnected ? `WS ${wsLagMs ?? 0}ms` : 'WS offline'}
+                </span>
+              )}
               {/* Maintenance indicator */}
               {maintenanceDay && (
                 <span className="flex items-center gap-1 text-xs text-amber-400">
