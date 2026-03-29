@@ -34,6 +34,7 @@ This checkpoint marks the completion of the MERID Robustness Checklist—all 14 
 | **9** | `security/secrets_manager.py` | Secrets management, RBAC, telemetry redaction, audit logging |
 | **10** | `data/ingestion/data_ingestion.py` | Pluggable data sources (market, sentiment, news, on-chain) |
 | **11** | `bots/bot_integration.py` | Telegram/Twitter bots with commands, RBAC, rate limiting |
+|        | `agents/telegram_agent.py` | ✅ Telegram global send queue with backoff and tests |
 | **12** | `web/react/src/components/charts/AgentOpinionChart.tsx` | Agent opinion visualization |
 | **12** | `web/react/src/components/charts/MarketHeatmap.tsx` | Market heatmap component |
 | **13** | `core/reuse_guardrails.py` | Non-reinvention checks, feature proposal review |
@@ -106,6 +107,19 @@ Implements Telegram and Twitter bots as **thin frontends on the MERID event bus*
 
 **Supports swarm goals**: Human oversight interface, emergency controls accessible outside the trading UI.
 
+### TelegramAgent — Queued Sender (`agents/telegram_agent.py`) ✅
+
+Refactored `TelegramAgent` to use a **global async send queue** with full rate-limit and retry handling so callers never block on or hammer the Telegram Bot API.
+
+Key changes:
+- **Async send queue** with configurable max size (`TELEGRAM_QUEUE_MAXSIZE`, default 200) and backpressure: when full, messages are dropped with a warning and a running drop counter.
+- **SHA1-based dedupe** within a configurable TTL (`TELEGRAM_DEDUPE_TTL`, default 5 s) to prevent flooding identical alerts.
+- **Centralized rate-limit / backoff handling**: both `RetryAfter` exceptions and generic `TelegramError` with `retry_after` attributes are caught; backoff is clamped to `[min_post_interval, TELEGRAM_MAX_BACKOFF]`.
+- **Bounded retries** (`_max_send_attempts = 3`) with clearer per-attempt warning logs.
+- **Async tests** in `tests/agents/test_telegram_rate_limit.py` asserting that duplicates are dropped, sends are spaced by at least `min_post_interval`, and retry-after backoff is respected.
+
+**Supports swarm goals**: Reliable, non-blocking alert delivery; prevents Telegram API ban from burst messages.
+
 ### ReuseGuardrails (`core/reuse_guardrails.py`)
 
 Enforces the **legacy-first rule**: every new feature must declare what existing topics, jobs, or adapters it reuses. Proposals with zero reuse are flagged as "suspect" and require explicit justification. This prevents architecture sprawl and duplicate systems.
@@ -139,8 +153,15 @@ python -m pytest tests/ -v --tb=short
 
 1. **S3 Event Source** – Implement production event fetcher for replay harness
 2. **Schema Migration** – Add tooling for evolving Kafka topic schemas
-3. **Bot Deployment** – Configure Telegram/Twitter API credentials in production
+3. **Bot Deployment** – ✅ Queue + backoff implemented in `agents/telegram_agent.py`; production credentials configuration still pending
 4. **CI Integration** – Add these 66 tests to CI pipeline as gate
+
+### Open Items (not addressed in Telegram queue commit)
+
+- [ ] **Kalshi fill ingestion / idempotency** – dedupe fill events by `fill_id` before recording to ledger
+- [ ] **BTC risk-limit wiring** – propagate updated BTC position limits to `ExecutionGuard` domain caps in real time
+- [ ] **Event-loop lag controls** – tiered WARN / DEGRADE / HALT response when `LagMetricsCollector` thresholds are breached
+- [ ] **CFB RTI readiness gating** – surface CFB RTI health status in go-live preflight so live trading is blocked on stale RTI data
 
 ---
 

@@ -3,6 +3,21 @@ Telegram Agent for MERID.
 
 Handles posting updates, alerts, and breaking news to Telegram.
 Production-grade implementation with real Bot API integration.
+
+Lifecycle-aligned notifications
+────────────────────────────────
+Use ``send_lifecycle_event()`` (or the per-stage ``notify_*`` wrappers) to
+emit structured episode messages that follow the 8-phase MERID trading loop:
+
+  DISCOVER → ANALYZE → CONSENSUS → SIZE → EXECUTE → MONITOR → PROMOTE → PROTECT
+
+Each call is keyed to an ``episode_id`` that covers all assets/timeframes in
+one trading episode so Telegram shows a narrative, not per-market spam.
+
+Deduplication is keyed by ``episode_id + stage + status`` so retries within
+the TTL are suppressed but materially different outcomes (new status, new
+stage) always get through.  PROTECT FAILURE events default to ``force=True``
+and bypass the dedupe window entirely.
 """
 
 from __future__ import annotations
@@ -12,8 +27,9 @@ import time
 import asyncio
 import hashlib
 from collections import deque
-from typing import Optional, List, Dict
-from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, List, Dict, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from telegram import Bot
@@ -22,6 +38,57 @@ from utils.logger import get_logger
 
 logger = get_logger("agents.telegram_agent")
 
+
+# ── Lifecycle types ────────────────────────────────────────────────────
+
+class LifecycleStage(str, Enum):
+    """The 8 phases of the MERID trading loop."""
+    DISCOVER  = "DISCOVER"
+    ANALYZE   = "ANALYZE"
+    CONSENSUS = "CONSENSUS"
+    SIZE      = "SIZE"
+    EXECUTE   = "EXECUTE"
+    MONITOR   = "MONITOR"
+    PROMOTE   = "PROMOTE"
+    PROTECT   = "PROTECT"
+
+
+class LifecycleStatus(str, Enum):
+    """Outcome of a lifecycle stage."""
+    SUCCESS = "SUCCESS"
+    PARTIAL = "PARTIAL"
+    FAILURE = "FAILURE"
+
+
+@dataclass
+class EpisodeEvent:
+    """Structured lifecycle notification for a single multi-asset episode."""
+
+    episode_id: str
+    """Stable ID for this trading episode (UUID or deterministic hash)."""
+
+    stage: LifecycleStage
+    """Current phase of the trading loop."""
+
+    status: LifecycleStatus
+    """Outcome: SUCCESS / PARTIAL / FAILURE."""
+
+    assets: Sequence[str] = field(default_factory=list)
+    """Crypto assets involved (e.g. ["BTC", "ETH"])."""
+
+    summary: str = ""
+    """Short human-readable description (≤ 200 chars recommended)."""
+
+    details: Dict = field(default_factory=dict)
+    """Optional key/value payload rendered in the message.
+    Common keys: confidence, direction, vetoed_assets, slippage_bps,
+    risk_utilization, error, re_enable_condition."""
+
+    force: bool = False
+    """When True, bypasses dedupe — always use for PROTECT FAILURE alerts."""
+
+
+# ── Core message types ─────────────────────────────────────────────────
 
 @dataclass
 class TelegramMessage:
@@ -388,6 +455,188 @@ class TelegramAgent:
         
         return await self.send_message(text)
     
+    # ── Lifecycle-aligned notifications ───────────────────────────────
+
+    _STAGE_EMOJI = {
+        "DISCOVER":  "🔭",
+        "ANALYZE":   "🔬",
+        "CONSENSUS": "🤝",
+        "SIZE":      "📐",
+        "EXECUTE":   "⚡",
+        "MONITOR":   "📡",
+        "PROMOTE":   "🚀",
+        "PROTECT":   "🛡",
+    }
+    _STATUS_EMOJI = {
+        "SUCCESS": "✅",
+        "PARTIAL": "⚠️",
+        "FAILURE": "❌",
+    }
+
+    @staticmethod
+    def _episode_dedupe_key(event: EpisodeEvent) -> str:
+        """SHA1 key from episode_id + stage + status for deduplication."""
+        raw = f"{event.episode_id}|{event.stage}|{event.status}"
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _format_lifecycle_text(event: EpisodeEvent) -> str:
+        """Render an EpisodeEvent as an HTML Telegram message."""
+        stage_emoji  = TelegramAgent._STAGE_EMOJI.get(str(event.stage).split(".")[-1].split("'")[0], "📋")
+        # Handle both "LifecycleStage.DISCOVER" and plain "DISCOVER"
+        stage_str    = event.stage.value if hasattr(event.stage, "value") else str(event.stage)
+        status_str   = event.status.value if hasattr(event.status, "value") else str(event.status)
+        stage_emoji  = TelegramAgent._STAGE_EMOJI.get(stage_str, "📋")
+        status_emoji = TelegramAgent._STATUS_EMOJI.get(status_str, "❓")
+        asset_str    = ", ".join(event.assets) if event.assets else "—"
+        ep_short     = event.episode_id[:8] if len(event.episode_id) >= 8 else event.episode_id
+
+        lines = [
+            f"{stage_emoji} <b>{stage_str} — {status_str}</b> {status_emoji}",
+            f"<code>ep:{ep_short}</code>  assets: <b>{asset_str}</b>",
+        ]
+        if event.summary:
+            lines.append(f"\n{event.summary}")
+        if event.details:
+            lines.append("")
+            for k, v in event.details.items():
+                lines.append(f"  <b>{k}:</b> {v}")
+        lines.append("\n<i>MERID Trading Loop</i>")
+        return "\n".join(lines)
+
+    async def send_lifecycle_event(self, event: EpisodeEvent) -> Optional[TelegramMessage]:
+        """Send a lifecycle-phase notification for a trading episode.
+
+        Deduplication is keyed by ``episode_id + stage + status`` so the same
+        outcome within the TTL is suppressed but a different status (e.g.
+        FAILURE after SUCCESS) always gets through.
+
+        PROTECT FAILURE events are sent with ``force=True`` by default so
+        circuit-fire alerts are never silently dropped.
+        """
+        if not self.enabled:
+            logger.warning(
+                "Telegram disabled — lifecycle event not sent: %s %s [%s]",
+                event.stage, event.status, event.episode_id,
+            )
+            return None
+
+        await self._ensure_worker()
+
+        stage_str  = event.stage.value if hasattr(event.stage, "value") else str(event.stage)
+        status_str = event.status.value if hasattr(event.status, "value") else str(event.status)
+        is_protect_failure = stage_str == "PROTECT" and status_str == "FAILURE"
+        force = event.force or is_protect_failure
+
+        if not force:
+            dedupe_key = self._episode_dedupe_key(event)
+            now = time.time()
+            while self._recent_hashes and now - self._recent_hashes[0][1] > self._dedupe_ttl:
+                self._recent_hashes.popleft()
+            if any(h == dedupe_key for h, _ in self._recent_hashes):
+                logger.info(
+                    "Lifecycle dedupe: dropping %s %s [%s]",
+                    stage_str, status_str, event.episode_id[:8],
+                )
+                return None
+            self._recent_hashes.append((dedupe_key, now))
+
+        text = self._format_lifecycle_text(event)
+        if len(text) > 4096:
+            text = text[:4093] + "..."
+
+        future = asyncio.get_running_loop().create_future()
+        try:
+            self._queue.put_nowait(
+                _QueuedMessage(
+                    text=text,
+                    parse_mode="HTML",
+                    force=force,
+                    future=future,
+                    enqueued_at=time.time(),
+                )
+            )
+        except asyncio.QueueFull:
+            self._queue_drop_count += 1
+            logger.warning(
+                "Telegram queue full — dropping lifecycle event %s %s (dropped_total=%d)",
+                stage_str, status_str, self._queue_drop_count,
+            )
+            future.set_result(None)
+            return None
+
+        return await future
+
+    # ── Per-stage convenience wrappers ────────────────────────────────
+
+    async def notify_discover(self, episode_id: str, assets: Sequence[str], summary: str,
+                              status: LifecycleStatus = LifecycleStatus.SUCCESS, **details) -> Optional[TelegramMessage]:
+        """Emit a DISCOVER-phase notification (new episode found)."""
+        return await self.send_lifecycle_event(EpisodeEvent(
+            episode_id=episode_id, stage=LifecycleStage.DISCOVER, status=status,
+            assets=list(assets), summary=summary, details=dict(details),
+        ))
+
+    async def notify_analyze(self, episode_id: str, assets: Sequence[str], summary: str,
+                             status: LifecycleStatus = LifecycleStatus.SUCCESS, **details) -> Optional[TelegramMessage]:
+        """Emit an ANALYZE-phase notification (feature/signal summary)."""
+        return await self.send_lifecycle_event(EpisodeEvent(
+            episode_id=episode_id, stage=LifecycleStage.ANALYZE, status=status,
+            assets=list(assets), summary=summary, details=dict(details),
+        ))
+
+    async def notify_consensus(self, episode_id: str, assets: Sequence[str], summary: str,
+                               status: LifecycleStatus = LifecycleStatus.SUCCESS, **details) -> Optional[TelegramMessage]:
+        """Emit a CONSENSUS-phase notification (one message per episode)."""
+        return await self.send_lifecycle_event(EpisodeEvent(
+            episode_id=episode_id, stage=LifecycleStage.CONSENSUS, status=status,
+            assets=list(assets), summary=summary, details=dict(details),
+        ))
+
+    async def notify_size(self, episode_id: str, assets: Sequence[str], summary: str,
+                          status: LifecycleStatus = LifecycleStatus.SUCCESS, **details) -> Optional[TelegramMessage]:
+        """Emit a SIZE-phase notification (position sizing decision)."""
+        return await self.send_lifecycle_event(EpisodeEvent(
+            episode_id=episode_id, stage=LifecycleStage.SIZE, status=status,
+            assets=list(assets), summary=summary, details=dict(details),
+        ))
+
+    async def notify_execute(self, episode_id: str, assets: Sequence[str], summary: str,
+                             status: LifecycleStatus = LifecycleStatus.SUCCESS, **details) -> Optional[TelegramMessage]:
+        """Emit an EXECUTE-phase notification (order submission summary)."""
+        return await self.send_lifecycle_event(EpisodeEvent(
+            episode_id=episode_id, stage=LifecycleStage.EXECUTE, status=status,
+            assets=list(assets), summary=summary, details=dict(details),
+        ))
+
+    async def notify_monitor(self, episode_id: str, assets: Sequence[str], summary: str,
+                             status: LifecycleStatus = LifecycleStatus.SUCCESS, **details) -> Optional[TelegramMessage]:
+        """Emit a MONITOR-phase notification (PnL / health update)."""
+        return await self.send_lifecycle_event(EpisodeEvent(
+            episode_id=episode_id, stage=LifecycleStage.MONITOR, status=status,
+            assets=list(assets), summary=summary, details=dict(details),
+        ))
+
+    async def notify_promote(self, episode_id: str, assets: Sequence[str], summary: str,
+                             status: LifecycleStatus = LifecycleStatus.SUCCESS, **details) -> Optional[TelegramMessage]:
+        """Emit a PROMOTE-phase notification (strategy graduation)."""
+        return await self.send_lifecycle_event(EpisodeEvent(
+            episode_id=episode_id, stage=LifecycleStage.PROMOTE, status=status,
+            assets=list(assets), summary=summary, details=dict(details),
+        ))
+
+    async def notify_protect(self, episode_id: str, assets: Sequence[str], summary: str,
+                             status: LifecycleStatus = LifecycleStatus.FAILURE,
+                             force: bool = True, **details) -> Optional[TelegramMessage]:
+        """Emit a PROTECT-phase notification (circuit fire / risk halt).
+
+        Defaults to FAILURE + force=True so these alerts always reach Telegram.
+        """
+        return await self.send_lifecycle_event(EpisodeEvent(
+            episode_id=episode_id, stage=LifecycleStage.PROTECT, status=status,
+            assets=list(assets), summary=summary, details=dict(details), force=force,
+        ))
+
     def get_recent_messages(self, limit: int = 10) -> List[TelegramMessage]:
         """Get recent messages sent by this agent."""
         return self.recent_messages[-limit:]
