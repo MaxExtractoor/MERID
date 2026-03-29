@@ -91,15 +91,20 @@ class CoinbaseAdvancedAdapter(VenueAdapter):
         if not self._has_credentials:
             self.logger.warning("coinbase_no_credentials — running in stub mode")
             return False
+        # Create a temporary client to probe auth before committing to self._http.
+        # This prevents connect() failures from leaving self._http in a non-None
+        # state, which would cause subsequent get_market_data() calls to attempt
+        # authenticated requests and receive 401 responses indefinitely.
+        tmp_http = httpx.AsyncClient(base_url=_BASE_URL, timeout=15.0)
         try:
-            self._http = httpx.AsyncClient(base_url=_BASE_URL, timeout=15.0)
             path = "/api/v3/brokerage/accounts"
-            resp = await self._http.get(
+            resp = await tmp_http.get(
                 path,
                 headers=self._auth_headers("GET", path),
             )
             resp.raise_for_status()
             accounts = resp.json().get("accounts", [])
+            self._http = tmp_http          # promote only on success
             self.connected = True
             self.logger.info(
                 "coinbase_connected",
@@ -108,6 +113,7 @@ class CoinbaseAdvancedAdapter(VenueAdapter):
             return True
         except Exception as e:
             self.logger.error("coinbase_connect_error", error=str(e))
+            await tmp_http.aclose()        # clean up the probe client
             self.connected = False
             return False
 
@@ -121,8 +127,39 @@ class CoinbaseAdvancedAdapter(VenueAdapter):
         return True
 
     async def get_market_data(self, symbol: str) -> Optional[MarketData]:
-        """Get crypto market data from Coinbase product ticker."""
-        if not self._http:
+        """Get crypto market data from Coinbase product ticker.
+
+        Uses the public ``/v2/prices/{symbol}/spot`` endpoint so no
+        authentication is required for read-only spot prices.  Falls back to
+        the authenticated Advanced Trade product endpoint only when a live
+        HTTP session is available (i.e. ``connect()`` succeeded).
+        """
+        # --- Public spot price (no auth, always available) ---
+        try:
+            async with httpx.AsyncClient(base_url=_BASE_URL, timeout=10.0) as pub:
+                pub_path = f"/v2/prices/{symbol}/spot"
+                pub_resp = await pub.get(pub_path)
+                if pub_resp.status_code == 200:
+                    data = pub_resp.json().get("data", {})
+                    price_str = data.get("amount", "0")
+                    price = Decimal(str(price_str)) if price_str else Decimal("0")
+                    if price > 0:
+                        return MarketData(
+                            symbol=symbol,
+                            bid=price,
+                            ask=price,
+                            last=price,
+                            volume_24h=Decimal("0"),
+                            high_24h=price,
+                            low_24h=price,
+                            timestamp=datetime.now(timezone.utc),
+                            venue="coinbase_advanced",
+                        )
+        except Exception as e:
+            self.logger.debug("coinbase_public_spot_failed", symbol=symbol, error=str(e))
+
+        # --- Authenticated Advanced Trade fallback (only if connected) ---
+        if not self._http or not self.connected:
             return None
         try:
             path = f"/api/v3/brokerage/products/{symbol}"
@@ -132,19 +169,20 @@ class CoinbaseAdvancedAdapter(VenueAdapter):
             )
             resp.raise_for_status()
             p = resp.json()
+            price = Decimal(str(p.get("price", "0")))
             return MarketData(
                 symbol=symbol,
                 bid=Decimal(str(p.get("quote_min_size", "0"))),
                 ask=Decimal(str(p.get("quote_max_size", "0"))),
-                last=Decimal(str(p.get("price", "0"))),
+                last=price,
                 volume_24h=Decimal(str(p.get("volume_24h", "0"))),
-                high_24h=Decimal(str(p.get("price", "0"))),
-                low_24h=Decimal(str(p.get("price", "0"))),
+                high_24h=price,
+                low_24h=price,
                 timestamp=datetime.now(timezone.utc),
                 venue="coinbase_advanced",
             )
         except Exception as e:
-            self.logger.error("market_data_error", error=str(e))
+            self.logger.error("market_data_error", symbol=symbol, error=str(e))
             return None
 
     async def _place_order_impl(

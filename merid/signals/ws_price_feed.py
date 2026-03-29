@@ -76,10 +76,11 @@ MERID_TO_COINBASE = {
     "BTC": "BTC-USD",
     "ETH": "ETH-USD",
     "SOL": "SOL-USD",
+    "XRP": "XRP-USD",
+    "DOGE": "DOGE-USD",
     "AVAX": "AVAX-USD",
     "LINK": "LINK-USD",
     "MATIC": "MATIC-USD",
-    "DOGE": "DOGE-USD",
 }
 
 COINBASE_TO_MERID = {v: k for k, v in MERID_TO_COINBASE.items()}

@@ -563,10 +563,13 @@ def _run_paper_matrix() -> RingResult:
 def _run_agent_gauntlet(cycles: int = 10) -> tuple:
     """Run agent gauntlet and return (RingResult, List[AgentPromotion])."""
     t0 = time.time()
+    coro = None
     try:
         from merid.agent_gauntlet import run_gauntlet, gauntlet_summary, GauntletResult
 
-        verdicts = asyncio.run(run_gauntlet(cycles=cycles))
+        coro = run_gauntlet(cycles=cycles)
+        verdicts = asyncio.run(coro)
+        coro = None
         summary = gauntlet_summary(verdicts)
 
         agent_promotions = []
@@ -592,6 +595,8 @@ def _run_agent_gauntlet(cycles: int = 10) -> tuple:
         return ring, agent_promotions
 
     except Exception as e:
+        if coro is not None:
+            coro.close()
         ring = RingResult(
             name="gauntlet", passed=False,
             failures=[str(e)],
