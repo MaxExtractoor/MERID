@@ -60,6 +60,24 @@ export interface KalshiRiskSummary {
   limits: Record<string, number>;
 }
 
+export interface KalshiExecutionHealth {
+  timestamp: string;
+  window_minutes: number;
+  signals: number;
+  orders_attempted: number;
+  orders_sent: number;
+  fills: number;
+  risk_rejections: number;
+  state: 'no_signals' | 'signals_rejected_by_risk' | 'signals_not_routed' | 'orders_pending' | 'orders_filled';
+  per_asset_timeframe: Record<string, {
+    signals: number;
+    orders_attempted: number;
+    orders_sent: number;
+    fills: number;
+    risk_rejections: number;
+  }>;
+}
+
 export interface SizingMetrics {
   kelly_fraction: number;
   kelly_utilization_pct: number;

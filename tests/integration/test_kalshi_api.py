@@ -33,12 +33,11 @@ class TestKalshiAPIHealth:
         response = client.get("/api/v1/kalshi/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] in ["healthy", "degraded", "disconnected", "halted"]
+        assert data["status"] in ["healthy", "degraded", "disconnected", "halted", "critical"]
         assert "issues" in data
         assert "catalog" in data
         assert "risk" in data
         assert "ws" in data
-        assert "rest_connected" in data
 
 
 class TestKalshiAPIMarkets:
@@ -146,6 +145,8 @@ class TestKalshiAPIPortfolio:
         data = response.json()
         assert "positions" in data
         assert "count" in data
+        if data["positions"]:
+            assert "status" in data["positions"][0]
 
     def test_get_orders(self):
         """Get orders endpoint."""

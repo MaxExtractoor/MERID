@@ -90,6 +90,7 @@ export const API_ENDPOINTS = {
   KALSHI_GRID_FILLS: "/api/v1/kalshi-grid/fills",
   KALSHI_GRID_PORTFOLIO: "/api/v1/kalshi-grid/portfolio",
   KALSHI_GRID_SESSION: "/api/v1/kalshi-grid/session",
+  KALSHI_GRID_EXECUTION_HEALTH: "/api/v1/kalshi-grid/execution-health",
   KALSHI_GRID_START: "/api/v1/kalshi-grid/start",
   KALSHI_GRID_STOP: "/api/v1/kalshi-grid/stop",
   KALSHI_GRID_PAUSE: "/api/v1/kalshi-grid/pause",
@@ -363,4 +364,3 @@ export const LOG_LEVELS = {
   INFO: "info",
   DEBUG: "debug",
 } as const;
-

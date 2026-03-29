@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, API_BASE_URL, DEFAULTS } from '../config/constants';
-import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiFill, KalshiRiskSummary, SizingMetrics } from '../types/kalshi';
+import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiFill, KalshiRiskSummary, SizingMetrics, KalshiExecutionHealth } from '../types/kalshi';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiPnlChart from '../components/KalshiPnlChart';
@@ -53,6 +53,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     maintenance_window?: string;
   }>(API_ENDPOINTS.KALSHI_GRID_SESSION, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
   const gridPortfolioResult = useApiData<{ equity_usd: number; daily_pnl_usd: number; open_interest: number; position_count: number; kill_switch_active: boolean; margin_utilization: number }>(API_ENDPOINTS.KALSHI_GRID_PORTFOLIO, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
+  const execHealthResult = useApiData<KalshiExecutionHealth>(API_ENDPOINTS.KALSHI_GRID_EXECUTION_HEALTH, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
   const orderGroupsResult = useApiData<{
     groups: Array<{
       order_group_id: string;
@@ -96,6 +97,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   }, [allFills, assetFilter]);
   const balance = balResult.data;
   const risk = riskResult.data;
+  const execHealth = execHealthResult.data;
   const loading = posResult.loading || ordResult.loading || fillResult.loading || balResult.loading || riskResult.loading;
 
   const [killSwitchError, setKillSwitchError] = useState<string | null>(null);
@@ -237,7 +239,8 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     fillResult.refetch();
     balResult.refetch();
     riskResult.refetch();
-  }, [posResult, ordResult, fillResult, balResult, riskResult]);
+    execHealthResult.refetch();
+  }, [posResult, ordResult, fillResult, balResult, riskResult, execHealthResult]);
 
   const isLive = modeResult.data?.is_live ?? false;
   const liveEnabled = modeResult.data?.live_enabled ?? false;
@@ -560,6 +563,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                     <th className="text-left p-3">Ticker</th>
                     <th className="text-left p-3">Side</th>
                     <th className="text-right p-3">Size</th>
+                    <th className="text-right p-3">Status</th>
                     <th className="text-right p-3">Avg Price</th>
                     <th className="text-right p-3">Unrealized</th>
                     <th className="text-right p-3">Realized</th>
@@ -567,7 +571,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                 </thead>
                 <tbody>
                   {positions.length === 0 ? (
-                    <tr><td colSpan={6} className="text-center py-8 text-gray-500">No positions</td></tr>
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-500">No positions</td></tr>
                   ) : (
                     positions.map((p, i) => (
                       <tr key={p.ticker} className="border-b border-slate-800/50 hover:bg-slate-800/30">
@@ -579,8 +583,9 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                             {p.outcome.toUpperCase()}
                           </span>
                         </td>
-                        <td className="p-3 text-right text-white">{p.size}</td>
-                        <td className="p-3 text-right text-gray-300">{((p.avg_price ?? 0) * 100).toFixed(1)}¢</td>
+                          <td className="p-3 text-right text-white">{p.size}</td>
+                          <td className="p-3 text-right text-gray-400">{(p as { status?: string }).status ?? 'active'}</td>
+                          <td className="p-3 text-right text-gray-300">{((p.avg_price ?? 0) * 100).toFixed(1)}¢</td>
                         <td className={`p-3 text-right font-medium ${p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                           ${(p.unrealized_pnl ?? 0).toFixed(2)}
                         </td>
@@ -767,6 +772,25 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
           {/* Risk Tab */}
           {tab === 'risk' && risk && (
             <div className="space-y-4">
+              {execHealth && (
+                <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                  <h3 className="text-sm font-medium text-gray-300 mb-2">Execution Status</h3>
+                  <p className="text-xs text-gray-400 mb-3">
+                    {execHealth.state === 'no_signals' && 'No signals'}
+                    {execHealth.state === 'signals_rejected_by_risk' && 'Signals rejected by risk'}
+                    {execHealth.state === 'signals_not_routed' && 'Signals generated but not routed'}
+                    {execHealth.state === 'orders_pending' && 'Orders pending'}
+                    {execHealth.state === 'orders_filled' && 'Orders filled'}
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="bg-slate-800 rounded px-2 py-1.5"><span className="text-gray-500">Signals</span><div className="text-white">{execHealth.signals}</div></div>
+                    <div className="bg-slate-800 rounded px-2 py-1.5"><span className="text-gray-500">Attempted</span><div className="text-white">{execHealth.orders_attempted}</div></div>
+                    <div className="bg-slate-800 rounded px-2 py-1.5"><span className="text-gray-500">Sent</span><div className="text-white">{execHealth.orders_sent}</div></div>
+                    <div className="bg-slate-800 rounded px-2 py-1.5"><span className="text-gray-500">Fills</span><div className="text-white">{execHealth.fills}</div></div>
+                    <div className="bg-slate-800 rounded px-2 py-1.5"><span className="text-gray-500">Risk rejects</span><div className="text-white">{execHealth.risk_rejections}</div></div>
+                  </div>
+                </div>
+              )}
               {/* Risk Overview */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">

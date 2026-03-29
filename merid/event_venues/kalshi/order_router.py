@@ -25,7 +25,7 @@ import asyncio
 import os
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -173,6 +173,7 @@ class OrderIntent:
     order_group_id: Optional[str] = None
     self_trade_prevention_type: Optional[str] = None
     post_only: bool = False
+    decision_trace_id: Optional[str] = None
     # Live orderbook params (E1) — populated from the current orderbook snapshot
     spread_cents: Optional[int] = None
     depth_at_price: Optional[int] = None
@@ -291,7 +292,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     """
     if intent.count <= 0:
         return "non_positive_size"
-    if intent.price_cents <= 0 or intent.price_cents >= 100:
+    if intent.order_type == "limit" and (intent.price_cents <= 0 or intent.price_cents >= 100):
         return "invalid_price"
     if intent.side not in ("yes", "no"):
         return "invalid_side"
@@ -521,6 +522,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 "ticker": intent.ticker,
                 "side": intent.side,
                 "action": intent.action,
+                "decision_trace_id": intent.decision_trace_id,
                 "price_cents": fill_price_cents,
                 "count": filled_count,
                 "requested_count": requested_count,
@@ -670,6 +672,7 @@ async def route_batch_orders_async(
             order_group_id=order_group_id,
             self_trade_prevention_type=stp_type,
             post_only=intent.post_only,
+            decision_trace_id=intent.decision_trace_id,
         ))
 
     # Validate all orders first
