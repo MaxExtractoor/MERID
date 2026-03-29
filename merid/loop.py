@@ -824,6 +824,21 @@ class MeridLoop:
         # Global kill switch short-circuit
         if guard.kill_switch_active:
             summary["actions"].append("execution:blocked_by_kill_switch")
+
+            # Lifecycle notification: PROTECT phase (kill switch active)
+            try:
+                from agents.telegram_agent import get_telegram_agent
+                tg = get_telegram_agent()
+                if tg.enabled:
+                    await tg.notify_protect(
+                        episode_id="system",
+                        assets=[],
+                        summary="Global kill switch active — all execution blocked",
+                        reason=guard._global_kill_reason,
+                        force=True,
+                    )
+            except Exception as tg_exc:
+                logger.debug("Telegram PROTECT notification failed: %s", tg_exc)
             return
 
         # Hard reconciliation gate — refuse to execute if positions are out of sync
@@ -869,6 +884,12 @@ class MeridLoop:
                     )
                     continue
 
+            # Extract asset symbol for per-asset risk caps (crypto domain only)
+            asset = getattr(plan, "asset", "")
+            if not asset and domain == "crypto":
+                # Extract from symbol: "BTC/USDT" -> "BTC", "ETH-USD" -> "ETH"
+                asset = plan.symbol.split("/")[0].split("-")[0].upper()
+
             # Pre-trade safety check
             verdict = guard.pre_trade_check(
                 plan_id=plan.plan_id,
@@ -876,6 +897,7 @@ class MeridLoop:
                 domain=domain,
                 size_usd=size_usd,
                 direction=plan.direction,
+                asset=asset,
             )
 
             if not verdict.allowed:
@@ -887,16 +909,51 @@ class MeridLoop:
                 plan.approved_size_usd = verdict.adjusted_size_usd
                 result = await self._execute_single_plan(plan)
                 if result:
-                    guard.record_execution(domain, verdict.adjusted_size_usd)
+                    guard.record_execution(domain, verdict.adjusted_size_usd, asset=asset)
                     self.metrics.plans_executed += 1
                     summary["actions"].append(
                         f"executed:{plan.symbol}:{plan.direction}"
                         f":${verdict.adjusted_size_usd:.0f}"
                         f"(throttle={verdict.throttle_pct:.0%})"
                     )
+
+                    # Lifecycle notification: EXECUTE phase SUCCESS
+                    try:
+                        from agents.telegram_agent import get_telegram_agent, LifecycleStatus
+                        tg = get_telegram_agent()
+                        if tg.enabled:
+                            episode_id = getattr(plan, "id", plan.plan_id)
+                            assets_list = [asset] if asset else []
+                            await tg.notify_execute(
+                                episode_id=episode_id,
+                                assets=assets_list,
+                                summary=f"{plan.direction.upper()} {plan.symbol} ${verdict.adjusted_size_usd:.0f}",
+                                status=LifecycleStatus.SUCCESS,
+                                throttle=f"{verdict.throttle_pct:.0%}",
+                                cqi=f"{verdict.cqi_score:.2f}",
+                            )
+                    except Exception as tg_exc:
+                        logger.debug("Telegram lifecycle notification failed: %s", tg_exc)
             except Exception as e:
                 logger.error(f"Plan execution failed {plan.plan_id}: {e}")
                 summary["actions"].append(f"plan_failed:{plan.plan_id}:{plan.symbol}:{e}")
+
+                # Lifecycle notification: EXECUTE phase FAILURE
+                try:
+                    from agents.telegram_agent import get_telegram_agent, LifecycleStatus
+                    tg = get_telegram_agent()
+                    if tg.enabled:
+                        episode_id = getattr(plan, "id", plan.plan_id)
+                        assets_list = [asset] if asset else []
+                        await tg.notify_execute(
+                            episode_id=episode_id,
+                            assets=assets_list,
+                            summary=f"Execution failed: {str(e)[:100]}",
+                            status=LifecycleStatus.FAILURE,
+                            error=str(e),
+                        )
+                except Exception as tg_exc:
+                    logger.debug("Telegram lifecycle notification failed: %s", tg_exc)
 
     async def _execute_single_plan(self, plan) -> Optional[Dict]:
         """Bridge a TradePlan to a TradeRequest and submit to the adapter.

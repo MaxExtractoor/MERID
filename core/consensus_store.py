@@ -81,6 +81,7 @@ class TradePlan:
     votes_for: int = 0
     votes_against: int = 0
     created_at: float = field(default_factory=time.time)
+    asset: str = ""  # Crypto asset symbol (e.g., "BTC", "ETH") for per-asset risk caps
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -99,6 +100,7 @@ class TradePlan:
             "agents_involved": self.supporting_agents + self.opposing_agents,
             "created_at": datetime.fromtimestamp(self.created_at, tz=timezone.utc).isoformat(),
             "timestamp": self.created_at,
+            "asset": self.asset,
         }
 
 
@@ -161,6 +163,12 @@ class ConsensusStore:
             conn.execute(_CREATE_OPINIONS)
             conn.execute(_CREATE_PLANS)
             conn.executescript(_CREATE_INDEXES)
+            # Migration: add asset column if it doesn't exist
+            try:
+                conn.execute("ALTER TABLE plans ADD COLUMN asset TEXT NOT NULL DEFAULT ''")
+                logger.info("Migration: added asset column to plans table")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         logger.info("Consensus store initialized: %s", self._db_path)
 
     def _connect(self) -> sqlite3.Connection:
@@ -207,13 +215,13 @@ class ConsensusStore:
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT INTO plans (id, symbol, title, direction, target_size_usd, confidence, consensus_score, status, supporting_agents, opposing_agents, votes_for, votes_against, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO plans (id, symbol, title, direction, target_size_usd, confidence, consensus_score, status, supporting_agents, opposing_agents, votes_for, votes_against, created_at, asset) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (plan.id, plan.symbol, plan.title, plan.direction,
                      plan.target_size_usd, plan.confidence, plan.consensus_score,
                      plan.status, json.dumps(plan.supporting_agents),
                      json.dumps(plan.opposing_agents), plan.votes_for,
-                     plan.votes_against, plan.created_at),
+                     plan.votes_against, plan.created_at, plan.asset),
                 )
         return plan
 
@@ -509,6 +517,7 @@ class ConsensusStore:
             votes_for=row["votes_for"],
             votes_against=row["votes_against"],
             created_at=row["created_at"],
+            asset=row.get("asset", ""),  # Backwards-compatible with old DB
         )
 
 
