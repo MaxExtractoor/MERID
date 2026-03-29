@@ -318,7 +318,7 @@ export default function KillSwitchView() {
               className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-800 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
             >
               <ShieldCheck className="w-4 h-4" />
-              Reset Kill Switch
+              Reset Safety State
             </button>
           )}
           <span className="text-xs text-slate-500 flex items-center">

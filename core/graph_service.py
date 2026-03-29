@@ -15,7 +15,17 @@ Follows Neo4j driver best practices for production:
 - Secure connections (neo4j+s://)
 """
 
-from neo4j import GraphDatabase
+try:
+    from neo4j import GraphDatabase
+    _NEO4J_AVAILABLE = True
+except ImportError:
+    import logging as _import_logger
+    _import_logger.getLogger(__name__).warning(
+        "neo4j package not installed — GraphService disabled"
+    )
+    GraphDatabase = None  # type: ignore[assignment,misc]
+    _NEO4J_AVAILABLE = False
+
 from typing import Dict, List, Optional, Any
 import logging
 from dataclasses import asdict
