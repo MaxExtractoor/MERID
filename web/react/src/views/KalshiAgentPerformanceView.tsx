@@ -327,7 +327,7 @@ export default function KalshiAgentPerformanceView() {
         ) : (
           <div className="p-10 text-center text-slate-500">
             <Activity className="w-12 h-12 mx-auto mb-3 opacity-50" />
-            <p>No agent performance data available yet</p>
+            <p>No performance data available yet</p>
             <p className="text-sm mt-1">Data will appear after agents execute trades</p>
           </div>
         )}

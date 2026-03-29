@@ -69,7 +69,8 @@ describe('Kalshi Suite — Smoke Tests', () => {
 
   it('KillSwitchView mounts and shows title', () => {
     render(<KillSwitchView />);
-    expect(screen.getByText(/Kill Switch/i)).toBeTruthy();
+    // Use heading role to avoid ambiguity with other "Kill Switch" text in the view
+    expect(screen.getByRole('heading', { name: /Kill Switch/i })).toBeTruthy();
   });
 
   it('ExposureView mounts without errors', () => {
