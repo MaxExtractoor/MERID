@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_WS_TIMEFRAMES
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
 from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig
 from merid.prediction.opinion_strategy import OpinionStrategy, OpinionEstimate, OpinionExplanation
@@ -36,8 +37,9 @@ logger = get_logger("merid.trading.kalshi_continuous_trader")
 
 # ── Configurable defaults (env overrides) ─────────────────────────────────
 
-_CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
-_CRYPTO_TIMEFRAMES = ("15m", "1h", "daily")
+# Import from canonical config — do not maintain a separate list here.
+_CRYPTO_ASSETS = tuple(ACTIVE_CRYPTO_ASSETS)
+_CRYPTO_TIMEFRAMES = tuple(ACTIVE_CRYPTO_WS_TIMEFRAMES)
 
 _DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"))
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
