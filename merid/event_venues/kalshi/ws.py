@@ -57,6 +57,8 @@ class KalshiWebSocket(EventVenueStream):
         # ── Async message queue ────────────────────────────────────────
         self._msg_queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
         self._processor_task: Optional[asyncio.Task] = None
+        self._latest_orderbook_deltas: Dict[str, Dict[str, Any]] = {}
+        self._dropped_by_channel: Dict[str, int] = defaultdict(int)
 
         # ── Orderbook snapshot cache ───────────────────────────────────
         self._ob_snapshots: Dict[str, Dict[str, Any]] = {}  # market -> snapshot
@@ -374,19 +376,41 @@ class KalshiWebSocket(EventVenueStream):
                         continue
 
                     # ── Enqueue for async processing ───────────────────
+                    channel = data.get("type") or data.get("channel") or "unknown"
                     try:
                         self._msg_queue.put_nowait(data)
                     except asyncio.QueueFull:
-                        # Backpressure: drop oldest non-critical message
-                        try:
-                            self._msg_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            pass
-                        self._msg_queue.put_nowait(data)
-                        logger.warning(
-                            "WS message queue full — dropped oldest message "
-                            f"(queue_size={self._msg_queue.maxsize})"
-                        )
+                        # Channel-aware backpressure:
+                        # - orderbook deltas are coalesced per ticker (keep latest)
+                        # - trade/order_group/error are critical and never replaced
+                        if channel == "orderbook_delta":
+                            ticker = data.get("ticker") or data.get("market_ticker") or "unknown"
+                            self._latest_orderbook_deltas[ticker] = data
+                            self._dropped_by_channel["orderbook_delta"] += 1
+                            if self._dropped_by_channel["orderbook_delta"] % 100 == 1:
+                                logger.warning(
+                                    "WS orderbook backpressure — coalesced %d deltas "
+                                    "(queue_size=%d)",
+                                    self._dropped_by_channel["orderbook_delta"],
+                                    self._msg_queue.maxsize,
+                                )
+                        elif channel in {"trade", "order_group_updates", "error"}:
+                            self._dropped_by_channel[f"{channel}_critical_drop"] += 1
+                            logger.error(
+                                "WS queue saturated; could not enqueue critical %s message "
+                                "(critical_drops=%d)",
+                                channel,
+                                self._dropped_by_channel[f"{channel}_critical_drop"],
+                            )
+                        else:
+                            self._dropped_by_channel[channel] += 1
+                            logger.warning(
+                                "WS queue full — dropped incoming %s "
+                                "(queue_size=%d, dropped=%d)",
+                                channel,
+                                self._msg_queue.maxsize,
+                                self._dropped_by_channel[channel],
+                            )
 
             except (ConnectionError, RuntimeError, ValueError) as e:
                 if self._running:
@@ -398,34 +422,40 @@ class KalshiWebSocket(EventVenueStream):
     async def _process_queue(self, callback: Callable[[Any], None]) -> None:
         """Drain the message queue and dispatch parsed events."""
         while self._running:
+            if self._latest_orderbook_deltas:
+                _ticker, data = self._latest_orderbook_deltas.popitem()
+                await self._dispatch_data(data, callback)
+                continue
             try:
                 data = await asyncio.wait_for(self._msg_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
+            await self._dispatch_data(data, callback)
 
-            t0 = time.monotonic()
-            try:
-                event = self._parse_message(data)
-                if event:
-                    await callback(event)
-            except (ValueError, TypeError, RuntimeError) as e:
-                logger.error(
-                    f"Error processing Kalshi WS message: {e} | "
+    async def _dispatch_data(self, data: Dict[str, Any], callback: Callable[[Any], None]) -> None:
+        t0 = time.monotonic()
+        try:
+            event = self._parse_message(data)
+            if event:
+                await callback(event)
+        except (ValueError, TypeError, RuntimeError) as e:
+            logger.error(
+                f"Error processing Kalshi WS message: {e} | "
+                f"type={data.get('type')} market={data.get('ticker', '?')}"
+            )
+        finally:
+            elapsed = time.monotonic() - t0
+            self._process_time_sum += elapsed
+            self._process_time_count += 1
+            if elapsed > self._process_time_max:
+                self._process_time_max = elapsed
+            if elapsed > 0.050:  # > 50ms is suspicious
+                logger.warning(
+                    f"Slow WS handler: {elapsed*1000:.1f}ms for "
                     f"type={data.get('type')} market={data.get('ticker', '?')}"
                 )
-            finally:
-                elapsed = time.monotonic() - t0
-                self._process_time_sum += elapsed
-                self._process_time_count += 1
-                if elapsed > self._process_time_max:
-                    self._process_time_max = elapsed
-                if elapsed > 0.050:  # > 50ms is suspicious
-                    logger.warning(
-                        f"Slow WS handler: {elapsed*1000:.1f}ms for "
-                        f"type={data.get('type')} market={data.get('ticker', '?')}"
-                    )
 
     # ── Error message handling ─────────────────────────────────────────
 
@@ -711,4 +741,5 @@ class KalshiWebSocket(EventVenueStream):
                 "max_loop_lag_ms": round(max_lag_ms, 1),
                 "lag_samples": len(lag_samples),
             },
+            "dropped_by_channel": dict(self._dropped_by_channel),
         }

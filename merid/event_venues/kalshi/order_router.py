@@ -292,6 +292,8 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     """
     if intent.count <= 0:
         return "non_positive_size"
+    if intent.order_type not in ("limit", "market"):
+        return "invalid_order_type"
     if intent.order_type == "limit" and (intent.price_cents <= 0 or intent.price_cents >= 100):
         return "invalid_price"
     if intent.side not in ("yes", "no"):

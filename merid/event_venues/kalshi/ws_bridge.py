@@ -49,6 +49,7 @@ _GAP_THRESHOLD_SECONDS = 30.0
 
 # G2: How often (seconds) the background-task monitor polls for stuck/failed tasks
 _TASK_MONITOR_INTERVAL = 5.0
+_WS_SUBSCRIBE_TICKER_LIMIT = 25
 
 
 class KalshiWebSocketBridge:
@@ -103,6 +104,7 @@ class KalshiWebSocketBridge:
         self._task_failures: Dict[str, str] = {}   # name → failure reason
         self._task_monitor_task: Optional[asyncio.Task] = None
         self._task_monitor_interval: float = task_monitor_interval
+        self._dropped_orderbook_deltas_by_asset: Dict[str, int] = defaultdict(int)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -122,6 +124,7 @@ class KalshiWebSocketBridge:
             return
 
         if tickers:
+            tickers = self._select_ws_tickers(tickers)
             # G1: perform initial subscription atomically
             await self._atomic_subscribe(tickers)
 
@@ -282,22 +285,33 @@ class KalshiWebSocketBridge:
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
-            # Drop oldest to make room
+            # Channel-aware drop policy:
+            # - keep fill/control messages
+            # - allow dropping orderbook deltas first
+            if isinstance(event, dict) and event.get("type") == "orderbook_delta":
+                ticker = event.get("ticker") or event.get("market_ticker") or ""
+                asset = self._infer_asset_from_ticker(ticker)
+                self._dropped_orderbook_deltas_by_asset[asset] += 1
+                self._events_dropped += 1
+                if self._events_dropped % 100 == 1:
+                    logger.warning(
+                        "WS bridge dropped orderbook delta (asset=%s dropped=%d queue=%d)",
+                        asset,
+                        self._events_dropped,
+                        _BRIDGE_QUEUE_SIZE,
+                    )
+                return
+            # Fallback for non-critical: drop one queued item then enqueue
             try:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 pass
-            self._queue.put_nowait(event)
+            try:
+                self._queue.put_nowait(event)
+            except asyncio.QueueFull:
+                self._events_dropped += 1
+                return
             self._events_dropped += 1
-            # Log every 100 drops so operators see the problem
-            if self._events_dropped % 100 == 1:
-                logger.warning(
-                    "WS bridge queue overflow — %d events dropped total "
-                    "(queue_size=%d, forwarded=%d)",
-                    self._events_dropped,
-                    _BRIDGE_QUEUE_SIZE,
-                    self._events_forwarded,
-                )
 
     # ── Forward loop (drains queue → event bus) ──────────────────────────
 
@@ -627,6 +641,7 @@ class KalshiWebSocketBridge:
             # G2
             "gaps_detected": int(getattr(self, "_gaps_detected", 0)),
             "task_failures": dict(getattr(self, "_task_failures", {})),
+            "dropped_orderbook_deltas_by_asset": dict(getattr(self, "_dropped_orderbook_deltas_by_asset", {})),
         }
 
         # Include underlying WS client stats if available
@@ -636,6 +651,37 @@ class KalshiWebSocketBridge:
             pass
 
         return result
+
+    def _select_ws_tickers(self, tickers: List[str]) -> List[str]:
+        """Bound subscriptions to a near-spot subset using market catalog metadata."""
+        uniq = list(dict.fromkeys([t for t in tickers if t]))
+        if len(uniq) <= _WS_SUBSCRIBE_TICKER_LIMIT:
+            return uniq
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            cat = get_market_catalog()
+            scored = []
+            for t in uniq:
+                cm = cat.get_market(t)
+                score = 0
+                if cm:
+                    score += 10 if cm.asset in {"BTC", "ETH", "SOL", "XRP", "DOGE"} else 0
+                    score += 5 if cm.timeframe in {"15m", "1h", "daily"} else 0
+                    if cm.minutes_to_expiry is not None:
+                        score += max(0, int(1440 - min(cm.minutes_to_expiry, 1440)) // 60)
+                scored.append((score, t))
+            scored.sort(reverse=True)
+            return [t for _, t in scored[:_WS_SUBSCRIBE_TICKER_LIMIT]]
+        except Exception:
+            return uniq[:_WS_SUBSCRIBE_TICKER_LIMIT]
+
+    @staticmethod
+    def _infer_asset_from_ticker(ticker: str) -> str:
+        t = (ticker or "").upper()
+        for a in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            if a in t:
+                return a
+        return "OTHER"
 
 
 # ── Singleton ────────────────────────────────────────────────────────────
