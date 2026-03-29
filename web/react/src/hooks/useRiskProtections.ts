@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { CircuitBreakerState } from '../types/risk';
+import { CircuitBreakerState } from '../types/_legacy/risk';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/constants';
 import { logUiError } from '../utils/logger';
 

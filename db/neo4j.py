@@ -16,6 +16,8 @@ from datetime import datetime
 
 class Neo4jMemory:
     def __init__(self):
+        if not _NEO4J_AVAILABLE or GraphDatabase is None:
+            raise RuntimeError("neo4j driver unavailable")
         self.driver = GraphDatabase.driver(
             capabilities.neo4j_uri,
             auth=(capabilities.neo4j_user, capabilities.neo4j_password)
