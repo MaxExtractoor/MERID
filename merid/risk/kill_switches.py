@@ -201,12 +201,12 @@ class RiskController:
     def _trigger_kill(self, reason: KillSwitchReason, details: str) -> None:
         """Internal method to trigger kill switch."""
         old_state = self.get_state()
-        
+
         self._global_kill = True
         self._kill_reason = reason
         self._kill_details = details
         self._kill_timestamp = self._now()
-        
+
         event = KillSwitchEvent(
             timestamp=self._kill_timestamp,
             old_state=old_state,
@@ -229,7 +229,7 @@ class RiskController:
             )
         except Exception as _se_exc:
             logger.debug("[risk] kill_switch session log failed: %s", _se_exc)
-        
+
         # Telegram alert — kill switch is the most critical event
         try:
             import asyncio as _aio
@@ -242,6 +242,20 @@ class RiskController:
             logger.debug("[risk] kill_switch Telegram skipped — no running loop")
         except Exception as _tg_exc:
             logger.debug("[risk] kill_switch Telegram failed: %s", _tg_exc)
+
+        # Cancel all open orders when kill switch triggers (live mode only)
+        try:
+            import asyncio as _aio
+            from merid.settings import settings
+            # Only cancel orders in live mode
+            if settings.MERID_MODE == "LIVE":
+                try:
+                    _loop = _aio.get_running_loop()
+                    _loop.create_task(self._cancel_all_orders_async(reason))
+                except RuntimeError:
+                    logger.warning("[risk] kill_switch: No running loop for order cancellation")
+        except Exception as _cancel_exc:
+            logger.error(f"[risk] kill_switch order cancellation failed: {_cancel_exc}")
 
         # Notify callbacks
         for callback in self._callbacks:
@@ -399,10 +413,93 @@ class RiskController:
     def on_kill(self, callback: Callable[[KillSwitchEvent], None]) -> None:
         """Register callback for kill switch events."""
         self._callbacks.append(callback)
-    
+
     def get_events(self, limit: int = 10) -> List[KillSwitchEvent]:
         """Get recent kill switch events."""
         return self._events[-limit:]
+
+    async def _cancel_all_orders_async(self, reason: KillSwitchReason) -> None:
+        """Cancel all open orders across all venues when kill switch triggers.
+
+        This is called automatically in live mode when the kill switch is triggered.
+        It fetches all open orders and cancels them in batches.
+        """
+        from merid.event_venues.kalshi.client import KalshiVenueClient
+        from merid.event_venues.kalshi.models import KalshiConfig
+
+        logger.critical(f"[risk] KILL SWITCH: Canceling all open orders (reason: {reason.value})")
+
+        try:
+            # Initialize Kalshi client
+            config = KalshiConfig()
+            client = KalshiVenueClient(config)
+            await client.connect()
+
+            try:
+                # Fetch all open orders
+                all_orders = await client.get_open_orders()
+                order_ids = [o.order_id for o in all_orders]
+
+                if not order_ids:
+                    logger.info("[risk] KILL SWITCH: No open orders to cancel")
+                    # Record event even if no orders
+                    try:
+                        from core.session_log import record_event
+                        record_event(
+                            category="kill_switch",
+                            severity="info",
+                            title="Kill switch: No orders to cancel",
+                            detail=f"Kill switch triggered ({reason.value}) but no open orders found",
+                            metadata={"kill_switch_cancelled_orders": 0, "reason": reason.value},
+                        )
+                    except Exception:
+                        pass
+                    return
+
+                logger.warning(f"[risk] KILL SWITCH: Found {len(order_ids)} open orders, canceling in batches...")
+
+                # Batch cancel (max 20 per call)
+                all_canceled = []
+                all_failed = []
+
+                for i in range(0, len(order_ids), 20):
+                    batch = order_ids[i:i+20]
+                    result = await client.batch_cancel_orders(batch)
+
+                    all_canceled.extend(result.get("canceled", []))
+                    all_failed.extend(result.get("failed", []))
+
+                # Log structured event
+                canceled_count = len(all_canceled)
+                failed_count = len(all_failed)
+
+                logger.critical(
+                    f"[risk] KILL SWITCH: Canceled {canceled_count} orders, "
+                    f"{failed_count} failed (reason: {reason.value})"
+                )
+
+                # Record session event
+                try:
+                    from core.session_log import record_event
+                    record_event(
+                        category="kill_switch",
+                        severity="critical",
+                        title=f"Kill switch cancelled {canceled_count} orders",
+                        detail=f"Kill switch triggered ({reason.value}), canceled {canceled_count} orders, {failed_count} failed",
+                        metadata={
+                            "kill_switch_cancelled_orders": canceled_count,
+                            "failed_orders": failed_count,
+                            "reason": reason.value,
+                        },
+                    )
+                except Exception as _evt_exc:
+                    logger.debug(f"[risk] kill_switch session log failed: {_evt_exc}")
+
+            finally:
+                await client.close()
+
+        except Exception as exc:
+            logger.error(f"[risk] KILL SWITCH: Failed to cancel orders: {exc}", exc_info=True)
 
 
 # Global singleton instance
