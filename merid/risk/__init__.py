@@ -23,6 +23,12 @@ from merid.risk.kill_switches import (
     get_risk_status,
     risk_controller,
 )
+from merid.risk.capital_engine import (
+    AssetCapitalConfig,
+    CapitalEngine,
+    CapitalSnapshot,
+    RiskBudget,
+)
 
 __all__ = [
     "KillSwitchEvent",
@@ -33,4 +39,9 @@ __all__ = [
     "emergency_stop",
     "get_risk_status",
     "risk_controller",
+    # Capital engine
+    "AssetCapitalConfig",
+    "CapitalEngine",
+    "CapitalSnapshot",
+    "RiskBudget",
 ]
