@@ -38,6 +38,15 @@ class TestKalshiAPIHealth:
         assert "catalog" in data
         assert "risk" in data
         assert "ws" in data
+        assert "rate_limits" in data
+
+    def test_health_response_structure(self):
+        """Health response keeps required top-level fields."""
+        response = client.get("/api/v1/kalshi/health")
+        assert response.status_code == 200
+        data = response.json()
+        required = {"status", "issues", "catalog", "risk", "ws", "rate_limits"}
+        assert required.issubset(set(data.keys()))
 
 
 class TestKalshiAPIMarkets:

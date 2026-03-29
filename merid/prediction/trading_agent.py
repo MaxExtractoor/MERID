@@ -725,7 +725,6 @@ class KalshiTradingAgent:
             "implied_yes": float(snapshot.implied.yes_prob) if snapshot.implied else None,
             "implied_no": float(snapshot.implied.no_prob) if snapshot.implied else None,
             "expiry_phase": str(signal.phase) if signal.phase else None,
-            "trade_settings_snapshot": self.state.trade_settings_snapshot,
         }
         self.state.signal_log.append(entry)
         if len(self.state.signal_log) > _MAX_LOG_ENTRIES:

@@ -584,7 +584,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                           </span>
                         </td>
                           <td className="p-3 text-right text-white">{p.size}</td>
-                          <td className="p-3 text-right text-gray-400">{(p as { status?: string }).status ?? 'active'}</td>
+                          <td className="p-3 text-right text-gray-400">{p.status ?? 'active'}</td>
                           <td className="p-3 text-right text-gray-300">{((p.avg_price ?? 0) * 100).toFixed(1)}¢</td>
                         <td className={`p-3 text-right font-medium ${p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                           ${(p.unrealized_pnl ?? 0).toFixed(2)}

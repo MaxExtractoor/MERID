@@ -14,6 +14,7 @@ export interface KalshiPosition {
   ticker: string;
   outcome: string;
   size: number;
+  status?: string;
   avg_price: number;
   unrealized_pnl: number;
   realized_pnl: number;
