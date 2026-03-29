@@ -10,12 +10,14 @@ from __future__ import annotations
 import os
 import time
 import asyncio
+import hashlib
+from collections import deque
 from typing import Optional, List, Dict
 from dataclasses import dataclass
 from datetime import datetime
 
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter
 from utils.logger import get_logger
 
 logger = get_logger("agents.telegram_agent")
@@ -28,6 +30,15 @@ class TelegramMessage:
     message_id: Optional[int] = None
     chat_id: Optional[str] = None
     sent_at: Optional[datetime] = None
+
+
+@dataclass
+class _QueuedMessage:
+    text: str
+    parse_mode: str
+    force: bool
+    future: asyncio.Future
+    enqueued_at: float
 
 
 class TelegramAgent:
@@ -65,7 +76,19 @@ class TelegramAgent:
         self.recent_messages: List[TelegramMessage] = []
         self.last_post_time = 0
         self.min_post_interval = 5  # Minimum 5 seconds between posts
-    
+
+        # Global async send queue with dedupe + backoff
+        self._queue: asyncio.Queue[_QueuedMessage] = asyncio.Queue(
+            maxsize=int(os.getenv("TELEGRAM_QUEUE_MAXSIZE", "200"))
+        )
+        self._worker_task: Optional[asyncio.Task] = None
+        self._dedupe_ttl = float(os.getenv("TELEGRAM_DEDUPE_TTL", "5.0"))
+        self._recent_hashes: deque[tuple[str, float]] = deque()
+        self._backoff_until = 0.0
+        self._max_retry_backoff = float(os.getenv("TELEGRAM_MAX_BACKOFF", "30.0"))
+        self._max_send_attempts = 3
+        self._queue_drop_count = 0
+
     async def send_message(self, text: str, parse_mode: str = "HTML", force: bool = False) -> Optional[TelegramMessage]:
         """
         Send a message to Telegram.
@@ -81,47 +104,42 @@ class TelegramAgent:
         if not self.enabled:
             logger.warning(f"Telegram agent disabled - would have sent: {text}")
             return None
-        
-        # Rate limiting
-        if not force:
-            time_since_last = time.time() - self.last_post_time
-            if time_since_last < self.min_post_interval:
-                logger.warning(f"Rate limit: {self.min_post_interval - time_since_last:.0f}s until next message")
-                return None
-        
+
+        await self._ensure_worker()
+
+        # Drop duplicates within the dedupe window unless forced
+        if not force and self._is_duplicate(text):
+            logger.info("Telegram dedupe: dropping duplicate message within %.1fs window", self._dedupe_ttl)
+            return None
+
         # Truncate if needed (Telegram max is 4096 characters)
         if len(text) > 4096:
             text = text[:4093] + "..."
             logger.warning("Message truncated to 4096 characters")
-        
+
+        future = asyncio.get_running_loop().create_future()
         try:
-            # Send message
-            message = await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=text,
-                parse_mode=parse_mode
+            self._queue.put_nowait(
+                _QueuedMessage(
+                    text=text,
+                    parse_mode=parse_mode,
+                    force=force,
+                    future=future,
+                    enqueued_at=time.time(),
+                )
             )
-            
-            telegram_msg = TelegramMessage(
-                text=text,
-                message_id=message.message_id,
-                chat_id=self.chat_id,
-                sent_at=datetime.now()
+        except asyncio.QueueFull:
+            self._queue_drop_count += 1
+            logger.warning(
+                "Telegram queue full (%d) — dropping message (dropped_total=%d)",
+                self._queue.maxsize,
+                self._queue_drop_count,
             )
-            
-            self.recent_messages.append(telegram_msg)
-            self.last_post_time = time.time()
-            
-            logger.info(f"Telegram message sent successfully: {telegram_msg.message_id}")
-            return telegram_msg
-            
-        except TelegramError as exc:
-            logger.error(f"Failed to send Telegram message: {exc}")
+            future.set_result(None)
             return None
-        except Exception as exc:
-            logger.error(f"Unexpected error sending Telegram message: {exc}")
-            return None
-    
+
+        return await future
+
     def send_message_sync(self, text: str, parse_mode: str = "HTML", force: bool = False) -> Optional[TelegramMessage]:
         """Synchronous wrapper for send_message."""
         try:
@@ -131,6 +149,130 @@ class TelegramAgent:
             asyncio.set_event_loop(loop)
         
         return loop.run_until_complete(self.send_message(text, parse_mode, force))
+
+    async def _ensure_worker(self) -> None:
+        """Start the background sender if it is not running."""
+        if self._worker_task and not self._worker_task.done():
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        self._worker_task = loop.create_task(self._sender_loop(), name="telegram-sender")
+
+    def _is_duplicate(self, text: str) -> bool:
+        """Return True when the text hash was seen within the dedupe TTL."""
+        now = time.time()
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+        # Evict expired hashes
+        while self._recent_hashes and now - self._recent_hashes[0][1] > self._dedupe_ttl:
+            self._recent_hashes.popleft()
+
+        if any(h == digest for h, _ in self._recent_hashes):
+            return True
+
+        self._recent_hashes.append((digest, now))
+        return False
+
+    async def _sender_loop(self) -> None:
+        """Drain the queue with global backoff and retry handling."""
+        while self.enabled:
+            try:
+                msg = await self._queue.get()
+            except asyncio.CancelledError:
+                break
+
+            try:
+                if not msg.force:
+                    await self._respect_backoff()
+
+                result = await self._deliver_message(msg)
+                if not msg.future.done():
+                    msg.future.set_result(result)
+            except Exception as exc:
+                logger.error("Unexpected error in Telegram sender loop: %s", exc)
+                if not msg.future.done():
+                    msg.future.set_result(None)
+            finally:
+                self._queue.task_done()
+
+    async def _respect_backoff(self) -> None:
+        """Sleep until the next permitted send window."""
+        delay = self._backoff_until - time.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    async def _deliver_message(self, msg: _QueuedMessage, attempt: int = 1) -> Optional[TelegramMessage]:
+        """Send a single message with retry/backoff on rate limits."""
+        try:
+            message = await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=msg.text,
+                parse_mode=msg.parse_mode,
+            )
+
+            telegram_msg = TelegramMessage(
+                text=msg.text,
+                message_id=message.message_id,
+                chat_id=self.chat_id,
+                sent_at=datetime.now(),
+            )
+
+            self.recent_messages.append(telegram_msg)
+            self.last_post_time = time.time()
+            self._backoff_until = self.last_post_time + self.min_post_interval
+
+            logger.info("Telegram message sent successfully: %s", telegram_msg.message_id)
+            return telegram_msg
+
+        except RetryAfter as exc:
+            retry_after = getattr(exc, "retry_after", None) or 0
+            backoff = min(max(float(retry_after), self.min_post_interval), self._max_retry_backoff)
+            self._backoff_until = time.time() + backoff
+            logger.warning("Telegram rate limit hit — backing off %.1fs (attempt %d)", backoff, attempt)
+            if attempt >= self._max_send_attempts:
+                return None
+            await asyncio.sleep(backoff)
+            return await self._deliver_message(msg, attempt + 1)
+
+        except TelegramError as exc:
+            # Parse retry_after from generic TelegramError if present
+            retry_after = getattr(exc, "retry_after", None)
+            if retry_after is None and isinstance(exc, TelegramError):
+                retry_after = self._extract_retry_after(str(exc))
+
+            if retry_after:
+                backoff = min(max(float(retry_after), self.min_post_interval), self._max_retry_backoff)
+                self._backoff_until = time.time() + backoff
+                logger.warning("TelegramError with retry_after=%s — backing off %.1fs", retry_after, backoff)
+                if attempt < self._max_send_attempts:
+                    await asyncio.sleep(backoff)
+                    return await self._deliver_message(msg, attempt + 1)
+
+            logger.error("Failed to send Telegram message: %s", exc)
+            self._backoff_until = time.time() + self.min_post_interval
+            return None
+        except Exception as exc:
+            logger.error("Unexpected error sending Telegram message: %s", exc)
+            self._backoff_until = time.time() + self.min_post_interval
+            return None
+
+    @staticmethod
+    def _extract_retry_after(error_text: str) -> Optional[float]:
+        """Best-effort extraction of retry-after seconds from error text."""
+        if not error_text:
+            return None
+        for token in error_text.split():
+            if token.isdigit():
+                try:
+                    return float(token)
+                except ValueError:
+                    continue
+        return None
     
     async def send_market_update(self, asset: str, price: float, change_pct: float, volume: float) -> Optional[TelegramMessage]:
         """Send market update."""
