@@ -14,6 +14,7 @@ export type View =
   | "kalshi-terminal"
   | "kalshi-performance"
   | "kalshi-sentiment"
+  | "discover-health"
   | "positions"
   | "orders"
   | "operator"

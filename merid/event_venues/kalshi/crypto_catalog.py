@@ -112,6 +112,10 @@ class KalshiCryptoCatalog:
                 continue
             if timeframe not in ACTIVE_CRYPTO_WS_TIMEFRAMES:
                 continue
+            # status=None is treated as "open": Kalshi's live API sometimes
+            # omits the status field on fresh markets.  Treating None as open
+            # is intentional — we want to include markets we haven't seen a
+            # status for yet rather than silently dropping them.
             if status is not None and status != "open":
                 continue
 

@@ -55,8 +55,9 @@ export const SIDEBAR_MANIFEST: SidebarSection[] = [
     label: 'Analytics',
     key: 'analytics',
     items: [
-      { name: 'Fear/Greed',   href: 'kalshi-sentiment',     icon: 'Activity',       color: 'text-rose-400' },
-      { name: 'Vol & Sizing',  href: 'kalshi-vol-dashboard', icon: 'Gauge',          color: 'text-purple-400' },
+      { name: 'Discover',    href: 'discover-health',    icon: 'Radar',           color: 'text-emerald-400' },
+      { name: 'Fear/Greed',  href: 'kalshi-sentiment',   icon: 'Activity',        color: 'text-rose-400' },
+      { name: 'Vol & Sizing', href: 'kalshi-vol-dashboard', icon: 'Gauge',         color: 'text-purple-400' },
     ],
   },
   {

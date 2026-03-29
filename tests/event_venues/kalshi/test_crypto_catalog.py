@@ -125,6 +125,15 @@ class TestKalshiCryptoCatalog:
         kept = catalog.reload(markets)
         assert kept == 1
 
+    def test_reload_includes_status_none_as_open(self) -> None:
+        """Markets with status=None must be treated as open (Kalshi sometimes omits it)."""
+        catalog = KalshiCryptoCatalog()
+        markets = [
+            _make_catalog_market("KXBTCD-NOSTATUS-T50000", "BTC", "daily", None),
+        ]
+        kept = catalog.reload(markets)
+        assert kept == 1, "status=None market must be included (treated as open)"
+
     def test_iter_tickers_returns_correct_asset_timeframe(self) -> None:
         catalog = KalshiCryptoCatalog()
         catalog.reload(_make_full_universe_markets())

@@ -33,6 +33,47 @@ logger = get_logger("web.api.discover_health_api")
 router = APIRouter(tags=["system"])
 
 
+# ── Startup summary logging ──────────────────────────────────────────────────
+
+
+def log_discover_state(catalog_markets: List[Any]) -> None:
+    """Emit a single structured Discover-summary log line.
+
+    Intended to be called once at startup (after the market catalog loads)
+    so operators can grep for ``discover_state`` to confirm coverage.
+
+    Args:
+        catalog_markets: Output of ``KalshiMarketCatalog.get_all_markets()``.
+    """
+    from merid.event_venues.kalshi.crypto_catalog import (  # noqa: PLC0415
+        build_kalshi_crypto_catalog_from_catalog_markets,
+        collect_crypto_ws_subscription_tickers,
+        summarize_crypto_ws_coverage,
+    )
+
+    crypto_catalog = build_kalshi_crypto_catalog_from_catalog_markets(catalog_markets)
+    ws_tickers = collect_crypto_ws_subscription_tickers(crypto_catalog)
+    coverage = summarize_crypto_ws_coverage(ws_tickers)
+
+    markets_by_asset = {
+        asset: sum(crypto_catalog.grid_summary().get(asset, {}).values())
+        for asset in ACTIVE_CRYPTO_ASSETS
+    }
+    ws_by_asset = coverage.get("by_asset", {})
+    discover_green = coverage.get("coverage_complete", False)
+
+    logger.info(
+        "discover_state assets=%s timeframes=%s markets_by_asset=%s "
+        "ws_by_asset=%s total_ws_tickers=%d discover_green=%s",
+        list(ACTIVE_CRYPTO_ASSETS),
+        list(ACTIVE_CRYPTO_WS_TIMEFRAMES),
+        markets_by_asset,
+        ws_by_asset,
+        len(ws_tickers),
+        discover_green,
+    )
+
+
 # ── Core computation (pure, no I/O) ─────────────────────────────────────────
 
 

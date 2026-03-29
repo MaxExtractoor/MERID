@@ -216,6 +216,18 @@ SIDEBAR_SECTIONS: List[Dict[str, Any]] = [
         "label": "Analytics",
         "items": [
             {
+                "id": "discover-health",
+                "label": "Discover",
+                "href": "discover-health",
+                "icon": "Radar",
+                "color": "text-emerald-400",
+                "endpoints": [
+                    "/api/v1/system/discover-health",
+                ],
+                "workflow_phase": "discovery",
+                "links_to": ["kalshi-dashboard", "kalshi-grid"],
+            },
+            {
                 "id": "kalshi-sentiment",
                 "label": "Fear / Greed",
                 "href": "kalshi-sentiment",

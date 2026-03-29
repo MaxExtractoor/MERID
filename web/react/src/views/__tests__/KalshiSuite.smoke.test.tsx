@@ -54,6 +54,7 @@ import KalshiOrderbookPanel from '../../components/KalshiOrderbookPanel';
 import KalshiActivityLog from '../../components/KalshiActivityLog';
 import KalshiSentimentView from '../KalshiSentimentView';
 import KalshiAgentPerformanceView from '../KalshiAgentPerformanceView';
+import DiscoverHealthView from '../DiscoverHealthView';
 
 describe('Kalshi Suite — Smoke Tests', () => {
   it('Overview mounts without errors', () => {
@@ -111,6 +112,31 @@ describe('Kalshi Suite — Smoke Tests', () => {
   it('KalshiAgentPerformanceView mounts and shows title', () => {
     render(<KalshiAgentPerformanceView />);
     expect(screen.getByText(/Agent Performance/i)).toBeTruthy();
+  });
+
+  it('DiscoverHealthView mounts and shows "Discover Health" title', () => {
+    render(<DiscoverHealthView />);
+    expect(screen.getByText(/Discover Health/i)).toBeTruthy();
+  });
+
+  it('DiscoverHealthView shows all five crypto assets', () => {
+    render(<DiscoverHealthView />);
+    for (const asset of ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']) {
+      expect(screen.getAllByText(asset).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('DiscoverHealthView shows all four timeframe labels', () => {
+    render(<DiscoverHealthView />);
+    expect(screen.getAllByText(/15 Min/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Hourly/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Daily/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Weekly/i).length).toBeGreaterThan(0);
+  });
+
+  it('DiscoverHealthView renders 5×4 mood grid section', () => {
+    render(<DiscoverHealthView />);
+    expect(screen.getByText(/Asset × Timeframe × Mood Grid/i)).toBeTruthy();
   });
 
 });

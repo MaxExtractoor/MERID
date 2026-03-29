@@ -18,6 +18,7 @@ export const WS_PORTFOLIO_URL = getEnv('VITE_WS_PORTFOLIO_URL', `ws://${window?.
 export const API_ENDPOINTS = {
   // ── System ────────────────────────────────────────────────────
   SYSTEM_HEALTH: "/api/v1/system/health",
+  SYSTEM_DISCOVER_HEALTH: "/api/v1/system/discover-health",
   SYSTEM_EXECUTION_GATE: "/api/v1/system/execution-gate",
   SYSTEM_MODE_SAFETY: "/api/v1/system/mode-safety",
   SYSTEM_PNL_CONSISTENCY: "/api/v1/system/pnl-consistency",
