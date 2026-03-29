@@ -109,6 +109,63 @@ class DomainCap:
         }
 
 
+# ── Per-asset caps (BTC/ETH/SOL/XRP/DOGE) ───────────────────────────
+
+@dataclass
+class AssetCap:
+    """Per-crypto-asset daily execution limits inside the crypto domain.
+
+    Sits inside the global crypto DomainCap and prevents the daily budget from
+    being concentrated in a single asset.  Keyed by normalised symbol (e.g.
+    "BTC", "ETH", "SOL", "XRP", "DOGE").
+    """
+
+    asset: str
+    max_daily_notional_usd: float = 3000.0
+    max_single_trade_usd: float = 1000.0
+    enabled: bool = True
+
+    # Runtime counters (reset daily)
+    daily_notional_usd: float = 0.0
+    daily_trade_count: int = 0
+    last_reset_date: str = ""
+
+    def reset_if_new_day(self):
+        today = time.strftime("%Y-%m-%d")
+        if today != self.last_reset_date:
+            self.daily_notional_usd = 0.0
+            self.daily_trade_count = 0
+            self.last_reset_date = today
+
+    def record_trade(self, notional_usd: float):
+        self.reset_if_new_day()
+        self.daily_notional_usd += notional_usd
+        self.daily_trade_count += 1
+
+    def remaining_notional(self) -> float:
+        self.reset_if_new_day()
+        return max(0.0, self.max_daily_notional_usd - self.daily_notional_usd)
+
+    def utilization_pct(self) -> float:
+        if self.max_daily_notional_usd <= 0:
+            return 0.0
+        self.reset_if_new_day()
+        return round(self.daily_notional_usd / self.max_daily_notional_usd * 100.0, 1)
+
+    def to_dict(self) -> Dict[str, Any]:
+        self.reset_if_new_day()
+        return {
+            "asset": self.asset,
+            "enabled": self.enabled,
+            "max_daily_notional_usd": self.max_daily_notional_usd,
+            "daily_notional_usd": round(self.daily_notional_usd, 2),
+            "remaining_notional_usd": round(self.remaining_notional(), 2),
+            "utilization_pct": self.utilization_pct(),
+            "daily_trade_count": self.daily_trade_count,
+            "max_single_trade_usd": self.max_single_trade_usd,
+        }
+
+
 # ── Per-venue exposure caps ──────────────────────────────────────────
 
 @dataclass
@@ -193,6 +250,16 @@ class ExecutionGuard:
         self._cooldown_seconds = 5.0
         self._last_execution_at = 0.0
         self._trade_log: List[Dict[str, Any]] = []
+
+        # Per-asset caps for BTC/ETH/SOL/XRP/DOGE — sub-limits of the
+        # 10 000 $/day crypto domain cap, one per supported asset.
+        self._asset_caps: Dict[str, AssetCap] = {
+            "BTC":  AssetCap(asset="BTC",  max_daily_notional_usd=4000, max_single_trade_usd=1000),
+            "ETH":  AssetCap(asset="ETH",  max_daily_notional_usd=3000, max_single_trade_usd=750),
+            "SOL":  AssetCap(asset="SOL",  max_daily_notional_usd=2000, max_single_trade_usd=500),
+            "XRP":  AssetCap(asset="XRP",  max_daily_notional_usd=1500, max_single_trade_usd=375),
+            "DOGE": AssetCap(asset="DOGE", max_daily_notional_usd=500,  max_single_trade_usd=125),
+        }
 
         self._load_persisted_kill_switch()
 
@@ -311,6 +378,40 @@ class ExecutionGuard:
 
     # ── Pre-trade check ───────────────────────────────────────────────
 
+    def set_asset_cap(
+        self,
+        asset: str,
+        max_daily_notional_usd: float,
+        max_single_trade_usd: Optional[float] = None,
+    ) -> None:
+        """Update or create the cap for a single crypto asset.
+
+        Args:
+            asset: Normalised symbol, e.g. "BTC".
+            max_daily_notional_usd: New daily notional ceiling in USD.
+            max_single_trade_usd: Per-trade ceiling; defaults to 25 % of daily.
+        """
+        asset = asset.upper()
+        if max_single_trade_usd is None:
+            max_single_trade_usd = max_daily_notional_usd * 0.25
+        if asset in self._asset_caps:
+            self._asset_caps[asset].max_daily_notional_usd = max_daily_notional_usd
+            self._asset_caps[asset].max_single_trade_usd = max_single_trade_usd
+        else:
+            self._asset_caps[asset] = AssetCap(
+                asset=asset,
+                max_daily_notional_usd=max_daily_notional_usd,
+                max_single_trade_usd=max_single_trade_usd,
+            )
+        logger.info(
+            "Asset cap updated: %s max_daily=%.0f max_single=%.0f",
+            asset, max_daily_notional_usd, max_single_trade_usd,
+        )
+
+    def get_asset_cap_status(self) -> Dict[str, Any]:
+        """Return a snapshot of all per-asset cap utilisation."""
+        return {asset: cap.to_dict() for asset, cap in self._asset_caps.items()}
+
     def get_venue_cap(self, venue: str) -> Optional[VenueExposureCap]:
         return self._venue_caps.get(venue)
 
@@ -338,8 +439,15 @@ class ExecutionGuard:
         order_group_id: str = "",
         order_contracts: int = 0,
         now: Optional[float] = None,
+        asset: str = "",
     ) -> TradeVerdict:
-        """Run all safety checks before execution. Returns a TradeVerdict."""
+        """Run all safety checks before execution. Returns a TradeVerdict.
+
+        Args:
+            asset: Optional crypto asset symbol (e.g. "BTC").  When supplied
+                   and domain=="crypto", the per-asset cap is checked after the
+                   domain cap (step 5a).
+        """
         now = now or time.time()
         passed: List[str] = []
         failed: List[str] = []
@@ -482,6 +590,37 @@ class ExecutionGuard:
             else:
                 passed.append("single_trade_cap")
 
+        # 5a. Per-asset cap (only inside the "crypto" domain)
+        asset_key = asset.upper() if asset else ""
+        if asset_key and domain == "crypto":
+            acap = self._asset_caps.get(asset_key)
+            if acap and acap.enabled:
+                acap.reset_if_new_day()
+                asset_remaining = acap.remaining_notional()
+                if verdict.adjusted_size_usd > asset_remaining:
+                    if asset_remaining <= 0:
+                        verdict.allowed = False
+                        verdict.reason = (
+                            f"daily asset notional cap exhausted for {asset_key} "
+                            f"(0.0 remaining of {acap.max_daily_notional_usd:.0f})"
+                        )
+                        verdict.adjusted_size_usd = 0
+                        failed.append("asset_notional_cap")
+                        verdict.checks_passed = passed
+                        verdict.checks_failed = failed
+                        self._log_verdict(plan_id, verdict)
+                        return verdict
+                    verdict.adjusted_size_usd = min(verdict.adjusted_size_usd, asset_remaining)
+                    passed.append("asset_notional_cap_clamped")
+                else:
+                    passed.append("asset_notional_cap")
+
+                if verdict.adjusted_size_usd > acap.max_single_trade_usd:
+                    verdict.adjusted_size_usd = acap.max_single_trade_usd
+                    passed.append("asset_single_trade_cap_clamped")
+                else:
+                    passed.append("asset_single_trade_cap")
+
         # 6. Cooldown
         if now - self._last_execution_at < self._cooldown_seconds:
             verdict.allowed = False
@@ -537,12 +676,20 @@ class ExecutionGuard:
         self._log_verdict(plan_id, verdict)
         return verdict
 
-    def record_execution(self, domain: str, notional_usd: float):
-        """Called after a successful execution to update caps and cooldown."""
+    def record_execution(self, domain: str, notional_usd: float, asset: str = ""):
+        """Called after a successful execution to update caps and cooldown.
+
+        Args:
+            asset: Crypto asset symbol (e.g. "BTC") to update the per-asset cap.
+        """
         self._last_execution_at = time.time()
         cap = self._domain_caps.get(domain)
         if cap:
             cap.record_trade(notional_usd)
+        if asset and domain == "crypto":
+            acap = self._asset_caps.get(asset.upper())
+            if acap:
+                acap.record_trade(notional_usd)
 
     # ── Logging ───────────────────────────────────────────────────────
 
@@ -578,6 +725,7 @@ class ExecutionGuard:
             },
             "last_cqi": {k: round(v, 4) for k, v in self._last_cqi.items()},
             "domain_caps": {k: v.to_dict() for k, v in self._domain_caps.items()},
+            "asset_caps": {k: v.to_dict() for k, v in self._asset_caps.items()},
             "venue_caps": {k: v.to_dict() for k, v in self._venue_caps.items()},
             "cooldown_seconds": self._cooldown_seconds,
             "recent_verdicts": len(self._trade_log),
