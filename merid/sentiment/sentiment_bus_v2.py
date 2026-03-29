@@ -668,8 +668,8 @@ class SentimentBusV2:
 
     def get_all_asset_contexts(self) -> Dict[str, AssetSentimentContext]:
         """Return contexts for all tracked crypto assets."""
-        from merid.sentiment.news_config import CRYPTO_ASSETS
-        return {asset: self.get_asset_context(asset) for asset in CRYPTO_ASSETS}
+        from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
+        return {asset: self.get_asset_context(asset) for asset in ACTIVE_CRYPTO_ASSETS}
 
     def get_hashtag_summary(self) -> Dict[str, Any]:
         """Return a summary of all hashtag contexts for UI/Telegram."""

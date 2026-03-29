@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 
+from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_WS_TIMEFRAMES
 from merid.event_venues.base import EventMarket, MarketFilter
 from merid.event_venues.kalshi.client import KalshiVenueClient
 from merid.event_venues.kalshi.models import KalshiConfig
@@ -307,8 +308,7 @@ class KalshiMarketCatalog:
 
             # Per-asset/timeframe INFO logging on every refresh so operators
             # can confirm crypto assets are flowing through the catalog.
-            _CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
-            for _asset in _CRYPTO_ASSETS:
+            for _asset in ACTIVE_CRYPTO_ASSETS:
                 _asset_mkts = asset_idx.get(_asset, [])
                 if _asset_mkts:
                     _15m = sum(1 for m in _asset_mkts if m.timeframe == "15m")

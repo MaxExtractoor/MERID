@@ -13,6 +13,7 @@ import KalshiVolDashboardView from "./views/KalshiVolDashboardView";
 import KalshiTerminalView from "./views/KalshiTerminalView";
 import KalshiAgentPerformanceView from "./views/KalshiAgentPerformanceView";
 import KalshiSentimentView from "./views/KalshiSentimentView";
+import DiscoverHealthView from "./views/DiscoverHealthView";
 import LaneControlDashboard from "./views/LaneControlDashboard";
 import SwarmConsensusMatrix from "./views/SwarmConsensusMatrix";
 import CalibrationDashboardView from "./views/CalibrationDashboardView";
@@ -114,6 +115,7 @@ export default function App() {
               {view === "kalshi-terminal" && <KalshiTerminalView />}
               {view === "kalshi-performance" && <KalshiAgentPerformanceView />}
               {view === "kalshi-sentiment" && <KalshiSentimentView />}
+              {view === "discover-health" && <DiscoverHealthView />}
               {view === "lane-control" && <LaneControlDashboard />}
               {view === "swarm-consensus" && <SwarmConsensusMatrix />}
               {view === "calibration-dashboard" && <CalibrationDashboardView />}
