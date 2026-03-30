@@ -890,52 +890,100 @@ async def update_categories(body: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.get("/positions")
 async def get_positions() -> Dict[str, Any]:
-    """Get current Kalshi positions."""
+    """Get current Kalshi positions.
+
+    Primary source: the reconciled ``KalshiPositionCache`` (updated in real-time
+    from WebSocket fills and reconciliation cycles).  REST positions are fetched
+    as a diagnostic supplement and discrepancies are logged.
+    """
+    # ── Primary: reconciled position cache ───────────────────────────────────
+    reconciled_positions: List[Dict[str, Any]] = []
+    cache_error: Optional[str] = None
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        cache = get_position_cache()
+        for pos in cache.get_all_positions().values():
+            reconciled_positions.append({
+                "ticker": pos.market_id,
+                "outcome": pos.side,
+                "size": pos.contracts,
+                "avg_price": pos.avg_price_cents / 100.0,
+                "unrealized_pnl": float(pos.unrealized_pnl_usd),
+                "realized_pnl": float(pos.realized_pnl_usd),
+                "source": "reconciled",
+            })
+    except Exception as exc:
+        cache_error = str(exc)
+        logger.warning("Position cache unavailable: %s", exc)
+
+    # ── Diagnostic: REST positions ────────────────────────────────────────────
+    rest_positions: List[Dict[str, Any]] = []
+    rest_error: Optional[str] = None
+
     executor = _get_executor()
     if executor:
         try:
-            positions = await executor.get_positions()
-            return {
-                "count": len(positions),
-                "positions": [
-                    {
-                        "ticker": p.symbol,
-                        "outcome": p.metadata.get("outcome", "yes"),
-                        "size": float(p.size),
-                        "avg_price": float(p.entry_price),
-                        "unrealized_pnl": float(p.pnl),
-                        "realized_pnl": 0.0,
-                    }
-                    for p in positions
-                ],
-            }
+            raw = await executor.get_positions()
+            for p in raw:
+                rest_positions.append({
+                    "ticker": p.symbol,
+                    "outcome": p.metadata.get("outcome", "yes"),
+                    "size": float(p.size),
+                    "avg_price": float(p.entry_price),
+                    "unrealized_pnl": float(p.pnl),
+                    "realized_pnl": 0.0,
+                })
         except Exception as exc:
-            logger.warning(f"Executor positions failed: {exc}")
-
-    # Fallback: merid_core REST client
-    rest = _get_rest_client()
-    if rest:
-        try:
-            positions = rest.get_positions()
-            return {
-                "count": len(positions),
-                "positions": [
-                    {
+            rest_error = str(exc)
+            logger.warning("Executor positions failed: %s", exc)
+    else:
+        rest = _get_rest_client()
+        if rest:
+            try:
+                raw_rest = rest.get_positions()
+                for p in raw_rest:
+                    rest_positions.append({
                         "ticker": p.get("ticker", p.get("market_ticker", "")),
                         "outcome": p.get("side", "yes"),
                         "size": p.get("total_traded", p.get("position", 0)),
                         "avg_price": p.get("average_price", 0) / 100.0 if p.get("average_price") else 0,
                         "unrealized_pnl": p.get("market_exposure", 0) / 100.0 if p.get("market_exposure") else 0,
                         "realized_pnl": p.get("realized_pnl", 0) / 100.0 if p.get("realized_pnl") else 0,
-                    }
-                    for p in positions
-                ],
-            }
-        except Exception as exc:
-            logger.warning(f"merid_core positions failed: {exc}")
-            return {"count": 0, "positions": [], "error": str(exc)}
+                    })
+            except Exception as exc:
+                rest_error = str(exc)
+                logger.warning("merid_core positions failed: %s", exc)
 
-    return {"count": 0, "positions": [], "error": "No Kalshi client configured"}
+    # ── Discrepancy detection ─────────────────────────────────────────────────
+    reconciled_count = len(reconciled_positions)
+    rest_count = len(rest_positions)
+    in_sync = reconciled_count == rest_count
+    if not in_sync:
+        reconciled_tickers = {p["ticker"] for p in reconciled_positions}
+        rest_tickers = {p["ticker"] for p in rest_positions}
+        logger.warning(
+            "kalshi.position_discrepancy reconciled=%d rest=%d "
+            "only_reconciled=%s only_rest=%s",
+            reconciled_count, rest_count,
+            list(reconciled_tickers - rest_tickers)[:5],
+            list(rest_tickers - reconciled_tickers)[:5],
+        )
+
+    response: Dict[str, Any] = {
+        "count": reconciled_count,
+        "positions": reconciled_positions,
+        "diagnostics": {
+            "reconciled_count": reconciled_count,
+            "rest_count": rest_count,
+            "in_sync": in_sync,
+            "raw_rest_positions": rest_positions,
+        },
+    }
+    if cache_error:
+        response["cache_error"] = cache_error
+    if rest_error:
+        response["diagnostics"]["rest_error"] = rest_error
+    return response
 
 
 @router.get("/orders")
