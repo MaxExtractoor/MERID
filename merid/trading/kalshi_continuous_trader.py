@@ -42,6 +42,11 @@ _CRYPTO_TIMEFRAMES = ("15m", "1h", "daily")
 _DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"))
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
 _DEFAULT_BANKROLL_FRACTION = float(os.getenv("MERID_BANKROLL_FRACTION", "0.01"))
+_DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
+
+# Fallback YES price (cents) when a candidate has no best_ask or mid price data.
+# Used only in the max-price guard inside trade_cycle().
+_FALLBACK_YES_PRICE_CENTS = 50
 
 
 # ── TradingCandidate (thin subclass of canonical MarketCandidate) ──────────
@@ -132,6 +137,11 @@ class KalshiContinuousTrader:
         Minimum clamped confidence to proceed to execution.
     bankroll_fraction:
         Maximum fraction of bankroll per individual trade.
+    max_yes_price:
+        Hard cap (in dollars, e.g. 0.50 = 50¢) on the YES price the trader
+        will pay per contract.  Any YES intent whose implied price exceeds
+        this cap is dropped with a ``max_yes_price_cap`` rejection log.
+        Configurable via ``MERID_MAX_YES_PRICE`` env var; default 0.50.
     """
 
     def __init__(
@@ -141,12 +151,14 @@ class KalshiContinuousTrader:
         max_group_notional: float = _DEFAULT_MAX_GROUP_NOTIONAL,
         min_confidence: float = _DEFAULT_MIN_CONFIDENCE,
         bankroll_fraction: float = _DEFAULT_BANKROLL_FRACTION,
+        max_yes_price: float = _DEFAULT_MAX_YES_PRICE,
     ) -> None:
         self._catalog = catalog or get_market_catalog()
         self._strategy = strategy
         self._max_group_notional = max_group_notional
         self._min_confidence = min_confidence
         self._bankroll_fraction = bankroll_fraction
+        self._max_yes_price = max_yes_price
 
         self._risk = DailyRiskState()
         self._filter_config = MarketFilterConfig(
@@ -164,8 +176,10 @@ class KalshiContinuousTrader:
     async def start(self) -> None:
         self._running = True
         logger.info(
-            "KalshiContinuousTrader starting — assets=%s timeframes=%s",
+            "KalshiContinuousTrader starting — assets=%s timeframes=%s "
+            "max_yes_price=%.2f min_confidence=%.2f bankroll_fraction=%.4f",
             _CRYPTO_ASSETS, _CRYPTO_TIMEFRAMES,
+            self._max_yes_price, self._min_confidence, self._bankroll_fraction,
         )
         await self._refresh_candidates()
 
@@ -339,6 +353,21 @@ class KalshiContinuousTrader:
                 "intent_id": f"ct-{candidate.ticker}-{int(time.time())}",
                 "ts": time.time(),
             }
+
+            # Max YES price guard — drop YES intents whose implied price exceeds cap
+            if intent["direction"] == "yes":
+                yes_price_cents = candidate.best_ask_cents or candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
+                max_cents = int(self._max_yes_price * 100)
+                if yes_price_cents > max_cents:
+                    logger.info(
+                        "ContinuousTrader: MAX_YES_PRICE_CAP dropped YES intent "
+                        "ticker=%s price=%d¢ cap=%d¢",
+                        candidate.ticker, yes_price_cents, max_cents,
+                    )
+                    self._risk.execution_rejections += 1
+                    self._emit_rejection(candidate.ticker, "max_yes_price_cap", intent["intent_id"])
+                    continue
+
             self._risk.add_notional(candidate.group_id, notional)
             self._risk.trade_count += 1
             intents.append(intent)
@@ -397,6 +426,7 @@ class KalshiContinuousTrader:
                 "max_group_notional": self._max_group_notional,
                 "min_confidence": self._min_confidence,
                 "bankroll_fraction": self._bankroll_fraction,
+                "max_yes_price": self._max_yes_price,
             },
         }
 

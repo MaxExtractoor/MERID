@@ -411,6 +411,11 @@ class KalshiRiskConfig:
     max_spread_cents: int = 10        # Reject if bid-ask spread exceeds this
     min_depth_contracts: int = 5      # Reject if available depth below this
 
+    # YES price cap — no YES buy order may exceed this price
+    # Default 50¢ (0.50). Set via MERID_MAX_YES_PRICE env var (dollars) or
+    # override per-profile by constructing KalshiRiskConfig directly.
+    max_yes_price_cents: int = 50
+
     # Rate limit awareness
     max_orders_per_minute: int = 30
     max_orders_per_hour: int = 300
@@ -494,6 +499,7 @@ class KalshiRiskManager:
         existing_position: int = 0,
         spread_cents: Optional[int] = None,
         depth_at_price: Optional[int] = None,
+        outcome: str = "yes",
     ) -> Tuple[bool, str]:
         """Run all pre-trade risk checks.
 
@@ -506,6 +512,7 @@ class KalshiRiskManager:
             existing_position: Current position in this contract
             spread_cents: Live bid-ask spread from orderbook snapshot (optional)
             depth_at_price: Available depth at the desired price level (optional)
+            outcome: "yes" or "no" — used to enforce max_yes_price_cents cap
 
         Returns:
             (allowed, reason) — True if order passes all checks
@@ -527,6 +534,17 @@ class KalshiRiskManager:
         # 1. Kill switch
         if self._state.kill_switch_active:
             return False, f"Kill switch active: {self._state.kill_switch_reason}"
+
+        # 1b. YES price cap — hard guard; no YES buy may exceed max_yes_price_cents
+        if outcome == "yes" and price_cents > self._config.max_yes_price_cents:
+            logger.warning(
+                "max_yes_price_cap: ticker=%s price=%d¢ cap=%d¢ contracts=%d category=%s",
+                ticker, price_cents, self._config.max_yes_price_cents, contracts, category,
+            )
+            return False, (
+                f"max_yes_price_cap:YES price {price_cents}¢ exceeds cap "
+                f"{self._config.max_yes_price_cents}¢ for {ticker}"
+            )
 
         # 2. Single order size
         if contracts > self._config.max_single_order_contracts:

@@ -116,3 +116,69 @@ def test_order_intent_carries_orderbook_params():
     )
     assert intent.spread_cents == 8
     assert intent.depth_at_price == 20
+
+
+# ── Max YES price cap tests ───────────────────────────────────────────────
+
+class TestMaxYesPriceCap:
+    """check_order enforces max_yes_price_cents for YES outcome orders."""
+
+    @pytest.fixture
+    def risk_with_cap(self):
+        cfg = KalshiRiskConfig(max_yes_price_cents=50)  # 50¢ cap
+        return KalshiRiskManager(config=cfg)
+
+    def test_yes_price_below_cap_allowed(self, risk_with_cap):
+        """YES order at 45¢ < 50¢ cap → allowed."""
+        ok, reason = risk_with_cap.check_order(
+            ticker="KXBTC-TEST", category="crypto",
+            contracts=10, price_cents=45, outcome="yes",
+        )
+        assert ok, reason
+
+    def test_yes_price_at_cap_allowed(self, risk_with_cap):
+        """YES order exactly at 50¢ cap → allowed."""
+        ok, reason = risk_with_cap.check_order(
+            ticker="KXBTC-TEST", category="crypto",
+            contracts=10, price_cents=50, outcome="yes",
+        )
+        assert ok, reason
+
+    def test_yes_price_above_cap_blocked(self, risk_with_cap):
+        """YES order at 65¢ > 50¢ cap → rejected with max_yes_price_cap reason."""
+        ok, reason = risk_with_cap.check_order(
+            ticker="KXBTC-TEST", category="crypto",
+            contracts=10, price_cents=65, outcome="yes",
+        )
+        assert not ok
+        assert "max_yes_price_cap" in reason
+
+    def test_no_price_above_cap_allowed(self, risk_with_cap):
+        """NO orders are not constrained by the YES price cap."""
+        ok, reason = risk_with_cap.check_order(
+            ticker="KXBTC-TEST", category="crypto",
+            contracts=10, price_cents=75, outcome="no",
+        )
+        assert ok, reason
+
+    def test_default_outcome_is_yes(self, risk_with_cap):
+        """Default outcome parameter is 'yes', so cap is applied without explicit param."""
+        ok, reason = risk_with_cap.check_order(
+            ticker="KXBTC-TEST", category="crypto",
+            contracts=10, price_cents=65,  # above cap, no outcome= kwarg
+        )
+        assert not ok
+        assert "max_yes_price_cap" in reason
+
+    def test_custom_cap_enforced(self):
+        """A non-default max_yes_price_cents is respected."""
+        cfg = KalshiRiskConfig(max_yes_price_cents=40)  # tighter, 40¢
+        risk = KalshiRiskManager(config=cfg)
+
+        ok_below, _ = risk.check_order("KXBTC", "crypto", 5, 38, outcome="yes")
+        ok_above, reason_above = risk.check_order("KXBTC", "crypto", 5, 45, outcome="yes")
+
+        assert ok_below
+        assert not ok_above
+        assert "max_yes_price_cap" in reason_above
+
