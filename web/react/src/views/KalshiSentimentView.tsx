@@ -166,13 +166,15 @@ function CategoryCard({ name, data }: { name: string; data: SentimentScore }) {
 
 // ── Lane Sentiment Strip ─────────────────────────────────────────────────────
 
-function sigColor(v: number): string {
+function sigColor(v: number | null | undefined): string {
+  if (v == null) return 'text-slate-400';
   if (v >= 0.15) return 'text-green-400';
   if (v <= -0.15) return 'text-red-400';
   return 'text-slate-400';
 }
 
-function fmtSig(v: number): string {
+function fmtSig(v: number | null | undefined): string {
+  if (v == null) return '—';
   return (v >= 0 ? '+' : '') + v.toFixed(3);
 }
 
@@ -210,8 +212,9 @@ function LaneSentimentStrip() {
 
   const cfg = fgRegimeCfg(s.fg_regime ?? 'neutral');
   const clamp = s.fg_clamp_breakdown;
-  const isContrarian = (s.fg_index <= 20 && s.combined_raw > 0.2) ||
-                       (s.fg_index >= 80 && s.combined_raw < -0.2);
+  // UI-006 fix: Add null guard for combined_raw to prevent runtime errors
+  const isContrarian = (s.fg_index <= 20 && (s.combined_raw ?? 0) > 0.2) ||
+                       (s.fg_index >= 80 && (s.combined_raw ?? 0) < -0.2);
 
   return (
     <div className="bg-slate-900/80 rounded-2xl border border-slate-800 p-4 space-y-3">
