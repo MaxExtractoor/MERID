@@ -1,6 +1,10 @@
 """
 Unified Decision Layer for MERID
 Aggregates agent outputs with audit trail and explainability.
+
+Updated: integrates ``config.crypto_universe`` for asset/timeframe validation
+and ``agents.quorum_failure_tracker`` for quorum-failure throttling with
+structured per-series logging.
 """
 from __future__ import annotations
 
@@ -316,7 +320,122 @@ class UnifiedDecisionLayer:
         self._coordinator = get_swarm_coordinator()
         self._decision_log = get_decision_log()
         self._explainability = get_explainability_service()
-    
+
+    # ── Crypto universe helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _get_crypto_grid() -> List[tuple]:
+        """Return (asset, timeframe) pairs from crypto_universe (best-effort)."""
+        try:
+            from config.crypto_universe import get_full_grid
+            return get_full_grid()
+        except ImportError:
+            return []
+
+    @staticmethod
+    def _validate_asset_timeframe(asset: Optional[str], timeframe: Optional[str]) -> None:
+        """Warn if asset/timeframe is not in crypto_universe."""
+        try:
+            from config.crypto_universe import is_valid_pair
+            if asset and timeframe and not is_valid_pair(asset, timeframe):
+                logger.warning(
+                    "unified_decision_layer: (asset=%r, timeframe=%r) not in crypto_universe",
+                    asset,
+                    timeframe,
+                )
+        except ImportError:
+            pass
+
+    # ── Quorum failure handling ───────────────────────────────────────────────
+
+    def _handle_quorum_failed(
+        self,
+        decision_type: str,
+        context: Dict[str, Any],
+        unified_decision: "UnifiedDecision",
+    ) -> None:
+        """Route a QUORUM_FAILED outcome through the tracker and governance bus.
+
+        This method MUST be called for any decision that resolves as
+        QUORUM_FAILED so that the tracker can throttle alert storms without
+        hiding the underlying issue.  Safety actions are applied here; alert
+        emission is gated by the tracker.
+        """
+        asset: Optional[str] = context.get("asset")
+        timeframe: Optional[str] = context.get("timeframe")
+        reason = unified_decision.reasoning_summary or "quorum not reached"
+
+        self._validate_asset_timeframe(asset, timeframe)
+
+        # --- Throttle-gate alert / event emission (safety actions are NOT gated) ---
+        try:
+            from agents.quorum_failure_tracker import get_quorum_failure_tracker
+            tracker = get_quorum_failure_tracker()
+            should_emit = tracker.record_failure(
+                asset=asset,
+                timeframe=timeframe,
+                reason=reason,
+            )
+        except ImportError:
+            should_emit = True
+
+        if not should_emit:
+            # Suppressed — log aggregate metric but do not flood downstream.
+            logger.info(
+                "unified_decision_layer: QUORUM_FAILED emission suppressed by tracker "
+                "(asset=%s, tf=%s, decision_type=%s)",
+                asset,
+                timeframe,
+                decision_type,
+            )
+            return
+
+        # Emit governance event.
+        try:
+            from agents.governance_event_bus import (
+                GovernanceEvent,
+                GovernanceEventType,
+                get_governance_event_bus,
+            )
+            event = GovernanceEvent(
+                event_type=GovernanceEventType.QUORUM_FAILED,
+                asset=asset,
+                timeframe=timeframe,
+                source="unified_decision_layer",
+                payload={
+                    "decision_type": decision_type,
+                    "reason": reason,
+                    "decision_id": unified_decision.decision_id,
+                    "contributing_agents": len(unified_decision.contributions),
+                },
+            )
+            get_governance_event_bus().publish(event)
+        except ImportError:
+            pass
+
+        # Emit alert.
+        try:
+            from agents.alert_manager import AlertSeverity, get_alert_manager
+            get_alert_manager().fire(
+                severity=AlertSeverity.WARNING,
+                title="QUORUM_FAILED",
+                message=(
+                    f"Quorum failed for {decision_type}"
+                    + (f" [{asset}/{timeframe}]" if asset or timeframe else "")
+                    + f": {reason}"
+                ),
+                source="unified_decision_layer",
+                asset=asset,
+                timeframe=timeframe,
+                data={
+                    "decision_id": unified_decision.decision_id,
+                    "decision_type": decision_type,
+                    "reason": reason,
+                },
+            )
+        except ImportError:
+            pass
+
     def make_decision(
         self,
         decision_type: str,
@@ -326,6 +445,12 @@ class UnifiedDecisionLayer:
         """Make a unified decision using swarm intelligence."""
         logger.info(f"Making decision: {decision_type}")
         decision_start = time.time()
+
+        # Validate asset/timeframe fields from context against crypto_universe.
+        self._validate_asset_timeframe(
+            context.get("asset"),
+            context.get("timeframe"),
+        )
         
         # Get relevant agents
         registry = get_agent_registry()
@@ -399,6 +524,10 @@ class UnifiedDecisionLayer:
             self._decision_log.log_agent_decision(agent_decision)
         
         self._record_explanation(unified_decision, decision_start)
+
+        # Route QUORUM_FAILED outcomes through tracker + governance bus.
+        if unified_decision.final_decision.upper() in ("QUORUM_FAILED", "NO_QUORUM"):
+            self._handle_quorum_failed(decision_type, context, unified_decision)
 
         return unified_decision
         
