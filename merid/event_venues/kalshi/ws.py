@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
@@ -29,6 +30,21 @@ logger = get_logger("merid.event_venues.kalshi.ws")
 _FATAL_ERROR_CODES = {"auth_failed", "invalid_token", "rate_limited"}
 # Errors where we can keep the connection but log loudly
 _WARN_ERROR_CODES = {"invalid_channel", "bad_request", "unknown_ticker"}
+
+# ── EDGE-1: Adaptive queue sizing constants ──────────────────────────────
+_WS_QUEUE_MIN = int(os.getenv("MERID_WS_QUEUE_MIN", "1024"))
+_WS_QUEUE_MAX = int(os.getenv("MERID_WS_QUEUE_MAX", "16384"))
+_WS_QUEUE_DEFAULT = int(os.getenv("MERID_WS_QUEUE_DEFAULT", "4096"))
+
+# ── RES-1: WS health thresholds for auto-failover ───────────────────────
+_WS_HEALTH_MSG_RATE_MIN = float(os.getenv("MERID_WS_HEALTH_MSG_RATE_MIN", "0.1"))  # msgs/sec
+_WS_HEALTH_QUEUE_DEPTH_WARN = float(os.getenv("MERID_WS_HEALTH_QUEUE_DEPTH_WARN", "0.75"))
+_WS_HEALTH_QUEUE_DEPTH_CRIT = float(os.getenv("MERID_WS_HEALTH_QUEUE_DEPTH_CRIT", "0.95"))
+_WS_HEALTH_STALE_SECONDS = float(os.getenv("MERID_WS_HEALTH_STALE_SECONDS", "30.0"))
+
+# ── PERF-1: Event loop watchdog thresholds ───────────────────────────────
+_LOOP_LAG_WARN_MS = float(os.getenv("MERID_LOOP_LAG_WARN_MS", "100"))
+_LOOP_LAG_CRIT_MS = float(os.getenv("MERID_LOOP_LAG_CRIT_MS", "500"))
 
 
 class KalshiWebSocket(EventVenueStream):
@@ -54,9 +70,13 @@ class KalshiWebSocket(EventVenueStream):
         self._last_seq: Dict[str, int] = {}          # market_id -> last seq
         self._seq_gaps: int = 0                       # total gaps detected
 
-        # ── Async message queue ────────────────────────────────────────
-        self._msg_queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
+        # ── EDGE-1: Adaptive message queue with overflow metrics ───────
+        self._queue_maxsize: int = _WS_QUEUE_DEFAULT
+        self._msg_queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_maxsize)
         self._processor_task: Optional[asyncio.Task] = None
+        self._queue_overflow_count: int = 0          # total messages dropped
+        self._queue_overflow_recent: deque = deque(maxlen=100)  # recent overflow timestamps
+        self._queue_high_water: int = 0              # peak queue depth observed
 
         # ── Orderbook snapshot cache ───────────────────────────────────
         self._ob_snapshots: Dict[str, Dict[str, Any]] = {}  # market -> snapshot
@@ -80,6 +100,17 @@ class KalshiWebSocket(EventVenueStream):
         self._process_time_count: int = 0           # # of timed handler calls
         self._lag_check_handle: Optional[asyncio.TimerHandle] = None
         self._expected_lag_ts: float = 0.0
+
+        # ── RES-1: WS health state for auto-failover ──────────────────
+        self._ws_health_status: str = "healthy"      # healthy | degraded | failed
+        self._msg_rate_window: deque = deque(maxlen=300)  # timestamps of recent messages
+        self._failover_to_rest: bool = False
+        self._health_check_handle: Optional[asyncio.TimerHandle] = None
+
+        # ── PERF-1: Event loop watchdog with alert thresholds ──────────
+        self._loop_lag_warn_count: int = 0           # warnings (>100ms)
+        self._loop_lag_crit_count: int = 0           # critical (>500ms)
+        self._loop_lag_alerts: deque = deque(maxlen=50)  # recent alert events
         
     @property
     def venue_name(self) -> str:
@@ -348,6 +379,8 @@ class KalshiWebSocket(EventVenueStream):
         )
         # Start periodic event-loop lag measurement
         self._start_lag_monitor()
+        # RES-1: Start periodic WS health monitoring
+        self._start_health_monitor()
 
         while self._running:
             try:
@@ -357,6 +390,8 @@ class KalshiWebSocket(EventVenueStream):
 
                     self._last_message_ts = time.monotonic()
                     self._messages_received += 1
+                    # RES-1: Track message timestamps for rate calculation
+                    self._msg_rate_window.append(time.monotonic())
 
                     try:
                         data = json.loads(raw)
@@ -376,8 +411,14 @@ class KalshiWebSocket(EventVenueStream):
                     # ── Enqueue for async processing ───────────────────
                     try:
                         self._msg_queue.put_nowait(data)
+                        # EDGE-1: Track high-water mark for adaptive sizing
+                        depth = self._msg_queue.qsize()
+                        if depth > self._queue_high_water:
+                            self._queue_high_water = depth
                     except asyncio.QueueFull:
-                        # Backpressure: drop oldest non-critical message
+                        # EDGE-1: Backpressure — drop oldest, log with metrics
+                        self._queue_overflow_count += 1
+                        self._queue_overflow_recent.append(time.monotonic())
                         try:
                             self._msg_queue.get_nowait()
                         except asyncio.QueueEmpty:
@@ -385,8 +426,11 @@ class KalshiWebSocket(EventVenueStream):
                         self._msg_queue.put_nowait(data)
                         logger.warning(
                             "WS message queue full — dropped oldest message "
-                            f"(queue_size={self._msg_queue.maxsize})"
+                            f"(queue_size={self._msg_queue.maxsize}, "
+                            f"total_overflows={self._queue_overflow_count})"
                         )
+                        # EDGE-1: Attempt adaptive queue growth if under max
+                        self._try_grow_queue()
 
             except (ConnectionError, RuntimeError, ValueError) as e:
                 if self._running:
@@ -664,10 +708,187 @@ class KalshiWebSocket(EventVenueStream):
         # Keep last 60 samples (1 per second = 1 minute window)
         if len(self._loop_lag_samples) > 60:
             self._loop_lag_samples = self._loop_lag_samples[-60:]
-        if lag > 0.100:  # >100ms lag is concerning
-            logger.warning(f"Event-loop lag: {lag*1000:.0f}ms")
+
+        # PERF-1: Enhanced watchdog with tiered alerts
+        lag_ms = lag * 1000
+        if lag_ms > _LOOP_LAG_CRIT_MS:
+            self._loop_lag_crit_count += 1
+            self._loop_lag_alerts.append({
+                "ts": now, "lag_ms": round(lag_ms, 1), "severity": "critical",
+            })
+            logger.error(
+                f"CRITICAL event-loop lag: {lag_ms:.0f}ms (threshold: {_LOOP_LAG_CRIT_MS}ms) "
+                f"— total critical: {self._loop_lag_crit_count}"
+            )
+        elif lag_ms > _LOOP_LAG_WARN_MS:
+            self._loop_lag_warn_count += 1
+            self._loop_lag_alerts.append({
+                "ts": now, "lag_ms": round(lag_ms, 1), "severity": "warning",
+            })
+            logger.warning(
+                f"Event-loop lag: {lag_ms:.0f}ms (threshold: {_LOOP_LAG_WARN_MS}ms) "
+                f"— total warnings: {self._loop_lag_warn_count}"
+            )
         # Reschedule
         self._schedule_lag_check(loop)
+
+    # ── EDGE-1: Adaptive queue sizing ─────────────────────────────────
+
+    def _try_grow_queue(self) -> None:
+        """Attempt to grow the message queue when overflow is detected.
+
+        Doubles the queue capacity (up to _WS_QUEUE_MAX) by draining the
+        current queue into a new, larger one.
+        """
+        if self._queue_maxsize >= _WS_QUEUE_MAX:
+            return
+        new_size = min(self._queue_maxsize * 2, _WS_QUEUE_MAX)
+        old_queue = self._msg_queue
+        new_queue: asyncio.Queue = asyncio.Queue(maxsize=new_size)
+
+        # Drain existing messages into new queue
+        drained = 0
+        while not old_queue.empty():
+            try:
+                item = old_queue.get_nowait()
+                new_queue.put_nowait(item)
+                drained += 1
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                break
+
+        self._msg_queue = new_queue
+        self._queue_maxsize = new_size
+        logger.info(
+            f"EDGE-1: Grew WS message queue {self._queue_maxsize // 2} → {new_size} "
+            f"(drained {drained} messages, overflows: {self._queue_overflow_count})"
+        )
+
+    def get_queue_health(self) -> Dict[str, Any]:
+        """Return queue health metrics for monitoring dashboards."""
+        now = time.monotonic()
+        recent_overflows = sum(
+            1 for ts in self._queue_overflow_recent
+            if now - ts < 60.0  # overflows in last 60s
+        )
+        depth = self._msg_queue.qsize()
+        capacity = self._msg_queue.maxsize
+        utilization = depth / capacity if capacity > 0 else 0.0
+
+        return {
+            "depth": depth,
+            "capacity": capacity,
+            "utilization": round(utilization, 3),
+            "high_water": self._queue_high_water,
+            "total_overflows": self._queue_overflow_count,
+            "recent_overflows_60s": recent_overflows,
+            "pressure": (
+                "critical" if utilization > _WS_HEALTH_QUEUE_DEPTH_CRIT
+                else "warning" if utilization > _WS_HEALTH_QUEUE_DEPTH_WARN
+                else "normal"
+            ),
+        }
+
+    # ── RES-1: WS health monitoring and auto-failover ─────────────────
+
+    def _start_health_monitor(self) -> None:
+        """Start periodic WS health checks (every 5s)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._schedule_health_check(loop)
+
+    def _schedule_health_check(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Schedule a single health check 5s from now."""
+        if not self._running:
+            return
+        self._health_check_handle = loop.call_later(
+            5.0, self._check_ws_health, loop,
+        )
+
+    def _check_ws_health(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Evaluate WS health and trigger failover if degraded."""
+        now = time.monotonic()
+
+        # Calculate message rate (messages per second over last 30s)
+        recent_msgs = sum(1 for ts in self._msg_rate_window if now - ts < 30.0)
+        msg_rate = recent_msgs / 30.0 if recent_msgs > 0 else 0.0
+
+        # Check last message staleness
+        last_msg_ago = now - self._last_message_ts if self._last_message_ts else float('inf')
+
+        # Queue pressure
+        depth = self._msg_queue.qsize()
+        capacity = self._msg_queue.maxsize
+        queue_ratio = depth / capacity if capacity > 0 else 0.0
+
+        # Determine health status
+        prev_status = self._ws_health_status
+        if last_msg_ago > _WS_HEALTH_STALE_SECONDS and self._messages_received > 0:
+            self._ws_health_status = "failed"
+        elif queue_ratio > _WS_HEALTH_QUEUE_DEPTH_CRIT or msg_rate < _WS_HEALTH_MSG_RATE_MIN:
+            self._ws_health_status = "degraded"
+        else:
+            self._ws_health_status = "healthy"
+
+        # Log state transitions
+        if self._ws_health_status != prev_status:
+            log_fn = logger.warning if self._ws_health_status != "healthy" else logger.info
+            log_fn(
+                f"RES-1: WS health transition {prev_status} → {self._ws_health_status} "
+                f"(msg_rate={msg_rate:.2f}/s, last_msg_ago={last_msg_ago:.1f}s, "
+                f"queue={depth}/{capacity})"
+            )
+
+        # Trigger REST failover if degraded/failed
+        if self._ws_health_status in ("degraded", "failed") and not self._failover_to_rest:
+            self._failover_to_rest = True
+            logger.warning(
+                "RES-1: WS degraded — enabling REST polling failover "
+                f"(health={self._ws_health_status})"
+            )
+        elif self._ws_health_status == "healthy" and self._failover_to_rest:
+            self._failover_to_rest = False
+            logger.info("RES-1: WS recovered — disabling REST polling failover")
+
+        # Reschedule
+        self._schedule_health_check(loop)
+
+    @property
+    def should_failover_to_rest(self) -> bool:
+        """Whether callers should use REST polling instead of WS."""
+        return self._failover_to_rest
+
+    @property
+    def ws_health_status(self) -> str:
+        """Current WS health: 'healthy', 'degraded', or 'failed'."""
+        return self._ws_health_status
+
+    def get_ws_health(self) -> Dict[str, Any]:
+        """Full WS health report for dashboards and alerting."""
+        now = time.monotonic()
+        recent_msgs = sum(1 for ts in self._msg_rate_window if now - ts < 30.0)
+        msg_rate = recent_msgs / 30.0 if recent_msgs > 0 else 0.0
+        last_msg_ago = now - self._last_message_ts if self._last_message_ts else None
+
+        return {
+            "status": self._ws_health_status,
+            "failover_active": self._failover_to_rest,
+            "msg_rate_per_sec": round(msg_rate, 3),
+            "last_msg_ago_s": round(last_msg_ago, 1) if last_msg_ago else None,
+            "queue": self.get_queue_health(),
+            "loop_lag": {
+                "warn_count": self._loop_lag_warn_count,
+                "crit_count": self._loop_lag_crit_count,
+                "recent_alerts": list(self._loop_lag_alerts)[-10:],
+                "avg_ms": round(
+                    sum(self._loop_lag_samples) / len(self._loop_lag_samples) * 1000, 1
+                ) if self._loop_lag_samples else 0,
+                "max_ms": round(
+                    max(self._loop_lag_samples) * 1000, 1
+                ) if self._loop_lag_samples else 0,
+            },
+        }
 
     # ── Observability ──────────────────────────────────────────────────
 
@@ -700,9 +921,13 @@ class KalshiWebSocket(EventVenueStream):
             "seq_gaps": self._seq_gaps,
             "queue_depth": self._msg_queue.qsize(),
             "queue_max": self._msg_queue.maxsize,
+            "queue_overflows": self._queue_overflow_count,
+            "queue_high_water": self._queue_high_water,
             "last_msg_ago_s": round(last_msg_ago, 1) if last_msg_ago else None,
             "ob_cached_markets": len(self._ob_initialised),
             "subscriptions": len(self._subscriptions),
+            "ws_health": self._ws_health_status,
+            "failover_to_rest": self._failover_to_rest,
             "perf": {
                 "avg_handler_ms": round(avg_process_ms, 2),
                 "max_handler_ms": round(self._process_time_max * 1000, 2),
@@ -710,5 +935,7 @@ class KalshiWebSocket(EventVenueStream):
                 "avg_loop_lag_ms": round(avg_lag_ms, 1),
                 "max_loop_lag_ms": round(max_lag_ms, 1),
                 "lag_samples": len(lag_samples),
+                "lag_warn_count": self._loop_lag_warn_count,
+                "lag_crit_count": self._loop_lag_crit_count,
             },
         }

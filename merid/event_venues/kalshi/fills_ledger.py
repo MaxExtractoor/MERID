@@ -52,6 +52,9 @@ class Fill:
     order_id: Optional[str] = None
     source: str = "unknown"  # "rest" | "ws" | "unknown"
     raw_data: Optional[dict] = None
+    # DATA-1: Flag indicating this fill_id was synthetically generated
+    # rather than provided by Kalshi. Must be surfaced in UI and alerts.
+    derived_id: bool = False
 
     def pnl_contribution(self) -> float:
         """Net dollar value of this fill (positive = proceeds, negative = cost)."""
@@ -85,6 +88,7 @@ class KalshiFillsLedger:
         order_id: Optional[str] = None,
         source: str = "unknown",
         raw_data: Optional[dict] = None,
+        derived_id: bool = False,
     ) -> bool:
         """Insert or ignore a fill.
 
@@ -98,6 +102,14 @@ class KalshiFillsLedger:
         """
         if not fill_id:
             raise ValueError("fill_id must be non-empty; Kalshi fills always carry one.")
+
+        # DATA-1: Warn loudly when synthetic/derived fill IDs are used
+        if derived_id:
+            logger.warning(
+                "fills_ledger: derived_id fill_id=%s ticker=%s — "
+                "this fill was synthetically generated and may mask a missing Kalshi fill",
+                fill_id, ticker,
+            )
 
         async with self._lock:
             if fill_id in self._fills:
@@ -116,6 +128,7 @@ class KalshiFillsLedger:
                 order_id=order_id,
                 source=source,
                 raw_data=raw_data,
+                derived_id=derived_id,
             )
             logger.info(
                 "fills_ledger: +fill fill_id=%s ticker=%s %s %s %d@%dc src=%s",
@@ -170,11 +183,33 @@ class KalshiFillsLedger:
 
     def summary(self) -> dict:
         """JSON-serializable ledger status."""
+        derived_count = sum(1 for f in self._fills.values() if f.derived_id)
         return {
             "fill_count": len(self._fills),
             "realized_pnl": self.realized_pnl(),
             "positions": self.positions(),
+            "derived_fill_count": derived_count,
+            "derived_fill_pct": round(
+                derived_count / len(self._fills) * 100, 1
+            ) if self._fills else 0.0,
         }
+
+    # ── DATA-1: Derived fill visibility ───────────────────────────────────
+
+    def derived_fills(self) -> List[Fill]:
+        """Return all fills with synthetically generated IDs.
+
+        DATA-1: These fills may mask missing Kalshi fills and should be
+        surfaced prominently in UI and reconciliation reports.
+        """
+        return sorted(
+            (f for f in self._fills.values() if f.derived_id),
+            key=lambda f: f.ts,
+        )
+
+    def derived_fill_count(self) -> int:
+        """Count of fills with derived (synthetic) IDs."""
+        return sum(1 for f in self._fills.values() if f.derived_id)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────
