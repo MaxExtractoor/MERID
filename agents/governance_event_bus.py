@@ -161,12 +161,17 @@ class GovernanceEventBus:
     """
 
     # Retry / back-off knobs — intentionally centralised here.
-    MAX_RETRIES: int = 3
-    INITIAL_RETRY_DELAY_S: float = 0.5
-    MAX_RETRY_DELAY_S: float = 30.0
     DLQ_MAX_SIZE: int = 1_000
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_retries: int = 3,
+        initial_retry_delay_s: float = 0.5,
+        max_retry_delay_s: float = 30.0,
+    ) -> None:
+        self.max_retries = max_retries
+        self.initial_retry_delay_s = initial_retry_delay_s
+        self.max_retry_delay_s = max_retry_delay_s
         self._subscribers: Dict[GovernanceEventType, List[HandlerFn]] = defaultdict(list)
         self._dlq: Deque[DLQEntry] = deque(maxlen=self.DLQ_MAX_SIZE)
         self._event_counts: Dict[str, int] = defaultdict(int)
@@ -250,9 +255,9 @@ class GovernanceEventBus:
 
     def _dispatch_sync(self, event: GovernanceEvent, handler: HandlerFn) -> None:
         """Synchronous dispatch with retry (non-async environments only)."""
-        delay = self.INITIAL_RETRY_DELAY_S
+        delay = self.initial_retry_delay_s
         last_err = ""
-        for attempt in range(self.MAX_RETRIES + 1):
+        for attempt in range(self.max_retries + 1):
             event._attempt = attempt
             try:
                 result = handler(event)
@@ -268,16 +273,16 @@ class GovernanceEventBus:
                 return
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)
-                if attempt < self.MAX_RETRIES:
+                if attempt < self.max_retries:
                     logger.warning(
                         "governance_event_bus: handler %s failed (attempt %d/%d, event_id=%s): %s",
                         getattr(handler, "__qualname__", repr(handler)),
                         attempt + 1,
-                        self.MAX_RETRIES + 1,
+                        self.max_retries + 1,
                         event.event_id,
                         exc,
                     )
-                    time.sleep(min(delay, self.MAX_RETRY_DELAY_S))
+                    time.sleep(min(delay, self.max_retry_delay_s))
                     delay *= 2
         self._send_to_dlq(event, last_err)
 
@@ -285,9 +290,9 @@ class GovernanceEventBus:
         self, event: GovernanceEvent, handler: HandlerFn
     ) -> None:
         """Async dispatch with exponential back-off retry."""
-        delay = self.INITIAL_RETRY_DELAY_S
+        delay = self.initial_retry_delay_s
         last_err = ""
-        for attempt in range(self.MAX_RETRIES + 1):
+        for attempt in range(self.max_retries + 1):
             event._attempt = attempt
             try:
                 result = handler(event)
@@ -296,14 +301,14 @@ class GovernanceEventBus:
                 return
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)
-                if attempt < self.MAX_RETRIES:
-                    wait = min(delay, self.MAX_RETRY_DELAY_S)
+                if attempt < self.max_retries:
+                    wait = min(delay, self.max_retry_delay_s)
                     logger.warning(
                         "governance_event_bus: handler %s failed (attempt %d/%d, "
                         "event_id=%s, retry_in=%.1fs): %s",
                         getattr(handler, "__qualname__", repr(handler)),
                         attempt + 1,
-                        self.MAX_RETRIES + 1,
+                        self.max_retries + 1,
                         event.event_id,
                         wait,
                         exc,

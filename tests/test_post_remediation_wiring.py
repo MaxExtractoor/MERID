@@ -187,10 +187,8 @@ class TestGovernanceEventBus:
     def test_failed_handler_moves_to_dlq_after_retries(self):
         from agents.governance_event_bus import GovernanceEventBus, GovernanceEventType
 
-        bus = GovernanceEventBus()
         # Override retry knobs to speed up the test.
-        bus.MAX_RETRIES = 1
-        bus.INITIAL_RETRY_DELAY_S = 0.0
+        bus = GovernanceEventBus(max_retries=1, initial_retry_delay_s=0.0)
 
         def bad_handler(_evt):
             raise RuntimeError("boom")
@@ -203,11 +201,12 @@ class TestGovernanceEventBus:
     def test_dlq_entries_accessible(self):
         from agents.governance_event_bus import GovernanceEventBus, GovernanceEventType
 
-        bus = GovernanceEventBus()
-        bus.MAX_RETRIES = 0
-        bus.INITIAL_RETRY_DELAY_S = 0.0
+        bus = GovernanceEventBus(max_retries=0, initial_retry_delay_s=0.0)
 
-        bus.subscribe(GovernanceEventType.QUORUM_FAILED, lambda _: (_ for _ in ()).throw(ValueError("oops")))
+        def raise_value_error(_evt):
+            raise ValueError("oops")
+
+        bus.subscribe(GovernanceEventType.QUORUM_FAILED, raise_value_error)
         bus.publish(self._make_event())
 
         entries = bus.get_dlq_entries()
@@ -217,16 +216,9 @@ class TestGovernanceEventBus:
     def test_replay_dlq_redelivers_and_clears(self):
         from agents.governance_event_bus import GovernanceEventBus, GovernanceEventType
 
-        bus = GovernanceEventBus()
-        bus.MAX_RETRIES = 0
-        bus.INITIAL_RETRY_DELAY_S = 0.0
+        bus = GovernanceEventBus(max_retries=0, initial_retry_delay_s=0.0)
 
         calls: List[Any] = []
-
-        def first_fail_then_ok(evt):
-            if evt._attempt == 0 and not calls:
-                raise RuntimeError("fail on first real call")
-            calls.append(evt)
 
         # First subscription: always fail → goes to DLQ
         def always_fail(_evt):
@@ -247,11 +239,12 @@ class TestGovernanceEventBus:
     def test_clear_dlq_discards_entries(self):
         from agents.governance_event_bus import GovernanceEventBus, GovernanceEventType
 
-        bus = GovernanceEventBus()
-        bus.MAX_RETRIES = 0
-        bus.INITIAL_RETRY_DELAY_S = 0.0
+        bus = GovernanceEventBus(max_retries=0, initial_retry_delay_s=0.0)
 
-        bus.subscribe(GovernanceEventType.QUORUM_FAILED, lambda _: (_ for _ in ()).throw(RuntimeError("x")))
+        def always_raise(_evt):
+            raise RuntimeError("x")
+
+        bus.subscribe(GovernanceEventType.QUORUM_FAILED, always_raise)
         bus.publish(self._make_event())
         assert bus.get_dlq_depth() == 1
 
@@ -287,11 +280,12 @@ class TestGovernanceEventBus:
     def test_get_metrics_tracks_dlq_counts(self):
         from agents.governance_event_bus import GovernanceEventBus, GovernanceEventType
 
-        bus = GovernanceEventBus()
-        bus.MAX_RETRIES = 0
-        bus.INITIAL_RETRY_DELAY_S = 0.0
+        bus = GovernanceEventBus(max_retries=0, initial_retry_delay_s=0.0)
 
-        bus.subscribe(GovernanceEventType.QUORUM_FAILED, lambda _: (_ for _ in ()).throw(RuntimeError("z")))
+        def always_raise_z(_evt):
+            raise RuntimeError("z")
+
+        bus.subscribe(GovernanceEventType.QUORUM_FAILED, always_raise_z)
         bus.publish(self._make_event())
         m = bus.get_metrics()
         assert m["dlq_counts"].get("quorum.failed", 0) == 1
