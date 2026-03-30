@@ -255,7 +255,11 @@ class QuorumFailureTracker:
 
     @staticmethod
     def _make_key(asset: Optional[str], timeframe: Optional[str]) -> str:
-        return f"{asset or '_'}:{timeframe or '_'}"
+        # Use empty string markers that are unambiguous — real asset/timeframe
+        # values never contain "<>" so there is no collision risk.
+        a = asset if asset is not None else "<none>"
+        tf = timeframe if timeframe is not None else "<none>"
+        return f"{a}:{tf}"
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
