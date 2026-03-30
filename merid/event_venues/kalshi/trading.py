@@ -107,9 +107,6 @@ class KalshiTrader:
     
     async def buy_yes(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Buy YES contracts in a market."""
-        if not self._is_live_trading_allowed():
-            logger.debug("buy_yes: skipped (paper/sim mode) ticker=%s", ticker)
-            return None
         allowed, reason = self._pre_order_check(ticker, count, price or 50)
         if not allowed:
             logger.warning("buy_yes blocked: %s ticker=%s", reason, ticker)
@@ -130,9 +127,6 @@ class KalshiTrader:
     
     async def buy_no(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Buy NO contracts in a market."""
-        if not self._is_live_trading_allowed():
-            logger.debug("buy_no: skipped (paper/sim mode) ticker=%s", ticker)
-            return None
         allowed, reason = self._pre_order_check(ticker, count, price or 50)
         if not allowed:
             logger.warning("buy_no blocked: %s ticker=%s", reason, ticker)
@@ -152,9 +146,6 @@ class KalshiTrader:
     
     async def sell_yes(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Sell YES contracts (or close YES position)."""
-        if not self._is_live_trading_allowed():
-            logger.debug("sell_yes: skipped (paper/sim mode) ticker=%s", ticker)
-            return None
         allowed, reason = self._pre_order_check(ticker, count, price or 50)
         if not allowed:
             logger.warning("sell_yes blocked: %s ticker=%s", reason, ticker)
@@ -174,9 +165,6 @@ class KalshiTrader:
     
     async def sell_no(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Sell NO contracts (or close NO position)."""
-        if not self._is_live_trading_allowed():
-            logger.debug("sell_no: skipped (paper/sim mode) ticker=%s", ticker)
-            return None
         allowed, reason = self._pre_order_check(ticker, count, price or 50)
         if not allowed:
             logger.warning("sell_no blocked: %s ticker=%s", reason, ticker)
@@ -204,9 +192,6 @@ class KalshiTrader:
         Returns:
             List of placed orders
         """
-        if not self._is_live_trading_allowed():
-            logger.debug("close_position: skipped (paper/sim mode) ticker=%s", ticker)
-            return []
         positions = await self.client.get_positions()
         market_positions = [p for p in positions if p.market_id == ticker]
         
