@@ -361,8 +361,19 @@ class SwarmConsensusAggregator:
         # Determine status
         if len(proposals) < self.min_agents:
             status = ConsensusStatus.FORMING
+            # Add diagnostic logging to help identify "insufficient proposals" issues
+            logger.info(
+                f"Consensus FORMING for {asset}:{timeframe} - "
+                f"need {self.min_agents} proposals, have {len(proposals)} "
+                f"from agents: {[p.agent_id for p in proposals]}"
+            )
         elif len(archetypes) < min_archetypes:
             status = ConsensusStatus.FORMING  # Block consensus without diversity
+            logger.info(
+                f"Consensus FORMING for {asset}:{timeframe} - "
+                f"need {min_archetypes} archetypes, have {len(archetypes)}: {archetypes} "
+                f"from {len(proposals)} proposals"
+            )
         elif agreement_ratio < self.consensus_threshold:
             status = ConsensusStatus.CONFLICTED
         else:
