@@ -275,6 +275,8 @@ class PredictionMarketModel:
         order_size_contracts: int = 1,
         asset: Optional[str] = None,
         strike_price: Optional[float] = None,
+        orderbook_depth: Optional[int] = None,
+        orderbook_spread_cents: Optional[Decimal] = None,
     ) -> EdgeEstimate:
         """Compute expected edge for a potential trade.
 
@@ -291,6 +293,8 @@ class PredictionMarketModel:
             order_size_contracts: Number of contracts for fee calc.
             asset: Underlying asset (e.g. BTC) for external feed integration.
             strike_price: The strike price of the contract for spot-relative model.
+            orderbook_depth: EDGE-2: Depth at target price for dynamic slippage.
+            orderbook_spread_cents: EDGE-2: Current orderbook spread in cents.
         """
         mp = model_prob or self._model_probs.get(market_id)
         
@@ -337,9 +341,9 @@ class PredictionMarketModel:
             Decimal("0.0001"), ROUND_HALF_UP
         )
 
-        # Slippage estimate
-        slippage = (self._default_slippage / Decimal("100")).quantize(
-            Decimal("0.0001"), ROUND_HALF_UP
+        # EDGE-2: Dynamic slippage based on orderbook depth and size
+        slippage = self._compute_dynamic_slippage(
+            order_size_contracts, orderbook_depth, orderbook_spread_cents
         )
 
         net_edge = raw_edge - fee_drag - slippage
@@ -371,6 +375,56 @@ class PredictionMarketModel:
             edge_type=edge_type,
             confidence=confidence,
         )
+
+    # ------------------------------------------------------------------
+    # EDGE-2: Dynamic slippage estimation
+    # ------------------------------------------------------------------
+
+    def _compute_dynamic_slippage(
+        self,
+        order_size: int,
+        orderbook_depth: Optional[int],
+        spread_cents: Optional[Decimal],
+    ) -> Decimal:
+        """Compute slippage estimate dynamically from orderbook data.
+
+        When orderbook data is available, slippage scales with:
+        - Order size relative to available depth (size impact)
+        - Current spread width (market quality signal)
+
+        Falls back to the static default when no orderbook data is present.
+
+        Args:
+            order_size: Number of contracts being ordered.
+            orderbook_depth: Contracts available at or near the target price.
+            spread_cents: Current bid-ask spread in cents.
+
+        Returns:
+            Slippage as a decimal fraction (e.g., 0.01 = 1%).
+        """
+        # Fall back to static default when no depth data available
+        if orderbook_depth is None or orderbook_depth <= 0:
+            return (self._default_slippage / Decimal("100")).quantize(
+                Decimal("0.0001"), ROUND_HALF_UP
+            )
+
+        # Base slippage from spread (half-spread is minimum expected slippage)
+        if spread_cents is not None and spread_cents > 0:
+            base_slippage = (spread_cents / Decimal("2")) / Decimal("100")
+        else:
+            base_slippage = Decimal("0.005")  # 0.5% default base
+
+        # Size impact: how much of available depth the order consumes
+        size_ratio = Decimal(str(order_size)) / Decimal(str(orderbook_depth))
+        # Convex size impact: slippage accelerates as we consume more depth
+        size_impact = size_ratio * size_ratio * Decimal("0.02")  # 2% at full depth
+
+        total_slippage = base_slippage + size_impact
+
+        # Clamp to reasonable bounds
+        total_slippage = max(Decimal("0.001"), min(total_slippage, Decimal("0.05")))
+
+        return total_slippage.quantize(Decimal("0.0001"), ROUND_HALF_UP)
 
     # ------------------------------------------------------------------
     # Arb detection

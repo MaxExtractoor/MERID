@@ -111,6 +111,8 @@ class KalshiConsensusAdapter:
                 "edge_pct": edge_pct,
                 "confidence": confidence,
                 "reasoning": getattr(signal, 'reasoning', '')[:200] if getattr(signal, 'reasoning', '') else "",
+                # EXEC-3: Full decision trace for swarm-level auditability
+                "decision_trace": self._build_decision_trace(signal, market),
             },
         }
     
@@ -147,13 +149,64 @@ class KalshiConsensusAdapter:
     def _extract_timeframe(self, ticker: str) -> str:
         """Extract timeframe from Kalshi ticker."""
         ticker_lower = ticker.lower()
+        if "15m" in ticker_lower:
+            return "15m"
         if "24h" in ticker_lower or "daily" in ticker_lower:
             return "24h"
         if "weekly" in ticker_lower or "week" in ticker_lower:
             return "weekly"
+        if "monthly" in ticker_lower or "month" in ticker_lower:
+            return "monthly"
         if "hourly" in ticker_lower or "1h" in ticker_lower:
             return "1h"
+        if "4h" in ticker_lower:
+            return "4h"
         return "unknown"
+
+    # ── EXEC-3: Decision trace builder ────────────────────────────────────
+
+    def _build_decision_trace(
+        self,
+        signal: StrategySignal,
+        market: EventMarket,
+    ) -> Dict[str, Any]:
+        """Build a rich decision trace for swarm-level post-mortem auditability.
+
+        EXEC-3: Includes structural conviction components, regime flags,
+        timeframe context, and asset tags for each energy packet.
+        """
+        trace: Dict[str, Any] = {
+            "signal_ts": time.time(),
+            "asset": self._extract_asset(market.market_id),
+            "timeframe": self._extract_timeframe(market.market_id),
+        }
+
+        # Extract edge breakdown if available
+        if signal.edge:
+            trace["edge"] = {
+                "raw": float(signal.edge.raw_edge) if hasattr(signal.edge, 'raw_edge') else None,
+                "fee_drag": float(signal.edge.fee_drag) if hasattr(signal.edge, 'fee_drag') else None,
+                "slippage": float(signal.edge.slippage_est) if hasattr(signal.edge, 'slippage_est') else None,
+                "net": float(signal.edge.net_edge) if hasattr(signal.edge, 'net_edge') else None,
+                "type": getattr(signal.edge, 'edge_type', 'unknown'),
+            }
+
+        # Extract structural filters and conviction components
+        trace["structural"] = {
+            "conviction_score": getattr(signal, 'conviction', None),
+            "regime": getattr(signal, 'regime', None),
+            "fvg_confluence": getattr(signal, 'fvg_confluence', None),
+            "sentiment_bias": getattr(signal, 'sentiment_bias', None),
+            "momentum_aligned": getattr(signal, 'momentum_aligned', None),
+        }
+
+        # Filter reasons (why gates were passed/failed)
+        trace["filters"] = {
+            "gate_results": getattr(signal, 'gate_results', {}),
+            "skip_reasons": getattr(signal, 'skip_reasons', []),
+        }
+
+        return trace
     
     # ── Order Intent → Vote Response ──────────────────────────────────────
     

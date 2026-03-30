@@ -664,5 +664,109 @@ class OrderManager:
             "canceled_orders": len(canceled),
             "total_fill_events": self._total_fills,
             "total_partial_fill_events": self._total_partial_fills,
+            "orphaned_orders": len(self.detect_orphaned_orders()),
             "orders": {oid: o.to_dict() for oid, o in self._orders.items()},
+        }
+
+    # ── DATA-2: Orphaned order detection ─────────────────────────────
+
+    def detect_orphaned_orders(
+        self,
+        max_age_seconds: float = 600.0,
+    ) -> List[TrackedOrder]:
+        """Detect orders that have been resting without state change too long.
+
+        DATA-2: An 'orphaned' order is one in a non-terminal state that
+        hasn't been updated in ``max_age_seconds``. These may indicate
+        lost WS updates, stale REST polling, or exchange-side issues.
+
+        Args:
+            max_age_seconds: Maximum time (seconds) an order can be resting
+                without a status update before being flagged as orphaned.
+                Default: 600s (10 minutes).
+
+        Returns:
+            List of TrackedOrder instances flagged as orphaned.
+        """
+        now = time.time()
+        orphaned = []
+        for tracked in self._orders.values():
+            if tracked.terminal:
+                continue
+            # Use last_polled_at if available, otherwise created_at
+            last_activity = tracked.last_polled_at or tracked.created_at
+            age = now - last_activity
+            if age > max_age_seconds:
+                orphaned.append(tracked)
+                logger.warning(
+                    "DATA-2: Orphaned order detected: order_id=%s ticker=%s "
+                    "status=%s age=%.0fs last_activity=%.0f",
+                    tracked.order_id, tracked.ticker, tracked.status,
+                    age, last_activity,
+                )
+        return orphaned
+
+    async def sweep_orphaned_orders(
+        self,
+        max_age_seconds: float = 600.0,
+        cancel_orphans: bool = False,
+    ) -> Dict[str, Any]:
+        """Sweep for orphaned orders and optionally cancel them.
+
+        DATA-2: Reconciles resting orders against Kalshi's open orders
+        endpoint. Identifies truly orphaned orders vs orders that are
+        still live on the exchange but not updating locally.
+
+        Args:
+            max_age_seconds: Threshold for flagging orphans.
+            cancel_orphans: If True, cancel orders confirmed as orphaned.
+
+        Returns:
+            Dict with sweep results.
+        """
+        orphaned = self.detect_orphaned_orders(max_age_seconds)
+        if not orphaned:
+            return {"orphaned_count": 0, "canceled": [], "refreshed": []}
+
+        canceled = []
+        refreshed = []
+
+        for tracked in orphaned:
+            # Try to refresh from Kalshi first
+            if self._client is not None:
+                try:
+                    updated = await self.poll_order(tracked.order_id)
+                    if updated and updated.terminal:
+                        refreshed.append(tracked.order_id)
+                        logger.info(
+                            "DATA-2: Orphan resolved by polling: order_id=%s now %s",
+                            tracked.order_id, updated.status,
+                        )
+                        continue
+                except Exception as exc:
+                    logger.warning(
+                        "DATA-2: Failed to poll orphaned order %s: %s",
+                        tracked.order_id, exc,
+                    )
+
+            # Still orphaned after refresh — optionally cancel
+            if cancel_orphans and self._client is not None:
+                try:
+                    success = await self.cancel_order(tracked.order_id)
+                    if success:
+                        canceled.append(tracked.order_id)
+                        logger.warning(
+                            "DATA-2: Canceled orphaned order: order_id=%s ticker=%s",
+                            tracked.order_id, tracked.ticker,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "DATA-2: Failed to cancel orphaned order %s: %s",
+                        tracked.order_id, exc,
+                    )
+
+        return {
+            "orphaned_count": len(orphaned),
+            "canceled": canceled,
+            "refreshed": refreshed,
         }
