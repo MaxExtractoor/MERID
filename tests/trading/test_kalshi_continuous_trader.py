@@ -310,3 +310,132 @@ class TestTraderStatus:
         assert s["config"]["min_confidence"] == 0.6
         assert s["config"]["bankroll_fraction"] == 0.02
 
+    def test_status_includes_max_yes_price(self) -> None:
+        """status() must expose max_yes_price so operators can audit it."""
+        catalog = MagicMock()
+        trader = KalshiContinuousTrader(catalog=catalog, max_yes_price=0.40)
+        s = trader.status()
+        assert "max_yes_price" in s["config"]
+        assert s["config"]["max_yes_price"] == 0.40
+
+    def test_status_default_max_yes_price_is_fifty_cents(self) -> None:
+        """Default max_yes_price is 0.50 (50¢) unless overridden."""
+        import os
+        catalog = MagicMock()
+        os.environ.pop("MERID_MAX_YES_PRICE", None)
+        from merid.trading import kalshi_continuous_trader as _kct
+        # Instantiate directly with the module default
+        trader = KalshiContinuousTrader(catalog=catalog)
+        assert trader.status()["config"]["max_yes_price"] == pytest.approx(0.50, abs=1e-6)
+
+
+# ── Max YES price cap ─────────────────────────────────────────────────────
+
+class TestMaxYesPriceCap:
+    """Unit tests for the max_yes_price cap in trade_cycle()."""
+
+    def _make_trader(self, max_yes_price: float = 0.50) -> KalshiContinuousTrader:
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        return KalshiContinuousTrader(catalog=catalog, max_yes_price=max_yes_price)
+
+    def _strategy_with_yes_signal(self, agent_prob: float = 0.75) -> _FixedStrategy:
+        """Return a strategy that signals a YES trade (agent_prob > market prob)."""
+        s = _FixedStrategy(conf=0.80)
+        s._agent_prob = agent_prob
+        return s
+
+    def test_yes_intent_below_cap_is_accepted(self) -> None:
+        """YES intents whose ask price is at or below max_yes_price are included."""
+        trader = self._make_trader(max_yes_price=0.50)
+        strategy = _FixedStrategy(conf=0.80)
+        trader._strategy = strategy
+
+        # Candidate: mid=45¢, ask=48¢ — both below 50¢ cap
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=45, best_ask_cents=48)
+        )
+        trader._candidates = [candidate]
+
+        import asyncio
+        intents = asyncio.get_event_loop().run_until_complete(
+            trader.trade_cycle(bankroll=1000.0)
+        )
+        # agent_prob=0.70 > market_prob=0.45 → YES direction, ask=48¢ < 50¢ cap
+        yes_intents = [i for i in intents if i["direction"] == "yes"]
+        assert len(yes_intents) == 1
+
+    def test_yes_intent_above_cap_is_dropped(self) -> None:
+        """YES intents whose ask price exceeds max_yes_price are dropped."""
+        trader = self._make_trader(max_yes_price=0.40)
+        strategy = _FixedStrategy(conf=0.80)
+        trader._strategy = strategy
+
+        # Candidate: ask=65¢ — above 40¢ cap
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=60, best_ask_cents=65)
+        )
+        trader._candidates = [candidate]
+
+        import asyncio
+        intents = asyncio.get_event_loop().run_until_complete(
+            trader.trade_cycle(bankroll=1000.0)
+        )
+        yes_intents = [i for i in intents if i["direction"] == "yes"]
+        assert len(yes_intents) == 0
+
+    def test_yes_cap_rejection_increments_counter(self) -> None:
+        """Dropping a YES intent above the cap increments execution_rejections."""
+        trader = self._make_trader(max_yes_price=0.30)
+        strategy = _FixedStrategy(conf=0.80)
+        trader._strategy = strategy
+
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=50, best_ask_cents=55)
+        )
+        trader._candidates = [candidate]
+
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(trader.trade_cycle(bankroll=1000.0))
+        assert trader.risk_state.execution_rejections >= 1
+
+    def test_no_intent_not_affected_by_yes_cap(self) -> None:
+        """NO direction intents are not dropped by the YES price cap."""
+        trader = self._make_trader(max_yes_price=0.10)  # very tight cap
+        # agent_prob < mid_prob → NO direction
+        # Override: make strategy return agent_prob=0.20, market mid=0.50 → NO trade
+        strategy = _FixedStrategy(conf=0.80)  # returns agent_prob=0.70 > 0.50 → YES
+        # Use a mid_price_cents > agent_prob*100 to force NO direction
+        # _FixedStrategy returns agent_prob=0.70; if market mid=0.80 → NO direction
+        trader._strategy = strategy
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=80, best_ask_cents=85)
+        )
+        trader._candidates = [candidate]
+
+        import asyncio
+        intents = asyncio.get_event_loop().run_until_complete(
+            trader.trade_cycle(bankroll=1000.0)
+        )
+        no_intents = [i for i in intents if i["direction"] == "no"]
+        assert len(no_intents) == 1
+
+    def test_yes_cap_uses_best_ask_when_available(self) -> None:
+        """best_ask_cents is used (not mid_price_cents) for the YES price check."""
+        # best_ask=55¢ > cap=50¢ → dropped even though mid=45¢ < cap
+        trader = self._make_trader(max_yes_price=0.50)
+        strategy = _FixedStrategy(conf=0.80)
+        trader._strategy = strategy
+
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=45, best_ask_cents=55)
+        )
+        trader._candidates = [candidate]
+
+        import asyncio
+        intents = asyncio.get_event_loop().run_until_complete(
+            trader.trade_cycle(bankroll=1000.0)
+        )
+        yes_intents = [i for i in intents if i["direction"] == "yes"]
+        assert len(yes_intents) == 0
+

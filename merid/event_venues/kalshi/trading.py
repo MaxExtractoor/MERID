@@ -49,11 +49,13 @@ class KalshiTrader:
         category: str | None = None,
         spread_cents: int | None = None,
         depth_at_price: int | None = None,
+        outcome: str = "yes",
     ) -> tuple[bool, str]:
         """Run kill-switch + KalshiRiskManager checks before placing any order.
 
         Pass ``spread_cents`` and ``depth_at_price`` from the live orderbook
         snapshot so that E1 orderbook checks are applied.
+        Pass ``outcome`` ("yes" or "no") so the max_yes_price_cents cap is enforced.
 
         Returns (allowed, reason).  Fail-closed: any import/runtime error blocks the order.
         """
@@ -79,6 +81,7 @@ class KalshiTrader:
                 price_cents=price_cents,
                 spread_cents=spread_cents,
                 depth_at_price=depth_at_price,
+                outcome=outcome,
             )
             if not allowed:
                 logger.warning("Order blocked by KalshiRiskManager: %s", reason)
@@ -107,7 +110,7 @@ class KalshiTrader:
     
     async def buy_yes(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Buy YES contracts in a market."""
-        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        allowed, reason = self._pre_order_check(ticker, count, price or 50, outcome="yes")
         if not allowed:
             logger.warning("buy_yes blocked: %s ticker=%s", reason, ticker)
             return None
@@ -127,7 +130,7 @@ class KalshiTrader:
     
     async def buy_no(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Buy NO contracts in a market."""
-        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        allowed, reason = self._pre_order_check(ticker, count, price or 50, outcome="no")
         if not allowed:
             logger.warning("buy_no blocked: %s ticker=%s", reason, ticker)
             return None
