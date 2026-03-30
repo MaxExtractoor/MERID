@@ -22,9 +22,11 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import random
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -176,6 +178,8 @@ class OrderIntent:
     # Live orderbook params (E1) — populated from the current orderbook snapshot
     spread_cents: Optional[int] = None
     depth_at_price: Optional[int] = None
+    # EXEC-1: End-to-end trace ID for distributed latency tracking
+    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 @dataclass
@@ -188,12 +192,16 @@ class OrderResult:
         fill: Fill details (if filled)
         reason: Rejection reason (if rejected)
         latency_ms: Routing latency
+        trace_id: EXEC-1: Correlated trace ID from the originating OrderIntent
+        trace_timings: EXEC-1: Per-hop latency measurements in milliseconds
     """
     status: str
     mode: TradingMode
     fill: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
     latency_ms: float = 0.0
+    trace_id: str = ""
+    trace_timings: Dict[str, float] = field(default_factory=dict)
 
 
 # ── Paper fill simulation ─────────────────────────────────────────────────
@@ -227,27 +235,54 @@ def _is_live_mode(mode: TradingMode) -> bool:
 
 
 def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Kalshi fee schedule mirrored for simulation/live-normalized reporting."""
+    """Kalshi convex fee schedule: fee = ceil(0.07 * C * P * (1-P)).
+
+    EXEC-2: Updated to match Kalshi's actual convex fee curve where
+    fee peaks at P=0.50 (50¢ price) and tapers toward extremes.
+    Tiered rates apply based on contract count.
+    """
     if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
         return 0
-    payout = 100 - price_cents
+    p = price_cents / 100.0
     if contracts < 100:
         rate = 0.07
     elif contracts < 1000:
         rate = 0.05
     else:
         rate = 0.03
-    per_contract = max(2, int((payout * rate) + 0.9999))
+    # Convex fee: peaks at P=0.5, lower at extremes
+    per_contract = max(2, math.ceil(rate * 100 * p * (1 - p)))
     return per_contract * contracts
 
 
+def _dynamic_paper_slippage_cents(price_cents: int, contracts: int) -> int:
+    """EXEC-2: Price-dependent slippage for realistic paper simulation.
+
+    Models slippage as larger near P=0.5 (where liquidity is typically
+    best but impact is highest in probability terms) and scales with
+    order size. Uses the configured PAPER_SLIPPAGE_BPS as a baseline.
+    """
+    p = price_cents / 100.0
+    # Base slippage from configured BPS
+    base_slip = price_cents * PAPER_SLIPPAGE_BPS / 10_000
+    # Price-dependent: slippage is higher near 50¢ where more market-making occurs
+    price_factor = 1.0 + 0.5 * (1.0 - abs(2 * p - 1.0))  # peaks at P=0.5
+    # Size factor: larger orders face more slippage
+    size_factor = 1.0 + 0.1 * math.log1p(max(0, contracts - 1))
+    return max(0, int(round(base_slip * price_factor * size_factor)))
+
+
 def simulate_paper_fill(intent: OrderIntent) -> Dict[str, Any]:
-    """Simulate a paper/mock fill with slippage, partial-fill probability, and fees."""
+    """Simulate a paper/mock fill with slippage, partial-fill probability, and fees.
+
+    EXEC-2: Uses price-dependent slippage model matching Kalshi's convex fee
+    curve for more realistic paper simulation across all price bands.
+    """
     requested_count = max(0, int(intent.count))
     requested_price = max(1, min(99, int(intent.price_cents)))
 
-    # Basic side-aware slippage in cents from configured basis points.
-    slippage_cents = max(0, int(round(requested_price * PAPER_SLIPPAGE_BPS / 10_000)))
+    # EXEC-2: Dynamic, price-dependent slippage instead of uniform BPS
+    slippage_cents = _dynamic_paper_slippage_cents(requested_price, requested_count)
     if intent.order_type == "market":
         slippage_cents = max(slippage_cents, 1)
 
@@ -304,32 +339,44 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
 
 def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
     """Route MOCK/PAPER intents synchronously."""
+    trace_timings: Dict[str, float] = {}
+
     if _is_mock_mode(mode):
+        t_sim = time.monotonic()
         fill = simulate_paper_fill(intent)
+        trace_timings["simulation_ms"] = round((time.monotonic() - t_sim) * 1000, 2)
         latency = (time.monotonic() - t0) * 1000
+        trace_timings["total_ms"] = round(latency, 2)
         logger.info(
             f"[order-router] MOCK fill {intent.ticker} {intent.action} "
-            f"{intent.count}x @ {intent.price_cents}c"
+            f"{intent.count}x @ {intent.price_cents}c [trace={intent.trace_id[:8]}]"
         )
         return OrderResult(
             status="filled_mock",
             mode=mode,
             fill=fill,
             latency_ms=round(latency, 2),
+            trace_id=intent.trace_id,
+            trace_timings=trace_timings,
         )
 
     if _is_paper_mode(mode):
+        t_sim = time.monotonic()
         fill = simulate_paper_fill(intent)
+        trace_timings["simulation_ms"] = round((time.monotonic() - t_sim) * 1000, 2)
         latency = (time.monotonic() - t0) * 1000
+        trace_timings["total_ms"] = round(latency, 2)
         logger.info(
             f"[order-router] PAPER fill {intent.ticker} {intent.action} "
-            f"{intent.count}x @ {intent.price_cents}c"
+            f"{intent.count}x @ {intent.price_cents}c [trace={intent.trace_id[:8]}]"
         )
         return OrderResult(
             status="filled_paper",
             mode=mode,
             fill=fill,
             latency_ms=round(latency, 2),
+            trace_id=intent.trace_id,
+            trace_timings=trace_timings,
         )
 
     latency = (time.monotonic() - t0) * 1000
@@ -338,6 +385,7 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         mode=mode,
         reason=f"sync_route_unsupported_mode_{_mode_value(mode)}",
         latency_ms=round(latency, 2),
+        trace_id=intent.trace_id,
     )
 
 
