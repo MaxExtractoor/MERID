@@ -357,3 +357,230 @@ def record_metrics(endpoint_name: str):
                 )
         return wrapper
     return decorator
+
+
+# ── PERF-1: Event loop watchdog ──────────────────────────────────────────
+
+class EventLoopWatchdog:
+    """PERF-1: Monitors asyncio event loop health with latency alerts.
+
+    Tracks event loop lag, blocked task detection, and provides
+    health status for observability dashboards.
+    """
+
+    def __init__(
+        self,
+        warn_threshold_ms: float = 100.0,
+        critical_threshold_ms: float = 500.0,
+        check_interval_s: float = 1.0,
+    ):
+        self._warn_threshold = warn_threshold_ms
+        self._critical_threshold = critical_threshold_ms
+        self._check_interval = check_interval_s
+        self._lag_samples: deque = deque(maxlen=300)  # 5 minutes at 1/s
+        self._warn_count: int = 0
+        self._crit_count: int = 0
+        self._running: bool = False
+        self._task: Optional[asyncio.Task] = None
+        self._alerts: deque = deque(maxlen=100)
+
+    async def start(self) -> None:
+        """Start the watchdog monitoring loop."""
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(
+            self._monitor_loop(), name="event-loop-watchdog"
+        )
+        logger.info(
+            "PERF-1: Event loop watchdog started "
+            f"(warn={self._warn_threshold}ms, crit={self._critical_threshold}ms)"
+        )
+
+    async def stop(self) -> None:
+        """Stop the watchdog."""
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+    async def _monitor_loop(self) -> None:
+        """Core monitoring loop measuring event loop responsiveness."""
+        while self._running:
+            expected = time.monotonic()
+            await asyncio.sleep(self._check_interval)
+            actual = time.monotonic()
+            lag_ms = (actual - expected - self._check_interval) * 1000
+
+            self._lag_samples.append(lag_ms)
+
+            if lag_ms > self._critical_threshold:
+                self._crit_count += 1
+                self._alerts.append({
+                    "ts": actual, "lag_ms": round(lag_ms, 1),
+                    "severity": "critical",
+                })
+                logger.error(
+                    f"PERF-1: CRITICAL event loop lag: {lag_ms:.0f}ms "
+                    f"(threshold: {self._critical_threshold}ms)"
+                )
+            elif lag_ms > self._warn_threshold:
+                self._warn_count += 1
+                self._alerts.append({
+                    "ts": actual, "lag_ms": round(lag_ms, 1),
+                    "severity": "warning",
+                })
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get watchdog health status for dashboards."""
+        samples = list(self._lag_samples)
+        return {
+            "running": self._running,
+            "samples": len(samples),
+            "avg_lag_ms": round(sum(samples) / len(samples), 2) if samples else 0.0,
+            "max_lag_ms": round(max(samples), 2) if samples else 0.0,
+            "p95_lag_ms": round(
+                sorted(samples)[int(len(samples) * 0.95)] if samples else 0.0, 2
+            ),
+            "warn_count": self._warn_count,
+            "crit_count": self._crit_count,
+            "recent_alerts": list(self._alerts)[-10:],
+        }
+
+
+# ── PERF-2: Memory pressure monitoring ──────────────────────────────────
+
+class MemoryPressureMonitor:
+    """PERF-2: Monitors memory usage and triggers buffer trimming.
+
+    Tracks memory footprint of key components and alerts when usage
+    exceeds configurable thresholds. Supports automatic trimming of
+    oversized buffers.
+    """
+
+    def __init__(
+        self,
+        warn_mb: float = 256.0,
+        critical_mb: float = 512.0,
+        check_interval_s: float = 30.0,
+    ):
+        self._warn_mb = warn_mb
+        self._critical_mb = critical_mb
+        self._check_interval = check_interval_s
+        self._running: bool = False
+        self._task: Optional[asyncio.Task] = None
+        self._history: deque = deque(maxlen=120)  # 1 hour at 30s intervals
+        self._trim_callbacks: List[Any] = []  # registered trim functions
+        self._pressure_status: str = "normal"
+
+    def register_trim_callback(self, callback: Any) -> None:
+        """Register a callback to be invoked when memory pressure is high.
+
+        The callback should trim or release memory from its component.
+        """
+        self._trim_callbacks.append(callback)
+
+    async def start(self) -> None:
+        """Start the memory pressure monitoring loop."""
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(
+            self._monitor_loop(), name="memory-pressure-monitor"
+        )
+        logger.info(
+            f"PERF-2: Memory pressure monitor started "
+            f"(warn={self._warn_mb}MB, crit={self._critical_mb}MB)"
+        )
+
+    async def stop(self) -> None:
+        """Stop the monitor."""
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _monitor_loop(self) -> None:
+        """Core memory monitoring loop."""
+        while self._running:
+            await asyncio.sleep(self._check_interval)
+            usage = self._get_memory_usage_mb()
+            self._history.append({"ts": time.monotonic(), "mb": usage})
+
+            prev = self._pressure_status
+            if usage > self._critical_mb:
+                self._pressure_status = "critical"
+                logger.error(
+                    f"PERF-2: CRITICAL memory pressure: {usage:.1f}MB "
+                    f"(threshold: {self._critical_mb}MB)"
+                )
+                self._trigger_trim()
+            elif usage > self._warn_mb:
+                self._pressure_status = "warning"
+                if prev != "warning":
+                    logger.warning(
+                        f"PERF-2: Memory pressure warning: {usage:.1f}MB "
+                        f"(threshold: {self._warn_mb}MB)"
+                    )
+            else:
+                self._pressure_status = "normal"
+
+    def _get_memory_usage_mb(self) -> float:
+        """Get current process memory usage in MB."""
+        try:
+            import resource
+            # getrusage returns memory in KB on Linux
+            usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return usage_kb / 1024.0
+        except (ImportError, AttributeError):
+            return 0.0
+
+    def _trigger_trim(self) -> None:
+        """Invoke all registered trim callbacks."""
+        for cb in self._trim_callbacks:
+            try:
+                cb()
+            except Exception as exc:
+                logger.warning(f"PERF-2: Trim callback error: {exc}")
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get memory pressure status for dashboards."""
+        current = self._get_memory_usage_mb()
+        history = list(self._history)
+        return {
+            "current_mb": round(current, 1),
+            "pressure": self._pressure_status,
+            "warn_threshold_mb": self._warn_mb,
+            "critical_threshold_mb": self._critical_mb,
+            "peak_mb": round(max(h["mb"] for h in history), 1) if history else 0.0,
+            "samples": len(history),
+        }
+
+
+# ── Watchdog / Monitor singletons ────────────────────────────────────────
+
+_watchdog: Optional[EventLoopWatchdog] = None
+_memory_monitor: Optional[MemoryPressureMonitor] = None
+
+
+def get_event_loop_watchdog(**kwargs) -> EventLoopWatchdog:
+    """Get or create the singleton event loop watchdog."""
+    global _watchdog
+    if _watchdog is None:
+        _watchdog = EventLoopWatchdog(**kwargs)
+    return _watchdog
+
+
+def get_memory_pressure_monitor(**kwargs) -> MemoryPressureMonitor:
+    """Get or create the singleton memory pressure monitor."""
+    global _memory_monitor
+    if _memory_monitor is None:
+        _memory_monitor = MemoryPressureMonitor(**kwargs)
+    return _memory_monitor
