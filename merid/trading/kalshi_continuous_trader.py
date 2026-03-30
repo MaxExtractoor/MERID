@@ -44,6 +44,10 @@ _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
 _DEFAULT_BANKROLL_FRACTION = float(os.getenv("MERID_BANKROLL_FRACTION", "0.01"))
 _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
 
+# Fallback YES price (cents) when a candidate has no best_ask or mid price data.
+# Used only in the max-price guard inside trade_cycle().
+_FALLBACK_YES_PRICE_CENTS = 50
+
 
 # ── TradingCandidate (thin subclass of canonical MarketCandidate) ──────────
 
@@ -352,7 +356,7 @@ class KalshiContinuousTrader:
 
             # Max YES price guard — drop YES intents whose implied price exceeds cap
             if intent["direction"] == "yes":
-                yes_price_cents = candidate.best_ask_cents or candidate.mid_price_cents or 50
+                yes_price_cents = candidate.best_ask_cents or candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
                 max_cents = int(self._max_yes_price * 100)
                 if yes_price_cents > max_cents:
                     logger.info(

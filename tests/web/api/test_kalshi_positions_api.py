@@ -17,6 +17,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from web.api.kalshi_api import router as kalshi_router
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -35,8 +37,7 @@ def _make_cached_position(market_id: str, contracts: int = 5, side: str = "yes",
 
 def _make_app() -> FastAPI:
     app = FastAPI()
-    from web.api.kalshi_api import router
-    app.include_router(router)
+    app.include_router(kalshi_router)
     return app
 
 
