@@ -198,7 +198,10 @@ class EnhancedConsensusCoordinator:
         
         # Event stream subscription
         self._opinion_subscriber_task: Optional[asyncio.Task] = None
-        
+
+        # Timeout task tracking (BUG-L5 fix: prevent garbage collection)
+        self._timeout_tasks: Dict[str, asyncio.Task] = {}  # round_id -> timeout task
+
         # Locks
         self._lock = asyncio.Lock()
         
@@ -499,12 +502,14 @@ class EnhancedConsensusCoordinator:
             self._total_rounds += 1
             
             logger.info(f"Consensus round started: {round.round_id} for {symbol}")
-            
+
             await self._emit_event("consensus.round_started", round.to_dict())
-            
-            # Schedule timeout
-            asyncio.create_task(self._handle_round_timeout(round.round_id, symbol))
-            
+
+            # Schedule timeout (BUG-L5 fix: store task reference to prevent GC)
+            self._timeout_tasks[round.round_id] = asyncio.create_task(
+                self._handle_round_timeout(round.round_id, symbol)
+            )
+
             return round
     
     async def submit_vote(
@@ -652,7 +657,14 @@ class EnhancedConsensusCoordinator:
         
         # Archive round
         self._round_history.append(round)
-        
+
+        # Clean up timeout task (BUG-L5 fix: remove task reference)
+        if round.round_id in self._timeout_tasks:
+            task = self._timeout_tasks[round.round_id]
+            if not task.done():
+                task.cancel()
+            del self._timeout_tasks[round.round_id]
+
         # Clean up
         if symbol in self._rounds:
             del self._rounds[symbol]
@@ -668,9 +680,11 @@ class EnhancedConsensusCoordinator:
                 if round.retry_count < self.config.max_retries:
                     round.retry_count += 1
                     logger.warning(f"Consensus round timeout, retrying ({round.retry_count}/{self.config.max_retries}): {symbol}")
-                    
-                    # Schedule another timeout
-                    asyncio.create_task(self._handle_round_timeout(round_id, symbol))
+
+                    # Schedule another timeout (BUG-L5 fix: store task reference to prevent GC)
+                    self._timeout_tasks[round_id] = asyncio.create_task(
+                        self._handle_round_timeout(round_id, symbol)
+                    )
                     return
                 
                 # Final timeout
@@ -688,9 +702,13 @@ class EnhancedConsensusCoordinator:
                     **round.to_dict(),
                     "safe_action": safe_action.value,
                 })
-                
+
                 self._round_history.append(round)
                 del self._rounds[symbol]
+
+                # Clean up timeout task (BUG-L5 fix: remove task reference)
+                if round_id in self._timeout_tasks:
+                    del self._timeout_tasks[round_id]
     
     def _get_safe_action_for_veto(self) -> str:
         """Get safe action when consensus is vetoed."""

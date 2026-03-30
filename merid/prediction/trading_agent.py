@@ -1559,7 +1559,11 @@ class KalshiTradingAgent:
             )
 
         except Exception as exc:
-            self.logger.debug(f"Consensus submission error: {exc}")
+            # Upgrade to WARNING to help diagnose "insufficient proposals" issues
+            self.logger.warning(
+                f"Consensus submission error for {self.config.asset}:{self.config.timeframe}: {exc}",
+                exc_info=True
+            )
 
     def _get_consensus(
         self,

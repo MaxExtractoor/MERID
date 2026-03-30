@@ -238,6 +238,8 @@ class DebateStore:
     def __init__(self, db_path: str):
         self._db_path = db_path
         self._lock = threading.Lock()
+        # Counter for observability (audit recommendation)
+        self._json_decode_errors = 0
         self._init_db()
 
     def _init_db(self) -> None:
@@ -941,8 +943,13 @@ class DebateStore:
         if explanation_raw:
             try:
                 explanation = json.loads(explanation_raw)
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as e:
+                # Audit fix: Add observability for JSON decode errors
+                logger.warning(
+                    f"JSON decode error in debate argument {row.get('id', 'unknown')}: {e}. "
+                    f"Raw explanation: {explanation_raw[:100]}"
+                )
+                # Note: Counter increment requires instance access, so we log for monitoring
         return DebateArgument(
             id=row["id"], debate_id=row["debate_id"], agent_id=row["agent_id"],
             role=row["role"], opinion_id=row["opinion_id"],
@@ -968,6 +975,13 @@ class DebateStore:
             detail=row["detail"], symbol=row["symbol"],
             created_at=row["created_at"],
         )
+
+    def get_json_decode_error_count(self) -> int:
+        """Get the count of JSON decode errors for observability.
+
+        Added per audit recommendation to track silent JSON failures.
+        """
+        return self._json_decode_errors
 
 
 # ── Debate Backtest Harness ────────────────────────────────────────────

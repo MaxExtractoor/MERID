@@ -1042,7 +1042,8 @@ export default function KalshiGridView() {
                             <span className={`px-1.5 py-0.5 rounded ${
                               o.action === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                             }`}>
-                              {o.action.toUpperCase()} {o.side.toUpperCase()}
+                              {/* UI-005 fix: Add defensive null checks for action/side */}
+                              {(o.action || 'N/A').toUpperCase()} {(o.side || 'N/A').toUpperCase()}
                             </span>
                           </td>
                           <td className="p-2 text-right font-mono text-gray-300">{o.price_cents}¢</td>
@@ -1103,7 +1104,8 @@ export default function KalshiGridView() {
                       <span className={`px-1.5 py-0.5 rounded ${
                         f.action === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                       }`}>
-                        {f.action.toUpperCase()} {f.side.toUpperCase()}
+                        {/* UI-005 fix: Add defensive null checks for action/side */}
+                        {(f.action || 'N/A').toUpperCase()} {(f.side || 'N/A').toUpperCase()}
                       </span>
                     </td>
                     <td className="p-2 text-right font-mono text-gray-300">{f.price_cents}¢</td>

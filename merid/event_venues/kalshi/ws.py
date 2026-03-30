@@ -514,7 +514,8 @@ class KalshiWebSocket(EventVenueStream):
         )
 
         try:
-            await self.connect()
+            # Add timeout protection to prevent indefinite hang (fixes TimeoutError issue)
+            await asyncio.wait_for(self.connect(), timeout=30.0)
 
             # Clear cached orderbook state — force fresh snapshots
             self._ob_initialised.clear()
@@ -537,6 +538,11 @@ class KalshiWebSocket(EventVenueStream):
                 f"{len(ticker_ids)} quotes, {len(self._trade_tickers)} trades, "
                 f"{len(self._orderbook_tickers)} orderbooks" +
                 (", order_group_updates" if self._order_group_updates_enabled else "")
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Kalshi reconnection timed out after 30s "
+                f"(attempt #{self._reconnect_count})"
             )
         except (ConnectionError, RuntimeError, ValueError) as e:
             logger.error(f"Kalshi reconnection failed: {e}")
