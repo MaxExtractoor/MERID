@@ -1708,6 +1708,21 @@ async def _app_lifespan(application: FastAPI):
     _startup_state["started_at"] = time.time()
     startup_success = True
 
+    # ── Phase -1: Event Loop Monitor ──────────────────────────────────────
+    # Start event loop lag monitoring FIRST to catch any startup lag issues
+    logger.info("=" * 80)
+    logger.info("📊 Starting Event Loop Monitor")
+    logger.info("=" * 80)
+    try:
+        from observability.event_loop_monitor import get_event_loop_monitor
+        event_loop_monitor = get_event_loop_monitor()
+        await event_loop_monitor.start()
+        logger.info("✅ Event Loop Monitor started (100ms sample interval, 200ms warn, 500ms crit)")
+        _startup_state["services"]["event_loop_monitor"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.error("Failed to start Event Loop Monitor: %s", e, exc_info=True)
+        _startup_state["services"]["event_loop_monitor"] = {"status": "failed", "error": str(e)}
+
     # ── Phase 0: WebSocket publishers ──────────────────────────────────
     # Legacy crypto publishers DISABLED — Kalshi has its own data pipeline.
     # price_publisher, portfolio_publisher, prediction_publisher all produced
