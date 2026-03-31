@@ -34,12 +34,26 @@ Usage
 from __future__ import annotations
 
 import asyncio
-import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional
 
+from merid.formulas import (
+    AUDIT_SPEC_VERSION,
+    COMPONENT_WEIGHTS,
+    EXTREME_FEAR_MAX,
+    FEAR_MAX,
+    FORMULAS_VERSION,
+    GREED_MAX,
+    book_imbalance,
+    generate_correlation_id,
+    normalize_vol,
+    normalize_volume,
+    regime,
+    rolling_std,
+    score_to_100,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.sentiment")
@@ -49,16 +63,18 @@ logger = get_logger("merid.event_venues.kalshi.sentiment")
 
 VOLATILITY_WINDOW   = 60          # samples kept for rolling σ (≈1 h at 1-min cadence)
 VOLUME_BASELINE_WIN = 1440        # samples for volume baseline (≈24 h)
-EXTREME_FEAR_MAX    = 24
-FEAR_MAX            = 49
-GREED_MAX           = 74
-# 75–100 = extreme_greed
 
-COMPONENT_WEIGHTS = {
-    "volatility":  0.30,
-    "volume_heat": 0.30,
-    "book_imbal":  0.40,
-}
+# Band boundaries are canonical — imported from merid.formulas
+# (re-exported here for backward compatibility)
+__all__ = [
+    "KalshiSentimentService",
+    "SentimentScore",
+    "get_sentiment_service",
+    "EXTREME_FEAR_MAX",
+    "FEAR_MAX",
+    "GREED_MAX",
+    "COMPONENT_WEIGHTS",
+]
 
 # External fear/greed API (alternative.me — crypto only, contextual)
 EXTERNAL_FG_URL = "https://api.alternative.me/fng/?limit=1&format=json"
@@ -117,60 +133,30 @@ class _MarketState:
     composite: float = 50.0       # 0–100
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Private shims (delegate to merid.formulas — do NOT add math here) ─────────
 
 def _regime(score: float) -> str:
-    if score <= EXTREME_FEAR_MAX:
-        return "extreme_fear"
-    if score <= FEAR_MAX:
-        return "fear"
-    if score <= GREED_MAX:
-        return "greed"
-    return "extreme_greed"
+    return regime(score)
 
 
-def _rolling_std(buf: Deque[float]) -> float:
-    """Population σ of a deque, returns 0 if < 2 samples."""
-    n = len(buf)
-    if n < 2:
-        return 0.0
-    mean = sum(buf) / n
-    variance = sum((x - mean) ** 2 for x in buf) / n
-    return math.sqrt(variance)
+def _rolling_std(buf: "Deque[float]") -> float:
+    return rolling_std(buf)
 
 
 def _normalize_vol(sigma: float, baseline_sigma: float) -> float:
-    """Map σ / baseline_σ to 0–1.  σ > 2× baseline → 1.0 (extreme)."""
-    if baseline_sigma <= 0:
-        return 0.5
-    ratio = sigma / baseline_sigma
-    return min(1.0, ratio / 2.0)
+    return normalize_vol(sigma, baseline_sigma)
 
 
 def _normalize_volume(current: float, baseline: float) -> float:
-    """Map current / baseline to 0–1.  ≥ 3× baseline → 1.0."""
-    if baseline <= 0:
-        return 0.5
-    ratio = current / baseline
-    return min(1.0, ratio / 3.0)
+    return normalize_volume(current, baseline)
 
 
 def _book_imbalance(bid: float, ask: float) -> float:
-    """|(bid − ask)| / (bid + ask) → 0–1.  0 = balanced, 1 = one-sided."""
-    total = bid + ask
-    if total <= 0:
-        return 0.0
-    return abs(bid - ask) / total
+    return book_imbalance(bid, ask)
 
 
 def _score_to_100(vol: float, volume: float, imbal: float) -> float:
-    """Combine normalised 0–1 components into a 0–100 index."""
-    raw = (
-        COMPONENT_WEIGHTS["volatility"]  * vol +
-        COMPONENT_WEIGHTS["volume_heat"] * volume +
-        COMPONENT_WEIGHTS["book_imbal"]  * imbal
-    )
-    return raw * 100.0
+    return score_to_100(vol, volume, imbal)
 
 
 # ── Service ───────────────────────────────────────────────────────────────────
@@ -215,14 +201,22 @@ class KalshiSentimentService:
         ask_depth: float = 0.0,
         category: str = "unknown",
         model_prob: Optional[float] = None,
+        correlation_id: Optional[str] = None,
     ) -> None:
         """Ingest a new data point for one market and recompute its score."""
+        corr_id = correlation_id or generate_correlation_id()
+
         if ticker not in self._markets:
             self._markets[ticker] = _MarketState(ticker=ticker, category=category)
             if category not in self._category_tickers:
                 self._category_tickers[category] = []
             if ticker not in self._category_tickers[category]:
                 self._category_tickers[category].append(ticker)
+            logger.debug(
+                "[TRACE] stage=ANALYZE action=market_registered ticker=%s "
+                "category=%s corr_id=%s formulas_ver=%s audit_spec_ver=%s",
+                ticker, category, corr_id, FORMULAS_VERSION, AUDIT_SPEC_VERSION,
+            )
 
         state = self._markets[ticker]
         state.category = category
@@ -237,9 +231,8 @@ class KalshiSentimentService:
         state.prob_history.append(prob)
         state.volume_history.append(volume)
 
-        # Recompute components
+        # Recompute components (all math delegated to merid.formulas)
         sigma = _rolling_std(state.prob_history)
-        # Use long-run σ as baseline (last 30 samples vs full window)
         baseline_sigma = _rolling_std(deque(list(state.prob_history)[-30:], maxlen=30)) or 0.01
 
         vol_score    = _normalize_vol(sigma, baseline_sigma)
@@ -250,6 +243,14 @@ class KalshiSentimentService:
         state.volume_score = volume_score
         state.imbal_score  = imbal_score
         state.composite    = _score_to_100(vol_score, volume_score, imbal_score)
+
+        logger.debug(
+            "[TRACE] stage=ANALYZE action=score_updated ticker=%s "
+            "composite=%.1f regime=%s vol=%.3f volume=%.3f imbal=%.3f "
+            "corr_id=%s",
+            ticker, state.composite, _regime(state.composite),
+            vol_score, volume_score, imbal_score, corr_id,
+        )
 
         # Invalidate aggregate caches
         self._category_scores.pop(category, None)

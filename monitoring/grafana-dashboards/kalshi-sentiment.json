@@ -1,0 +1,393 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "MERID Kalshi Sentiment — Audit & Health",
+    "tags": ["merid", "kalshi", "sentiment", "audit"],
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "1m",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Versions",
+        "description": "FORMULAS_VERSION and AUDIT_SPEC_VERSION currently running. Amber = version drift detected.",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_kalshi_formulas_version_info",
+            "legendFormat": "FORMULAS_VERSION"
+          },
+          {
+            "expr": "merid_kalshi_audit_spec_version_info",
+            "legendFormat": "AUDIT_SPEC_VERSION"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 0.5},
+                {"color": "red", "value": 1}
+              ]
+            },
+            "mappings": []
+          }
+        },
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "orientation": "horizontal",
+          "textMode": "value_and_name",
+          "colorMode": "background"
+        }
+      },
+      {
+        "id": 2,
+        "title": "Invariant Violations",
+        "description": "Number of merid.formulas invariant violations. Must be 0 (GREEN). Any non-zero value is RED.",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_kalshi_invariant_violations_total",
+            "legendFormat": "Violations"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "red",   "value": 1}
+              ]
+            },
+            "unit": "short",
+            "min": 0
+          }
+        },
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "background"
+        }
+      },
+      {
+        "id": 3,
+        "title": "R/A/G Status",
+        "description": "Overall pipeline health derived from formula invariants, version drift, and tracked market count.",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_kalshi_sentiment_rag_status",
+            "legendFormat": "R/A/G"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "red",    "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "green",  "value": 2}
+              ]
+            },
+            "mappings": [
+              {"type": "value", "value": "0", "result": {"text": "RED",   "color": "red"}},
+              {"type": "value", "value": "1", "result": {"text": "AMBER", "color": "yellow"}},
+              {"type": "value", "value": "2", "result": {"text": "GREEN", "color": "green"}}
+            ]
+          }
+        },
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "background"
+        }
+      },
+      {
+        "id": 4,
+        "title": "Global Fear/Greed Score",
+        "description": "0 = extreme fear, 100 = extreme greed. Bands: 0–24 extreme_fear, 25–49 fear, 50–74 greed, 75–100 extreme_greed.",
+        "type": "gauge",
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_kalshi_sentiment_global_score",
+            "legendFormat": "Global Score"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "dark-red",    "value": 0},
+                {"color": "red",         "value": 25},
+                {"color": "green",       "value": 50},
+                {"color": "dark-green",  "value": 75}
+              ]
+            },
+            "min": 0,
+            "max": 100,
+            "unit": "short"
+          }
+        },
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "showThresholdLabels": true,
+          "showThresholdMarkers": true
+        }
+      },
+      {
+        "id": 5,
+        "title": "Score Component Breakdown",
+        "description": "Raw 0–1 component values: volatility (30%), volume_heat (30%), book_imbal (40%).",
+        "type": "bargauge",
+        "gridPos": {"h": 8, "w": 6, "x": 6, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_kalshi_sentiment_component{component=\"volatility\"}",
+            "legendFormat": "Volatility (30%)"
+          },
+          {
+            "expr": "merid_kalshi_sentiment_component{component=\"volume_heat\"}",
+            "legendFormat": "Volume Heat (30%)"
+          },
+          {
+            "expr": "merid_kalshi_sentiment_component{component=\"book_imbal\"}",
+            "legendFormat": "Book Imbalance (40%)"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "min": 0,
+            "max": 1,
+            "unit": "percentunit"
+          }
+        },
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "orientation": "horizontal",
+          "displayMode": "lcd",
+          "showUnfilled": true
+        }
+      },
+      {
+        "id": 6,
+        "title": "Tracked Markets",
+        "description": "Number of Kalshi markets actively contributing to the sentiment score. Must be ≥ 1 for GREEN status.",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_kalshi_sentiment_tracked_markets",
+            "legendFormat": "Markets"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "red",   "value": 0},
+                {"color": "green", "value": 1}
+              ]
+            },
+            "unit": "short",
+            "min": 0
+          }
+        },
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "background"
+        }
+      },
+      {
+        "id": 7,
+        "title": "Score Drift (vs 1h prior)",
+        "description": "Absolute change in global score vs 1 hour ago. GREEN < 15, AMBER 15–30, RED > 30.",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 4},
+        "targets": [
+          {
+            "expr": "abs(merid_kalshi_sentiment_global_score - merid_kalshi_sentiment_global_score offset 1h)",
+            "legendFormat": "Score Drift"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green",  "value": 0},
+                {"color": "yellow", "value": 15},
+                {"color": "red",    "value": 30}
+              ]
+            },
+            "unit": "short",
+            "min": 0,
+            "max": 100
+          }
+        },
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "background"
+        }
+      },
+      {
+        "id": 8,
+        "title": "Active Correlation IDs",
+        "description": "Correlation IDs from recent DISCOVER→ANALYZE traces. Use these for manual spot-checks per AGENT_AUDIT_KALSHI_SENTIMENT.md §5.",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "merid_kalshi_trace_correlation_id_info",
+            "legendFormat": "{{corr_id}}",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {"custom": {"align": "left"}},
+          "overrides": [
+            {
+              "matcher": {"id": "byName", "options": "corr_id"},
+              "properties": [{"id": "displayName", "value": "Correlation ID"}]
+            },
+            {
+              "matcher": {"id": "byName", "options": "stage"},
+              "properties": [{"id": "displayName", "value": "Last Stage"}]
+            },
+            {
+              "matcher": {"id": "byName", "options": "formulas_ver"},
+              "properties": [{"id": "displayName", "value": "formulas_ver"}]
+            }
+          ]
+        },
+        "options": {
+          "showHeader": true,
+          "sortBy": [{"displayName": "Time", "desc": true}]
+        }
+      },
+      {
+        "id": 9,
+        "title": "Kill Switch Activations (24h)",
+        "description": "Number of PROTECT/kill_switch_activate events in the last 24 hours.",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "increase(merid_kalshi_kill_switch_activations_total[24h])",
+            "legendFormat": "Activations"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "red",   "value": 1}
+              ]
+            },
+            "unit": "short",
+            "min": 0
+          }
+        },
+        "options": {
+          "reduceOptions": {"calcs": ["lastNotNull"]},
+          "orientation": "auto",
+          "textMode": "auto",
+          "colorMode": "background"
+        }
+      },
+      {
+        "id": 10,
+        "title": "Global Score History",
+        "description": "Fear/greed index over the last 6 hours.",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+        "targets": [
+          {
+            "expr": "merid_kalshi_sentiment_global_score",
+            "legendFormat": "Global Score"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "dark-red",   "value": 0},
+                {"color": "red",        "value": 25},
+                {"color": "green",      "value": 50},
+                {"color": "dark-green", "value": 75}
+              ]
+            },
+            "min": 0,
+            "max": 100,
+            "unit": "short",
+            "custom": {
+              "lineWidth": 2,
+              "fillOpacity": 10,
+              "spanNulls": true
+            }
+          }
+        },
+        "options": {
+          "tooltip": {"mode": "single"},
+          "legend": {"displayMode": "list", "placement": "bottom"}
+        }
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "datasource",
+          "type": "datasource",
+          "query": "prometheus",
+          "current": {},
+          "label": "Data Source"
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Kill Switch Events",
+          "datasource": "$datasource",
+          "enable": true,
+          "expr": "merid_kalshi_kill_switch_activations_total",
+          "iconColor": "red",
+          "titleFormat": "Kill switch activated"
+        }
+      ]
+    },
+    "time": {"from": "now-6h", "to": "now"},
+    "timepicker": {},
+    "links": [
+      {
+        "title": "Audit Spec",
+        "url": "https://github.com/MaxExtractoor/MERID/blob/main/AGENT_AUDIT_KALSHI_SENTIMENT.md",
+        "tooltip": "Open AGENT_AUDIT_KALSHI_SENTIMENT.md",
+        "type": "link",
+        "icon": "doc"
+      }
+    ]
+  },
+  "folderId": 0,
+  "overwrite": true
+}
