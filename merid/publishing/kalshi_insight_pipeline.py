@@ -212,7 +212,14 @@ class KalshiInsightPipeline:
         while self._running:
             try:
                 markets = await self._fetch_markets(category)
+                # FIX-2: Yield to event loop after fetch to ensure scheduler runs
+                # before processing begins, preventing burst lag when many markets are returned.
+                await asyncio.sleep(0)
+
                 for market in markets:
+                    # FIX-2: Yield between market processing to prevent long bursts
+                    # when processing many markets without giving other tasks a chance.
+                    await asyncio.sleep(0)
                     await self._process_market(market)
             except asyncio.CancelledError:
                 break
