@@ -76,6 +76,10 @@ def record_loop_lag(lag_ms: float, ts: Optional[float] = None) -> None:
 
     Called by EventLoopWatchdog, KalshiWebSocket._measure_lag, or any
     other component that measures event-loop responsiveness.
+
+    Note: This function is designed to be called from a single asyncio
+    event loop (not from multiple threads).  If multi-threaded callers
+    are needed, wrap calls in a threading.Lock.
     """
     global _consecutive_critical, _lag_blocked_until
     ts = ts or time.time()

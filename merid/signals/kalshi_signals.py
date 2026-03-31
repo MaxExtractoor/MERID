@@ -333,6 +333,8 @@ def make_kalshi_risk_signal(**kwargs) -> KalshiRiskSignal:
 EDGE_MIN_SPREAD_CENTS: float = 1.0       # Minimum spread to compute edge
 EDGE_CONFIDENCE_BASE: float = 0.3        # Baseline confidence when data is sparse
 EDGE_CONFIDENCE_SPREAD_BONUS: float = 0.4  # Extra confidence from tight spreads
+EDGE_SPREAD_NEUTRALISATION: float = 20.0 # Spread % at which model fully reverts to 0.5
+EDGE_MODEL_REVERSION_WEIGHT: float = 0.1 # How much model nudges toward 0.5 at max spread
 
 # Liquidity thresholds
 LIQUIDITY_WIDE_SPREAD_PCT: float = 8.0   # Spread % considered "wide"
@@ -453,11 +455,12 @@ class KalshiSignalGenerator:
 
                 implied_prob = mid_cents / 100.0
 
-                # Model probability: nudge toward 0.5 proportional to spread
-                # (wider spread → less confidence in mid → model closer to 0.5)
+                # Model probability: nudge toward 0.5 proportional to spread.
+                # spread_factor ranges from 1.0 (zero spread) to 0.0 (spread >= EDGE_SPREAD_NEUTRALISATION%).
+                # The model reversion shifts implied_prob toward 0.5 by at most EDGE_MODEL_REVERSION_WEIGHT.
                 spread_pct = (spread_cents / mid_cents * 100.0) if mid_cents > 0 else 100.0
-                spread_factor = max(0.0, min(1.0, 1.0 - spread_pct / 20.0))
-                model_prob = implied_prob + (0.5 - implied_prob) * (1.0 - spread_factor) * 0.1
+                spread_factor = max(0.0, min(1.0, 1.0 - spread_pct / EDGE_SPREAD_NEUTRALISATION))
+                model_prob = implied_prob + (0.5 - implied_prob) * (1.0 - spread_factor) * EDGE_MODEL_REVERSION_WEIGHT
 
                 # Clamp to valid range
                 model_prob = max(0.01, min(0.99, model_prob))
@@ -682,15 +685,14 @@ class KalshiSignalGenerator:
             daily_pnl = getattr(risk_controller, "_daily_pnl", None)
             if daily_pnl is not None and float(daily_pnl) < 0:
                 loss_usd = abs(float(daily_pnl))
-                if loss_usd > 0:
-                    signals.append(KalshiRiskSignal(
-                        category=RiskEventCategory.LOSS_CAP.value,
-                        severity="warning" if loss_usd < 500 else "critical",
-                        title="Daily loss alert",
-                        detail=f"Daily loss ${loss_usd:.2f}",
-                        daily_loss_usd=loss_usd,
-                        timestamp=now,
-                    ))
+                signals.append(KalshiRiskSignal(
+                    category=RiskEventCategory.LOSS_CAP.value,
+                    severity="warning" if loss_usd < 500 else "critical",
+                    title="Daily loss alert",
+                    detail=f"Daily loss ${loss_usd:.2f}",
+                    daily_loss_usd=loss_usd,
+                    timestamp=now,
+                ))
 
         except Exception as exc:
             logger.warning(f"Risk signal generation failed: {exc}")
