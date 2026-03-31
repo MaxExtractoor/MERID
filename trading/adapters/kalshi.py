@@ -11,7 +11,7 @@ import asyncio
 from decimal import Decimal
 from typing import Any, Dict, List
 
-from trading.adapters.base import BalanceSnapshot, OrderResult, TradeRequest, TradingVenueAdapterBase
+from trading.adapters.base import BalanceSnapshot, OrderResult, PositionSnapshot, TradeRequest, TradingVenueAdapterBase
 from trading.adapters.registry import register_adapter
 from trading.integrations.kalshi_client import fetch_kalshi_balance, get_kalshi_client
 from utils.logger import get_logger
@@ -53,6 +53,54 @@ class KalshiPredictionAdapter(TradingVenueAdapterBase):
                 metadata=snapshot.get("raw", {}),
             )
         ]
+
+    def _get_positions_live(self) -> List[PositionSnapshot]:
+        """Fetch live positions from Kalshi via the async venue adapter."""
+        from merid.event_venues.kalshi.venue_adapter import KalshiVenueAdapter
+
+        adapter = KalshiVenueAdapter()
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
+                import concurrent.futures as _cf
+                fut = _cf.Future()
+
+                async def _fetch() -> None:
+                    try:
+                        fut.set_result(await adapter.get_positions())
+                    except Exception as _e:
+                        fut.set_exception(_e)
+
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(_fetch(), loop=loop)
+                )
+                venue_positions = fut.result(timeout=30.0)
+            else:
+                venue_positions = asyncio.run(adapter.get_positions())
+        except Exception as exc:
+            logger.error("Kalshi positions fetch failed: %s", exc)
+            return []
+
+        snapshots: List[PositionSnapshot] = []
+        for pos in venue_positions:
+            try:
+                snapshots.append(
+                    PositionSnapshot(
+                        symbol=pos.market_id,
+                        quantity=float(pos.size),
+                        entry_price=float(pos.average_entry_price),
+                        mark_price=float(pos.average_entry_price),
+                        unrealized_pnl=float(pos.unrealized_pnl) if pos.unrealized_pnl is not None else 0.0,
+                        metadata={"outcome_id": pos.outcome_id, "venue": pos.venue},
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                logger.warning("Skipping malformed Kalshi position %s: %s", pos.market_id, exc)
+        return snapshots
 
     def _submit_order_live(self, request: TradeRequest) -> OrderResult:
         """Submit a live or paper order via the Kalshi venue adapter."""
@@ -116,7 +164,7 @@ class KalshiPredictionAdapter(TradingVenueAdapterBase):
                 quantity=request.quantity,
                 executed_price=0.0,
                 status="rejected",
-                error=str(exc),
+                metadata={"error": str(exc)},
             )
 
         executed_price = float(placed.price) if placed.price else 0.0
@@ -127,8 +175,8 @@ class KalshiPredictionAdapter(TradingVenueAdapterBase):
             quantity=float(placed.filled_size),
             executed_price=executed_price,
             status=placed.status,
-            order_id=placed.order_id,
-            raw=placed.raw_data,
+            venue_order_id=placed.order_id,
+            metadata={"raw": placed.raw_data},
         )
 
 
