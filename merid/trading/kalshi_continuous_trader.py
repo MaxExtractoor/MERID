@@ -342,8 +342,8 @@ class KalshiContinuousTrader:
         q = 1.0 - p
         kelly_raw = (p * b - q) / b if b > 0 else 0.0
 
-        # Clamp negative Kelly → no trade
-        if kelly_raw <= 0 or abs(edge) < self._min_edge:
+        # Clamp negative Kelly → no trade; negative edge always skips regardless of magnitude
+        if kelly_raw <= 0 or edge < self._min_edge:
             result = SizingResult(
                 edge=edge, win_prob=win_prob, payout_cents=float(payout_cents),
                 kelly_raw=kelly_raw, source=source,
@@ -359,7 +359,7 @@ class KalshiContinuousTrader:
         kelly_frac = kelly_raw * self._kelly_fraction
         notional = bankroll * kelly_frac
         price_dollars = price_cents / 100.0
-        size_contracts = max(0, int(math.floor(notional / price_dollars))) if price_dollars > 0 else 0
+        size_contracts = max(0, int(math.floor(notional / price_dollars)))
 
         result = SizingResult(
             edge=edge,
@@ -479,7 +479,6 @@ class KalshiContinuousTrader:
 
             # Use signal_to_sizing for Kelly-based notional
             sizing = self.signal_to_sizing(candidate, bankroll)
-            edge_for_intent = sizing.edge
 
             notional = self._apply_risk_checks(candidate, estimate, bankroll)
             if notional is None:
@@ -497,7 +496,7 @@ class KalshiContinuousTrader:
                 "direction": "yes" if estimate.agent_prob > mid_prob else "no",
                 "notional": notional,
                 "confidence": estimate.confidence,
-                "edge": edge_for_intent if edge_for_intent != 0.0 else estimate.edge,
+                "edge": sizing.edge,
                 "kelly_raw": sizing.kelly_raw,
                 "kelly_frac": sizing.kelly_frac,
                 "size_contracts": sizing.size_contracts,
