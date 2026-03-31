@@ -561,6 +561,15 @@ class SwarmConsensusAggregator:
         else:
             self._proposals.clear()
 
+    def _reset_for_tests(self) -> None:
+        """Reset all internal state back to defaults.
+
+        **For testing only.** Clears proposals AND the consensus cache so that
+        no state bleeds between test cases that share the singleton instance.
+        """
+        self._proposals.clear()
+        self._consensus_cache.clear()
+
 
 # Singleton accessor
 def get_consensus_aggregator() -> SwarmConsensusAggregator:
