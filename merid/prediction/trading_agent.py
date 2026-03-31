@@ -221,6 +221,11 @@ class KalshiTradingAgent:
 
     async def _run_cycle(self) -> None:
         """Single decision cycle."""
+        # FIX-1: Yield to event loop scheduler at start of each cycle to prevent starvation
+        # when cycle completes quickly (agent paused, session guard blocked, no markets, etc.)
+        # Reference: https://til.simonwillison.net/python/yielding-in-asyncio
+        await asyncio.sleep(0)
+
         now = datetime.now(timezone.utc)
         self.state.last_cycle_at = now
         self.state.cycles_run += 1
@@ -246,6 +251,10 @@ class KalshiTradingAgent:
 
         # 5. Evaluate each filtered market
         for market in active_markets:
+            # FIX-1: Yield between market evaluations to prevent long bursts
+            # when processing many markets without giving other tasks a chance to run.
+            await asyncio.sleep(0)
+
             if self._shutdown.is_set():
                 break
 

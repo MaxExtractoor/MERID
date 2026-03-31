@@ -23,11 +23,46 @@ router = APIRouter(tags=["health"])
 @router.get("/api/health")
 async def get_global_health(request: Request) -> dict:
     """Simple health check for MERID system."""
-    
+
+    # Check event loop lag
+    event_loop_status = "healthy"
+    event_loop_degraded = False
+    event_loop_metrics = {}
+
+    try:
+        from observability.event_loop_monitor import get_event_loop_monitor
+        monitor = get_event_loop_monitor()
+        status = monitor.get_current_status()
+        event_loop_degraded = status.get("degraded", False)
+        event_loop_metrics = status.get("stats_5m", {})
+
+        # Determine health status based on P95 lag
+        p95_lag = event_loop_metrics.get("p95_ms", 0.0)
+        if p95_lag > 500:
+            event_loop_status = "degraded"
+        elif p95_lag > 200:
+            event_loop_status = "warning"
+        else:
+            event_loop_status = "healthy"
+    except Exception as exc:
+        logger.debug(f"Event loop monitor check failed: {exc}")
+        event_loop_status = "unknown"
+
     return {
-        "status": "healthy",
+        "status": "degraded" if event_loop_degraded else "healthy",
         "timestamp": int(time.time()),
+        "degraded": event_loop_degraded,
         "checks": {
+            "event_loop": {
+                "status": event_loop_status,
+                "degraded": event_loop_degraded,
+                "p50_lag_ms": event_loop_metrics.get("p50_ms", 0.0),
+                "p95_lag_ms": event_loop_metrics.get("p95_ms", 0.0),
+                "p99_lag_ms": event_loop_metrics.get("p99_ms", 0.0),
+                "max_lag_ms": event_loop_metrics.get("max_ms", 0.0),
+                "samples_above_warn": event_loop_metrics.get("samples_above_warn", 0),
+                "samples_above_crit": event_loop_metrics.get("samples_above_crit", 0),
+            },
             "price_feed": {
                 "status": "healthy",
                 "last_update": int(time.time()),
@@ -261,6 +296,61 @@ async def get_cfb_rti_health() -> dict:
         logger.error("CFB RTI health check failed: %s", exc)
         return {
             "status": "error",
+            "error": str(exc),
+            "timestamp": time.time(),
+        }
+
+
+@router.get("/health/event_loop")
+async def get_event_loop_health() -> dict:
+    """Event loop lag monitoring health check.
+
+    Returns detailed metrics about event loop responsiveness, including:
+    - P50/P95/P99 lag percentiles over 1-minute and 5-minute windows
+    - Count of samples exceeding warning (200ms) and critical (500ms) thresholds
+    - Degraded status if P95 lag consistently exceeds 500ms
+
+    This is critical for detecting event loop starvation, tight loops without
+    yields, and blocking operations on the main event loop.
+
+    Response fields
+    ---------------
+    ``status``
+        ``"healthy"`` — P95 lag < 200ms
+        ``"warning"`` — P95 lag 200-500ms
+        ``"degraded"`` — P95 lag > 500ms
+        ``"unknown"`` — Monitor not running
+    ``degraded``
+        ``true`` when event loop is currently experiencing sustained high lag
+    ``degraded_since``
+        ISO timestamp when degradation started, or ``null`` if healthy
+    ``stats_1m`` / ``stats_5m``
+        Statistical summary over 1-minute and 5-minute windows
+    """
+    try:
+        from observability.event_loop_monitor import get_event_loop_monitor
+
+        monitor = get_event_loop_monitor()
+        status = monitor.get_current_status()
+
+        # Determine overall health status
+        p95_lag = status.get("stats_5m", {}).get("p95_ms", 0.0)
+        if p95_lag > 500:
+            health_status = "degraded"
+        elif p95_lag > 200:
+            health_status = "warning"
+        else:
+            health_status = "healthy"
+
+        return {
+            "status": health_status,
+            "timestamp": time.time(),
+            **status,
+        }
+    except Exception as exc:
+        logger.error(f"Event loop health check failed: {exc}")
+        return {
+            "status": "unknown",
             "error": str(exc),
             "timestamp": time.time(),
         }
