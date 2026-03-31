@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from enum import Enum
 
+from merid.formulas import AUDIT_SPEC_VERSION, FORMULAS_VERSION, generate_correlation_id
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.protection_enhancements")
@@ -144,18 +145,28 @@ class EnhancedKillSwitch:
         *,
         domain: Optional[str] = None,
         reason: str = "Manual activation",
+        correlation_id: Optional[str] = None,
     ) -> AutoExitResult:
         """Activate kill switch and optionally auto-exit positions.
 
         Args:
             domain: Optional domain to activate (None = global)
             reason: Reason for activation (for audit log)
+            correlation_id: Optional correlation ID for end-to-end tracing
 
         Returns:
             AutoExitResult with exit status
         """
+        corr_id = correlation_id or generate_correlation_id()
         now = datetime.now(timezone.utc)
         self.total_activations += 1
+
+        logger.info(
+            "[TRACE] stage=PROTECT action=kill_switch_activate domain=%s "
+            "reason=%s mode=%s corr_id=%s formulas_ver=%s audit_spec_ver=%s",
+            domain or "global", reason, self.mode.value,
+            corr_id, FORMULAS_VERSION, AUDIT_SPEC_VERSION,
+        )
 
         # Dry-run mode
         if self.mode == KillSwitchMode.DRY_RUN:
@@ -191,6 +202,7 @@ class EnhancedKillSwitch:
             "reason": reason,
             "timestamp": now,
             "mode": self.mode.value,
+            "correlation_id": corr_id,
         })
 
         # PR-001 FIX: Auto-exit positions if enabled
