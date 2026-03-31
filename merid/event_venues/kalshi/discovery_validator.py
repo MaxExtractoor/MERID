@@ -18,6 +18,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator, ValidationError
 
+from merid.formulas import AUDIT_SPEC_VERSION, FORMULAS_VERSION, generate_correlation_id
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.discovery_validator")
@@ -150,17 +151,30 @@ class DiscoveryValidator:
         self.total_invalid = 0
         self.total_warnings = 0
 
-    def validate_market(self, raw_market: Dict[str, Any]) -> ValidationResult:
+    def validate_market(
+        self,
+        raw_market: Dict[str, Any],
+        *,
+        correlation_id: Optional[str] = None,
+    ) -> ValidationResult:
         """Validate a single market object against schema.
 
         Args:
             raw_market: Raw market dict from Kalshi API
+            correlation_id: Optional correlation ID for end-to-end tracing
 
         Returns:
             ValidationResult with valid flag and error/warning lists
         """
+        corr_id = correlation_id or generate_correlation_id()
         self.total_validations += 1
         market_id = raw_market.get("market_id", "<unknown>")
+
+        logger.debug(
+            "[TRACE] stage=DISCOVER action=validate_market market_id=%s "
+            "corr_id=%s formulas_ver=%s audit_spec_ver=%s",
+            market_id, corr_id, FORMULAS_VERSION, AUDIT_SPEC_VERSION,
+        )
 
         try:
             # Pydantic validation
@@ -177,6 +191,12 @@ class DiscoveryValidator:
             self.total_valid += 1
             self.total_warnings += len(warnings)
 
+            logger.debug(
+                "[TRACE] stage=DISCOVER action=validate_ok market_id=%s "
+                "warnings=%d corr_id=%s",
+                market_id, len(warnings), corr_id,
+            )
+
             return ValidationResult(
                 valid=True,
                 errors=[],
@@ -190,6 +210,12 @@ class DiscoveryValidator:
 
             if self.log_validation_errors:
                 logger.error(f"Market {market_id} validation failed: {errors}")
+
+            logger.debug(
+                "[TRACE] stage=DISCOVER action=validate_failed market_id=%s "
+                "errors=%d corr_id=%s",
+                market_id, len(errors), corr_id,
+            )
 
             self.total_invalid += 1
 
@@ -215,16 +241,28 @@ class DiscoveryValidator:
                 market_id=market_id,
             )
 
-    def validate_markets(self, raw_markets: List[Dict[str, Any]]) -> List[ValidationResult]:
+    def validate_markets(
+        self,
+        raw_markets: List[Dict[str, Any]],
+        *,
+        correlation_id: Optional[str] = None,
+    ) -> List[ValidationResult]:
         """Validate a batch of markets.
 
         Args:
             raw_markets: List of raw market dicts from Kalshi API
+            correlation_id: Optional correlation ID for end-to-end tracing
 
         Returns:
             List of ValidationResult objects (one per market)
         """
-        return [self.validate_market(m) for m in raw_markets]
+        corr_id = correlation_id or generate_correlation_id()
+        logger.debug(
+            "[TRACE] stage=DISCOVER action=validate_batch count=%d corr_id=%s "
+            "formulas_ver=%s audit_spec_ver=%s",
+            len(raw_markets), corr_id, FORMULAS_VERSION, AUDIT_SPEC_VERSION,
+        )
+        return [self.validate_market(m, correlation_id=corr_id) for m in raw_markets]
 
     # ── SLA Tracking ─────────────────────────────────────────────────────────
 

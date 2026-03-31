@@ -16,6 +16,40 @@ env:
   MERID_ENV: "test"
 
 jobs:
+  # ── Kalshi audit-spec policy gate ────────────────────────────────────
+  kalshi-audit-gate:
+    name: Kalshi Audit-Spec Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pydantic aiohttp
+
+      - name: Run Kalshi audit-spec gate
+        run: |
+          mkdir -p reports
+          python scripts/enforce_kalshi_audit_spec.py \
+            --strict \
+            --output-json reports/kalshi-audit-spec.json
+
+      - name: Upload audit-spec report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-audit-spec-report
+          path: reports/kalshi-audit-spec.json
+
   # ── Swarm integrity + data authenticity gate ──────────────────────
   swarm-integrity-gate:
     name: Swarm Integrity Gate
