@@ -9,11 +9,14 @@ Validates:
     not just BTC.
   - signal_to_sizing: edge_pct from MarketCandidate.edge_pct is used for
     Kelly sizing when present (priority over strategy edge).
+  - Invariants: negative edge / sub-threshold edge always → 0 contracts;
+    intent["edge"] is always the same value as sizing.edge (living spec).
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
@@ -430,3 +433,259 @@ class TestStatusIncludesKellyConfig:
         trader = _make_trader(min_edge=0.05)
         s = trader.status()
         assert s["config"]["min_edge"] == 0.05
+
+
+# ── 7. Kelly edge invariants (living spec) ──────────────────────────────────
+#
+# These tests document the exact no-trade policy for the sizing layer and the
+# intent faithfulness invariant.  They should be kept close to the logic they
+# guard so future refactors produce an obvious diff rather than a silent break.
+
+
+class TestEdgeInvariants:
+    """Invariant: negative or sub-threshold edges always produce 0 contracts.
+
+    Design contract being asserted:
+      - edge <= 0        →  size_contracts == 0  (Kelly says don't bet)
+      - 0 < edge < min_edge  →  size_contracts == 0  (noise filter)
+      - edge == min_edge →  size_contracts  > 0  (boundary: condition is strict '<', equality trades)
+      - edge > min_edge  →  size_contracts  > 0  (normal trade)
+    """
+
+    def test_negative_edge_yields_zero_contracts(self):
+        """Any negative edge → zero contracts regardless of magnitude."""
+        trader = _make_trader(kelly_fraction=0.25, min_edge=0.02)
+        for neg_edge in (-0.50, -0.10, -0.02, -0.001, -1e-9):
+            candidate = TradingCandidate.from_candidate(
+                _market(mid=40, edge_pct=neg_edge * 100)
+            )
+            sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+            assert sizing.size_contracts == 0, (
+                f"edge={neg_edge}: expected 0 contracts, got {sizing.size_contracts}"
+            )
+            assert sizing.edge == pytest.approx(neg_edge, abs=1e-9), (
+                f"edge={neg_edge}: sizing.edge should preserve the raw edge value"
+            )
+
+    def test_zero_edge_yields_zero_contracts(self):
+        """Zero edge → zero contracts (no bet when there is no advantage)."""
+        trader = _make_trader(kelly_fraction=0.25, min_edge=0.02)
+        candidate = TradingCandidate.from_candidate(_market(mid=50, edge_pct=0.0))
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        assert sizing.size_contracts == 0
+        assert sizing.kelly_frac == 0.0
+
+    def test_edge_below_min_edge_yields_zero_contracts(self):
+        """Edge in (0, min_edge) → zero contracts (noise filter blocks tiny edges)."""
+        min_edge = 0.05  # 5%
+        trader = _make_trader(kelly_fraction=0.25, min_edge=min_edge)
+        for tiny_edge_pct in (0.1, 1.0, 2.5, 4.9):  # all < 5% min_edge
+            candidate = TradingCandidate.from_candidate(
+                _market(mid=40, edge_pct=tiny_edge_pct)
+            )
+            sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+            assert sizing.size_contracts == 0, (
+                f"edge_pct={tiny_edge_pct}%: expected 0 contracts below min_edge={min_edge}"
+            )
+
+    def test_edge_exactly_at_min_edge_yields_positive_contracts(self):
+        """edge == min_edge IS tradeable — condition is strictly 'edge < min_edge'."""
+        min_edge = 0.05
+        trader = _make_trader(kelly_fraction=0.25, min_edge=min_edge)
+        # edge_pct=5.0 → edge=0.05 exactly equals min_edge
+        # The guard is: if edge < min_edge → no trade
+        # So edge == min_edge passes the guard and produces contracts.
+        candidate = TradingCandidate.from_candidate(_market(mid=40, edge_pct=5.0))
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        assert sizing.size_contracts > 0, (
+            "edge exactly equal to min_edge should produce contracts "
+            "(condition is strict 'edge < min_edge', so equality allows trading)"
+        )
+
+    def test_edge_above_min_edge_yields_positive_contracts(self):
+        """The first edge strictly above min_edge should produce >0 contracts."""
+        min_edge = 0.05
+        trader = _make_trader(kelly_fraction=0.25, min_edge=min_edge)
+        # edge_pct=5.1 → edge=0.051 > 0.05 = min_edge
+        candidate = TradingCandidate.from_candidate(_market(mid=40, edge_pct=5.1))
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        assert sizing.size_contracts > 0, (
+            "edge just above min_edge should produce at least 1 contract"
+        )
+        assert sizing.kelly_frac > 0.0
+
+    def test_negative_edge_via_edge_override(self):
+        """edge_override with negative value still produces 0 contracts."""
+        trader = _make_trader(kelly_fraction=0.25, min_edge=0.02)
+        candidate = TradingCandidate.from_candidate(_market(mid=40))
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0, edge_override=-0.15)
+        assert sizing.size_contracts == 0
+        assert sizing.edge == pytest.approx(-0.15, abs=1e-9)
+        assert sizing.source == "override"
+
+    def test_size_contracts_never_negative(self):
+        """size_contracts is always >= 0 for any edge input."""
+        trader = _make_trader(kelly_fraction=0.25, min_edge=0.02)
+        for edge_pct in (-50.0, -5.0, 0.0, 1.0, 5.0, 20.0):
+            candidate = TradingCandidate.from_candidate(
+                _market(mid=40, edge_pct=edge_pct)
+            )
+            sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+            assert sizing.size_contracts >= 0, (
+                f"edge_pct={edge_pct}: size_contracts must never be negative"
+            )
+
+    def test_kelly_frac_never_exceeds_configured_fraction(self):
+        """kelly_frac = kelly_raw * fraction; raw Kelly can't exceed 1.0 in normal range."""
+        kelly_fraction = 0.25
+        trader = _make_trader(kelly_fraction=kelly_fraction, min_edge=0.02)
+        # Very large edge to stress-test ceiling
+        for edge_pct in (5.0, 20.0, 50.0, 99.0):
+            candidate = TradingCandidate.from_candidate(
+                _market(mid=40, edge_pct=edge_pct)
+            )
+            sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+            assert sizing.kelly_frac <= kelly_fraction, (
+                f"kelly_frac={sizing.kelly_frac} exceeds configured "
+                f"kelly_fraction={kelly_fraction}"
+            )
+            assert not math.isnan(sizing.kelly_frac), (
+                "kelly_frac must not be NaN"
+            )
+
+
+class TestIntentEdgeFaithfulness:
+    """Invariant: intent['edge'] is always == sizing.edge.
+
+    This is the single-truth property: the edge value displayed/logged/stored
+    in the intent must be exactly the edge the Kelly engine used.  A mismatch
+    would mean the audit trail is misleading.
+    """
+
+    def _make_trader_with_strategy(self, edge_val: float, **kwargs) -> KalshiContinuousTrader:
+        """Trader wired with a fixed-edge strategy."""
+        class _Fixed(OpinionStrategy):
+            name = "fixed"
+            def estimate(self, agent_id, ticker, market_prob, category="", context=None):
+                return OpinionEstimate(
+                    agent_prob=market_prob + edge_val,
+                    confidence=0.80,
+                    edge=edge_val,
+                    reasoning_tag="fixed",
+                    signal_sources=["test"],
+                )
+        return _make_trader(strategy=_Fixed(), max_yes_price=0.99, min_edge=0.01, **kwargs)
+
+    def test_intent_edge_equals_sizing_edge_for_positive_edge(self):
+        """When edge > min_edge, intent['edge'] == sizing.edge == the positive edge."""
+        trader = self._make_trader_with_strategy(edge_val=0.10)
+        candidate = TradingCandidate.from_candidate(
+            _market(ticker="KXBTC-T1", underlying="BTC", mid=40, edge_pct=None)
+        )
+        trader._candidates = [candidate]
+
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        intents = asyncio.run(trader.trade_cycle(bankroll=1000.0))
+
+        assert len(intents) >= 1, "Expected at least one intent"
+        intent = intents[0]
+        assert intent["edge"] == sizing.edge, (
+            f"intent['edge']={intent['edge']} != sizing.edge={sizing.edge}"
+        )
+        assert intent["size_contracts"] == sizing.size_contracts
+
+    def test_intent_edge_equals_sizing_edge_for_negative_signal_edge(self):
+        """When candidate has negative edge_pct, intent['edge'] == sizing.edge (negative)."""
+        # Strategy provides positive confidence so an intent is generated,
+        # but the signal edge (negative) is what drives sizing.
+        class _HighConf(OpinionStrategy):
+            name = "high_conf"
+            def estimate(self, agent_id, ticker, market_prob, category="", context=None):
+                return OpinionEstimate(
+                    agent_prob=0.70,
+                    confidence=0.80,
+                    edge=0.10,  # strategy edge — but signal takes priority
+                    reasoning_tag="high_conf",
+                    signal_sources=["test"],
+                )
+
+        trader = _make_trader(
+            strategy=_HighConf(),
+            max_yes_price=0.99,
+            min_edge=0.02,
+        )
+        candidate = TradingCandidate.from_candidate(
+            _market(ticker="KXBTC-T1", underlying="BTC", mid=40, edge_pct=-5.0)
+        )
+        trader._candidates = [candidate]
+
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        intents = asyncio.run(trader.trade_cycle(bankroll=1000.0))
+
+        # An intent is generated (risk checks pass via bankroll_fraction),
+        # but the edge in the intent must reflect the actual sizing edge.
+        assert len(intents) >= 1, "Expected at least one intent (confidence passes)"
+        intent = intents[0]
+        assert intent["edge"] == sizing.edge, (
+            f"intent['edge']={intent['edge']} != sizing.edge={sizing.edge}"
+        )
+        # Contracts should be 0 — Kelly doesn't size on a negative edge
+        assert intent["size_contracts"] == 0, (
+            "Negative edge should produce 0 contracts in the intent"
+        )
+
+    def test_intent_edge_equals_sizing_edge_for_sub_threshold_edge(self):
+        """When 0 < edge < min_edge, intent['edge'] == sizing.edge and contracts==0."""
+        class _LowConf(OpinionStrategy):
+            name = "low_conf"
+            def estimate(self, agent_id, ticker, market_prob, category="", context=None):
+                return OpinionEstimate(
+                    agent_prob=0.65,
+                    confidence=0.80,
+                    edge=0.05,  # strategy edge — but signal takes priority
+                    reasoning_tag="low_conf",
+                    signal_sources=["test"],
+                )
+
+        min_edge = 0.05  # 5%
+        trader = _make_trader(
+            strategy=_LowConf(),
+            max_yes_price=0.99,
+            min_edge=min_edge,
+        )
+        # Signal edge is 3% — above zero but below min_edge threshold
+        candidate = TradingCandidate.from_candidate(
+            _market(ticker="KXBTC-T1", underlying="BTC", mid=40, edge_pct=3.0)
+        )
+        trader._candidates = [candidate]
+
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        intents = asyncio.run(trader.trade_cycle(bankroll=1000.0))
+
+        assert len(intents) >= 1, "Expected at least one intent"
+        intent = intents[0]
+        assert intent["edge"] == sizing.edge, (
+            f"intent['edge']={intent['edge']} != sizing.edge={sizing.edge}"
+        )
+        assert intent["size_contracts"] == 0, (
+            f"Edge {sizing.edge} < min_edge {min_edge}: contracts must be 0"
+        )
+
+    def test_intent_edge_is_always_finite(self):
+        """intent['edge'] must never be NaN or Inf for any valid edge input."""
+        trader = self._make_trader_with_strategy(edge_val=0.10)
+        for edge_pct in (-50.0, -0.1, 0.0, 0.5, 10.0, 99.0):
+            candidate = TradingCandidate.from_candidate(
+                _market(ticker="KXBTC-T1", underlying="BTC", mid=40, edge_pct=edge_pct)
+            )
+            trader._candidates = [candidate]
+            trader.reset_daily()
+            intents = asyncio.run(trader.trade_cycle(bankroll=1000.0))
+            for intent in intents:
+                edge_val = intent["edge"]
+                assert not math.isnan(edge_val), (
+                    f"intent['edge'] is NaN for edge_pct={edge_pct}"
+                )
+                assert abs(edge_val) < 1e9, (
+                    f"intent['edge']={edge_val} is unreasonably large for edge_pct={edge_pct}"
+                )
