@@ -358,7 +358,8 @@ class KalshiContinuousTrader:
 
         kelly_frac = kelly_raw * self._kelly_fraction
         notional = bankroll * kelly_frac
-        size_contracts = max(0, int(math.floor(notional / (price_cents / 100.0)))) if price_cents > 0 else 0
+        price_dollars = price_cents / 100.0
+        size_contracts = max(0, int(math.floor(notional / price_dollars))) if price_dollars > 0 else 0
 
         result = SizingResult(
             edge=edge,

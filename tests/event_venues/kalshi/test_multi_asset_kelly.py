@@ -308,9 +308,7 @@ class TestNoBtcBias:
         )
         trader._candidates = [btc_candidate, eth_candidate]
 
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = asyncio.run(trader.trade_cycle(bankroll=1000.0))
         eth_intents = [i for i in intents if i["underlying"] == "ETH"]
         assert len(eth_intents) >= 1, "ETH intent should be generated when ETH has edge"
 
@@ -353,9 +351,7 @@ class TestNoBtcBias:
                 _market(ticker=f"KX{asset}-15M-T1", underlying=asset, mid=40)
             )
             trader._candidates = [candidate]
-            intents = asyncio.get_event_loop().run_until_complete(
-                trader.trade_cycle(bankroll=1000.0)
-            )
+            intents = asyncio.run(trader.trade_cycle(bankroll=1000.0))
             trader.reset_daily()
             assert len(intents) >= 1, f"No intent for {asset}"
             assert intents[0]["underlying"] == asset
