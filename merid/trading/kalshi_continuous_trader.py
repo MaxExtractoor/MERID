@@ -25,8 +25,9 @@ import asyncio
 import math
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
 from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig
@@ -50,6 +51,10 @@ _DEFAULT_MIN_EDGE = float(os.getenv("MERID_MIN_EDGE", "0.02"))
 # Fallback YES price (cents) when a candidate has no best_ask or mid price data.
 # Used only in the max-price guard inside trade_cycle().
 _FALLBACK_YES_PRICE_CENTS = 50
+
+# Number of past scan cycles to retain for the rolling volume-band block-rate average.
+# At the default ~60s candidate refresh interval this covers roughly 20 minutes.
+_VOLUME_BAND_RATE_HISTORY_MAXLEN = 20
 
 
 # ── TradingCandidate (thin subclass of canonical MarketCandidate) ──────────
@@ -195,6 +200,16 @@ class KalshiContinuousTrader:
         self._task: Optional[asyncio.Task] = None
         self._candidates: List[TradingCandidate] = []
 
+        # ── Filter telemetry ────────────────────────────────────────────────
+        # Aggregated filter stats from the most recent _refresh_candidates() call.
+        # Empty dict until the first scan completes.
+        self._last_scan_filter_stats: Dict[str, Any] = {}
+        # Rolling history of per-scan volume_band_block_rate values (oldest first).
+        # Capped at _VOLUME_BAND_RATE_HISTORY_MAXLEN entries.
+        self._volume_band_rate_history: Deque[float] = deque(
+            maxlen=_VOLUME_BAND_RATE_HISTORY_MAXLEN
+        )
+
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -223,6 +238,10 @@ class KalshiContinuousTrader:
         """Pull fresh candidates from catalog + filter pipeline."""
         new_candidates: List[TradingCandidate] = []
         asset_counts: Dict[str, Dict[str, int]] = {}
+
+        # Accumulators for cross-asset/timeframe filter telemetry for this scan run.
+        scan_total_input: int = 0
+        scan_rejected_volume_band: int = 0
 
         for asset in _CRYPTO_ASSETS:
             for tf in _CRYPTO_TIMEFRAMES:
@@ -254,6 +273,38 @@ class KalshiContinuousTrader:
 
                 counts = asset_counts.setdefault(asset, {})
                 counts[tf] = len(filter_result.candidates)
+
+                # Accumulate filter telemetry across all (asset, timeframe) loops.
+                scan_total_input += filter_result.total_input
+                scan_rejected_volume_band += filter_result.rejected_volume_band
+
+        # Compute per-scan volume-band block rate and update rolling history.
+        scan_block_rate = (
+            scan_rejected_volume_band / scan_total_input
+            if scan_total_input > 0
+            else 0.0
+        )
+        self._volume_band_rate_history.append(scan_block_rate)
+
+        # Store aggregated stats for the most recent scan so status() can expose them.
+        rolling_avg = (
+            sum(self._volume_band_rate_history) / len(self._volume_band_rate_history)
+            if self._volume_band_rate_history
+            else 0.0
+        )
+        self._last_scan_filter_stats = {
+            "scan_total_input": scan_total_input,
+            "scan_rejected_volume_band": scan_rejected_volume_band,
+            "volume_band_block_rate": round(scan_block_rate, 4),
+            "volume_band_block_rate_rolling_avg": round(rolling_avg, 4),
+            "rolling_window_scans": len(self._volume_band_rate_history),
+        }
+        logger.info(
+            "ContinuousTrader filter: total_input=%d volume_band_rejected=%d "
+            "block_rate=%.3f rolling_avg=%.3f (window=%d scans)",
+            scan_total_input, scan_rejected_volume_band,
+            scan_block_rate, rolling_avg, len(self._volume_band_rate_history),
+        )
 
         # Log per-asset/timeframe counts at INFO level
         for asset, tfs in asset_counts.items():
@@ -584,6 +635,11 @@ class KalshiContinuousTrader:
                 "kelly_fraction": self._kelly_fraction,
                 "min_edge": self._min_edge,
             },
+            # ── Filter telemetry (populated after first _refresh_candidates call) ──
+            # Use these to audit the relative-volume band: a healthy block_rate is
+            # 15–40% of input candidates.  Below 10% the band may be too loose;
+            # above 60% it may be too restrictive.  rolling_avg smooths scan noise.
+            "filter": dict(self._last_scan_filter_stats),
         }
 
     @property

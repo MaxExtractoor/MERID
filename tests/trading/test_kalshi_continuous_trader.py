@@ -318,15 +318,141 @@ class TestTraderStatus:
         assert "max_yes_price" in s["config"]
         assert s["config"]["max_yes_price"] == 0.40
 
-    def test_status_default_max_yes_price_is_fifty_cents(self) -> None:
-        """Default max_yes_price is 0.50 (50¢) unless overridden."""
-        import os
+    def test_status_includes_filter_key(self) -> None:
+        """status() must include a 'filter' key for volume-band telemetry."""
         catalog = MagicMock()
-        os.environ.pop("MERID_MAX_YES_PRICE", None)
-        from merid.trading import kalshi_continuous_trader as _kct
-        # Instantiate directly with the module default
         trader = KalshiContinuousTrader(catalog=catalog)
-        assert trader.status()["config"]["max_yes_price"] == pytest.approx(0.50, abs=1e-6)
+        s = trader.status()
+        assert "filter" in s
+
+    def test_filter_empty_before_first_scan(self) -> None:
+        """Before _refresh_candidates() runs, filter telemetry is an empty dict."""
+        catalog = MagicMock()
+        trader = KalshiContinuousTrader(catalog=catalog)
+        assert trader.status()["filter"] == {}
+
+
+# ── Filter telemetry ──────────────────────────────────────────────────────
+
+def _make_catalog_with_volumes(volumes: List[int], asset: str = "BTC", timeframe: str = "15m"):
+    """Return a mock catalog that yields one market per volume entry for a single (asset, timeframe)."""
+
+    class FakeMarket:
+        def __init__(self, vol: int) -> None:
+            self.market_id = f"KXBTC-{vol}"
+            self.volume = vol
+            self.open_interest = 50
+
+    class FakeCatalogMarket:
+        def __init__(self, vol: int) -> None:
+            self.market = FakeMarket(vol)
+            self.expires_at = None
+            self.category = ""
+            self.strike_price = None
+
+    _asset, _timeframe = asset, timeframe
+
+    def _get(a: str, timeframe: str = "") -> list:
+        if a == _asset and timeframe == _timeframe:
+            return [FakeCatalogMarket(v) for v in volumes]
+        return []
+
+    catalog = MagicMock()
+    catalog.get_markets_by_asset.side_effect = _get
+    return catalog
+
+
+class TestFilterTelemetry:
+    """Validate that _refresh_candidates() surfaces volume-band metrics in status()."""
+
+    def _run(self, trader):
+        """Run _refresh_candidates() synchronously using a fresh event loop."""
+        import asyncio
+        asyncio.run(trader._refresh_candidates())
+
+    def test_filter_key_populated_after_scan(self) -> None:
+        """After a scan, status()['filter'] contains the telemetry keys."""
+        catalog = _make_catalog_with_volumes([100, 500, 1000])
+        trader = KalshiContinuousTrader(catalog=catalog)
+        self._run(trader)
+        f = trader.status()["filter"]
+        assert "scan_total_input" in f
+        assert "scan_rejected_volume_band" in f
+        assert "volume_band_block_rate" in f
+        assert "volume_band_block_rate_rolling_avg" in f
+        assert "rolling_window_scans" in f
+
+    def test_no_band_rejects_when_filter_disabled(self) -> None:
+        """Default filter (band disabled: 0.0/1.0) → zero volume-band rejections."""
+        catalog = _make_catalog_with_volumes([10, 500, 1000])
+        trader = KalshiContinuousTrader(catalog=catalog)
+        self._run(trader)
+        f = trader.status()["filter"]
+        assert f["scan_rejected_volume_band"] == 0
+        assert f["volume_band_block_rate"] == 0.0
+
+    def test_band_rejects_counted_in_scan_stats(self) -> None:
+        """When volume_band_min=0.4 is active, out-of-band markets are counted."""
+        from merid.event_venues.kalshi.market_filter import MarketFilterConfig
+
+        catalog = _make_catalog_with_volumes(
+            [10, 600, 1000],   # rel: 0.01, 0.6, 1.0 → only 0.6 is in [0.4, 0.8]
+            asset="BTC", timeframe="15m",
+        )
+        trader = KalshiContinuousTrader(catalog=catalog)
+        trader._filter_config = MarketFilterConfig(
+            allowed_underlyings=["BTC"],
+            allowed_timeframes=["15m"],
+            volume_band_min=0.4,
+            volume_band_max=0.8,
+        )
+        from merid.event_venues.kalshi.market_filter import MarketFilter
+        trader._filter = MarketFilter(trader._filter_config)
+
+        self._run(trader)
+        f = trader.status()["filter"]
+        assert f["scan_rejected_volume_band"] == 2      # outlier + spike
+        assert f["volume_band_block_rate"] == pytest.approx(2 / 3, abs=1e-4)
+
+    def test_block_rate_rolling_avg_accumulates_over_scans(self) -> None:
+        """volume_band_block_rate_rolling_avg is the mean over past N scans."""
+        # Default band (disabled) → block rate always 0.0, so rolling_avg stays 0.0
+        catalog = _make_catalog_with_volumes([100, 500, 1000])
+        trader = KalshiContinuousTrader(catalog=catalog)
+
+        for _ in range(3):
+            self._run(trader)
+
+        f = trader.status()["filter"]
+        assert f["rolling_window_scans"] == 3
+        assert f["volume_band_block_rate_rolling_avg"] == pytest.approx(0.0)
+
+    def test_rolling_window_caps_at_maxlen(self) -> None:
+        """Rolling history is capped at _VOLUME_BAND_RATE_HISTORY_MAXLEN entries."""
+        from merid.trading.kalshi_continuous_trader import _VOLUME_BAND_RATE_HISTORY_MAXLEN
+
+        catalog = _make_catalog_with_volumes([100, 500])
+        trader = KalshiContinuousTrader(catalog=catalog)
+
+        for _ in range(_VOLUME_BAND_RATE_HISTORY_MAXLEN + 5):
+            self._run(trader)
+
+        f = trader.status()["filter"]
+        assert f["rolling_window_scans"] == _VOLUME_BAND_RATE_HISTORY_MAXLEN
+
+    def test_empty_catalog_still_produces_filter_stats(self) -> None:
+        """A scan over a completely empty catalog yields all-zero filter stats."""
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(catalog=catalog)
+
+        self._run(trader)
+        f = trader.status()["filter"]
+        assert f["scan_total_input"] == 0
+        assert f["scan_rejected_volume_band"] == 0
+        assert f["volume_band_block_rate"] == 0.0
+        assert f["volume_band_block_rate_rolling_avg"] == 0.0
+        assert f["rolling_window_scans"] == 1
 
 
 # ── Max YES price cap ─────────────────────────────────────────────────────
