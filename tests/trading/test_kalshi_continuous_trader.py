@@ -457,6 +457,12 @@ class TestFilterTelemetry:
 
 # ── Max YES price cap ─────────────────────────────────────────────────────
 
+# NOTE: These tests drive async code via `await` in `async def` test methods.
+# Do NOT revert to `asyncio.get_event_loop().run_until_complete()` — that
+# pattern is broken when tests run after other async tests that close or
+# swap the loop. pytest-asyncio (asyncio_mode=auto) manages the loop; just
+# use `async def` and `await`.
+
 class TestMaxYesPriceCap:
     """Unit tests for the max_yes_price cap in trade_cycle()."""
 
@@ -471,7 +477,7 @@ class TestMaxYesPriceCap:
         s._agent_prob = agent_prob
         return s
 
-    def test_yes_intent_below_cap_is_accepted(self) -> None:
+    async def test_yes_intent_below_cap_is_accepted(self) -> None:
         """YES intents whose ask price is at or below max_yes_price are included."""
         trader = self._make_trader(max_yes_price=0.50)
         strategy = _FixedStrategy(conf=0.80)
@@ -483,15 +489,12 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = await trader.trade_cycle(bankroll=1000.0)
         # agent_prob=0.70 > market_prob=0.45 → YES direction, ask=48¢ < 50¢ cap
         yes_intents = [i for i in intents if i["direction"] == "yes"]
         assert len(yes_intents) == 1
 
-    def test_yes_intent_above_cap_is_dropped(self) -> None:
+    async def test_yes_intent_above_cap_is_dropped(self) -> None:
         """YES intents whose ask price exceeds max_yes_price are dropped."""
         trader = self._make_trader(max_yes_price=0.40)
         strategy = _FixedStrategy(conf=0.80)
@@ -503,14 +506,11 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = await trader.trade_cycle(bankroll=1000.0)
         yes_intents = [i for i in intents if i["direction"] == "yes"]
         assert len(yes_intents) == 0
 
-    def test_yes_cap_rejection_increments_counter(self) -> None:
+    async def test_yes_cap_rejection_increments_counter(self) -> None:
         """Dropping a YES intent above the cap increments execution_rejections."""
         trader = self._make_trader(max_yes_price=0.30)
         strategy = _FixedStrategy(conf=0.80)
@@ -521,11 +521,10 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        asyncio.get_event_loop().run_until_complete(trader.trade_cycle(bankroll=1000.0))
+        await trader.trade_cycle(bankroll=1000.0)
         assert trader.risk_state.execution_rejections >= 1
 
-    def test_no_intent_not_affected_by_yes_cap(self) -> None:
+    async def test_no_intent_not_affected_by_yes_cap(self) -> None:
         """NO direction intents are not dropped by the YES price cap."""
         trader = self._make_trader(max_yes_price=0.10)  # very tight cap
         # agent_prob < mid_prob → NO direction
@@ -539,14 +538,11 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = await trader.trade_cycle(bankroll=1000.0)
         no_intents = [i for i in intents if i["direction"] == "no"]
         assert len(no_intents) == 1
 
-    def test_yes_cap_uses_best_ask_when_available(self) -> None:
+    async def test_yes_cap_uses_best_ask_when_available(self) -> None:
         """best_ask_cents is used (not mid_price_cents) for the YES price check."""
         # best_ask=55¢ > cap=50¢ → dropped even though mid=45¢ < cap
         trader = self._make_trader(max_yes_price=0.50)
@@ -558,10 +554,7 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = await trader.trade_cycle(bankroll=1000.0)
         yes_intents = [i for i in intents if i["direction"] == "yes"]
         assert len(yes_intents) == 0
 
