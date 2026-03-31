@@ -39,7 +39,7 @@ logger = get_logger("merid.trading.kalshi_continuous_trader")
 # ── Configurable defaults (env overrides) ─────────────────────────────────
 
 _CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
-_CRYPTO_TIMEFRAMES = ("15m", "1h", "daily")
+_CRYPTO_TIMEFRAMES = ("15m", "1h", "daily", "weekly", "monthly")
 
 _DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"))
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))

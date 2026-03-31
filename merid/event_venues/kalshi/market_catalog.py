@@ -312,10 +312,13 @@ class KalshiMarketCatalog:
                 _asset_mkts = asset_idx.get(_asset, [])
                 if _asset_mkts:
                     _15m = sum(1 for m in _asset_mkts if m.timeframe == "15m")
+                    _1h = sum(1 for m in _asset_mkts if m.timeframe == "1h")
                     _daily = sum(1 for m in _asset_mkts if m.timeframe == "daily")
+                    _weekly = sum(1 for m in _asset_mkts if m.timeframe == "weekly")
+                    _monthly = sum(1 for m in _asset_mkts if m.timeframe == "monthly")
                     logger.info(
-                        "Catalog %s: total=%d  15m=%d  daily=%d",
-                        _asset, len(_asset_mkts), _15m, _daily,
+                        "Catalog %s: total=%d  15m=%d  1h=%d  daily=%d  weekly=%d  monthly=%d",
+                        _asset, len(_asset_mkts), _15m, _1h, _daily, _weekly, _monthly,
                     )
                 else:
                     logger.debug("Catalog %s: 0 markets detected", _asset)

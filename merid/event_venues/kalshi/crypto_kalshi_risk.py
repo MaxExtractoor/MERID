@@ -1,6 +1,6 @@
 """CryptoKalshiRisk — Unified risk + sizing + routing layer for Kalshi crypto markets.
 
-Supports BTC, ETH, SOL, XRP, DOGE across scalp / intraday / swing timeframes.
+Supports BTC, ETH, SOL, XRP, DOGE across all timeframes (15m, 1h, daily, weekly, monthly).
 
 Key design principles:
 - Risk is always a **percentage of bankroll** — no hardcoded dollar amounts.
@@ -40,7 +40,16 @@ logger = get_logger("merid.event_venues.kalshi.crypto_kalshi_risk")
 # ── Supported assets and timeframes ──────────────────────────────────────
 
 CRYPTO_ASSETS: List[str] = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
-TIMEFRAMES: List[str] = ["scalp", "intraday", "swing"]
+# Canonical timeframes - using standard format from config.crypto_universe
+TIMEFRAMES: List[str] = ["15m", "1h", "daily", "weekly", "monthly"]
+
+# Legacy timeframe aliases for backward compatibility
+LEGACY_TIMEFRAMES: List[str] = ["scalp", "intraday", "swing"]
+TIMEFRAME_ALIASES: Dict[str, str] = {
+    "scalp": "15m",
+    "intraday": "1h",
+    "swing": "daily",
+}
 
 
 # ── Per-asset risk profile ────────────────────────────────────────────────
@@ -138,7 +147,7 @@ class StrategyProfile:
     """Trading constraints for a specific (asset, timeframe) combination."""
 
     asset_symbol: str
-    timeframe: str  # "scalp" | "intraday" | "swing"
+    timeframe: str  # "15m" | "1h" | "daily" | "weekly" | "monthly"
 
     # Fraction of the *asset's* bankroll slice allocated to this timeframe lane.
     bankroll_share_pct: float
@@ -169,33 +178,66 @@ class CryptoKalshiStrategyConfig:
             self.profiles = _build_default_profiles()
 
     def get(self, asset: str, timeframe: str) -> Optional[StrategyProfile]:
-        return self.profiles.get((asset, timeframe))
+        """Get strategy profile for (asset, timeframe).
+
+        Supports both canonical timeframes (15m, 1h, daily, weekly, monthly)
+        and legacy aliases (scalp, intraday, swing).
+        """
+        # Try canonical timeframe first
+        profile = self.profiles.get((asset, timeframe))
+        if profile is not None:
+            return profile
+
+        # Try legacy alias mapping
+        canonical_tf = TIMEFRAME_ALIASES.get(timeframe)
+        if canonical_tf:
+            return self.profiles.get((asset, canonical_tf))
+
+        return None
+
+    def get_profile(self, asset: str, timeframe: str) -> Optional[StrategyProfile]:
+        """Alias for get() method for backward compatibility."""
+        return self.get(asset, timeframe)
 
 
 def _build_default_profiles() -> Dict[Tuple[str, str], StrategyProfile]:
-    """Build sensible default strategy profiles for all (asset, timeframe) pairs."""
+    """Build sensible default strategy profiles for all (asset, timeframe) pairs.
+
+    Covers all 5 assets × 5 timeframes = 25 profiles.
+    Timeframes: 15m, 1h, daily, weekly, monthly
+    """
     # (asset, timeframe): (bankroll_share, max_trades/day, price_band, min_edge_bp, max_open)
     spec: Dict[Tuple[str, str], tuple] = {
         # ── BTC ──────────────────────────────────────────────────────────
-        ("BTC", "scalp"):    (0.30, 5,  (0.35, 0.75), 50.0, 3),
-        ("BTC", "intraday"): (0.40, 10, (0.35, 0.75), 40.0, 5),
-        ("BTC", "swing"):    (0.30, 3,  (0.65, 0.85), 30.0, 2),
+        ("BTC", "15m"):      (0.20, 5,  (0.35, 0.75), 50.0, 3),
+        ("BTC", "1h"):       (0.25, 10, (0.35, 0.75), 40.0, 5),
+        ("BTC", "daily"):    (0.25, 3,  (0.65, 0.85), 30.0, 2),
+        ("BTC", "weekly"):   (0.15, 2,  (0.65, 0.85), 25.0, 2),
+        ("BTC", "monthly"):  (0.15, 1,  (0.70, 0.85), 20.0, 1),
         # ── ETH ──────────────────────────────────────────────────────────
-        ("ETH", "scalp"):    (0.30, 5,  (0.35, 0.75), 50.0, 3),
-        ("ETH", "intraday"): (0.40, 10, (0.35, 0.75), 40.0, 5),
-        ("ETH", "swing"):    (0.30, 3,  (0.65, 0.85), 30.0, 2),
+        ("ETH", "15m"):      (0.20, 5,  (0.35, 0.75), 50.0, 3),
+        ("ETH", "1h"):       (0.25, 10, (0.35, 0.75), 40.0, 5),
+        ("ETH", "daily"):    (0.25, 3,  (0.65, 0.85), 30.0, 2),
+        ("ETH", "weekly"):   (0.15, 2,  (0.65, 0.85), 25.0, 2),
+        ("ETH", "monthly"):  (0.15, 1,  (0.70, 0.85), 20.0, 1),
         # ── SOL ──────────────────────────────────────────────────────────
-        ("SOL", "scalp"):    (0.30, 4,  (0.25, 0.75), 60.0, 2),
-        ("SOL", "intraday"): (0.40, 8,  (0.25, 0.75), 50.0, 4),
-        ("SOL", "swing"):    (0.30, 2,  (0.55, 0.80), 40.0, 2),
+        ("SOL", "15m"):      (0.20, 4,  (0.25, 0.75), 60.0, 2),
+        ("SOL", "1h"):       (0.25, 8,  (0.25, 0.75), 50.0, 4),
+        ("SOL", "daily"):    (0.25, 2,  (0.55, 0.80), 40.0, 2),
+        ("SOL", "weekly"):   (0.15, 1,  (0.60, 0.80), 35.0, 1),
+        ("SOL", "monthly"):  (0.15, 1,  (0.65, 0.80), 30.0, 1),
         # ── XRP ──────────────────────────────────────────────────────────
-        ("XRP", "scalp"):    (0.30, 4,  (0.25, 0.75), 60.0, 2),
-        ("XRP", "intraday"): (0.40, 8,  (0.25, 0.75), 50.0, 4),
-        ("XRP", "swing"):    (0.30, 2,  (0.55, 0.80), 40.0, 2),
+        ("XRP", "15m"):      (0.20, 4,  (0.25, 0.75), 60.0, 2),
+        ("XRP", "1h"):       (0.25, 8,  (0.25, 0.75), 50.0, 4),
+        ("XRP", "daily"):    (0.25, 2,  (0.55, 0.80), 40.0, 2),
+        ("XRP", "weekly"):   (0.15, 1,  (0.60, 0.80), 35.0, 1),
+        ("XRP", "monthly"):  (0.15, 1,  (0.65, 0.80), 30.0, 1),
         # ── DOGE ─────────────────────────────────────────────────────────
-        ("DOGE", "scalp"):    (0.30, 3,  (0.25, 0.70), 75.0, 2),
-        ("DOGE", "intraday"): (0.40, 6,  (0.25, 0.70), 60.0, 3),
-        ("DOGE", "swing"):    (0.30, 2,  (0.50, 0.75), 50.0, 2),
+        ("DOGE", "15m"):     (0.20, 3,  (0.25, 0.70), 75.0, 2),
+        ("DOGE", "1h"):      (0.25, 6,  (0.25, 0.70), 60.0, 3),
+        ("DOGE", "daily"):   (0.25, 2,  (0.50, 0.75), 50.0, 2),
+        ("DOGE", "weekly"):  (0.15, 1,  (0.55, 0.75), 45.0, 1),
+        ("DOGE", "monthly"): (0.15, 1,  (0.60, 0.75), 40.0, 1),
     }
     profiles: Dict[Tuple[str, str], StrategyProfile] = {}
     for (asset, tf), (bshare, max_td, band, edge_bp, max_open) in spec.items():

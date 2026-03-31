@@ -451,17 +451,12 @@ async def check_market_coverage(verbose: bool = False) -> List[MarketCoverageChe
                 try:
                     from merid.event_venues.kalshi.crypto_kalshi_risk import CryptoKalshiStrategyConfig
                     strategy_config = CryptoKalshiStrategyConfig()
-                    # Map timeframes: 15m→scalp, 1h→intraday, daily→swing
-                    timeframe_map = {"15m": "scalp", "1h": "intraday", "daily": "swing"}
-                    mapped_tf = timeframe_map.get(timeframe, timeframe)
-
-                    if mapped_tf in ("scalp", "intraday", "swing"):
-                        profile = strategy_config.get_profile(asset, mapped_tf)
-                        check.strategy_ok = profile is not None
-                    else:
-                        # Weekly/monthly not yet mapped to scalp/intraday/swing
-                        check.strategy_ok = False
-                        check.notes = f"Timeframe {timeframe} not mapped to strategy profile"
+                    # Try to get profile using canonical timeframe (15m, 1h, daily, weekly, monthly)
+                    # The get() method now supports both canonical and legacy formats
+                    profile = strategy_config.get(asset, timeframe)
+                    check.strategy_ok = profile is not None
+                    if not check.strategy_ok:
+                        check.notes = f"No strategy profile for {asset} {timeframe}"
                 except Exception as e:
                     check.strategy_ok = False
                     if not check.notes:
