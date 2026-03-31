@@ -125,19 +125,22 @@ class KalshiWebSocket(EventVenueStream):
             if self._auth_token:
                 headers["Authorization"] = f"Bearer {self._auth_token}"
 
-            self._ws = await websockets.connect(
-                self.config.ws_url,
-                extra_headers=headers if headers else None,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=5,
+            self._ws = await asyncio.wait_for(
+                websockets.connect(
+                    self.config.ws_url,
+                    extra_headers=headers if headers else None,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                ),
+                timeout=30.0,
             )
             self._running = True
             self._reconnect_delay = 1.0
             self._connect_ts = time.monotonic()
             logger.info("Connected to Kalshi WebSocket")
 
-        except (ConnectionError, RuntimeError, ValueError) as e:
+        except (ConnectionError, RuntimeError, ValueError, TimeoutError, asyncio.TimeoutError) as e:
             logger.error(f"Failed to connect to Kalshi WebSocket: {e}")
             raise
     
@@ -432,7 +435,7 @@ class KalshiWebSocket(EventVenueStream):
                         # EDGE-1: Attempt adaptive queue growth if under max
                         self._try_grow_queue()
 
-            except (ConnectionError, RuntimeError, ValueError) as e:
+            except Exception as e:
                 if self._running:
                     logger.error(f"Kalshi WebSocket error: {e}")
                     await self._reconnect()
@@ -582,7 +585,7 @@ class KalshiWebSocket(EventVenueStream):
                 f"{len(self._orderbook_tickers)} orderbooks" +
                 (", order_group_updates" if self._order_group_updates_enabled else "")
             )
-        except (ConnectionError, RuntimeError, ValueError) as e:
+        except (ConnectionError, RuntimeError, ValueError, TimeoutError, asyncio.TimeoutError) as e:
             logger.error(f"Kalshi reconnection failed: {e}")
     
     def _parse_message(self, data: Dict[str, Any]) -> Optional[Any]:
