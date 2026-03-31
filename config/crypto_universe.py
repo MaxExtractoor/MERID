@@ -36,19 +36,35 @@ TIMEFRAME_LABELS: Dict[str, str] = {
     "monthly": "Monthly",
 }
 
-# ── Full grid ────────────────────────────────────────────────────────────────
+# ── Full grid (25-cell matrix) ──────────────────────────────────────────────
+
+# First-class 25-cell matrix: the canonical enumeration of all supported markets.
+# All modules (crypto_kalshi_risk, continuous_trader, catalog, readiness script)
+# MUST derive their coverage from this matrix, not from local re-enumerations.
+CRYPTO_TIMEFRAME_MATRIX: List[Tuple[str, str]] = [
+    # BTC (Bitcoin)
+    ("BTC", "15m"), ("BTC", "1h"), ("BTC", "daily"), ("BTC", "weekly"), ("BTC", "monthly"),
+    # ETH (Ethereum)
+    ("ETH", "15m"), ("ETH", "1h"), ("ETH", "daily"), ("ETH", "weekly"), ("ETH", "monthly"),
+    # SOL (Solana)
+    ("SOL", "15m"), ("SOL", "1h"), ("SOL", "daily"), ("SOL", "weekly"), ("SOL", "monthly"),
+    # XRP (Ripple)
+    ("XRP", "15m"), ("XRP", "1h"), ("XRP", "daily"), ("XRP", "weekly"), ("XRP", "monthly"),
+    # DOGE (Dogecoin)
+    ("DOGE", "15m"), ("DOGE", "1h"), ("DOGE", "daily"), ("DOGE", "weekly"), ("DOGE", "monthly"),
+]
+
 
 def get_full_grid() -> List[Tuple[str, str]]:
     """Return every (asset, timeframe) pair in the universe.
 
     Returns ordered list: BTC/ETH/SOL/XRP/DOGE × 15m/1h/daily/weekly/monthly
     (25 pairs total).
+
+    Note: This function returns the canonical CRYPTO_TIMEFRAME_MATRIX.
+    All code should use this function or the matrix constant directly.
     """
-    return [
-        (asset, tf)
-        for asset in CRYPTO_ASSETS_ORDERED
-        for tf in CRYPTO_TIMEFRAMES_ORDERED
-    ]
+    return list(CRYPTO_TIMEFRAME_MATRIX)
 
 
 def get_assets_for_timeframe(timeframe: str) -> List[str]:

@@ -3,24 +3,38 @@
 MERID Kalshi Crypto Live-Trading Readiness Checklist
 ====================================================
 
-Comprehensive pre-flight validation script that ensures all environment variables,
-formulas, agent behaviors, and market coverage are correct before live trading.
+OPERATOR RUNBOOK: Pre-Flight Checklist for Kalshi Crypto Live Trading
+----------------------------------------------------------------------
 
-This script implements the 5-section readiness checklist:
-  1. Environment and mode sanity
-  2. Formula and sizing conflicts
-  3. Agent proposals, confidence, and hardcoding
-  4. ContinuousTrader + agents: market coverage matrix
-  5. Crypto-Kalshi readiness dry-run
+Before enabling live trading on Kalshi crypto markets, the operator MUST:
+
+1. ✓ Run this script: `python scripts/kalshi_crypto_live_readiness.py`
+2. ✓ Verify all 5 sections PASS (no blocking failures)
+3. ✓ Verify all 25 markets (5 assets × 5 timeframes) have full coverage
+4. ✓ Verify CFB RTI feed is healthy (if MERID_CFB_RTI_ENABLED=true)
+5. ✓ Run go-live preflight: `python scripts/go_live_preflight.py`
+6. ✓ Verify kill switch is not triggered
+7. ✓ Set MERID_PM_TRADING_MODE=live in .env
+8. ✓ Set MERID_PM_LIVE_ENABLED=true in .env
+9. ✓ Set MERID_LIVE_TRADING_UNLOCKED=true in .env
+
+DO NOT proceed with live trading if any check fails. Investigate and fix issues first.
+
+This script validates:
+  1. Environment and mode sanity (credentials, API endpoints, mode flags)
+  2. Formula and sizing conflicts (Kelly fractions, per-asset caps, portfolio limits)
+  3. Agent proposals, confidence, and hardcoding (unified signal path compliance)
+  4. Market coverage matrix (25 markets: BTC/ETH/SOL/XRP/DOGE × 15m/1h/daily/weekly/monthly)
+  5. Dry-run preflight (CFB RTI feed health, sample trade sizing)
 
 Usage:
-    python scripts/kalshi_crypto_live_readiness.py
-    python scripts/kalshi_crypto_live_readiness.py --verbose
-    python scripts/kalshi_crypto_live_readiness.py --json
+    python scripts/kalshi_crypto_live_readiness.py           # Human-readable output
+    python scripts/kalshi_crypto_live_readiness.py --verbose # Detailed diagnostics
+    python scripts/kalshi_crypto_live_readiness.py --json    # Machine-readable JSON
 
 Exit codes:
-    0  LIVE_READY=YES — all checks passed
-    1  LIVE_READY=NO — blocking failures found
+    0  LIVE_READY=YES — all checks passed, safe to enable live trading
+    1  LIVE_READY=NO — blocking failures found, DO NOT enable live trading
 """
 
 from __future__ import annotations
@@ -538,6 +552,8 @@ async def run_dry_run_preflight(verbose: bool = False) -> Dict[str, Any]:
 
         if cfb_enabled and kalshi_env == "live":
             from merid.data.settlement_rti_buffer import SettlementRtiBuffer
+
+            # Test the feed with a single poll
             buf = SettlementRtiBuffer(
                 adapter_type=os.getenv("MERID_CFB_RTI_ADAPTER", "live"),
                 poll_url=os.getenv("MERID_CFB_RTI_POLL_URL", ""),
@@ -546,7 +562,24 @@ async def run_dry_run_preflight(verbose: bool = False) -> Dict[str, Any]:
             )
             tick = buf.poll_once()
             results["data_feeds_healthy"] = tick is not None
-            results["cfb_tick"] = f"{tick.index_name}={tick.value:.2f}" if tick else None
+
+            # Provide detailed CFB RTI status
+            if tick:
+                results["cfb_tick"] = f"{tick.index_name}={tick.value:.2f}"
+                results["cfb_status"] = f"✓ CFB RTI feed healthy: {tick.index_name}"
+
+                # Note: Kalshi crypto contracts settle against CF Benchmarks RTIs:
+                # - BTC markets → BRTI (Bitcoin Real-Time Index)
+                # - ETH markets → ETHUSD_RTI (Ethereum USD Real-Time Index)
+                # - SOL, XRP, DOGE → Currently use BRTI or ETHUSD_RTI as fallback
+                # All are 60-second volume-weighted averages per CFTC requirements.
+                results["cfb_note"] = (
+                    "CF Benchmarks RTI provides settlement prices for all Kalshi crypto contracts. "
+                    "Ensure MERID_CFB_RTI_POLL_URL points to the correct RTI endpoint."
+                )
+            else:
+                results["cfb_tick"] = None
+                results["cfb_status"] = "✗ CFB RTI feed unhealthy: no tick received"
         else:
             # CFB not required in paper/demo mode
             results["data_feeds_healthy"] = True
@@ -554,6 +587,7 @@ async def run_dry_run_preflight(verbose: bool = False) -> Dict[str, Any]:
     except Exception as e:
         results["data_feeds_healthy"] = False
         results["feed_error"] = str(e)
+        results["cfb_status"] = f"✗ CFB RTI feed error: {e}"
 
     # ── 3. Sample dry-run trades ──
     sample_markets = [
@@ -730,9 +764,18 @@ def print_dry_run_results(results: Dict[str, Any], verbose: bool = False) -> Non
     feeds_status = f"{GREEN}{PASS}{RESET}" if results.get("data_feeds_healthy") else f"{RED}{FAIL}{RESET}"
     print(f"Data feeds healthy: {feeds_status}")
     if "cfb_tick" in results:
-        print(f"  {GRAY}CFB RTI: {results['cfb_tick']}{RESET}")
+        print(f"  {GRAY}CFB RTI tick: {results['cfb_tick']}{RESET}")
     if "cfb_status" in results:
-        print(f"  {GRAY}{results['cfb_status']}{RESET}")
+        # Color the status based on ✓ or ✗ prefix
+        status_text = results['cfb_status']
+        if status_text.startswith("✓"):
+            print(f"  {GREEN}{status_text}{RESET}")
+        elif status_text.startswith("✗"):
+            print(f"  {RED}{status_text}{RESET}")
+        else:
+            print(f"  {GRAY}{status_text}{RESET}")
+    if "cfb_note" in results and verbose:
+        print(f"  {GRAY}Note: {results['cfb_note']}{RESET}")
     if "feed_error" in results:
         print(f"  {RED}Error: {results['feed_error']}{RESET}")
 

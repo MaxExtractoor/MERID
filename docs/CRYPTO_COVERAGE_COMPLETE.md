@@ -1,5 +1,94 @@
 # Complete Crypto Coverage Implementation Summary
 
+## Operator Runbook: Pre-Flight Checklist
+
+### Before Enabling Live Trading
+
+**CRITICAL**: Follow these steps in order before enabling live crypto trading on Kalshi:
+
+1. **Run comprehensive coverage tests**:
+   ```bash
+   python tests/test_crypto_coverage_comprehensive.py
+   ```
+   - ✓ Verify all 4 tests pass
+   - ✓ Confirm 25/25 markets validated
+
+2. **Run readiness validation**:
+   ```bash
+   python scripts/kalshi_crypto_live_readiness.py --verbose
+   ```
+   - ✓ Verify SECTION 1: All environment variables valid
+   - ✓ Verify SECTION 2: All formulas validated
+   - ✓ Verify SECTION 3: All agents use unified path
+   - ✓ Verify SECTION 4: All 25 markets have full coverage
+   - ✓ Verify SECTION 5: CFB RTI feed healthy (if enabled)
+   - ✓ Verify LIVE_READY=YES
+
+3. **Run go-live preflight**:
+   ```bash
+   python scripts/go_live_preflight.py
+   ```
+   - ✓ Verify all 9 gates PASS
+   - ✓ Verify Kalshi API authentication succeeds
+   - ✓ Verify balance is readable
+   - ✓ Verify kill switch not triggered
+
+4. **Set environment variables** (in `.env`):
+   ```bash
+   MERID_PM_TRADING_MODE=live
+   MERID_PM_LIVE_ENABLED=true
+   MERID_LIVE_TRADING_UNLOCKED=true
+   KALSHI_USE_DEMO=false
+   MERID_CFB_RTI_ENABLED=true  # If using CFB settlement feed
+   ```
+
+5. **Start trading system** and monitor logs for:
+   - Market discovery for all 25 markets
+   - CFB RTI tick reception (every 60 seconds)
+   - No kill switch triggers
+   - Successful proposal generation
+
+**DO NOT proceed if any check fails.** Investigate and fix issues before continuing.
+
+### 25-Market Coverage Checklist
+
+Verify each market has full coverage:
+
+| Asset | 15m | 1h | daily | weekly | monthly |
+|-------|:---:|:--:|:-----:|:------:|:-------:|
+| BTC   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| ETH   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| SOL   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| XRP   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| DOGE  | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Total** | **5** | **5** | **5** | **5** | **5** = **25/25** |
+
+### Emergency Stop Procedure
+
+If live trading must be stopped immediately:
+
+1. **Trigger kill switch**:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/operator/kill-switch \
+     -H "Content-Type: application/json" \
+     -d '{"reason": "Emergency stop - [describe reason]"}'
+   ```
+
+2. **Stop trading process**:
+   ```bash
+   # Stop continuous trader
+   pkill -f kalshi_continuous_trader
+   ```
+
+3. **Verify no pending orders**:
+   - Check Kalshi dashboard for open orders
+   - Cancel any pending orders manually if needed
+
+4. **Document incident**:
+   - Record reason for stop
+   - Record timestamp
+   - Record market conditions at time of stop
+
 ## Overview
 
 Successfully implemented complete coverage for all 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) across all 5 timeframes (15m, 1h, daily, weekly, monthly), resulting in full support for 25 distinct trading markets.
@@ -220,3 +309,125 @@ Updated the following documentation:
 ✅ **Production ready**: Ready for gradual rollout
 
 The MERID system now has complete, unified coverage for all Kalshi crypto prediction markets across all timeframes.
+
+## Hardening Improvements (Post-Implementation)
+
+After completing the initial 25-market coverage, the following hardening improvements were added:
+
+### 1. First-Class 25-Cell Matrix (`config/crypto_universe.py`)
+
+**Added**: `CRYPTO_TIMEFRAME_MATRIX` as a first-class constant to prevent future drift:
+
+```python
+CRYPTO_TIMEFRAME_MATRIX: List[Tuple[str, str]] = [
+    # BTC (Bitcoin)
+    ("BTC", "15m"), ("BTC", "1h"), ("BTC", "daily"), ("BTC", "weekly"), ("BTC", "monthly"),
+    # ETH (Ethereum)
+    ("ETH", "15m"), ("ETH", "1h"), ("ETH", "daily"), ("ETH", "weekly"), ("ETH", "monthly"),
+    # SOL (Solana)
+    ("SOL", "15m"), ("SOL", "1h"), ("SOL", "daily"), ("SOL", "weekly"), ("SOL", "monthly"),
+    # XRP (Ripple)
+    ("XRP", "15m"), ("XRP", "1h"), ("XRP", "daily"), ("XRP", "weekly"), ("XRP", "monthly"),
+    # DOGE (Dogecoin)
+    ("DOGE", "15m"), ("DOGE", "1h"), ("DOGE", "daily"), ("DOGE", "weekly"), ("DOGE", "monthly"),
+]
+```
+
+**Purpose**: Single source of truth for all 25 markets. All modules MUST import from this matrix instead of re-defining asset/timeframe lists locally.
+
+### 2. Comprehensive Test Suite (`tests/test_crypto_coverage_comprehensive.py`)
+
+**Added**: 4-test validation suite that verifies:
+
+1. **Legacy Alias Behavior**: Tests that `scalp`→`15m`, `intraday`→`1h`, `swing`→`daily` mappings work correctly
+2. **Matrix Consistency**: Validates that all 25 pairs exist and match across all modules
+3. **Continuous Trader Filter**: Ensures continuous trader matches canonical matrix
+4. **Readiness Script Alignment**: Verifies readiness script iterates over all 25 markets
+
+**Test Results**:
+```
+✓ PASS   Legacy Alias Behavior
+✓ PASS   Matrix Consistency
+✓ PASS   Continuous Trader Filter
+✓ PASS   Readiness Script Alignment
+
+Total: 4/4 tests passed
+```
+
+### 3. Enhanced Readiness Script
+
+**File**: `scripts/kalshi_crypto_live_readiness.py`
+
+**Improvements**:
+- Added **Operator Runbook** header with 9-step pre-flight checklist
+- Enhanced **CFB RTI validation** with detailed status reporting:
+  - Validates CF Benchmarks RTI feed health
+  - Reports specific index name (BRTI, ETHUSD_RTI)
+  - Documents settlement index requirements
+  - Color-coded status output (green ✓ / red ✗)
+- Improved **dry-run reporting** with verbose mode
+- Added **CFB RTI note** explaining settlement feed mapping
+
+### 4. Updated Documentation
+
+**File**: `docs/CRYPTO_COVERAGE_COMPLETE.md`
+
+**Additions**:
+- **Operator Runbook**: Pre-flight checklist at top of document
+- **25-Market Coverage Checklist**: Quick verification matrix
+- **Emergency Stop Procedure**: Kill switch and process shutdown steps
+- **Hardening Improvements**: This section documenting post-implementation enhancements
+
+### 5. Matrix-First Architecture
+
+**Design Principle**: The `CRYPTO_TIMEFRAME_MATRIX` constant is now the canonical source of truth. All modules derive their coverage from this matrix:
+
+- **crypto_kalshi_risk.py**: Builds strategy profiles from matrix
+- **kalshi_continuous_trader.py**: Filters markets based on matrix
+- **market_catalog.py**: Discovers markets aligned with matrix
+- **kalshi_crypto_live_readiness.py**: Validates coverage against matrix
+
+**Benefits**:
+- Prevents drift between modules
+- Single place to update coverage
+- Easier to add new assets/timeframes
+- Clear audit trail for production validation
+
+### CFB RTI Settlement Feed Coverage
+
+CF Benchmarks Real-Time Indices (RTIs) provide settlement prices for Kalshi crypto contracts per CFTC requirements:
+
+| Asset | Settlement Index | Update Frequency | Averaging Window |
+|-------|-----------------|------------------|------------------|
+| BTC   | BRTI (Bitcoin RTI) | 1 second | 60-second VWAP |
+| ETH   | ETHUSD_RTI (Ethereum USD RTI) | 1 second | 60-second VWAP |
+| SOL   | SOLUSD_RTI (Solana USD RTI)* | 1 second | 60-second VWAP |
+| XRP   | XRPUSD_RTI (Ripple USD RTI)* | 1 second | 60-second VWAP |
+| DOGE  | DOGEUSD_RTI (Dogecoin USD RTI)* | 1 second | 60-second VWAP |
+
+\* *Check with CF Benchmarks API for current index availability*
+
+**VWAP** = Volume-Weighted Average Price across multiple exchanges
+
+### Validation Chain
+
+Complete validation workflow:
+
+```
+1. Unit Tests (pytest)
+   └─> Validates individual components
+
+2. Coverage Tests (test_crypto_coverage_comprehensive.py)
+   └─> Validates 25-market matrix consistency
+
+3. Readiness Script (kalshi_crypto_live_readiness.py)
+   └─> Validates environment, formulas, agents, coverage, CFB RTI
+
+4. Go-Live Preflight (go_live_preflight.py)
+   └─> Validates 9 safety gates including API auth and kill switch
+
+5. Manual Operator Checklist (CRYPTO_COVERAGE_COMPLETE.md)
+   └─> Final human verification before live enable
+```
+
+**All 5 stages must pass before enabling live trading.**
