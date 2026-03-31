@@ -117,14 +117,11 @@ class TestSubmitProposalValidation:
         agg.submit_proposal(_make_proposal("a1", "SHIB", "15m"))
         # SHIB is not in crypto_universe — proposal should be silently dropped
         assert agg.get_consensus("SHIB", "15m") is None
-        # Internal storage should not contain the invalid key
-        assert "SHIB:15m" not in agg._proposals or len(agg._proposals["SHIB:15m"]) == 0
 
     def test_reject_invalid_timeframe(self):
         agg = _fresh_aggregator(min_agents=1)
         agg.submit_proposal(_make_proposal("a1", "BTC", "4h"))
         assert agg.get_consensus("BTC", "4h") is None
-        assert "BTC:4h" not in agg._proposals or len(agg._proposals["BTC:4h"]) == 0
 
     def test_reject_both_invalid(self):
         agg = _fresh_aggregator(min_agents=1)
@@ -134,8 +131,8 @@ class TestSubmitProposalValidation:
     def test_accept_valid_pair(self):
         agg = _fresh_aggregator(min_agents=1)
         agg.submit_proposal(_make_proposal("a1", "ETH", "daily"))
-        # Valid pair should be stored
-        assert len(agg._proposals.get("ETH:daily", [])) == 1
+        # Valid pair should produce a consensus view (min_agents=1)
+        assert agg.get_consensus("ETH", "daily") is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

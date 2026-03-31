@@ -23,7 +23,10 @@ if "telegram" not in sys.modules:
     _telegram_error_stub = types.ModuleType("telegram.error")
     _telegram_error_stub.TelegramError = type("TelegramError", (Exception,), {})  # type: ignore[attr-defined]
     _telegram_error_stub.RetryAfter = type("RetryAfter", (Exception,), {  # type: ignore[attr-defined]
-        "__init__": lambda self, retry_after=0: None,
+        "__init__": lambda self, retry_after=0: (
+            Exception.__init__(self, f"Flood control exceeded. Retry in {retry_after} seconds"),
+            setattr(self, "retry_after", retry_after),
+        )[-1],
     })
     sys.modules["telegram.error"] = _telegram_error_stub
 
