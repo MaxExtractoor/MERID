@@ -22,10 +22,12 @@ Key invariants:
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
 from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig
@@ -43,10 +45,16 @@ _DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
 _DEFAULT_BANKROLL_FRACTION = float(os.getenv("MERID_BANKROLL_FRACTION", "0.01"))
 _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
+_DEFAULT_KELLY_FRACTION = float(os.getenv("MERID_KELLY_FRACTION", "0.25"))
+_DEFAULT_MIN_EDGE = float(os.getenv("MERID_MIN_EDGE", "0.02"))
 
 # Fallback YES price (cents) when a candidate has no best_ask or mid price data.
 # Used only in the max-price guard inside trade_cycle().
 _FALLBACK_YES_PRICE_CENTS = 50
+
+# Number of past scan cycles to retain for the rolling volume-band block-rate average.
+# At the default ~60s candidate refresh interval this covers roughly 20 minutes.
+_VOLUME_BAND_RATE_HISTORY_MAXLEN = 20
 
 
 # ── TradingCandidate (thin subclass of canonical MarketCandidate) ──────────
@@ -84,6 +92,8 @@ class TradingCandidate(MarketCandidate):
             best_yes_ask=candidate.best_yes_ask,
             best_no_bid=candidate.best_no_bid,
             best_no_ask=candidate.best_no_ask,
+            edge_pct=candidate.edge_pct,
+            model_prob=candidate.model_prob,
             group_id=group_id or f"{candidate.underlying}_{candidate.timeframe}",
             tags=tags or [],
         )
@@ -116,6 +126,21 @@ class DailyRiskState:
         self.daily_loss = 0.0
         self.trade_count = 0
         self.execution_rejections = 0
+
+
+# ── Sizing result ─────────────────────────────────────────────────────────
+
+@dataclass
+class SizingResult:
+    """Output of ``signal_to_sizing`` — captures Kelly and sizing arithmetic."""
+    edge: float = 0.0
+    win_prob: float = 0.5
+    payout_cents: float = 0.0
+    kelly_raw: float = 0.0
+    kelly_frac: float = 0.0
+    size_contracts: int = 0
+    notional_usd: float = 0.0
+    source: str = "none"      # "signal" | "strategy" | "none"
 
 
 # ── Trader ────────────────────────────────────────────────────────────────
@@ -152,6 +177,8 @@ class KalshiContinuousTrader:
         min_confidence: float = _DEFAULT_MIN_CONFIDENCE,
         bankroll_fraction: float = _DEFAULT_BANKROLL_FRACTION,
         max_yes_price: float = _DEFAULT_MAX_YES_PRICE,
+        kelly_fraction: float = _DEFAULT_KELLY_FRACTION,
+        min_edge: float = _DEFAULT_MIN_EDGE,
     ) -> None:
         self._catalog = catalog or get_market_catalog()
         self._strategy = strategy
@@ -159,6 +186,8 @@ class KalshiContinuousTrader:
         self._min_confidence = min_confidence
         self._bankroll_fraction = bankroll_fraction
         self._max_yes_price = max_yes_price
+        self._kelly_fraction = kelly_fraction
+        self._min_edge = min_edge
 
         self._risk = DailyRiskState()
         self._filter_config = MarketFilterConfig(
@@ -170,6 +199,16 @@ class KalshiContinuousTrader:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._candidates: List[TradingCandidate] = []
+
+        # ── Filter telemetry ────────────────────────────────────────────────
+        # Aggregated filter stats from the most recent _refresh_candidates() call.
+        # Empty dict until the first scan completes.
+        self._last_scan_filter_stats: Dict[str, Any] = {}
+        # Rolling history of per-scan volume_band_block_rate values (oldest first).
+        # Capped at _VOLUME_BAND_RATE_HISTORY_MAXLEN entries.
+        self._volume_band_rate_history: Deque[float] = deque(
+            maxlen=_VOLUME_BAND_RATE_HISTORY_MAXLEN
+        )
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -199,6 +238,10 @@ class KalshiContinuousTrader:
         """Pull fresh candidates from catalog + filter pipeline."""
         new_candidates: List[TradingCandidate] = []
         asset_counts: Dict[str, Dict[str, int]] = {}
+
+        # Accumulators for cross-asset/timeframe filter telemetry for this scan run.
+        scan_total_input: int = 0
+        scan_rejected_volume_band: int = 0
 
         for asset in _CRYPTO_ASSETS:
             for tf in _CRYPTO_TIMEFRAMES:
@@ -231,6 +274,38 @@ class KalshiContinuousTrader:
                 counts = asset_counts.setdefault(asset, {})
                 counts[tf] = len(filter_result.candidates)
 
+                # Accumulate filter telemetry across all (asset, timeframe) loops.
+                scan_total_input += filter_result.total_input
+                scan_rejected_volume_band += filter_result.rejected_volume_band
+
+        # Compute per-scan volume-band block rate and update rolling history.
+        scan_block_rate = (
+            scan_rejected_volume_band / scan_total_input
+            if scan_total_input > 0
+            else 0.0
+        )
+        self._volume_band_rate_history.append(scan_block_rate)
+
+        # Store aggregated stats for the most recent scan so status() can expose them.
+        rolling_avg = (
+            sum(self._volume_band_rate_history) / len(self._volume_band_rate_history)
+            if self._volume_band_rate_history
+            else 0.0
+        )
+        self._last_scan_filter_stats = {
+            "scan_total_input": scan_total_input,
+            "scan_rejected_volume_band": scan_rejected_volume_band,
+            "volume_band_block_rate": round(scan_block_rate, 4),
+            "volume_band_block_rate_rolling_avg": round(rolling_avg, 4),
+            "rolling_window_scans": len(self._volume_band_rate_history),
+        }
+        logger.info(
+            "ContinuousTrader filter: total_input=%d volume_band_rejected=%d "
+            "block_rate=%.3f rolling_avg=%.3f (window=%d scans)",
+            scan_total_input, scan_rejected_volume_band,
+            scan_block_rate, rolling_avg, len(self._volume_band_rate_history),
+        )
+
         # Log per-asset/timeframe counts at INFO level
         for asset, tfs in asset_counts.items():
             for tf, cnt in tfs.items():
@@ -246,6 +321,115 @@ class KalshiContinuousTrader:
         return new_candidates
 
     # ── Sizing / risk ─────────────────────────────────────────────────────
+
+    def signal_to_sizing(
+        self,
+        candidate: TradingCandidate,
+        bankroll: float,
+        *,
+        edge_override: Optional[float] = None,
+        win_prob_override: Optional[float] = None,
+    ) -> SizingResult:
+        """Compute Kelly-based sizing from candidate edge and market data.
+
+        Sources edge from (in priority order):
+          1. ``edge_override`` parameter (for testing / manual injection).
+          2. ``candidate.edge_pct`` (enriched from Kalshi signals).
+          3. ``estimate.edge`` from the wired ``OpinionStrategy``.
+          4. Fallback to 0 (no edge → no trade).
+
+        Uses the binary Kelly formula::
+
+            implied_prob  = mid_price / 100
+            win_prob      = implied_prob + edge
+            payout        = 100 - price_cents
+            b             = payout / price_cents
+            kelly_raw     = (p * b - q) / b
+            kelly_frac    = kelly_raw * kelly_fraction
+
+        Returns a ``SizingResult`` with all intermediate values for audit.
+        """
+        price_cents = candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
+        implied_prob = price_cents / 100.0
+
+        # 1. Resolve edge (priority: override > candidate signal > strategy > 0)
+        edge = 0.0
+        source = "none"
+
+        if edge_override is not None:
+            edge = edge_override
+            source = "override"
+        elif candidate.edge_pct is not None and candidate.edge_pct != 0.0:
+            edge = candidate.edge_pct / 100.0  # edge_pct is in percentage
+            source = "signal"
+        else:
+            # Try strategy-based edge
+            mid_prob = implied_prob if implied_prob > 0 else 0.5
+            estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
+            if estimate is not None and estimate.edge != 0.0:
+                edge = estimate.edge
+                source = "strategy"
+
+        # 2. Compute win probability
+        if win_prob_override is not None:
+            win_prob = win_prob_override
+        else:
+            win_prob = max(0.01, min(0.99, implied_prob + edge))
+
+        # 3. Kelly formula for binary contract
+        payout_cents = 100 - price_cents
+        if price_cents <= 0 or price_cents >= 100 or payout_cents <= 0:
+            result = SizingResult(edge=edge, win_prob=win_prob, source=source)
+            logger.info(
+                "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
+                "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) source=%s",
+                candidate.ticker, edge, win_prob, 0.0, 0.0, 0.0,
+                self._kelly_fraction * 100, source,
+            )
+            return result
+
+        b = payout_cents / price_cents  # net odds ratio
+        p = win_prob
+        q = 1.0 - p
+        kelly_raw = (p * b - q) / b if b > 0 else 0.0
+
+        # Clamp negative Kelly → no trade; negative edge always skips regardless of magnitude
+        if kelly_raw <= 0 or edge < self._min_edge:
+            result = SizingResult(
+                edge=edge, win_prob=win_prob, payout_cents=float(payout_cents),
+                kelly_raw=kelly_raw, source=source,
+            )
+            logger.info(
+                "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
+                "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) source=%s",
+                candidate.ticker, edge, win_prob, float(payout_cents),
+                kelly_raw, 0.0, self._kelly_fraction * 100, source,
+            )
+            return result
+
+        kelly_frac = kelly_raw * self._kelly_fraction
+        notional = bankroll * kelly_frac
+        price_dollars = price_cents / 100.0
+        size_contracts = int(math.floor(notional / price_dollars))
+
+        result = SizingResult(
+            edge=edge,
+            win_prob=win_prob,
+            payout_cents=float(payout_cents),
+            kelly_raw=kelly_raw,
+            kelly_frac=kelly_frac,
+            size_contracts=size_contracts,
+            notional_usd=notional,
+            source=source,
+        )
+        logger.info(
+            "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
+            "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) size=%d source=%s",
+            candidate.ticker, edge, win_prob, float(payout_cents),
+            kelly_raw, kelly_frac, self._kelly_fraction * 100,
+            size_contracts, source,
+        )
+        return result
 
     def _apply_risk_checks(
         self,
@@ -325,6 +509,13 @@ class KalshiContinuousTrader:
     ) -> List[Dict[str, Any]]:
         """Run one trade evaluation cycle across all current candidates.
 
+        For each candidate:
+          1. Enrich with spot price (if available).
+          2. Compute edge and Kelly sizing via ``signal_to_sizing``.
+          3. Fall back to strategy-based edge if no signal edge.
+          4. Apply risk checks (group cap, confidence gate).
+          5. Apply max-YES-price guard.
+
         Returns list of approved intent dicts (does NOT submit orders).
         """
         intents = []
@@ -337,9 +528,16 @@ class KalshiContinuousTrader:
             if estimate is None:
                 continue
 
+            # Use signal_to_sizing for Kelly-based notional
+            sizing = self.signal_to_sizing(candidate, bankroll)
+
             notional = self._apply_risk_checks(candidate, estimate, bankroll)
             if notional is None:
                 continue
+
+            # When Kelly sizing produces a positive notional, prefer it
+            if sizing.notional_usd > 0:
+                notional = min(notional, sizing.notional_usd)
 
             intent = {
                 "ticker": candidate.ticker,
@@ -349,7 +547,11 @@ class KalshiContinuousTrader:
                 "direction": "yes" if estimate.agent_prob > mid_prob else "no",
                 "notional": notional,
                 "confidence": estimate.confidence,
-                "edge": estimate.edge,
+                "edge": sizing.edge,
+                "kelly_raw": sizing.kelly_raw,
+                "kelly_frac": sizing.kelly_frac,
+                "size_contracts": sizing.size_contracts,
+                "sizing_source": sizing.source,
                 "intent_id": f"ct-{candidate.ticker}-{int(time.time())}",
                 "ts": time.time(),
             }
@@ -372,9 +574,12 @@ class KalshiContinuousTrader:
             self._risk.trade_count += 1
             intents.append(intent)
             logger.info(
-                "ContinuousTrader: INTENT %s %s notional=%.2f conf=%.3f edge=%.4f",
+                "ContinuousTrader: INTENT %s %s notional=%.2f conf=%.3f edge=%.4f "
+                "kelly_raw=%.4f kelly_frac=%.4f size=%d source=%s",
                 intent["direction"], candidate.ticker, notional,
-                estimate.confidence, estimate.edge,
+                estimate.confidence, intent["edge"],
+                sizing.kelly_raw, sizing.kelly_frac,
+                sizing.size_contracts, sizing.source,
             )
 
         return intents
@@ -427,7 +632,14 @@ class KalshiContinuousTrader:
                 "min_confidence": self._min_confidence,
                 "bankroll_fraction": self._bankroll_fraction,
                 "max_yes_price": self._max_yes_price,
+                "kelly_fraction": self._kelly_fraction,
+                "min_edge": self._min_edge,
             },
+            # ── Filter telemetry (populated after first _refresh_candidates call) ──
+            # Use these to audit the relative-volume band: a healthy block_rate is
+            # 15–40% of input candidates.  Below 10% the band may be too loose;
+            # above 60% it may be too restrictive.  rolling_avg smooths scan noise.
+            "filter": dict(self._last_scan_filter_stats),
         }
 
     @property

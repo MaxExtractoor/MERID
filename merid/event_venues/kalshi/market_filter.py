@@ -12,6 +12,11 @@ attaching agents:
 6. **Edge dead-zone**: Skip markets where win probability is too close to 50%
    (within `min_edge_dead_zone_pct`) to avoid coin-flip bleed
 7. **Candidate limit**: Return at most `max_candidates_per_asset` per asset
+8. **Relative-volume band**: Reject markets whose volume, expressed as a
+   fraction of the *batch maximum*, falls outside
+   [``volume_band_min``, ``volume_band_max``].  This keeps the "middle
+   regime" of liquidity: avoiding both the illiquid tail (too thin) and
+   anomalous spike/auction events (unreliably high).
 
 Usage::
 
@@ -83,6 +88,33 @@ class MarketFilterConfig:
     # filters.  The candidates closest to spot are preferred.  0 = no limit.
     max_candidates_per_asset: int = 5
 
+    # ── Relative-volume band ───────────────────────────────────────────────
+    #
+    # "Relative volume" for a candidate is defined as:
+    #
+    #   volume_fraction = market.volume / max(m.volume for m in batch)
+    #
+    # where the denominator is the maximum raw volume across ALL markets
+    # submitted to filter_markets() in a single call — computed before any
+    # other gate removes markets from the batch.  This gives each market a
+    # normalised score in [0, 1] reflecting where it sits in the current
+    # liquidity distribution.
+    #
+    # The band [volume_band_min, volume_band_max] retains only markets that
+    # fall within that relative-volume range.  The design intent is:
+    #   - Reject the illiquid tail (volume_fraction < min): very thin markets
+    #     where spreads are wide and fills are uncertain.
+    #   - Reject anomalous spikes (volume_fraction > max): markets showing
+    #     unusually high activity relative to peers, which may indicate
+    #     news events, auctions, or data artifacts that distort edge estimates.
+    #   - Live in the middle regime: established, liquid, well-behaved markets.
+    #
+    # Setting volume_band_min=0.0 and volume_band_max=1.0 disables the filter
+    # entirely (every market passes regardless of relative volume).
+    # Recommended production values: volume_band_min=0.4, volume_band_max=0.8
+    volume_band_min: float = 0.0  # 0.0 = no lower bound (disabled)
+    volume_band_max: float = 1.0  # 1.0 = no upper bound (disabled)
+
 
 DEFAULT_FILTER_CONFIG = MarketFilterConfig()
 
@@ -114,6 +146,11 @@ class MarketCandidate:
     best_yes_ask: Optional[float] = None
     best_no_bid: Optional[float] = None
     best_no_ask: Optional[float] = None
+    # Edge/model enrichment fields (populated by signal layer or enrichment step).
+    # ``edge_pct`` is the signed edge as a percentage of implied probability;
+    # ``model_prob`` is the model-estimated probability (0–1).
+    edge_pct: Optional[float] = None
+    model_prob: Optional[float] = None
 
     @property
     def has_book(self) -> bool:
@@ -147,6 +184,8 @@ class MarketCandidate:
             "best_yes_ask": self.best_yes_ask,
             "best_no_bid": self.best_no_bid,
             "best_no_ask": self.best_no_ask,
+            "edge_pct": self.edge_pct,
+            "model_prob": self.model_prob,
         }
 
     def __getattr__(self, name: str) -> Any:
@@ -157,7 +196,8 @@ class MarketCandidate:
         return None for those attributes instead of raising AttributeError so
         downstream edge calculations remain safe.
         """
-        if name in ("best_yes_bid", "best_yes_ask", "best_no_bid", "best_no_ask"):
+        if name in ("best_yes_bid", "best_yes_ask", "best_no_bid", "best_no_ask",
+                    "edge_pct", "model_prob"):
             return None
         raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
 
@@ -175,8 +215,21 @@ class FilterResult:
     rejected_timeframe: int = 0
     rejected_distance: int = 0       # struck too far from spot
     rejected_edge_deadzone: int = 0  # mid-price too close to 50¢
+    rejected_volume_band: int = 0    # outside relative-volume band
     capped_per_asset: int = 0        # dropped by max_candidates_per_asset limit
     candidates: List[MarketCandidate] = field(default_factory=list)
+
+    @property
+    def volume_band_block_rate(self) -> float:
+        """Fraction of input markets blocked purely by the relative-volume band.
+
+        Useful for auditing whether the band is hitting a meaningful fraction
+        of otherwise-eligible candidates (typically 15–40% is healthy;
+        < 10% suggests the band is too loose; > 60% may be too restrictive).
+        """
+        if self.total_input == 0:
+            return 0.0
+        return self.rejected_volume_band / self.total_input
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -190,6 +243,8 @@ class FilterResult:
             "rejected_timeframe": self.rejected_timeframe,
             "rejected_distance": self.rejected_distance,
             "rejected_edge_deadzone": self.rejected_edge_deadzone,
+            "rejected_volume_band": self.rejected_volume_band,
+            "volume_band_block_rate": round(self.volume_band_block_rate, 4),
             "capped_per_asset": self.capped_per_asset,
             "candidates": [c.to_dict() for c in self.candidates],
         }
@@ -293,6 +348,11 @@ class MarketFilter:
         to ``max_candidates_per_asset`` per underlying (preferring those
         closest to spot when ``spot_price`` is available).
 
+        The relative-volume band (if configured) is applied first, before
+        any per-market quality gate.  The denominator for the band is the
+        maximum volume across ALL input markets in this call, so the score
+        is stable regardless of which other filters are active.
+
         Args:
             markets: Raw market candidates to evaluate.
 
@@ -302,7 +362,22 @@ class MarketFilter:
         result = FilterResult(total_input=len(markets))
         cfg = self._config
 
+        # Pre-compute the relative-volume denominator for the entire batch.
+        # The band is only applied when at least one bound is non-trivial.
+        check_vol_band = cfg.volume_band_min > 0.0 or cfg.volume_band_max < 1.0
+        max_volume: int = max((m.volume for m in markets), default=0) if markets else 0
+
         for market in markets:
+            # ── Relative-volume band (batch-level check) ──────────────────
+            # Applied before per-market gates so that the rejection bucket is
+            # exclusive (a market that fails the band is not also counted as a
+            # volume-floor or spread rejection).
+            if check_vol_band and max_volume > 0:
+                rel_vol = market.volume / max_volume
+                if rel_vol < cfg.volume_band_min or rel_vol > cfg.volume_band_max:
+                    result.rejected_volume_band += 1
+                    continue
+
             passed, reason = self.evaluate(market)
             if passed:
                 result.candidates.append(market)

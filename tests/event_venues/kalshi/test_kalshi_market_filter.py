@@ -379,3 +379,166 @@ class TestMaxCandidatesPerAsset:
         assert "rejected_distance" in d
         assert "rejected_edge_deadzone" in d
         assert "capped_per_asset" in d
+
+
+# ── Relative-volume band filter ──────────────────────────────────────
+
+class TestVolumeBandFilter:
+    """Validate the relative-volume band gate and its audit metrics.
+
+    The band is expressed as [volume_band_min, volume_band_max] where each
+    market's score is market.volume / max(batch.volume).  A score outside
+    the band causes the market to be rejected and counted in
+    FilterResult.rejected_volume_band.
+    """
+
+    def test_band_disabled_by_default(self):
+        """Default config (0.0/1.0) passes all markets regardless of relative volume."""
+        filt = MarketFilter()  # default config
+        markets = [
+            _market(ticker="low",  volume=100),
+            _market(ticker="mid",  volume=500),
+            _market(ticker="high", volume=1000),
+        ]
+        result = filt.filter_markets(markets)
+        assert result.rejected_volume_band == 0
+        assert result.passed == 3
+
+    def test_low_volume_tail_rejected(self):
+        """Market with relative volume below volume_band_min is rejected."""
+        cfg = MarketFilterConfig(volume_band_min=0.4, volume_band_max=0.8)
+        filt = MarketFilter(cfg)
+        markets = [
+            _market(ticker="low",  volume=10),   # rel=0.01 < 0.4 → rejected
+            _market(ticker="mid",  volume=600),  # rel=0.6 ∈ [0.4,0.8] → pass
+            _market(ticker="high", volume=1000), # rel=1.0 > 0.8 → rejected
+        ]
+        result = filt.filter_markets(markets)
+        assert result.rejected_volume_band == 2
+        assert result.passed == 1
+        assert result.candidates[0].ticker == "mid"
+
+    def test_high_volume_spike_rejected(self):
+        """Market with relative volume above volume_band_max is rejected."""
+        cfg = MarketFilterConfig(volume_band_min=0.4, volume_band_max=0.8)
+        filt = MarketFilter(cfg)
+        markets = [
+            _market(ticker="normal", volume=500),  # rel=0.5 ∈ [0.4,0.8]
+            _market(ticker="spike",  volume=1000), # rel=1.0 > 0.8 → rejected
+        ]
+        result = filt.filter_markets(markets)
+        assert result.rejected_volume_band == 1
+        assert result.passed == 1
+        assert result.candidates[0].ticker == "normal"
+
+    def test_all_equal_volume_passes(self):
+        """All markets with identical volume have rel=1.0 and pass any max ≥ 1.0."""
+        cfg = MarketFilterConfig(volume_band_min=0.4, volume_band_max=1.0)
+        filt = MarketFilter(cfg)
+        markets = [_market(ticker=f"m{i}", volume=200) for i in range(4)]
+        result = filt.filter_markets(markets)
+        assert result.rejected_volume_band == 0
+
+    def test_empty_batch_no_crash(self):
+        """Empty batch with an active band produces an empty result safely."""
+        cfg = MarketFilterConfig(volume_band_min=0.4, volume_band_max=0.8)
+        filt = MarketFilter(cfg)
+        result = filt.filter_markets([])
+        assert result.total_input == 0
+        assert result.rejected_volume_band == 0
+        assert result.volume_band_block_rate == 0.0
+
+    def test_zero_max_volume_skips_band_check(self):
+        """If all markets have zero volume the band check is skipped (no ZeroDivisionError)."""
+        cfg = MarketFilterConfig(volume_band_min=0.4, volume_band_max=0.8)
+        filt = MarketFilter(cfg)
+        # Volumes are all 0; band check would divide by zero → must skip gracefully
+        markets = [_market(ticker=f"m{i}", volume=0) for i in range(3)]
+        result = filt.filter_markets(markets)
+        # No crash; markets may fail other gates (min_volume floor) but not band
+        assert result.rejected_volume_band == 0
+
+    def test_volume_band_block_rate_property(self):
+        """volume_band_block_rate equals rejected_volume_band / total_input."""
+        cfg = MarketFilterConfig(volume_band_min=0.4, volume_band_max=0.8)
+        filt = MarketFilter(cfg)
+        markets = [
+            _market(ticker="a", volume=10),   # rel=0.01 → rejected by band
+            _market(ticker="b", volume=600),  # rel=0.6 → pass
+            _market(ticker="c", volume=1000), # rel=1.0 → rejected by band
+            _market(ticker="d", volume=500),  # rel=0.5 → pass
+        ]
+        result = filt.filter_markets(markets)
+        assert result.rejected_volume_band == 2
+        assert result.volume_band_block_rate == pytest.approx(2 / 4)
+
+    def test_to_dict_includes_volume_band_metrics(self):
+        """to_dict() exposes rejected_volume_band and volume_band_block_rate."""
+        cfg = MarketFilterConfig(volume_band_min=0.4, volume_band_max=0.8)
+        filt = MarketFilter(cfg)
+        markets = [
+            _market(ticker="low",  volume=50),   # rel=0.05 < 0.4 → band reject
+            _market(ticker="mid",  volume=600),  # rel=0.6 → pass
+            _market(ticker="high", volume=1000), # rel=1.0 > 0.8 → band reject
+        ]
+        result = filt.filter_markets(markets)
+        d = result.to_dict()
+        assert "rejected_volume_band" in d
+        assert "volume_band_block_rate" in d
+        assert d["rejected_volume_band"] == 2
+        assert d["volume_band_block_rate"] == pytest.approx(2 / 3, abs=1e-4)
+
+    def test_band_rejection_exclusive_from_other_buckets(self):
+        """A market rejected by the band is NOT also counted as a volume-floor reject."""
+        cfg = MarketFilterConfig(
+            min_volume=50,          # raw floor
+            volume_band_min=0.4,    # relative floor
+            volume_band_max=0.8,
+        )
+        filt = MarketFilter(cfg)
+        # volume=10: below both the raw floor AND the relative band.
+        # Should only increment rejected_volume_band, not rejected_volume.
+        markets = [
+            _market(ticker="outlier", volume=10),
+            _market(ticker="normal",  volume=600),
+            _market(ticker="spike",   volume=1000),
+        ]
+        result = filt.filter_markets(markets)
+        # "outlier" (rel=0.01 < 0.4) and "spike" (rel=1.0 > 0.8) hit the band
+        assert result.rejected_volume_band == 2
+        assert result.rejected_volume == 0   # band check fires first via `continue`
+
+    def test_min_only_band_passes_all_high_volume(self):
+        """Setting only a lower bound (volume_band_max=1.0) rejects just the low tail."""
+        cfg = MarketFilterConfig(volume_band_min=0.5, volume_band_max=1.0)
+        filt = MarketFilter(cfg)
+        markets = [
+            _market(ticker="thin", volume=10),   # rel=0.01 < 0.5 → reject
+            _market(ticker="ok1",  volume=600),  # rel=0.6 → pass
+            _market(ticker="ok2",  volume=1000), # rel=1.0 == 1.0 ≤ 1.0 → pass
+        ]
+        result = filt.filter_markets(markets)
+        assert result.rejected_volume_band == 1
+        assert result.passed == 2
+        assert {c.ticker for c in result.candidates} == {"ok1", "ok2"}
+
+    def test_max_only_band_rejects_spike_keeps_low(self):
+        """Setting only an upper bound (volume_band_min=0.0) rejects just the spike."""
+        cfg = MarketFilterConfig(volume_band_min=0.0, volume_band_max=0.8)
+        filt = MarketFilter(cfg)
+        markets = [
+            _market(ticker="thin",  volume=10),   # rel=0.01 ≥ 0.0 → pass
+            _market(ticker="ok",    volume=600),  # rel=0.6 ≤ 0.8 → pass
+            _market(ticker="spike", volume=1000), # rel=1.0 > 0.8 → reject
+        ]
+        result = filt.filter_markets(markets)
+        # thin passes band but may fail raw min_volume floor (100 by default);
+        # we care only that the spike is in the band bucket, not the volume bucket
+        assert result.rejected_volume_band == 1
+        assert "spike" not in {c.ticker for c in result.candidates}
+
+    def test_volume_band_block_rate_is_zero_without_rejections(self):
+        """block_rate is exactly 0.0 when no markets are band-rejected."""
+        filt = MarketFilter()
+        result = filt.filter_markets([_market()])
+        assert result.volume_band_block_rate == 0.0

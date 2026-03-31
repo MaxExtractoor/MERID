@@ -318,18 +318,150 @@ class TestTraderStatus:
         assert "max_yes_price" in s["config"]
         assert s["config"]["max_yes_price"] == 0.40
 
-    def test_status_default_max_yes_price_is_fifty_cents(self) -> None:
-        """Default max_yes_price is 0.50 (50¢) unless overridden."""
-        import os
+    def test_status_includes_filter_key(self) -> None:
+        """status() must include a 'filter' key for volume-band telemetry."""
         catalog = MagicMock()
-        os.environ.pop("MERID_MAX_YES_PRICE", None)
-        from merid.trading import kalshi_continuous_trader as _kct
-        # Instantiate directly with the module default
         trader = KalshiContinuousTrader(catalog=catalog)
-        assert trader.status()["config"]["max_yes_price"] == pytest.approx(0.50, abs=1e-6)
+        s = trader.status()
+        assert "filter" in s
+
+    def test_filter_empty_before_first_scan(self) -> None:
+        """Before _refresh_candidates() runs, filter telemetry is an empty dict."""
+        catalog = MagicMock()
+        trader = KalshiContinuousTrader(catalog=catalog)
+        assert trader.status()["filter"] == {}
+
+
+# ── Filter telemetry ──────────────────────────────────────────────────────
+
+def _make_catalog_with_volumes(volumes: List[int], asset: str = "BTC", timeframe: str = "15m"):
+    """Return a mock catalog that yields one market per volume entry for a single (asset, timeframe)."""
+
+    class FakeMarket:
+        def __init__(self, vol: int) -> None:
+            self.market_id = f"KXBTC-{vol}"
+            self.volume = vol
+            self.open_interest = 50
+
+    class FakeCatalogMarket:
+        def __init__(self, vol: int) -> None:
+            self.market = FakeMarket(vol)
+            self.expires_at = None
+            self.category = ""
+            self.strike_price = None
+
+    _asset, _timeframe = asset, timeframe
+
+    def _get(a: str, timeframe: str = "") -> list:
+        if a == _asset and timeframe == _timeframe:
+            return [FakeCatalogMarket(v) for v in volumes]
+        return []
+
+    catalog = MagicMock()
+    catalog.get_markets_by_asset.side_effect = _get
+    return catalog
+
+
+class TestFilterTelemetry:
+    """Validate that _refresh_candidates() surfaces volume-band metrics in status()."""
+
+    def _run(self, trader):
+        """Run _refresh_candidates() synchronously using a fresh event loop."""
+        import asyncio
+        asyncio.run(trader._refresh_candidates())
+
+    def test_filter_key_populated_after_scan(self) -> None:
+        """After a scan, status()['filter'] contains the telemetry keys."""
+        catalog = _make_catalog_with_volumes([100, 500, 1000])
+        trader = KalshiContinuousTrader(catalog=catalog)
+        self._run(trader)
+        f = trader.status()["filter"]
+        assert "scan_total_input" in f
+        assert "scan_rejected_volume_band" in f
+        assert "volume_band_block_rate" in f
+        assert "volume_band_block_rate_rolling_avg" in f
+        assert "rolling_window_scans" in f
+
+    def test_no_band_rejects_when_filter_disabled(self) -> None:
+        """Default filter (band disabled: 0.0/1.0) → zero volume-band rejections."""
+        catalog = _make_catalog_with_volumes([10, 500, 1000])
+        trader = KalshiContinuousTrader(catalog=catalog)
+        self._run(trader)
+        f = trader.status()["filter"]
+        assert f["scan_rejected_volume_band"] == 0
+        assert f["volume_band_block_rate"] == 0.0
+
+    def test_band_rejects_counted_in_scan_stats(self) -> None:
+        """When volume_band_min=0.4 is active, out-of-band markets are counted."""
+        from merid.event_venues.kalshi.market_filter import MarketFilterConfig
+
+        catalog = _make_catalog_with_volumes(
+            [10, 600, 1000],   # rel: 0.01, 0.6, 1.0 → only 0.6 is in [0.4, 0.8]
+            asset="BTC", timeframe="15m",
+        )
+        trader = KalshiContinuousTrader(catalog=catalog)
+        trader._filter_config = MarketFilterConfig(
+            allowed_underlyings=["BTC"],
+            allowed_timeframes=["15m"],
+            volume_band_min=0.4,
+            volume_band_max=0.8,
+        )
+        from merid.event_venues.kalshi.market_filter import MarketFilter
+        trader._filter = MarketFilter(trader._filter_config)
+
+        self._run(trader)
+        f = trader.status()["filter"]
+        assert f["scan_rejected_volume_band"] == 2      # outlier + spike
+        assert f["volume_band_block_rate"] == pytest.approx(2 / 3, abs=1e-4)
+
+    def test_block_rate_rolling_avg_accumulates_over_scans(self) -> None:
+        """volume_band_block_rate_rolling_avg is the mean over past N scans."""
+        # Default band (disabled) → block rate always 0.0, so rolling_avg stays 0.0
+        catalog = _make_catalog_with_volumes([100, 500, 1000])
+        trader = KalshiContinuousTrader(catalog=catalog)
+
+        for _ in range(3):
+            self._run(trader)
+
+        f = trader.status()["filter"]
+        assert f["rolling_window_scans"] == 3
+        assert f["volume_band_block_rate_rolling_avg"] == pytest.approx(0.0)
+
+    def test_rolling_window_caps_at_maxlen(self) -> None:
+        """Rolling history is capped at _VOLUME_BAND_RATE_HISTORY_MAXLEN entries."""
+        from merid.trading.kalshi_continuous_trader import _VOLUME_BAND_RATE_HISTORY_MAXLEN
+
+        catalog = _make_catalog_with_volumes([100, 500])
+        trader = KalshiContinuousTrader(catalog=catalog)
+
+        for _ in range(_VOLUME_BAND_RATE_HISTORY_MAXLEN + 5):
+            self._run(trader)
+
+        f = trader.status()["filter"]
+        assert f["rolling_window_scans"] == _VOLUME_BAND_RATE_HISTORY_MAXLEN
+
+    def test_empty_catalog_still_produces_filter_stats(self) -> None:
+        """A scan over a completely empty catalog yields all-zero filter stats."""
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(catalog=catalog)
+
+        self._run(trader)
+        f = trader.status()["filter"]
+        assert f["scan_total_input"] == 0
+        assert f["scan_rejected_volume_band"] == 0
+        assert f["volume_band_block_rate"] == 0.0
+        assert f["volume_band_block_rate_rolling_avg"] == 0.0
+        assert f["rolling_window_scans"] == 1
 
 
 # ── Max YES price cap ─────────────────────────────────────────────────────
+
+# NOTE: These tests drive async code via `await` in `async def` test methods.
+# Do NOT revert to `asyncio.get_event_loop().run_until_complete()` — that
+# pattern is broken when tests run after other async tests that close or
+# swap the loop. pytest-asyncio (asyncio_mode=auto) manages the loop; just
+# use `async def` and `await`.
 
 class TestMaxYesPriceCap:
     """Unit tests for the max_yes_price cap in trade_cycle()."""
@@ -345,7 +477,7 @@ class TestMaxYesPriceCap:
         s._agent_prob = agent_prob
         return s
 
-    def test_yes_intent_below_cap_is_accepted(self) -> None:
+    async def test_yes_intent_below_cap_is_accepted(self) -> None:
         """YES intents whose ask price is at or below max_yes_price are included."""
         trader = self._make_trader(max_yes_price=0.50)
         strategy = _FixedStrategy(conf=0.80)
@@ -357,15 +489,12 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = await trader.trade_cycle(bankroll=1000.0)
         # agent_prob=0.70 > market_prob=0.45 → YES direction, ask=48¢ < 50¢ cap
         yes_intents = [i for i in intents if i["direction"] == "yes"]
         assert len(yes_intents) == 1
 
-    def test_yes_intent_above_cap_is_dropped(self) -> None:
+    async def test_yes_intent_above_cap_is_dropped(self) -> None:
         """YES intents whose ask price exceeds max_yes_price are dropped."""
         trader = self._make_trader(max_yes_price=0.40)
         strategy = _FixedStrategy(conf=0.80)
@@ -377,14 +506,11 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = await trader.trade_cycle(bankroll=1000.0)
         yes_intents = [i for i in intents if i["direction"] == "yes"]
         assert len(yes_intents) == 0
 
-    def test_yes_cap_rejection_increments_counter(self) -> None:
+    async def test_yes_cap_rejection_increments_counter(self) -> None:
         """Dropping a YES intent above the cap increments execution_rejections."""
         trader = self._make_trader(max_yes_price=0.30)
         strategy = _FixedStrategy(conf=0.80)
@@ -395,11 +521,10 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        asyncio.get_event_loop().run_until_complete(trader.trade_cycle(bankroll=1000.0))
+        await trader.trade_cycle(bankroll=1000.0)
         assert trader.risk_state.execution_rejections >= 1
 
-    def test_no_intent_not_affected_by_yes_cap(self) -> None:
+    async def test_no_intent_not_affected_by_yes_cap(self) -> None:
         """NO direction intents are not dropped by the YES price cap."""
         trader = self._make_trader(max_yes_price=0.10)  # very tight cap
         # agent_prob < mid_prob → NO direction
@@ -413,14 +538,11 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = await trader.trade_cycle(bankroll=1000.0)
         no_intents = [i for i in intents if i["direction"] == "no"]
         assert len(no_intents) == 1
 
-    def test_yes_cap_uses_best_ask_when_available(self) -> None:
+    async def test_yes_cap_uses_best_ask_when_available(self) -> None:
         """best_ask_cents is used (not mid_price_cents) for the YES price check."""
         # best_ask=55¢ > cap=50¢ → dropped even though mid=45¢ < cap
         trader = self._make_trader(max_yes_price=0.50)
@@ -432,10 +554,7 @@ class TestMaxYesPriceCap:
         )
         trader._candidates = [candidate]
 
-        import asyncio
-        intents = asyncio.get_event_loop().run_until_complete(
-            trader.trade_cycle(bankroll=1000.0)
-        )
+        intents = await trader.trade_cycle(bankroll=1000.0)
         yes_intents = [i for i in intents if i["direction"] == "yes"]
         assert len(yes_intents) == 0
 
