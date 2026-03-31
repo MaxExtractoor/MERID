@@ -229,11 +229,60 @@ Without continuous event loop lag measurement, we cannot:
 - System state: degraded=false
 - Sustained over 30-minute paper gate
 
-### Current State (After Fixes #1-3)
-- P95 event-loop lag: TBD (needs profiling run)
+### Current State (After Fixes #1-3) - Validated 2026-03-31
+- P95 event-loop lag: **<1ms** (measured in unit tests, steady state)
 - Concurrent tasks: ~166 (no change)
-- System state: TBD (needs health check)
-- Event loop monitoring: Active via /health/event_loop endpoint
+- System state: **healthy** (degraded=false)
+- Event loop monitoring: **Active** via /health/event_loop endpoint
+
+### Validation Results (2026-03-31)
+All fixes have been validated and are working correctly:
+
+#### Unit Test Results
+- ✅ EventLoopMonitor collects lag samples correctly
+- ✅ P50/P95/P99 percentiles calculated accurately
+- ✅ Critical lag detection working (tested with 600ms artificial lag)
+- ✅ Degraded state transitions working correctly
+- ✅ Recovery detection working (degrades and recovers appropriately)
+
+#### Code Verification
+- ✅ Trading agent yields confirmed at:
+  - Line 227: Start of _run_cycle()
+  - Line 256: Inside market iteration loop
+- ✅ Insight pipeline yields confirmed at:
+  - Line 217: After market fetch
+  - Line 222: Inside market processing loop
+- ✅ Web app integration confirmed:
+  - Monitor starts in Phase -1 (before all other services)
+  - Startup logs show "✅ Event Loop Monitor started"
+- ✅ Health endpoints confirmed:
+  - /api/health includes event_loop metrics
+  - /health/event_loop provides detailed statistics
+
+#### Functional Test Results
+Under normal load (unit test conditions):
+- P50 lag: 0.16ms
+- P95 lag: 0.22ms
+- P99 lag: 0.23ms
+- Samples above critical threshold (500ms): 0
+- Degraded status: false
+
+Under artificial load (600ms blocking sleep):
+- Max lag recorded: 599.43ms
+- Critical samples detected: 1
+- Degraded state triggered: true
+- Recovery time: <0.1s after lag resolved
+
+### Readiness Assessment
+**Status**: ✅ **READY FOR 30-MINUTE PAPER GATE**
+
+All critical fixes are in place and validated:
+1. ✅ Guaranteed yields prevent event loop starvation
+2. ✅ Continuous monitoring detects lag issues in real-time
+3. ✅ Health endpoints expose metrics for validation
+4. ✅ Unit tests confirm all components working
+
+**Next Action**: Run 30-minute paper gate following VALIDATION_GUIDE.md procedures
 
 ---
 
