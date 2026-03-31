@@ -1,8 +1,31 @@
 import logging
 import multiprocessing as mp
+import sys
+import types
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from unittest.mock import MagicMock
+
 import pytest
+
+# ── Stub the ``telegram`` package if it is not installed ──────────────────────
+# agents/telegram_agent.py does ``from telegram import Bot`` and
+# ``from telegram.error import TelegramError, RetryAfter`` at module level.
+# When python-telegram-bot is not installed (e.g. CI), that import fails and
+# cascades through ``agents/__init__.py`` which blocks large parts of the test
+# suite.  By inserting a lightweight stub into ``sys.modules`` *before* any test
+# import, all downstream code sees a no-op class instead of an ImportError.
+if "telegram" not in sys.modules:
+    _telegram_stub = types.ModuleType("telegram")
+    _telegram_stub.Bot = MagicMock  # type: ignore[attr-defined]
+    sys.modules["telegram"] = _telegram_stub
+
+    _telegram_error_stub = types.ModuleType("telegram.error")
+    _telegram_error_stub.TelegramError = type("TelegramError", (Exception,), {})  # type: ignore[attr-defined]
+    _telegram_error_stub.RetryAfter = type("RetryAfter", (Exception,), {  # type: ignore[attr-defined]
+        "__init__": lambda self, retry_after=0: None,
+    })
+    sys.modules["telegram.error"] = _telegram_error_stub
 
 
 def pytest_sessionstart(session):

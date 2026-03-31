@@ -25,7 +25,10 @@ from agents.meta_agent import MetaAuditAgent
 from agents.reflection_layer import ReflectionLayer, Reflection
 from agents.registry import load_agents
 from agents.twitter_agent import TwitterAgent
-from agents.telegram_agent import TelegramAgent
+try:
+    from agents.telegram_agent import TelegramAgent
+except ImportError:
+    TelegramAgent = None  # type: ignore[assignment,misc]
 from agents.news_monitor_agent import NewsMonitorAgent
 from agents.fast_prediction_arbitrage_analyst import register_fast_agent
 from agents.optimization import (

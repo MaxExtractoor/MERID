@@ -177,7 +177,27 @@ class SwarmConsensusAggregator:
         logger.info(f"SwarmConsensusAggregator initialized (min={min_agents_for_consensus})")
     
     def submit_proposal(self, proposal: AgentProposal) -> None:
-        """Submit an agent proposal for consensus."""
+        """Submit an agent proposal for consensus.
+
+        Validates that ``proposal.asset`` and ``proposal.timeframe`` belong to
+        the canonical crypto universe before accepting.  Invalid proposals are
+        logged at WARNING and silently dropped so they never pollute consensus.
+        """
+        # Validate against crypto_universe
+        try:
+            from config.crypto_universe import is_valid_pair
+            if not is_valid_pair(proposal.asset, proposal.timeframe):
+                logger.warning(
+                    "submit_proposal: rejected proposal from %s — "
+                    "invalid (asset=%r, timeframe=%r)",
+                    proposal.agent_id,
+                    proposal.asset,
+                    proposal.timeframe,
+                )
+                return
+        except ImportError:
+            pass  # crypto_universe not available; skip validation
+
         key = f"{proposal.asset}:{proposal.timeframe}"
         
         # Clean old proposals
@@ -212,7 +232,7 @@ class SwarmConsensusAggregator:
                 try:
                     callback(consensus)
                 except Exception as exc:
-                    logger.debug(f"Subscriber error: {exc}")
+                    logger.warning(f"Subscriber callback error: {exc}", exc_info=True)
         
         # Publish to MarketMoodBus
         try:
