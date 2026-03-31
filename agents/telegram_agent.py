@@ -32,8 +32,15 @@ from typing import Optional, List, Dict, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from telegram import Bot
-from telegram.error import TelegramError, RetryAfter
+try:
+    from telegram import Bot
+    from telegram.error import TelegramError, RetryAfter
+    _TELEGRAM_AVAILABLE = True
+except ImportError:
+    Bot = None  # type: ignore[assignment,misc]
+    TelegramError = Exception  # type: ignore[assignment,misc]
+    RetryAfter = Exception  # type: ignore[assignment,misc]
+    _TELEGRAM_AVAILABLE = False
 from utils.logger import get_logger
 
 logger = get_logger("agents.telegram_agent")
@@ -125,8 +132,8 @@ class TelegramAgent:
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
 
-        # Enable when credentials are present
-        if self.bot_token and self.chat_id:
+        # Enable when credentials are present and telegram library is installed
+        if _TELEGRAM_AVAILABLE and self.bot_token and self.chat_id:
             try:
                 self.bot = Bot(token=self.bot_token)
                 self.enabled = True
