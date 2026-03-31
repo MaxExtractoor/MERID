@@ -195,3 +195,5 @@ test/
 
 # Stale root scripts
 create_shortcut.ps1
+data/paper_positions.json
+data/promotion_log.json
