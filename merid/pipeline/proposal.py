@@ -62,6 +62,8 @@ class TradeProposal:
 
     # Instrument
     venue: str = ""                    # Target venue (e.g. "kalshi", "binance", "alpaca")
+    asset: str = ""                    # Canonical asset (e.g. "BTC", "ETH")
+    timeframe: str = ""                # Canonical timeframe (e.g. "15m", "daily")
     instrument_id: str = ""            # MERID-internal symbol
     native_symbol: str = ""            # Venue-native symbol (filled by router)
 
@@ -104,6 +106,8 @@ class TradeProposal:
             "strategy_id": self.strategy_id,
             "agent_id": self.agent_id,
             "venue": self.venue,
+            "asset": self.asset,
+            "timeframe": self.timeframe,
             "instrument_id": self.instrument_id,
             "native_symbol": self.native_symbol,
             "side": self.side.value,

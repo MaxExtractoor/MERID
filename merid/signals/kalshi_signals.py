@@ -327,177 +327,419 @@ def make_kalshi_risk_signal(**kwargs) -> KalshiRiskSignal:
     return KalshiRiskSignal(**kwargs)
 
 
+# ── Configurable thresholds (override via environment or config) ──────────
+
+# Edge signal thresholds
+EDGE_MIN_SPREAD_CENTS: float = 1.0       # Minimum spread to compute edge
+EDGE_CONFIDENCE_BASE: float = 0.3        # Baseline confidence when data is sparse
+EDGE_CONFIDENCE_SPREAD_BONUS: float = 0.4  # Extra confidence from tight spreads
+EDGE_SPREAD_NEUTRALISATION: float = 20.0 # Spread % at which model fully reverts to 0.5
+EDGE_MODEL_REVERSION_WEIGHT: float = 0.1 # How much model nudges toward 0.5 at max spread
+
+# Liquidity thresholds
+LIQUIDITY_WIDE_SPREAD_PCT: float = 8.0   # Spread % considered "wide"
+LIQUIDITY_CRITICAL_SPREAD_PCT: float = 15.0  # Spread % considered "critical"
+LIQUIDITY_THIN_DEPTH: float = 20.0       # Contracts below this = thin book
+
+# Risk thresholds
+RISK_DRAWDOWN_WARN_PCT: float = 5.0      # Portfolio drawdown warning
+RISK_DRAWDOWN_CRIT_PCT: float = 10.0     # Portfolio drawdown critical
+
+
 # ── Signal Generator ──────────────────────────────────────────────────────
 
 class KalshiSignalGenerator:
     """Generates MERID signals from Kalshi market data.
-    
+
     Pulls from:
-    - KalshiVenueAdapter for market data
-    - Edge endpoint/model for EV signals
-    - Liquidity monitor for spread alerts
-    - Volume monitor for anomalies
-    - Risk manager for risk events
-    
+    - KalshiVenueAdapter for market data (orderbooks, mid prices)
+    - Risk manager for drawdown / kill-switch state
+    - crypto_universe for canonical asset validation
+
     Outputs:
-    - List of typed signals (MarketEdgeSignal, etc.)
+    - List of typed signals (MarketEdgeSignal, LiquiditySignal, etc.)
     - Ready for SignalStore persistence
+
+    All signals are **computed from live data**.  If the data source is
+    unavailable the corresponding signal list is empty (graceful degradation).
     """
-    
+
     def __init__(self):
         self._last_generation: float = 0.0
         self._signal_cache: List[Any] = []
-    
+
     async def generate_all(self, now: Optional[float] = None) -> List[Any]:
         """Generate all Kalshi signals.
-        
+
         Returns:
             List of signal objects (mixed types)
         """
         now = now or time.time()
         signals: List[Any] = []
-        
+
         try:
             # Generate edge signals
             edge_signals = await self._generate_edge_signals(now)
             signals.extend(edge_signals)
-            
+
             # Generate liquidity signals
             liq_signals = await self._generate_liquidity_signals(now)
             signals.extend(liq_signals)
-            
+
             # Generate volume anomaly signals
             vol_signals = await self._generate_volume_signals(now)
             signals.extend(vol_signals)
-            
+
             # Generate risk event signals
             risk_signals = await self._generate_risk_signals(now)
             signals.extend(risk_signals)
-            
+
             self._last_generation = now
             self._signal_cache = signals
-            
+
             logger.info(
                 f"Generated {len(signals)} Kalshi signals: "
                 f"{len(edge_signals)} edge, {len(liq_signals)} liquidity, "
                 f"{len(vol_signals)} volume, {len(risk_signals)} risk"
             )
-            
+
         except Exception as exc:
             logger.error(f"Kalshi signal generation failed: {exc}")
             return []
-        
+
         return signals
-    
+
+    # ── Edge signals ──────────────────────────────────────────────────
+
     async def _generate_edge_signals(self, now: float) -> List[MarketEdgeSignal]:
-        """Generate edge signals from Kalshi edge endpoint."""
-        signals = []
-        
+        """Generate edge signals from live market data.
+
+        For each active instrument the implied probability is derived from
+        the market mid-price.  A model probability is estimated from the
+        bid/ask spread width and recent volume (tighter spread → higher
+        confidence that mid reflects fair value).  Edge = model - implied.
+        """
+        signals: List[MarketEdgeSignal] = []
+
         try:
-            # Import here to avoid circular dependencies
             from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
-            
+
             adapter = get_kalshi_venue_adapter()
-            
-            # Get instruments (markets) for crypto category
-            instruments = await adapter.list_instruments(category="crypto", active_only=True)
-            
-            # For each market, check if we have edge data
-            # In production, this would call /kalshi/edge or edge model
-            # For now, generate synthetic edge signals for active markets
-            for inst in instruments[:10]:  # Limit to 10 for performance
-                # Extract asset and timeframe from ticker (e.g. "BTC-24FEB-50K-YES" → BTC, 24h)
+            instruments = await adapter.list_instruments(
+                category="crypto", active_only=True,
+            )
+
+            for inst in instruments:
                 asset = self._extract_asset(inst.id)
                 timeframe = self._extract_timeframe(inst.id)
-                
-                # Synthetic edge (in production: call edge endpoint)
+
+                # Derive prices from the instrument object when available.
+                bid = getattr(inst, "best_bid", None) or getattr(inst, "bid", None)
+                ask = getattr(inst, "best_ask", None) or getattr(inst, "ask", None)
+                last = getattr(inst, "last_price", None) or getattr(inst, "price", None)
+                volume = getattr(inst, "volume", None) or 0
+
+                # Compute mid price (cents) — skip if no price data at all
+                if bid is not None and ask is not None:
+                    mid_cents = (float(bid) + float(ask)) / 2.0
+                    spread_cents = float(ask) - float(bid)
+                elif last is not None:
+                    mid_cents = float(last)
+                    spread_cents = 0.0
+                else:
+                    # No price data — skip this instrument
+                    continue
+
+                if mid_cents <= 0 or mid_cents >= 100:
+                    continue  # Out of valid probability range
+
+                implied_prob = mid_cents / 100.0
+
+                # Model probability: nudge toward 0.5 proportional to spread.
+                # spread_factor ranges from 1.0 (zero spread) to 0.0 (spread >= EDGE_SPREAD_NEUTRALISATION%).
+                # The model reversion shifts implied_prob toward 0.5 by at most EDGE_MODEL_REVERSION_WEIGHT.
+                spread_pct = (spread_cents / mid_cents * 100.0) if mid_cents > 0 else 100.0
+                spread_factor = max(0.0, min(1.0, 1.0 - spread_pct / EDGE_SPREAD_NEUTRALISATION))
+                model_prob = implied_prob + (0.5 - implied_prob) * (1.0 - spread_factor) * EDGE_MODEL_REVERSION_WEIGHT
+
+                # Clamp to valid range
+                model_prob = max(0.01, min(0.99, model_prob))
+
+                edge_pct = ((model_prob - implied_prob) / max(implied_prob, 0.01)) * 100.0
+                ev_cents = (model_prob - implied_prob) * 100.0  # cents per contract
+
+                # Confidence from spread tightness and volume
+                confidence = EDGE_CONFIDENCE_BASE
+                if spread_cents < 5:
+                    confidence += EDGE_CONFIDENCE_SPREAD_BONUS
+                elif spread_cents < 10:
+                    confidence += EDGE_CONFIDENCE_SPREAD_BONUS * 0.5
+                if volume and float(volume) > 100:
+                    confidence = min(1.0, confidence + 0.1)
+
+                confidence_bucket = (
+                    "high" if confidence >= 0.7
+                    else "medium" if confidence >= 0.4
+                    else "low"
+                )
+                sizing_tier = "normal" if confidence >= 0.4 else "reduced"
+
                 edge_signal = MarketEdgeSignal(
                     ticker=inst.id,
                     asset=asset,
                     timeframe=timeframe,
-                    question=f"Market {inst.id}",
-                    implied_prob=0.55,  # Placeholder
-                    model_prob=0.57,    # Placeholder
-                    ev_cents=2.0,
-                    edge_pct=3.6,
-                    confidence=0.5,
-                    confidence_bucket="medium",
-                    sizing_tier="normal",
+                    question=getattr(inst, "title", "") or f"Market {inst.id}",
+                    implied_prob=round(implied_prob, 4),
+                    model_prob=round(model_prob, 4),
+                    ev_cents=round(ev_cents, 2),
+                    edge_pct=round(edge_pct, 2),
+                    confidence=round(confidence, 3),
+                    confidence_bucket=confidence_bucket,
+                    sizing_tier=sizing_tier,
                     timestamp=now,
-                    source="synthetic",
+                    source="live_market",
                 )
-                
-                # Only emit if actionable
+
                 if edge_signal.is_actionable():
                     signals.append(edge_signal)
-            
+
         except Exception as exc:
             logger.warning(f"Edge signal generation failed: {exc}")
-        
+
         return signals
-    
+
+    # ── Liquidity signals ─────────────────────────────────────────────
+
     async def _generate_liquidity_signals(self, now: float) -> List[LiquiditySignal]:
-        """Generate liquidity alerts from liquidity monitor."""
-        signals = []
-        
+        """Generate liquidity alerts from live orderbook spread and depth."""
+        signals: List[LiquiditySignal] = []
+
         try:
-            # In production: call liquidity monitor API
-            # For now: no signals (requires live monitor)
-            pass
+            from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
+
+            adapter = get_kalshi_venue_adapter()
+            instruments = await adapter.list_instruments(
+                category="crypto", active_only=True,
+            )
+
+            for inst in instruments:
+                bid = getattr(inst, "best_bid", None) or getattr(inst, "bid", None)
+                ask = getattr(inst, "best_ask", None) or getattr(inst, "ask", None)
+                depth = getattr(inst, "open_interest", None) or getattr(inst, "depth", None) or 0
+
+                if bid is None or ask is None:
+                    continue
+
+                bid_f, ask_f = float(bid), float(ask)
+                if bid_f <= 0:
+                    continue
+
+                spread_cents = ask_f - bid_f
+                mid = (bid_f + ask_f) / 2.0
+                spread_pct = (spread_cents / mid * 100.0) if mid > 0 else 0.0
+
+                # Determine alert type and severity
+                alert_type: Optional[str] = None
+                severity = LiquiditySeverity.INFO
+
+                if spread_pct >= LIQUIDITY_CRITICAL_SPREAD_PCT:
+                    alert_type = "wide_spread"
+                    severity = LiquiditySeverity.CRITICAL
+                elif spread_pct >= LIQUIDITY_WIDE_SPREAD_PCT:
+                    alert_type = "wide_spread"
+                    severity = LiquiditySeverity.WARNING
+
+                if float(depth) < LIQUIDITY_THIN_DEPTH:
+                    alert_type = alert_type or "thin_book"
+                    if severity == LiquiditySeverity.INFO:
+                        severity = LiquiditySeverity.WARNING
+
+                if alert_type is None:
+                    continue  # Healthy liquidity — no alert needed
+
+                signals.append(LiquiditySignal(
+                    ticker=inst.id,
+                    spread_cents=round(spread_cents, 2),
+                    spread_pct=round(spread_pct, 2),
+                    depth_contracts=float(depth),
+                    alert_type=alert_type,
+                    severity=severity.value,
+                    message=f"Spread {spread_pct:.1f}%, depth {depth}",
+                    timestamp=now,
+                ))
+
         except Exception as exc:
             logger.warning(f"Liquidity signal generation failed: {exc}")
-        
+
         return signals
-    
+
+    # ── Volume anomaly signals ────────────────────────────────────────
+
     async def _generate_volume_signals(self, now: float) -> List[VolumeAnomalySignal]:
-        """Generate volume anomaly signals from volume monitor."""
-        signals = []
-        
+        """Generate volume anomaly signals from instrument volume data.
+
+        Computes a simple z-score relative to the volume mean/std observed
+        across all active instruments.  A per-instrument rolling history is
+        not available here, so we use the cross-sectional distribution as a
+        proxy — instruments with volume far above the group mean get flagged.
+        """
+        signals: List[VolumeAnomalySignal] = []
+
         try:
-            # In production: call volume anomaly API
-            # For now: no signals (requires live monitor)
-            pass
+            from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
+
+            adapter = get_kalshi_venue_adapter()
+            instruments = await adapter.list_instruments(
+                category="crypto", active_only=True,
+            )
+
+            volumes: List[float] = []
+            inst_vols: List[tuple] = []
+            for inst in instruments:
+                vol = getattr(inst, "volume", None)
+                if vol is not None and float(vol) > 0:
+                    volumes.append(float(vol))
+                    inst_vols.append((inst, float(vol)))
+
+            if len(volumes) < 3:
+                return signals  # Not enough data for cross-sectional z-score
+
+            mean_vol = sum(volumes) / len(volumes)
+            var = sum((v - mean_vol) ** 2 for v in volumes) / len(volumes)
+            std_vol = var ** 0.5 if var > 0 else 1.0
+
+            for inst, vol in inst_vols:
+                z = (vol - mean_vol) / std_vol
+                if abs(z) < 2.0:
+                    continue
+
+                asset = self._extract_asset(inst.id)
+                severity = "critical" if abs(z) >= 4.0 else "warning" if abs(z) >= 3.0 else "info"
+
+                signals.append(VolumeAnomalySignal(
+                    ticker=inst.id,
+                    asset=asset,
+                    current_volume=vol,
+                    rolling_mean=round(mean_vol, 0),
+                    rolling_std=round(std_vol, 2),
+                    z_score=round(z, 2),
+                    severity=severity,
+                    direction="spike" if z > 0 else "drop",
+                    timestamp=now,
+                ))
+
         except Exception as exc:
             logger.warning(f"Volume signal generation failed: {exc}")
-        
+
         return signals
-    
+
+    # ── Risk event signals ────────────────────────────────────────────
+
     async def _generate_risk_signals(self, now: float) -> List[KalshiRiskSignal]:
-        """Generate risk event signals from risk manager."""
-        signals = []
-        
+        """Generate risk event signals from the risk manager.
+
+        Checks:
+        - Global kill switch state
+        - Portfolio drawdown percentage
+        - Daily PnL loss
+        """
+        signals: List[KalshiRiskSignal] = []
+
         try:
-            # In production: call /kalshi/risk/events
-            # For now: no signals (requires live risk events)
-            pass
+            from merid.risk.kill_switches import risk_controller
+
+            # Kill-switch check
+            if risk_controller._global_kill:
+                signals.append(KalshiRiskSignal(
+                    category=RiskEventCategory.CIRCUIT_BREAKER.value,
+                    severity="critical",
+                    title="Kill switch engaged",
+                    detail=risk_controller._kill_details or str(risk_controller._kill_reason),
+                    timestamp=now,
+                ))
+
+            # Drawdown check
+            drawdown = getattr(risk_controller, "_drawdown_pct", None)
+            if drawdown is not None:
+                dd = float(drawdown)
+                if dd >= RISK_DRAWDOWN_CRIT_PCT:
+                    signals.append(KalshiRiskSignal(
+                        category=RiskEventCategory.DRAWDOWN.value,
+                        severity="critical",
+                        title="Portfolio drawdown critical",
+                        detail=f"Drawdown at {dd:.1f}% (threshold {RISK_DRAWDOWN_CRIT_PCT}%)",
+                        drawdown_pct=dd,
+                        timestamp=now,
+                    ))
+                elif dd >= RISK_DRAWDOWN_WARN_PCT:
+                    signals.append(KalshiRiskSignal(
+                        category=RiskEventCategory.DRAWDOWN.value,
+                        severity="warning",
+                        title="Portfolio drawdown elevated",
+                        detail=f"Drawdown at {dd:.1f}% (threshold {RISK_DRAWDOWN_WARN_PCT}%)",
+                        drawdown_pct=dd,
+                        timestamp=now,
+                    ))
+
+            # Daily loss check
+            daily_pnl = getattr(risk_controller, "_daily_pnl", None)
+            if daily_pnl is not None and float(daily_pnl) < 0:
+                loss_usd = abs(float(daily_pnl))
+                signals.append(KalshiRiskSignal(
+                    category=RiskEventCategory.LOSS_CAP.value,
+                    severity="warning" if loss_usd < 500 else "critical",
+                    title="Daily loss alert",
+                    detail=f"Daily loss ${loss_usd:.2f}",
+                    daily_loss_usd=loss_usd,
+                    timestamp=now,
+                ))
+
         except Exception as exc:
             logger.warning(f"Risk signal generation failed: {exc}")
-        
+
         return signals
-    
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
     def _extract_asset(self, ticker: str) -> str:
-        """Extract asset symbol from Kalshi ticker."""
-        # Simple heuristic: first word before dash
+        """Extract asset symbol from Kalshi ticker.
+
+        Uses ``config.crypto_universe.CRYPTO_ASSETS`` when available,
+        falling back to a static set.
+        """
+        try:
+            from config.crypto_universe import CRYPTO_ASSETS
+            valid_assets = CRYPTO_ASSETS
+        except ImportError:
+            valid_assets = frozenset({"BTC", "ETH", "SOL", "DOGE", "XRP"})
+
         parts = ticker.split("-")
         if parts:
-            asset = parts[0].upper()
-            # Map common assets
-            if asset in ("BTC", "ETH", "SOL", "DOGE", "XRP", "ADA"):
-                return asset
+            # Try first segment, then two-letter prefix matches
+            candidate = parts[0].upper()
+            if candidate in valid_assets:
+                return candidate
+            # Check if ticker starts with any known asset (e.g. "KXBTC…")
+            for asset in valid_assets:
+                if candidate.endswith(asset):
+                    return asset
         return "UNKNOWN"
-    
+
     def _extract_timeframe(self, ticker: str) -> str:
         """Extract timeframe from Kalshi ticker."""
-        # Simple heuristic: look for date patterns
         ticker_lower = ticker.lower()
         if "24h" in ticker_lower or "daily" in ticker_lower:
             return "24h"
         if "weekly" in ticker_lower or "week" in ticker_lower:
             return "weekly"
+        if "monthly" in ticker_lower or "month" in ticker_lower:
+            return "monthly"
         if "hourly" in ticker_lower or "1h" in ticker_lower:
             return "1h"
+        if "15m" in ticker_lower:
+            return "15m"
         return "unknown"
-    
+
     def get_last_signals(self) -> List[Any]:
         """Get cached signals from last generation."""
         return self._signal_cache

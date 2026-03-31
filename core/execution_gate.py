@@ -5,6 +5,7 @@ Aggregates all safety checks into one boolean + reasons list:
   2. Reconciliation status (fail-closed on fresh start)
   3. Price feed staleness
   4. PnL consistency
+  5. Event-loop lag (sustained high lag → blocked)
 
 Every backend path that wants to execute a trade should call
 `is_execution_blocked()` and respect the result.
@@ -13,6 +14,7 @@ Every backend path that wants to execute a trade should call
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
@@ -35,7 +37,118 @@ REMEDIATION_HINTS: dict[str, str] = {
     "reconciliation": "Wait for the next reconciliation cycle or trigger a manual run from System settings.",
     "price_feed": "Check venue connectivity and data source health in Venue Health Grid.",
     "pnl_consistency": "Inspect PnL sources in the Consistency widget; look for missed fills or stale equity data.",
+    "loop_lag": "Investigate event-loop health; look for blocking calls or resource exhaustion.",
 }
+
+# ── Loop-lag gating configuration ────────────────────────────────────
+# All values are configurable at runtime via set_loop_lag_config().
+
+@dataclass
+class LoopLagConfig:
+    """Policy knobs for loop-lag → execution gate."""
+    warn_threshold_ms: float = 200.0       # Single-sample warning level
+    block_threshold_ms: float = 500.0      # Single-sample critical level
+    sustained_count: int = 5               # Consecutive critical samples to block
+    rolling_window_s: float = 30.0         # Window for p95 calculation
+    cooloff_s: float = 10.0                # Seconds after lag subsides before unblocking
+
+_loop_lag_config = LoopLagConfig()
+
+def set_loop_lag_config(cfg: LoopLagConfig) -> None:
+    """Replace loop-lag configuration (useful for tests and runtime tuning)."""
+    global _loop_lag_config
+    _loop_lag_config = cfg
+    logger.info(
+        "Loop-lag config updated: warn=%sms block=%sms sustained=%d cooloff=%ss",
+        cfg.warn_threshold_ms, cfg.block_threshold_ms, cfg.sustained_count, cfg.cooloff_s,
+    )
+
+def get_loop_lag_config() -> LoopLagConfig:
+    return _loop_lag_config
+
+# ── Loop-lag tracker (fed externally by watchdog / WS / diagnostics) ─
+_lag_samples: deque = deque(maxlen=300)        # (timestamp, lag_ms)
+_consecutive_critical: int = 0
+_lag_blocked_until: float = 0.0                # epoch; 0 = not blocked
+
+def record_loop_lag(lag_ms: float, ts: Optional[float] = None) -> None:
+    """Record a single loop-lag sample.
+
+    Called by EventLoopWatchdog, KalshiWebSocket._measure_lag, or any
+    other component that measures event-loop responsiveness.
+
+    Note: This function is designed to be called from a single asyncio
+    event loop (not from multiple threads).  If multi-threaded callers
+    are needed, wrap calls in a threading.Lock.
+    """
+    global _consecutive_critical, _lag_blocked_until
+    ts = ts or time.time()
+    _lag_samples.append((ts, lag_ms))
+
+    cfg = _loop_lag_config
+    if lag_ms >= cfg.block_threshold_ms:
+        _consecutive_critical += 1
+        if _consecutive_critical >= cfg.sustained_count:
+            _lag_blocked_until = ts + cfg.cooloff_s
+            logger.warning(
+                "Loop-lag gate BLOCKED: %d consecutive samples >= %sms "
+                "(cooloff until %.1f)",
+                _consecutive_critical, cfg.block_threshold_ms, _lag_blocked_until,
+            )
+    else:
+        _consecutive_critical = 0
+
+def _check_loop_lag() -> Optional["BlockReason"]:
+    """Return a BlockReason if loop lag is currently gating execution."""
+    now = time.time()
+    cfg = _loop_lag_config
+
+    # Hard block: sustained critical lag (with cooloff)
+    if _lag_blocked_until > now:
+        remaining = _lag_blocked_until - now
+        return BlockReason(
+            source="loop_lag",
+            severity="critical",
+            message=(
+                f"Sustained event-loop lag — blocked for {remaining:.0f}s more "
+                f"({_consecutive_critical} consecutive >= {cfg.block_threshold_ms}ms)"
+            ),
+            details=_lag_summary(now, cfg),
+            hint=REMEDIATION_HINTS["loop_lag"],
+        )
+
+    # Soft warning: recent p95 above warning threshold
+    cutoff = now - cfg.rolling_window_s
+    recent = [ms for ts, ms in _lag_samples if ts >= cutoff]
+    if len(recent) >= 3:
+        recent_sorted = sorted(recent)
+        p95 = recent_sorted[int(len(recent_sorted) * 0.95)]
+        if p95 >= cfg.warn_threshold_ms:
+            return BlockReason(
+                source="loop_lag",
+                severity="warning",
+                message=f"Event-loop lag elevated (p95={p95:.0f}ms, threshold={cfg.warn_threshold_ms}ms)",
+                details=_lag_summary(now, cfg),
+                hint=REMEDIATION_HINTS["loop_lag"],
+            )
+
+    return None
+
+def _lag_summary(now: float, cfg: LoopLagConfig) -> str:
+    cutoff = now - cfg.rolling_window_s
+    recent = [ms for ts, ms in _lag_samples if ts >= cutoff]
+    if not recent:
+        return "no recent samples"
+    avg = sum(recent) / len(recent)
+    mx = max(recent)
+    return f"avg={avg:.0f}ms max={mx:.0f}ms samples={len(recent)} window={cfg.rolling_window_s}s"
+
+def reset_loop_lag_state() -> None:
+    """Reset all loop-lag tracking state (for testing)."""
+    global _consecutive_critical, _lag_blocked_until
+    _lag_samples.clear()
+    _consecutive_critical = 0
+    _lag_blocked_until = 0.0
 
 
 @dataclass
@@ -205,6 +318,23 @@ def check_execution_gate() -> ExecutionGateStatus:
             ))
     except Exception as exc:
         logger.debug("PnL consistency check failed: %s", exc)
+
+    # ── 5. Event-loop lag ───────────────────────────────────────────
+    lag_reason = _check_loop_lag()
+    if lag_reason is not None:
+        reasons.append(lag_reason)
+        # Fire AlertManager so operators know trading paused due to lag
+        try:
+            from agents.alert_manager import AlertSeverity, get_alert_manager
+            sev = AlertSeverity.CRITICAL if lag_reason.severity == "critical" else AlertSeverity.WARNING
+            get_alert_manager().fire(
+                severity=sev,
+                title="LOOP_LAG_GATE",
+                message=lag_reason.message,
+                source="execution_gate",
+            )
+        except Exception:
+            pass  # AlertManager not available
 
     has_critical = any(r.severity == "critical" for r in reasons)
     has_warning = any(r.severity == "warning" for r in reasons)
