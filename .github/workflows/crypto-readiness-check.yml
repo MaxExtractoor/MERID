@@ -1,0 +1,133 @@
+name: Crypto Readiness Check
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC (before US market open)
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}  # Allow manual trigger
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'config/crypto_universe.py'
+      - 'merid/event_venues/kalshi/crypto_kalshi_risk.py'
+      - 'scripts/kalshi_crypto_live_readiness.py'
+      - 'tests/test_crypto_coverage_comprehensive.py'
+
+jobs:
+  readiness-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MERID_ENV: ci
+      KALSHI_ENV: paper
+      MERID_PM_TRADING_MODE: paper
+      MERID_PM_LIVE_ENABLED: false
+      MERID_CFB_RTI_ENABLED: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run comprehensive coverage tests
+        id: coverage_tests
+        run: |
+          python tests/test_crypto_coverage_comprehensive.py > coverage_test_results.txt 2>&1
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Run readiness script
+        id: readiness_script
+        run: |
+          python scripts/kalshi_crypto_live_readiness.py --json > readiness_results.json 2>&1
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Generate readiness report
+        run: |
+          cat > readiness_report.md <<'EOF'
+          # Crypto Coverage Readiness Report
+
+          **Run Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Workflow**: [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ## Coverage Tests
+
+          Exit Code: ${{ steps.coverage_tests.outputs.exit_code }}
+
+          \`\`\`
+          $(cat coverage_test_results.txt || echo "No results available")
+          \`\`\`
+
+          ## Readiness Status
+
+          Exit Code: ${{ steps.readiness_script.outputs.exit_code }}
+
+          \`\`\`json
+          $(cat readiness_results.json || echo "{\"error\": \"No results available\"}")
+          \`\`\`
+
+          ## Matrix Status
+
+          All 25 markets (5 assets × 5 timeframes):
+          - BTC: 15m, 1h, daily, weekly, monthly
+          - ETH: 15m, 1h, daily, weekly, monthly
+          - SOL: 15m, 1h, daily, weekly, monthly
+          - XRP: 15m, 1h, daily, weekly, monthly
+          - DOGE: 15m, 1h, daily, weekly, monthly
+
+          EOF
+
+      - name: Upload readiness artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-readiness-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            coverage_test_results.txt
+            readiness_results.json
+            readiness_report.md
+          retention-days: 90  # Keep 3 months of history
+
+      - name: Check for failures
+        run: |
+          if [ "${{ steps.coverage_tests.outputs.exit_code }}" != "0" ]; then
+            echo "❌ Coverage tests failed"
+            exit 1
+          fi
+          if [ "${{ steps.readiness_script.outputs.exit_code }}" != "0" ]; then
+            echo "❌ Readiness script failed"
+            exit 1
+          fi
+          echo "✅ All checks passed"
+
+      - name: Create issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            let reportContent = 'Report not available';
+            try {
+              reportContent = fs.readFileSync('readiness_report.md', 'utf8');
+            } catch (e) {
+              reportContent = `Error reading report: ${e.message}`;
+            }
+
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🔴 Crypto Readiness Check Failed',
+              body: `The scheduled crypto readiness check failed on ${new Date().toISOString()}.\n\n${reportContent}\n\nSee: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['crypto', 'readiness', 'automated-check', 'ci']
+            });
