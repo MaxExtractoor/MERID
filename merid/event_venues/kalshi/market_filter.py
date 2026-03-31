@@ -114,6 +114,11 @@ class MarketCandidate:
     best_yes_ask: Optional[float] = None
     best_no_bid: Optional[float] = None
     best_no_ask: Optional[float] = None
+    # Edge/model enrichment fields (populated by signal layer or enrichment step).
+    # ``edge_pct`` is the signed edge as a percentage of implied probability;
+    # ``model_prob`` is the model-estimated probability (0–1).
+    edge_pct: Optional[float] = None
+    model_prob: Optional[float] = None
 
     @property
     def has_book(self) -> bool:
@@ -147,6 +152,8 @@ class MarketCandidate:
             "best_yes_ask": self.best_yes_ask,
             "best_no_bid": self.best_no_bid,
             "best_no_ask": self.best_no_ask,
+            "edge_pct": self.edge_pct,
+            "model_prob": self.model_prob,
         }
 
     def __getattr__(self, name: str) -> Any:
@@ -157,7 +164,8 @@ class MarketCandidate:
         return None for those attributes instead of raising AttributeError so
         downstream edge calculations remain safe.
         """
-        if name in ("best_yes_bid", "best_yes_ask", "best_no_bid", "best_no_ask"):
+        if name in ("best_yes_bid", "best_yes_ask", "best_no_bid", "best_no_ask",
+                    "edge_pct", "model_prob"):
             return None
         raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
 
