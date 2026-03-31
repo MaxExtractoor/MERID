@@ -184,6 +184,7 @@ class Settings(BaseSettings):
     MERID_PM_MAX_DAILY_LOSS: float = Field(default=250.0, description="Max daily loss for prediction markets (USD)")
     MERID_PM_MAX_TOTAL_NOTIONAL: float = Field(default=5000.0, description="Max total PM portfolio notional (USD)")
     KALSHI_USE_DEMO: bool = Field(default=False, description="Use Kalshi demo/sandbox API")
+    DRY_RUN_MODE: bool = Field(default=False, description="Dry-run mode: generate signals but skip real order submission")
     KALSHI_EMAIL: Optional[str] = Field(default=None, description="Kalshi account email")
     KALSHI_PASSWORD: Optional[str] = Field(default=None, description="Kalshi account password")
 

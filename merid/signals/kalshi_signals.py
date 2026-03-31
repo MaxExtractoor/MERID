@@ -30,6 +30,15 @@ from typing import Any, Dict, List, Optional
 from merid.signals.decay import DecayEnvelope, SignalDomain
 from utils.logger import get_logger
 
+try:
+    from merid.event_venues.kalshi.venue_adapter import (
+        get_kalshi_venue_adapter,
+        reset_kalshi_venue_adapter,
+    )
+except Exception:  # pragma: no cover — missing deps in some envs
+    get_kalshi_venue_adapter = None  # type: ignore[assignment]
+    reset_kalshi_venue_adapter = None  # type: ignore[assignment]
+
 logger = get_logger("merid.signals.kalshi")
 
 

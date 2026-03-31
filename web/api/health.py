@@ -23,10 +23,26 @@ router = APIRouter(tags=["health"])
 @router.get("/api/health")
 async def get_global_health(request: Request) -> dict:
     """Simple health check for MERID system."""
-    
+
+    kill_switch_engaged = False
+    try:
+        from merid.risk.kill_switches import risk_controller
+        kill_switch_engaged = bool(risk_controller._global_kill)
+    except Exception:
+        pass
+
+    dry_run_mode = False
+    try:
+        from merid.settings import settings
+        dry_run_mode = bool(settings.DRY_RUN_MODE)
+    except Exception:
+        pass
+
     return {
         "status": "healthy",
         "timestamp": int(time.time()),
+        "kill_switch_engaged": kill_switch_engaged,
+        "dry_run_mode": dry_run_mode,
         "checks": {
             "price_feed": {
                 "status": "healthy",
