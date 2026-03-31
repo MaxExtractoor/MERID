@@ -1048,3 +1048,567 @@ class TestRiskContextRiskManagerIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H5: Kill-switch → Execution gate gating
+# ══════════════════════════════════════════════════════════════════════
+
+class TestKillSwitchGating(unittest.TestCase):
+    """Verify that risk_controller.emergency_stop() gates check_execution_gate()."""
+
+    def _check_gate_with_kill(self, global_kill: bool):
+        """Return ExecutionGateStatus with the kill switch forced on or off."""
+        from core.execution_gate import check_execution_gate
+
+        mock_rc = MagicMock()
+        mock_rc._global_kill = global_kill
+        mock_rc._kill_details = "test stop" if global_kill else None
+        mock_rc._kill_reason = "manual" if global_kill else None
+
+        mock_recon = MagicMock()
+        mock_recon.has_critical_discrepancies = MagicMock(return_value=False)
+        mock_recon._has_ever_completed = True
+
+        with patch.dict("sys.modules", {
+            "merid.risk.kill_switches": MagicMock(risk_controller=mock_rc),
+            "trading.reconciliation": mock_recon,
+        }):
+            # Also patch price-feed and PnL checks so only kill switch matters
+            with patch("core.execution_gate.check_price_feed_staleness",
+                       return_value={"safe_to_trade": True, "stale_symbols": [], "critical_count": 0}):
+                with patch("core.execution_gate.check_pnl_consistency",
+                           return_value={"consistent": True, "max_divergence_usd": 0, "threshold_usd": 5}):
+                    return check_execution_gate()
+
+    def test_kill_switch_on_blocks_gate(self):
+        """Engaging the kill switch must block execution."""
+        result = self._check_gate_with_kill(True)
+        self.assertTrue(result.blocked)
+        sources = [r.source for r in result.reasons]
+        self.assertIn("kill_switch", sources)
+
+    def test_kill_switch_off_allows_gate(self):
+        """With kill switch off (and all other checks clean) gate should be clear."""
+        result = self._check_gate_with_kill(False)
+        # No kill_switch reason in the list
+        sources = [r.source for r in result.reasons]
+        self.assertNotIn("kill_switch", sources)
+
+    def test_kill_switch_reason_is_critical(self):
+        """Kill switch block reason must have severity 'critical'."""
+        result = self._check_gate_with_kill(True)
+        ks_reasons = [r for r in result.reasons if r.source == "kill_switch"]
+        self.assertTrue(ks_reasons, "Expected at least one kill_switch reason")
+        self.assertEqual(ks_reasons[0].severity, "critical")
+
+    def test_risk_controller_emergency_stop_sets_global_kill(self):
+        """RiskController.emergency_stop() must set _global_kill = True."""
+        from merid.risk.kill_switches import RiskController
+        rc = RiskController()
+        rc.reset()  # ensure clean state
+        self.assertFalse(rc._global_kill)
+        rc.emergency_stop("unit-test stop")
+        self.assertTrue(rc._global_kill)
+
+    def test_risk_controller_reset_clears_global_kill(self):
+        """RiskController.reset() must clear _global_kill."""
+        from merid.risk.kill_switches import RiskController
+        rc = RiskController()
+        rc.emergency_stop("unit-test stop")
+        self.assertTrue(rc._global_kill)
+        rc.reset(operator="tester")
+        self.assertFalse(rc._global_kill)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H6: Config alignment — asset caps from canonical source
+# ══════════════════════════════════════════════════════════════════════
+
+class TestConfigAlignment(unittest.TestCase):
+    """config/crypto_universe.py must be the single source of truth for assets."""
+
+    def test_canonical_assets_are_five(self):
+        from config.crypto_universe import CRYPTO_ASSETS
+        self.assertEqual(len(CRYPTO_ASSETS), 5)
+
+    def test_canonical_assets_contain_expected_tickers(self):
+        from config.crypto_universe import CRYPTO_ASSETS
+        for ticker in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            self.assertIn(ticker, CRYPTO_ASSETS)
+
+    def test_risk_engine_assets_match_canonical(self):
+        """crypto_kalshi_risk.CRYPTO_ASSETS must be a subset of the canonical universe."""
+        try:
+            from config.crypto_universe import CRYPTO_ASSETS as CANONICAL
+            from merid.event_venues.kalshi.crypto_kalshi_risk import CRYPTO_ASSETS as RISK_ASSETS
+        except ImportError as exc:
+            self.skipTest(f"Dependency not available: {exc}")
+        for asset in RISK_ASSETS:
+            self.assertIn(
+                asset,
+                CANONICAL,
+                f"Risk asset {asset!r} not in canonical universe",
+            )
+
+    def test_canonical_timeframes_are_five(self):
+        from config.crypto_universe import CRYPTO_TIMEFRAMES
+        self.assertEqual(len(CRYPTO_TIMEFRAMES), 5)
+
+    def test_full_grid_has_25_pairs(self):
+        from config.crypto_universe import get_full_grid
+        grid = get_full_grid()
+        self.assertEqual(len(grid), 25)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H7: /api/health endpoint fields
+# ══════════════════════════════════════════════════════════════════════
+
+class TestHealthEndpoint(unittest.TestCase):
+    """Health endpoint must expose kill_switch_engaged and dry_run_mode."""
+
+    def _make_client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from web.api.health import router
+        app = FastAPI()
+        app.include_router(router)
+        return TestClient(app)
+
+    def _make_client_with_mocked_deps(self):
+        """Return a TestClient with heavy deps (numpy etc.) mocked out."""
+        import sys
+        import types
+        # Stub numpy and pandas if missing so health_checker can import
+        for mod_name in ("numpy", "pandas", "scipy"):
+            if mod_name not in sys.modules:
+                sys.modules[mod_name] = types.ModuleType(mod_name)
+        return self._make_client()
+
+    def test_health_returns_200(self):
+        client = self._make_client_with_mocked_deps()
+        resp = client.get("/api/health")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_health_contains_kill_switch_field(self):
+        client = self._make_client_with_mocked_deps()
+        data = client.get("/api/health").json()
+        self.assertIn("kill_switch_engaged", data)
+
+    def test_health_contains_dry_run_field(self):
+        client = self._make_client_with_mocked_deps()
+        data = client.get("/api/health").json()
+        self.assertIn("dry_run_mode", data)
+
+    def test_health_kill_switch_reflects_state(self):
+        """kill_switch_engaged must be True when the global kill is on."""
+        mock_rc = MagicMock()
+        mock_rc._global_kill = True
+        with patch.dict("sys.modules", {
+            "merid.risk.kill_switches": MagicMock(risk_controller=mock_rc),
+        }):
+            client = self._make_client_with_mocked_deps()
+            data = client.get("/api/health").json()
+        self.assertTrue(data["kill_switch_engaged"])
+
+    def test_health_kill_switch_false_when_off(self):
+        mock_rc = MagicMock()
+        mock_rc._global_kill = False
+        with patch.dict("sys.modules", {
+            "merid.risk.kill_switches": MagicMock(risk_controller=mock_rc),
+        }):
+            client = self._make_client_with_mocked_deps()
+            data = client.get("/api/health").json()
+        self.assertFalse(data["kill_switch_engaged"])
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H8: Crypto symbol / timeframe coverage
+# ══════════════════════════════════════════════════════════════════════
+
+class TestCryptoSymbolTimeframeCoverage(unittest.TestCase):
+    """The full 25-pair grid must be present and coherent."""
+
+    def test_grid_has_25_entries(self):
+        from config.crypto_universe import get_full_grid
+        grid = get_full_grid()
+        self.assertEqual(len(grid), 25, f"Expected 25 pairs, got {len(grid)}")
+
+    def test_grid_all_five_assets_represented(self):
+        from config.crypto_universe import get_full_grid
+        assets = {asset for asset, _ in get_full_grid()}
+        for ticker in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            self.assertIn(ticker, assets)
+
+    def test_grid_all_five_timeframes_represented(self):
+        from config.crypto_universe import get_full_grid
+        tfs = {tf for _, tf in get_full_grid()}
+        for tf in ("15m", "1h", "daily", "weekly", "monthly"):
+            self.assertIn(tf, tfs)
+
+    def test_is_valid_pair_accepts_known_pairs(self):
+        from config.crypto_universe import is_valid_pair
+        self.assertTrue(is_valid_pair("BTC", "1h"))
+        self.assertTrue(is_valid_pair("DOGE", "monthly"))
+
+    def test_is_valid_pair_rejects_unknown(self):
+        from config.crypto_universe import is_valid_pair
+        self.assertFalse(is_valid_pair("FAKE", "1h"))
+        self.assertFalse(is_valid_pair("BTC", "scalp"))
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H9: Consensus rules
+# ══════════════════════════════════════════════════════════════════════
+
+class TestConsensusRules(unittest.TestCase):
+    """SwarmConsensusAggregator behavior for agreement, disagreement, no quorum."""
+
+    def setUp(self):
+        """Reset the singleton's proposals before each test."""
+        from merid.swarm.consensus_aggregator import get_consensus_aggregator
+        self.agg = get_consensus_aggregator()
+        self.agg.clear_proposals()  # start with a clean slate
+
+    def _make_proposal(self, agent_id, direction, archetype="trend", confidence=0.8):
+        from merid.swarm.consensus_aggregator import AgentProposal
+        from datetime import datetime, timezone
+        return AgentProposal(
+            agent_id=agent_id,
+            asset="BTC",
+            timeframe="1h",
+            direction=direction,
+            probability=0.70 if direction == "yes" else 0.30,
+            confidence=confidence,
+            size_preference="base",
+            rationale="unit test",
+            edge_estimate=5.0,
+            timestamp=datetime.now(timezone.utc),
+            agent_archetype=archetype,
+        )
+
+    def test_all_agents_agree_yields_ready(self):
+        from merid.swarm.consensus_aggregator import ConsensusStatus
+        for i in range(3):
+            p = self._make_proposal(f"agent_{i}", "yes",
+                                    archetype="trend" if i == 0 else "momentum")
+            self.agg.submit_proposal(p)
+        view = self.agg.get_consensus("BTC", "1h")
+        self.assertIsNotNone(view)
+        self.assertEqual(view.status, ConsensusStatus.READY)
+        self.assertEqual(view.consensus_direction, "yes")
+
+    def test_conflicted_proposals_yield_non_ready_status(self):
+        from merid.swarm.consensus_aggregator import ConsensusStatus
+        # Equal split yes/no across diverse archetypes → CONFLICTED (agreement_ratio=0.5 < 0.6)
+        archetypes_yes = ["trend", "momentum"]
+        archetypes_no = ["mean_reversion", "arb"]
+        for i, arch in enumerate(archetypes_yes):
+            self.agg.submit_proposal(self._make_proposal(f"yes_{i}", "yes", archetype=arch))
+        for i, arch in enumerate(archetypes_no):
+            self.agg.submit_proposal(self._make_proposal(f"no_{i}", "no", archetype=arch))
+        view = self.agg.get_consensus("BTC", "1h")
+        self.assertIsNotNone(view)
+        # With equal split, consensus should NOT be READY with a clean majority
+        self.assertNotEqual(view.status, ConsensusStatus.READY)
+
+    def test_too_few_agents_yields_forming(self):
+        from merid.swarm.consensus_aggregator import ConsensusStatus
+        # Submit only 1 proposal (below min_agents=2)
+        self.agg.submit_proposal(self._make_proposal("only_agent", "yes"))
+        view = self.agg.get_consensus("BTC", "1h")
+        self.assertIsNotNone(view)
+        self.assertEqual(view.status, ConsensusStatus.FORMING)
+
+    def test_no_proposals_returns_none(self):
+        # agg is already cleared in setUp
+        view = self.agg.get_consensus("BTC", "daily")
+        self.assertIsNone(view)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H10: Sizing constraints
+# ══════════════════════════════════════════════════════════════════════
+
+class TestSizingConstraints(unittest.TestCase):
+    """KalshiCryptoRiskEngine sizing happy path and cap-exceeded paths."""
+
+    def _engine(self):
+        try:
+            from merid.event_venues.kalshi.crypto_kalshi_risk import KalshiCryptoRiskEngine
+            return KalshiCryptoRiskEngine()
+        except ImportError as exc:
+            self.skipTest(f"Dependency not available: {exc}")
+
+    def test_happy_path_produces_nonzero_contracts(self):
+        engine = self._engine()
+        contracts = engine.compute_contracts_for_order(1000.0, 0.40, asset="BTC")
+        self.assertGreater(contracts, 0)
+
+    def test_zero_price_yields_zero_contracts(self):
+        engine = self._engine()
+        contracts = engine.compute_contracts_for_order(1000.0, 0.0, asset="BTC")
+        self.assertEqual(contracts, 0)
+
+    def test_order_within_caps_is_allowed(self):
+        engine = self._engine()
+        contracts = engine.compute_contracts_for_order(1000.0, 0.40, asset="BTC")
+        ok, reason = engine.check_can_add_order(1000.0, 1000.0, {}, "BTC", 0.40, contracts)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "OK")
+
+    def test_portfolio_risk_cap_exceeded_is_rejected(self):
+        engine = self._engine()
+        # 1000 contracts × $0.40 = $400 >> portfolio cap on $100 bankroll
+        ok, reason = engine.check_can_add_order(100.0, 100.0, {}, "BTC", 0.40, 1000)
+        self.assertFalse(ok)
+        self.assertIn("portfolio_risk_limit", reason)
+
+    def test_drawdown_exceeded_is_rejected(self):
+        engine = self._engine()
+        # equity far below bankroll → max drawdown triggered
+        ok, reason = engine.check_can_add_order(
+            total_bankroll=1000.0,
+            current_equity=400.0,   # 60% drawdown >> 40% cap
+            open_positions={},
+            asset="BTC",
+            price=0.40,
+            contracts=1,
+            initial_bankroll=1000.0,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "max_drawdown_reached")
+
+    def test_zero_contracts_is_rejected(self):
+        engine = self._engine()
+        ok, reason = engine.check_can_add_order(1000.0, 1000.0, {}, "BTC", 0.40, 0)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "zero_or_negative_contracts")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H11: Execution gate hardening — full check matrix
+# ══════════════════════════════════════════════════════════════════════
+
+class TestExecutionGateHardening(unittest.TestCase):
+    """check_execution_gate() matrix: each invariant violation → denied or warned."""
+
+    def _run_gate(self, global_kill=False, price_feed_safe=True, pnl_consistent=True):
+        from core.execution_gate import check_execution_gate
+
+        mock_rc = MagicMock()
+        mock_rc._global_kill = global_kill
+        mock_rc._kill_details = "blocked" if global_kill else None
+        mock_rc._kill_reason = "manual" if global_kill else None
+
+        mock_recon = MagicMock()
+        mock_recon.has_critical_discrepancies = MagicMock(return_value=False)
+        mock_recon._has_ever_completed = True
+
+        # stale_symbols is a list of dicts with "symbol" key
+        price_resp = {
+            "safe_to_trade": price_feed_safe,
+            "stale_symbols": (
+                [] if price_feed_safe else [{"symbol": "BTC"}]
+            ),
+            "critical_count": 0 if price_feed_safe else 1,
+        }
+        pnl_resp = {
+            "consistent": pnl_consistent,
+            "max_divergence_usd": 0 if pnl_consistent else 999,
+            "threshold_usd": 5,
+        }
+
+        with patch.dict("sys.modules", {
+            "merid.risk.kill_switches": MagicMock(risk_controller=mock_rc),
+            "trading.reconciliation": mock_recon,
+        }):
+            with patch("core.execution_gate.check_price_feed_staleness",
+                       return_value=price_resp):
+                with patch("core.execution_gate.check_pnl_consistency",
+                           return_value=pnl_resp):
+                    return check_execution_gate()
+
+    def test_all_checks_pass_no_kill_switch_reason(self):
+        result = self._run_gate()
+        sources = [r.source for r in result.reasons]
+        self.assertNotIn("kill_switch", sources)
+
+    def test_kill_switch_on_blocks(self):
+        result = self._run_gate(global_kill=True)
+        self.assertTrue(result.blocked)
+        self.assertIn("kill_switch", [r.source for r in result.reasons])
+
+    def test_stale_price_feed_adds_price_feed_reason(self):
+        """Stale price feed must appear in reasons (may be warning in demo mode)."""
+        result = self._run_gate(price_feed_safe=False)
+        sources = [r.source for r in result.reasons]
+        self.assertIn("price_feed", sources)
+
+    def test_pnl_inconsistency_adds_pnl_reason(self):
+        """PnL inconsistency must appear in reasons as a warning."""
+        result = self._run_gate(pnl_consistent=False)
+        sources = [r.source for r in result.reasons]
+        self.assertIn("pnl_consistency", sources)
+        pnl_reason = next(r for r in result.reasons if r.source == "pnl_consistency")
+        self.assertEqual(pnl_reason.severity, "warning")
+
+    def test_gate_status_has_safe_to_trade(self):
+        result = self._run_gate()
+        self.assertTrue(result.safe_to_trade)
+
+    def test_blocked_gate_not_safe_to_trade(self):
+        result = self._run_gate(global_kill=True)
+        self.assertFalse(result.safe_to_trade)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H12: Loop health summary helper
+# ══════════════════════════════════════════════════════════════════════
+
+class TestLoopHealthSummary(unittest.TestCase):
+    """merid.loop_health.build_loop_health_summary() behavior."""
+
+    def test_empty_inputs_return_25_entries(self):
+        from merid.loop_health import build_loop_health_summary
+        summaries = build_loop_health_summary()
+        self.assertEqual(len(summaries), 25)
+
+    def test_all_assets_present(self):
+        from merid.loop_health import build_loop_health_summary
+        summaries = build_loop_health_summary()
+        assets = {s.asset for s in summaries}
+        for ticker in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            self.assertIn(ticker, assets)
+
+    def test_all_timeframes_present(self):
+        from merid.loop_health import build_loop_health_summary
+        summaries = build_loop_health_summary()
+        tfs = {s.timeframe for s in summaries}
+        for tf in ("15m", "1h", "daily", "weekly", "monthly"):
+            self.assertIn(tf, tfs)
+
+    def test_default_gate_result_is_unknown(self):
+        from merid.loop_health import build_loop_health_summary
+        summaries = build_loop_health_summary()
+        for s in summaries:
+            self.assertEqual(s.gate_result, "unknown")
+
+    def test_synthetic_data_is_reflected(self):
+        from merid.loop_health import build_loop_health_summary
+        summaries = build_loop_health_summary(
+            markets_by_series={"BTC_1h": 3},
+            consensus_by_series={"BTC_1h": "trade"},
+            sizing_by_series={"BTC_1h": (5.0, None)},
+            gate_by_series={"BTC_1h": ("allowed", None)},
+        )
+        btc_1h = next(s for s in summaries if s.asset == "BTC" and s.timeframe == "1h")
+        self.assertEqual(btc_1h.discovered_markets, 3)
+        self.assertEqual(btc_1h.consensus_result, "trade")
+        self.assertEqual(btc_1h.sizing_result, 5.0)
+        self.assertEqual(btc_1h.gate_result, "allowed")
+
+    def test_to_dict_has_expected_keys(self):
+        from merid.loop_health import build_loop_health_summary
+        s = build_loop_health_summary()[0]
+        d = s.to_dict()
+        for key in (
+            "asset", "timeframe", "discovered_markets",
+            "opinions_count", "opinions_missing_symbol_timeframe",
+            "consensus_result", "sizing_result", "sizing_zero_reason",
+            "gate_result", "gate_block_reason",
+        ):
+            self.assertIn(key, d)
+
+    def test_opinions_missing_symbol_counted(self):
+        """Opinions without symbol or timeframe must be counted."""
+        from merid.loop_health import build_loop_health_summary
+
+        class OpinionWithSymbol:
+            symbol = "BTC"
+            timeframe = "1h"
+
+        class OpinionNoSymbol:
+            symbol = None
+            timeframe = "1h"
+
+        summaries = build_loop_health_summary(
+            opinions_by_series={
+                "BTC_1h": [OpinionWithSymbol(), OpinionNoSymbol()],
+            }
+        )
+        btc_1h = next(s for s in summaries if s.asset == "BTC" and s.timeframe == "1h")
+        self.assertEqual(btc_1h.opinions_count, 2)
+        self.assertEqual(btc_1h.opinions_missing_symbol_timeframe, 1)
+
+    def test_custom_grid_is_respected(self):
+        from merid.loop_health import build_loop_health_summary
+        custom_grid = [("BTC", "1h"), ("ETH", "daily")]
+        summaries = build_loop_health_summary(grid=custom_grid)
+        self.assertEqual(len(summaries), 2)
+        self.assertEqual(summaries[0].asset, "BTC")
+        self.assertEqual(summaries[1].asset, "ETH")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H13: get_kalshi_venue_adapter public export from kalshi_signals
+# ══════════════════════════════════════════════════════════════════════
+
+class TestKalshiVenueAdapterExport(unittest.TestCase):
+    """Task 0: get_kalshi_venue_adapter must be importable from kalshi_signals."""
+
+    def test_symbol_importable_from_kalshi_signals(self):
+        """get_kalshi_venue_adapter must exist as a module-level name."""
+        import merid.signals.kalshi_signals as ks
+        self.assertTrue(
+            hasattr(ks, "get_kalshi_venue_adapter"),
+            "get_kalshi_venue_adapter not exported from merid.signals.kalshi_signals",
+        )
+
+    def test_reset_importable_from_kalshi_signals(self):
+        import merid.signals.kalshi_signals as ks
+        self.assertTrue(hasattr(ks, "reset_kalshi_venue_adapter"))
+
+    def test_patch_target_works(self):
+        """The canonical patch target used in loop tests must be patchable."""
+        from unittest.mock import patch, MagicMock
+        with patch(
+            "merid.signals.kalshi_signals.get_kalshi_venue_adapter",
+            return_value=MagicMock(),
+        ) as mock_fn:
+            import merid.signals.kalshi_signals as ks
+            result = ks.get_kalshi_venue_adapter()
+            self.assertIsNotNone(result)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# §H14: DRY_RUN_MODE settings flag
+# ══════════════════════════════════════════════════════════════════════
+
+class TestDryRunMode(unittest.TestCase):
+    """DRY_RUN_MODE must be present in merid.settings and default to False."""
+
+    def test_dry_run_mode_field_exists(self):
+        from merid.settings import settings
+        self.assertTrue(hasattr(settings, "DRY_RUN_MODE"))
+
+    def test_dry_run_mode_default_false(self):
+        from merid.settings import settings
+        # Default must be False so production is not accidentally in dry-run
+        self.assertFalse(settings.DRY_RUN_MODE)
+
+    def test_health_endpoint_reflects_dry_run_false(self):
+        import sys, types
+        for mod_name in ("numpy", "pandas", "scipy"):
+            if mod_name not in sys.modules:
+                sys.modules[mod_name] = types.ModuleType(mod_name)
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from web.api.health import router
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+        data = client.get("/api/health").json()
+        # Default must be False
+        self.assertFalse(data["dry_run_mode"])
