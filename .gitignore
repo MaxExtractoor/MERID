@@ -197,3 +197,4 @@ test/
 create_shortcut.ps1
 data/paper_positions.json
 data/promotion_log.json
+data/session_log.jsonl
