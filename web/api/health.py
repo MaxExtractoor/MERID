@@ -326,6 +326,8 @@ async def get_event_loop_health() -> dict:
         ISO timestamp when degradation started, or ``null`` if healthy
     ``stats_1m`` / ``stats_5m``
         Statistical summary over 1-minute and 5-minute windows
+    ``total_profiles``
+        Number of high-lag profiles captured
     """
     try:
         from observability.event_loop_monitor import get_event_loop_monitor
@@ -354,3 +356,174 @@ async def get_event_loop_health() -> dict:
             "error": str(exc),
             "timestamp": time.time(),
         }
+
+
+@router.get("/health/event_loop/profiles")
+async def get_event_loop_profiles(limit: Optional[int] = 10) -> dict:
+    """Get captured high-lag profiles for analysis.
+
+    Returns stack traces and task information captured during high-lag events
+    (lag >= 500ms). Profiles are ordered most recent first.
+
+    Query parameters
+    ----------------
+    ``limit``
+        Maximum number of profiles to return (default 10, max 50)
+
+    Response fields
+    ---------------
+    ``profile_count``
+        Number of profiles returned
+    ``total_profiles``
+        Total number of profiles stored
+    ``profiles``
+        List of high-lag profile objects, each containing:
+        - captured_at: ISO timestamp when profile was captured
+        - lag_ms: Event loop lag in milliseconds
+        - active_task_count: Number of active tasks at capture time
+        - top_tasks: List of top offending tasks with stack traces
+    """
+    try:
+        from observability.event_loop_monitor import get_event_loop_monitor
+
+        monitor = get_event_loop_monitor()
+
+        # Limit to max 50 profiles
+        requested_limit = min(limit or 10, 50)
+
+        profiles = monitor.get_profiles(max_count=requested_limit)
+
+        return {
+            "profile_count": len(profiles),
+            "total_profiles": len(monitor._profiles),
+            "max_profiles": monitor.max_profiles,
+            "profile_threshold_ms": monitor.profile_threshold_ms,
+            "timestamp": time.time(),
+            "profiles": [p.to_dict() for p in profiles],
+        }
+    except Exception as exc:
+        logger.error(f"Failed to retrieve event loop profiles: {exc}")
+        return {
+            "error": str(exc),
+            "timestamp": time.time(),
+        }
+
+
+@router.delete("/health/event_loop/profiles")
+async def clear_event_loop_profiles() -> dict:
+    """Clear all captured high-lag profiles.
+
+    Useful for resetting profiling state between test runs or after
+    resolving identified performance issues.
+
+    Returns
+    -------
+    ``cleared_count``
+        Number of profiles that were cleared
+    """
+    try:
+        from observability.event_loop_monitor import get_event_loop_monitor
+
+        monitor = get_event_loop_monitor()
+        cleared_count = monitor.clear_profiles()
+
+        return {
+            "status": "success",
+            "cleared_count": cleared_count,
+            "timestamp": time.time(),
+        }
+    except Exception as exc:
+        logger.error(f"Failed to clear event loop profiles: {exc}")
+        return {
+            "status": "error",
+            "error": str(exc),
+            "timestamp": time.time(),
+        }
+
+
+@router.get("/health/event_loop/profiles/summary")
+async def get_event_loop_profiles_summary() -> dict:
+    """Get a summary analysis of captured high-lag profiles.
+
+    Aggregates profile data to identify the most common offending subsystems
+    and coroutines causing event loop lag.
+
+    Response fields
+    ---------------
+    ``total_profiles``
+        Total number of profiles analyzed
+    ``offenders_by_coroutine``
+        Dictionary mapping coroutine names to frequency counts
+    ``offenders_by_module``
+        Dictionary mapping module names to frequency counts
+    ``max_lag_ms``
+        Maximum lag observed across all profiles
+    ``avg_lag_ms``
+        Average lag across all profiles
+    ``avg_task_count``
+        Average number of active tasks during high-lag events
+    """
+    try:
+        from observability.event_loop_monitor import get_event_loop_monitor
+
+        monitor = get_event_loop_monitor()
+        profiles = monitor.get_profiles(max_count=None)  # Get all profiles
+
+        if not profiles:
+            return {
+                "total_profiles": 0,
+                "offenders_by_coroutine": {},
+                "offenders_by_module": {},
+                "max_lag_ms": 0.0,
+                "avg_lag_ms": 0.0,
+                "avg_task_count": 0,
+                "timestamp": time.time(),
+            }
+
+        # Aggregate statistics
+        offenders_by_coroutine: dict = {}
+        offenders_by_module: dict = {}
+        total_lag = 0.0
+        max_lag = 0.0
+        total_tasks = 0
+
+        for profile in profiles:
+            total_lag += profile.lag_ms
+            max_lag = max(max_lag, profile.lag_ms)
+            total_tasks += profile.active_task_count
+
+            # Count coroutines
+            for task in profile.top_tasks:
+                coro = task.get("coro", "unknown")
+                offenders_by_coroutine[coro] = offenders_by_coroutine.get(coro, 0) + 1
+
+                # Extract module from file path
+                file_path = task.get("file", "")
+                if file_path:
+                    # Extract module name from path like "/path/to/merid/loop.py" -> "merid.loop"
+                    if "merid" in file_path:
+                        parts = file_path.split("merid")[-1].strip("/").replace("/", ".").replace(".py", "")
+                        if parts:
+                            module = f"merid.{parts}"
+                            offenders_by_module[module] = offenders_by_module.get(module, 0) + 1
+
+        # Sort by frequency
+        sorted_coros = sorted(offenders_by_coroutine.items(), key=lambda x: x[1], reverse=True)
+        sorted_modules = sorted(offenders_by_module.items(), key=lambda x: x[1], reverse=True)
+
+        return {
+            "total_profiles": len(profiles),
+            "offenders_by_coroutine": dict(sorted_coros[:20]),  # Top 20
+            "offenders_by_module": dict(sorted_modules[:10]),  # Top 10
+            "max_lag_ms": round(max_lag, 2),
+            "avg_lag_ms": round(total_lag / len(profiles), 2),
+            "avg_task_count": round(total_tasks / len(profiles), 1),
+            "timestamp": time.time(),
+        }
+    except Exception as exc:
+        logger.error(f"Failed to generate profile summary: {exc}")
+        return {
+            "error": str(exc),
+            "timestamp": time.time(),
+        }
+

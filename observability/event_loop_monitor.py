@@ -14,11 +14,13 @@ References:
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from utils.logger import get_logger
 
@@ -31,6 +33,30 @@ class LagSample:
     measured_at: datetime
     lag_ms: float
     expected_ms: float = 100.0  # Target callback interval
+
+
+@dataclass
+class HighLagProfile:
+    """Captured profile during a high-lag event.
+
+    Records stack traces and task information to identify
+    which coroutines are blocking the event loop.
+    """
+    captured_at: datetime
+    lag_ms: float
+    active_task_count: int
+    top_tasks: List[Dict[str, Any]]  # Top N tasks with name, coro, stack
+    full_stack_trace: str  # Complete stack dump for analysis
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "captured_at": self.captured_at.isoformat(),
+            "lag_ms": round(self.lag_ms, 2),
+            "active_task_count": self.active_task_count,
+            "top_tasks": self.top_tasks,
+            "full_stack_trace": self.full_stack_trace,
+        }
 
 
 @dataclass
@@ -69,13 +95,18 @@ class EventLoopMonitor:
         max_samples: int = 6000,  # 10 minutes at 100ms interval
         warn_threshold_ms: float = 200.0,
         crit_threshold_ms: float = 500.0,
+        profile_threshold_ms: float = 500.0,  # Capture profile when lag exceeds this
+        max_profiles: int = 10,  # Keep last N high-lag profiles
     ):
         self.sample_interval_ms = sample_interval_ms
         self.max_samples = max_samples
         self.warn_threshold_ms = warn_threshold_ms
         self.crit_threshold_ms = crit_threshold_ms
+        self.profile_threshold_ms = profile_threshold_ms
+        self.max_profiles = max_profiles
 
         self._samples: Deque[LagSample] = deque(maxlen=max_samples)
+        self._profiles: Deque[HighLagProfile] = deque(maxlen=max_profiles)
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._last_callback_time: float = 0.0
@@ -110,6 +141,83 @@ class EventLoopMonitor:
                 pass
         logger.info("EventLoopMonitor stopped")
 
+    def _capture_high_lag_profile(self, lag_ms: float) -> None:
+        """Capture a profile of running tasks during high lag event.
+
+        This is called synchronously when lag exceeds the profile threshold.
+        It captures stack traces of all running tasks to identify blocking code.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            all_tasks = asyncio.all_tasks(loop)
+
+            # Build list of task info
+            top_tasks = []
+            for task in all_tasks:
+                if task.done():
+                    continue
+
+                # Extract coroutine name and frame info
+                coro = task.get_coro()
+                coro_name = getattr(coro, '__name__', str(coro))
+                coro_qualname = getattr(coro, '__qualname__', coro_name)
+
+                # Get the coroutine's current frame for stack trace
+                frame = getattr(coro, 'cr_frame', None) or getattr(coro, 'gi_frame', None)
+
+                task_info = {
+                    "name": task.get_name(),
+                    "coro": coro_qualname,
+                    "done": task.done(),
+                    "cancelled": task.cancelled(),
+                }
+
+                # Capture stack trace if frame available
+                if frame:
+                    stack_lines = traceback.format_stack(frame)
+                    # Get just the last few frames (most recent calls)
+                    task_info["stack"] = "".join(stack_lines[-5:])
+                    task_info["file"] = frame.f_code.co_filename
+                    task_info["line"] = frame.f_lineno
+                    task_info["function"] = frame.f_code.co_name
+                else:
+                    task_info["stack"] = "N/A"
+
+                top_tasks.append(task_info)
+
+            # Capture full stack dump for deep analysis
+            full_stack = "=== Full Event Loop Stack Dump ===\n"
+            full_stack += f"Active tasks: {len(all_tasks)}\n"
+            full_stack += f"Lag: {lag_ms:.1f}ms\n\n"
+
+            for idx, task_info in enumerate(top_tasks[:20], 1):  # Top 20 tasks
+                full_stack += f"\n--- Task {idx}: {task_info['name']} ---\n"
+                full_stack += f"Coroutine: {task_info['coro']}\n"
+                if "file" in task_info:
+                    full_stack += f"Location: {task_info['file']}:{task_info['line']} in {task_info['function']}\n"
+                full_stack += f"{task_info.get('stack', 'N/A')}\n"
+
+            # Create profile
+            profile = HighLagProfile(
+                captured_at=datetime.now(timezone.utc),
+                lag_ms=lag_ms,
+                active_task_count=len(all_tasks),
+                top_tasks=top_tasks[:10],  # Keep top 10 for API response
+                full_stack_trace=full_stack,
+            )
+
+            self._profiles.append(profile)
+
+            # Log a summary
+            logger.warning(
+                f"High-lag profile captured: {lag_ms:.1f}ms, "
+                f"{len(all_tasks)} active tasks. "
+                f"Top offenders: {', '.join(t['coro'] for t in top_tasks[:3])}"
+            )
+
+        except Exception as exc:
+            logger.error(f"Failed to capture high-lag profile: {exc}")
+
     async def _monitor_loop(self) -> None:
         """Main monitoring loop."""
         while self._running:
@@ -135,6 +243,10 @@ class EventLoopMonitor:
 
                 # Check thresholds
                 if lag_ms >= self.crit_threshold_ms:
+                    # Capture profile for high lag events
+                    if lag_ms >= self.profile_threshold_ms:
+                        self._capture_high_lag_profile(lag_ms)
+
                     if not self._degraded:
                         self._degraded = True
                         self._degraded_since = sample.measured_at
@@ -220,6 +332,33 @@ class EventLoopMonitor:
         """Check if event loop is currently degraded."""
         return self._degraded
 
+    def get_profiles(self, max_count: Optional[int] = None) -> List[HighLagProfile]:
+        """Get captured high-lag profiles.
+
+        Args:
+            max_count: Maximum number of profiles to return (most recent first).
+                      If None, returns all stored profiles.
+
+        Returns:
+            List of HighLagProfile objects, most recent first.
+        """
+        profiles_list = list(self._profiles)
+        profiles_list.reverse()  # Most recent first
+        if max_count is not None:
+            profiles_list = profiles_list[:max_count]
+        return profiles_list
+
+    def clear_profiles(self) -> int:
+        """Clear all captured profiles.
+
+        Returns:
+            Number of profiles that were cleared.
+        """
+        count = len(self._profiles)
+        self._profiles.clear()
+        logger.info(f"Cleared {count} high-lag profiles")
+        return count
+
     def get_current_status(self) -> Dict[str, object]:
         """Get current monitor status."""
         stats_5m = self.get_stats(window_seconds=300)
@@ -232,7 +371,10 @@ class EventLoopMonitor:
             "sample_interval_ms": self.sample_interval_ms,
             "warn_threshold_ms": self.warn_threshold_ms,
             "crit_threshold_ms": self.crit_threshold_ms,
+            "profile_threshold_ms": self.profile_threshold_ms,
             "total_samples": len(self._samples),
+            "total_profiles": len(self._profiles),
+            "max_profiles": self.max_profiles,
             "stats_1m": {
                 "sample_count": stats_1m.sample_count,
                 "mean_ms": round(stats_1m.mean_ms, 2),
