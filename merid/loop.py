@@ -766,14 +766,38 @@ class MeridLoop:
             sym for sym, ops in _opinions.items()
             if ops and len(ops) >= 1
         ]
-        forced = 0
-        for sym in pending_symbols:
+
+        # Parallelize consensus cycles for independent symbols (with timeout)
+        async def run_consensus_with_timeout(sym: str):
+            """Run consensus cycle for a single symbol with timeout."""
             try:
-                plan = await coordinator._run_consensus_cycle(sym)
-                if plan:
-                    forced += 1
+                plan = await asyncio.wait_for(
+                    coordinator._run_consensus_cycle(sym),
+                    timeout=2.0  # 2s per symbol
+                )
+                return (sym, plan)
+            except asyncio.TimeoutError:
+                logger.warning(f"Consensus cycle timeout for {sym}")
+                return (sym, None)
             except Exception as _ce:
                 logger.debug(f"Consensus cycle error for {sym}: {_ce}")
+                return (sym, None)
+
+        # Run consensus cycles in parallel (limit to 5 concurrent)
+        semaphore = asyncio.Semaphore(5)
+
+        async def run_with_semaphore(sym: str):
+            async with semaphore:
+                return await run_consensus_with_timeout(sym)
+
+        tasks = [run_with_semaphore(sym) for sym in pending_symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Count successful cycles
+        forced = sum(
+            1 for r in results
+            if not isinstance(r, Exception) and r[1] is not None
+        )
 
         self.metrics.consensus_cycles_run += 1
 
@@ -786,6 +810,15 @@ class MeridLoop:
         try:
             from merid.prediction.debate import get_debate_store, DebateSession
             debate_store = get_debate_store()
+
+            # Pre-fetch all open debates once (avoid N+1 queries)
+            all_open_debates = debate_store.list_debates(status="open", limit=50)
+            open_debates_by_symbol = {}
+            for debate in all_open_debates:
+                symbol = debate.symbol
+                if symbol not in open_debates_by_symbol:
+                    open_debates_by_symbol[symbol] = []
+                open_debates_by_symbol[symbol].append(debate)
 
             # Open a debate for each freshly-forced plan (high-conviction only)
             _active_plans = getattr(coordinator, '_active_plans', {})
@@ -800,9 +833,8 @@ class MeridLoop:
                 symbol = getattr(plan, 'symbol', None) or getattr(plan, 'market_id', None)
                 if not symbol:
                     continue
-                # Avoid duplicate open debates for the same symbol
-                open_debates = debate_store.list_debates(symbol=symbol, status="open")
-                if open_debates:
+                # Avoid duplicate open debates for the same symbol (using pre-fetched data)
+                if symbol in open_debates_by_symbol:
                     continue
                 session = DebateSession(
                     symbol=symbol,
@@ -813,7 +845,7 @@ class MeridLoop:
                 logger.debug("debate opened: %s pre_prob=%.3f", symbol, float(prob))
 
             # Close open debates whose symbol has a fresh consensus probability
-            for debate in debate_store.list_debates(status="open", limit=50):
+            for debate in all_open_debates:
                 sym_opinions = _opinions.get(debate.symbol, [])
                 if not sym_opinions:
                     continue
