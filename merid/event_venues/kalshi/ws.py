@@ -576,6 +576,8 @@ class KalshiWebSocket(EventVenueStream):
                 await self.subscribe_trades(list(self._trade_tickers))
             for ob_ticker in self._orderbook_tickers:
                 await self.subscribe_orderbook(ob_ticker)
+                # Yield to event loop after each orderbook subscription
+                await asyncio.sleep(0)
             if self._order_group_updates_enabled:
                 await self.subscribe_order_group_updates()
 
