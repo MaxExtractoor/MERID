@@ -12,9 +12,28 @@ PASS/FAIL verdict against the criteria defined in VALIDATION_GUIDE.md:
   - No high-lag profiles captured (samples_above_crit == 0)
   - No crashes / missed heartbeats (all HTTP polls succeed)
 
+Early Stopping (NEW):
+  By default, the gate will stop early if it detects repeated failures, saving
+  time on runs that are clearly failing. Early stop triggers when:
+  - At least 5 samples collected (2.5 minutes), AND
+  - Either 5 consecutive failures OR 80% failure rate
+
+  When early stopped, the gate automatically fetches profiling data from
+  /health/event_loop/profiles/summary and /profiles to help identify the
+  lag sources causing the failures.
+
 Usage:
-    # Default: 30-minute gate against local server
+    # Default: 30-minute gate with early stopping enabled
     python scripts/run_paper_gate.py
+
+    # Short 5-minute gate for quick validation after fixes
+    python scripts/run_paper_gate.py --duration 5
+
+    # Disable early stopping (run full duration even if failing)
+    python scripts/run_paper_gate.py --no-early-stop
+
+    # Custom early stop thresholds
+    python scripts/run_paper_gate.py --early-stop-min-samples 3 --early-stop-consecutive 3
 
     # Custom duration and server
     python scripts/run_paper_gate.py --duration 5 --base-url http://localhost:8000
@@ -53,6 +72,12 @@ from typing import List, Optional
 P95_LIMIT_MS: float = 500.0   # Fail if any sample exceeds this
 DEGRADED_ALLOWED: bool = False  # Any degraded=true sample fails the gate
 CRIT_SAMPLES_ALLOWED: int = 0   # samples_above_crit must stay 0
+
+# ── Early stopping constants ──────────────────────────────────────────────────
+
+EARLY_STOP_MIN_SAMPLES: int = 5  # Minimum samples before early stop (2.5 min @ 30s interval)
+EARLY_STOP_CONSECUTIVE_FAILURES: int = 5  # Consecutive failures trigger early stop
+EARLY_STOP_FAILURE_RATE: float = 0.8  # 80% failure rate after min samples triggers early stop
 
 # ── Data structures ───────────────────────────────────────────────────────────
 
@@ -100,6 +125,11 @@ class GateResult:
     max_observed_lag_ms: Optional[float] = None
     total_crit_samples: int = 0
     degraded_samples: int = 0
+    # Early stopping
+    early_stopped: bool = False
+    early_stop_reason: Optional[str] = None
+    profiling_summary: Optional[dict] = None
+    top_offending_profiles: Optional[List[dict]] = None
     # Verdict
     passed: bool = False
     violations: List[str] = field(default_factory=list)
@@ -152,6 +182,97 @@ def _extract_sample_values(body: dict) -> dict:
     }
 
 
+def _fetch_profiling_data(base_url: str, timeout: float = 5.0) -> tuple[Optional[dict], Optional[list]]:
+    """
+    Fetch profiling data from /health/event_loop/profiles/summary and /profiles.
+
+    Returns (summary_dict, profiles_list) or (None, None) on error.
+    """
+    try:
+        # Fetch summary
+        summary_url = f"{base_url.rstrip('/')}/health/event_loop/profiles/summary"
+        req = urllib.request.Request(summary_url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                summary = json.loads(resp.read().decode("utf-8"))
+            else:
+                summary = None
+
+        # Fetch top profiles
+        profiles_url = f"{base_url.rstrip('/')}/health/event_loop/profiles?limit=5"
+        req = urllib.request.Request(profiles_url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                profiles_data = json.loads(resp.read().decode("utf-8"))
+                profiles = profiles_data.get("profiles", [])
+            else:
+                profiles = None
+
+        return summary, profiles
+    except Exception:
+        return None, None
+
+
+def _check_early_stop(
+    samples: List[dict],
+    min_samples: int,
+    consecutive_threshold: int,
+    failure_rate_threshold: float,
+) -> tuple[bool, Optional[str]]:
+    """
+    Determine if early stopping should be triggered.
+
+    Returns (should_stop, reason_string) tuple.
+
+    Early stop triggers when:
+    1. We have at least min_samples successful samples, AND
+    2. Either:
+       a) Last consecutive_threshold samples all failed, OR
+       b) Overall failure rate >= failure_rate_threshold
+
+    A sample is considered "failed" if:
+    - P95 >= 500ms, OR
+    - degraded=true, OR
+    - samples_above_crit > 0
+    """
+    if len(samples) < min_samples:
+        return False, None
+
+    # Count failures
+    failures = []
+    for s in samples:
+        if s["status"] != "ok":
+            failures.append(True)
+            continue
+
+        # Check gate criteria
+        is_failed = False
+        if s.get("p95_ms") is not None and s["p95_ms"] >= P95_LIMIT_MS:
+            is_failed = True
+        if s.get("degraded") is True:
+            is_failed = True
+        if s.get("samples_above_crit") and s["samples_above_crit"] > 0:
+            is_failed = True
+
+        failures.append(is_failed)
+
+    # Check consecutive failures
+    if len(failures) >= consecutive_threshold:
+        recent_failures = failures[-consecutive_threshold:]
+        if all(recent_failures):
+            return True, f"{consecutive_threshold} consecutive failures (P95≥500ms or degraded=true)"
+
+    # Check failure rate
+    total_successful_samples = sum(1 for s in samples if s["status"] == "ok")
+    if total_successful_samples >= min_samples:
+        failure_count = sum(failures)
+        failure_rate = failure_count / len(failures)
+        if failure_rate >= failure_rate_threshold:
+            return True, f"High failure rate: {failure_rate:.1%} ({failure_count}/{len(failures)} samples)"
+
+    return False, None
+
+
 # ── Core gate logic ───────────────────────────────────────────────────────────
 
 
@@ -161,12 +282,26 @@ def run_gate(
     poll_interval_s: float = 30.0,
     gate_id: Optional[str] = None,
     verbose: bool = True,
+    enable_early_stop: bool = True,
+    early_stop_min_samples: int = EARLY_STOP_MIN_SAMPLES,
+    early_stop_consecutive_failures: int = EARLY_STOP_CONSECUTIVE_FAILURES,
+    early_stop_failure_rate: float = EARLY_STOP_FAILURE_RATE,
 ) -> GateResult:
     """
     Run the paper gate for ``duration_s`` seconds, polling every
     ``poll_interval_s`` seconds.
 
     Returns a :class:`GateResult` with verdict and all samples.
+
+    Early stopping
+    --------------
+    If ``enable_early_stop`` is True (default), the gate will stop early if it
+    detects repeated failures, saving time on runs that are clearly failing.
+
+    Early stop triggers when:
+    - At least ``early_stop_min_samples`` samples collected, AND
+    - Either ``early_stop_consecutive_failures`` consecutive failures OR
+      failure rate >= ``early_stop_failure_rate``
     """
     if gate_id is None:
         gate_id = f"paper-gate-{int(time.time())}"
@@ -266,6 +401,31 @@ def run_gate(
         result.samples.append(asdict(sample))
         poll_index += 1
 
+        # ── Early stopping check ──────────────────────────────────────────────
+        if enable_early_stop:
+            should_stop, stop_reason = _check_early_stop(
+                result.samples,
+                early_stop_min_samples,
+                early_stop_consecutive_failures,
+                early_stop_failure_rate,
+            )
+            if should_stop:
+                result.early_stopped = True
+                result.early_stop_reason = stop_reason
+                if verbose:
+                    print(f"\n{'─'*72}")
+                    print(f"  🛑 EARLY STOP TRIGGERED")
+                    print(f"  Reason: {stop_reason}")
+                    print(f"  Fetching profiling data...")
+                    print(f"{'─'*72}\n")
+
+                # Fetch profiling data
+                summary, profiles = _fetch_profiling_data(base_url)
+                result.profiling_summary = summary
+                result.top_offending_profiles = profiles
+
+                break  # Exit the polling loop
+
         # Sleep until next poll (or gate deadline, whichever is sooner)
         remaining = deadline - time.monotonic()
         if remaining > 0:
@@ -327,19 +487,62 @@ def run_gate(
     if verbose:
         print(f"\n{'='*72}")
         print(f"  Gate: {gate_id}")
-        print(f"  Duration: {result.duration_s:.0f}s  |  Polls: {result.total_polls}")
+
+        if result.early_stopped:
+            actual_duration = (datetime.fromisoformat(result.ended_at) -
+                             datetime.fromisoformat(result.started_at)).total_seconds()
+            print(f"  🛑 EARLY STOPPED after {actual_duration:.0f}s (planned: {result.duration_s:.0f}s)")
+            print(f"  Reason: {result.early_stop_reason}")
+        else:
+            print(f"  Duration: {result.duration_s:.0f}s  |  Polls: {result.total_polls}")
+
+        print(f"  Polls: {result.total_polls} ({result.successful_polls} successful)")
         print(f"  P50 (mean/max): {result.p50_mean_ms}ms / {result.p50_max_ms}ms")
         print(f"  P95 (mean/max): {result.p95_mean_ms}ms / {result.p95_max_ms}ms")
         print(f"  P99 (mean/max): {result.p99_mean_ms}ms / {result.p99_max_ms}ms")
         print(f"  Max observed lag: {result.max_observed_lag_ms}ms")
         print(f"  Degraded samples: {result.degraded_samples}")
         print(f"  Critical-lag samples: {result.total_crit_samples}")
+
+        # Show profiling summary if available
+        if result.profiling_summary:
+            summary = result.profiling_summary
+            print(f"\n  📊 PROFILING SUMMARY")
+            print(f"  Total profiles captured: {summary.get('total_profiles', 0)}")
+            if summary.get('total_profiles', 0) > 0:
+                print(f"  Max lag: {summary.get('max_lag_ms', 0):.1f}ms")
+                print(f"  Avg lag: {summary.get('avg_lag_ms', 0):.1f}ms")
+
+                # Show top offending coroutines
+                offenders_coro = summary.get('offenders_by_coroutine', {})
+                if offenders_coro:
+                    print(f"\n  Top offending coroutines:")
+                    sorted_coro = sorted(offenders_coro.items(), key=lambda x: x[1], reverse=True)[:5]
+                    for coro_name, count in sorted_coro:
+                        print(f"    • {coro_name}: {count} occurrences")
+
+                # Show top offending modules
+                offenders_mod = summary.get('offenders_by_module', {})
+                if offenders_mod:
+                    print(f"\n  Top offending modules:")
+                    sorted_mod = sorted(offenders_mod.items(), key=lambda x: x[1], reverse=True)[:5]
+                    for mod_name, count in sorted_mod:
+                        print(f"    • {mod_name}: {count} occurrences")
+
         if result.passed:
             print(f"\n  ✅  GATE PASS — all criteria satisfied")
         else:
             print(f"\n  ❌  GATE FAIL — {len(violations)} violation(s):")
             for v in violations:
                 print(f"       • {v}")
+
+            if result.early_stopped:
+                print(f"\n  💡 NEXT STEPS:")
+                print(f"     1. Review profiling data above to identify lag sources")
+                print(f"     2. Add yields / offload blocking work in offending code")
+                print(f"     3. Re-run a short gate (5-10 min) after fixes")
+                print(f"     4. Only run full 30-min gate when short gates pass")
+
         print(f"{'='*72}\n")
 
     return result
@@ -394,6 +597,32 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Validate imports and config, then exit 0 without connecting",
     )
+    p.add_argument(
+        "--no-early-stop",
+        action="store_true",
+        help="Disable early stopping (run full duration even if clearly failing)",
+    )
+    p.add_argument(
+        "--early-stop-min-samples",
+        type=int,
+        default=EARLY_STOP_MIN_SAMPLES,
+        metavar="N",
+        help=f"Minimum samples before early stop (default: {EARLY_STOP_MIN_SAMPLES})",
+    )
+    p.add_argument(
+        "--early-stop-consecutive",
+        type=int,
+        default=EARLY_STOP_CONSECUTIVE_FAILURES,
+        metavar="N",
+        help=f"Consecutive failures to trigger early stop (default: {EARLY_STOP_CONSECUTIVE_FAILURES})",
+    )
+    p.add_argument(
+        "--early-stop-rate",
+        type=float,
+        default=EARLY_STOP_FAILURE_RATE,
+        metavar="RATE",
+        help=f"Failure rate threshold for early stop (default: {EARLY_STOP_FAILURE_RATE})",
+    )
     return p
 
 
@@ -402,9 +631,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.dry_run:
         print("Dry-run: all imports resolved, configuration valid.")
-        print(f"  Base URL    : {args.base_url}")
-        print(f"  Duration    : {args.duration} minutes")
-        print(f"  Poll interval: {args.poll_interval} seconds")
+        print(f"  Base URL       : {args.base_url}")
+        print(f"  Duration       : {args.duration} minutes")
+        print(f"  Poll interval  : {args.poll_interval} seconds")
+        print(f"  Early stop     : {'disabled' if args.no_early_stop else 'enabled'}")
+        if not args.no_early_stop:
+            print(f"    - Min samples: {args.early_stop_min_samples}")
+            print(f"    - Consecutive : {args.early_stop_consecutive}")
+            print(f"    - Failure rate: {args.early_stop_rate:.0%}")
         return 0
 
     try:
@@ -414,6 +648,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             poll_interval_s=args.poll_interval,
             gate_id=args.gate_id,
             verbose=not args.quiet,
+            enable_early_stop=not args.no_early_stop,
+            early_stop_min_samples=args.early_stop_min_samples,
+            early_stop_consecutive_failures=args.early_stop_consecutive,
+            early_stop_failure_rate=args.early_stop_rate,
         )
     except KeyboardInterrupt:
         print("\nGate interrupted by user.")
