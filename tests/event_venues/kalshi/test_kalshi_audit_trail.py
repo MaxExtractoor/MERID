@@ -148,9 +148,69 @@ class TestCorrelationId:
         ids = {generate_correlation_id() for _ in range(100)}
         assert len(ids) == 100
 
+    def test_generate_default_prefix(self):
+        from merid.formulas import generate_correlation_id
+        cid = generate_correlation_id()
+        assert cid.startswith("kalshi_")
+
+    def test_generate_custom_prefix(self):
+        from merid.formulas import generate_correlation_id
+        cid = generate_correlation_id(prefix="kalshi-trader")
+        assert cid.startswith("kalshi-trader_")
+
+    def test_generate_with_datetime(self):
+        from datetime import datetime, timezone
+        from merid.formulas import generate_correlation_id
+        dt = datetime(2024, 1, 15, 12, 30, 45, tzinfo=timezone.utc)
+        cid = generate_correlation_id(dt, prefix="test")
+        assert cid.startswith("test_20240115_123045_")
+
+    def test_generate_with_float_timestamp(self):
+        """Passing a float (e.g. time.time()) must not raise AttributeError."""
+        import time
+        from merid.formulas import generate_correlation_id
+        ts = time.time()
+        cid = generate_correlation_id(ts, prefix="kalshi-trader")
+        assert isinstance(cid, str)
+        assert cid.startswith("kalshi-trader_")
+
+    def test_generate_with_int_timestamp(self):
+        """Passing an int epoch must not raise AttributeError."""
+        from merid.formulas import generate_correlation_id
+        cid = generate_correlation_id(1700000000, prefix="test")
+        assert isinstance(cid, str)
+        assert cid.startswith("test_")
+
+    def test_generate_with_none_uses_current_time(self):
+        from merid.formulas import generate_correlation_id
+        cid = generate_correlation_id(None, prefix="test")
+        assert isinstance(cid, str)
+        assert cid.startswith("test_")
+
+    def test_generate_format(self):
+        """ID must follow {prefix}_{YYYYMMDD_HHMMSS}_{8hex} pattern."""
+        import re
+        from datetime import datetime, timezone
+        from merid.formulas import generate_correlation_id
+        dt = datetime(2024, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+        cid = generate_correlation_id(dt, prefix="kalshi")
+        assert re.fullmatch(r"kalshi_\d{8}_\d{6}_[0-9a-f]{8}", cid), f"Unexpected format: {cid}"
+
 
 # ── [TRACE] log emission tests ────────────────────────────────────────────────
+# These tests import modules that transitively require `aiohttp`.  The package
+# is not installed in the default unit-test environment, so we skip the whole
+# class when it is absent.  This is a pre-existing environment constraint and
+# is unrelated to the correlation-ID changes in this PR.
 
+try:
+    import aiohttp as _aiohttp  # noqa: F401
+    _aiohttp_available = True
+except ModuleNotFoundError:
+    _aiohttp_available = False
+
+
+@pytest.mark.skipif(not _aiohttp_available, reason="aiohttp not installed in default test env")
 class TestTraceLogging:
     def test_sentiment_emits_trace_on_update(self, caplog):
         import logging

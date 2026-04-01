@@ -27,7 +27,8 @@ from __future__ import annotations
 import math
 import uuid
 from collections import deque
-from typing import Deque
+from datetime import datetime, timezone
+from typing import Deque, Optional, Union
 
 # ── Version sentinels ─────────────────────────────────────────────────────────
 
@@ -66,8 +67,25 @@ RAG_DRIFT_RED_DELTA: float = 30.0
 
 # ── Correlation-ID factory ────────────────────────────────────────────────────
 
-def generate_correlation_id() -> str:
-    """Return a new UUID4-based correlation ID for one pipeline run.
+def generate_correlation_id(
+    timestamp: Optional[Union[datetime, float, int]] = None,
+    prefix: str = "kalshi",
+) -> str:
+    """Return a timestamped correlation ID for one pipeline run.
+
+    The ID format is ``{prefix}_{YYYYMMDD_HHMMSS}_{uuid4_short}`` to make it
+    both human-readable and globally unique.
+
+    Args:
+        timestamp: A :class:`~datetime.datetime`, a Unix epoch float/int, or
+            ``None``.  When ``None`` or omitted, the current UTC time is used.
+            Float/int values are interpreted as seconds since the Unix epoch
+            and converted to UTC :class:`~datetime.datetime` automatically —
+            passing ``time.time()`` directly is safe.
+        prefix: Short label prepended to the ID (default ``"kalshi"``).
+
+    Returns:
+        A string of the form ``kalshi_20240101_120000_a1b2c3d4``.
 
     Usage::
 
@@ -75,8 +93,24 @@ def generate_correlation_id() -> str:
         logger.info("[TRACE] stage=DISCOVER corr_id=%s ...", corr_id)
         # … pass corr_id to every subsequent stage …
         logger.info("[TRACE] stage=PROTECT corr_id=%s ...", corr_id)
+
+        # Passing an explicit datetime:
+        corr_id = generate_correlation_id(datetime.now(timezone.utc), prefix="kalshi-trader")
+
+        # Passing a raw float epoch (e.g. from time.time()) is also accepted:
+        import time
+        corr_id = generate_correlation_id(time.time(), prefix="kalshi-trader")
     """
-    return str(uuid.uuid4())
+    if timestamp is None:
+        ts_dt = datetime.now(timezone.utc)
+    elif isinstance(timestamp, (int, float)):
+        ts_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    else:
+        ts_dt = timestamp
+
+    ts_part = ts_dt.strftime("%Y%m%d_%H%M%S")
+    unique_part = str(uuid.uuid4()).replace("-", "")[:8]
+    return f"{prefix}_{ts_part}_{unique_part}"
 
 
 # ── Pure math helpers ─────────────────────────────────────────────────────────
