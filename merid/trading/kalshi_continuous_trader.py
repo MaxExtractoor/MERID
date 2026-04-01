@@ -27,10 +27,12 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional
 
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
 from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig
+from merid.formulas import generate_correlation_id
 from merid.prediction.opinion_strategy import OpinionStrategy, OpinionEstimate, OpinionExplanation
 from utils.logger import get_logger
 
@@ -552,7 +554,7 @@ class KalshiContinuousTrader:
                 "kelly_frac": sizing.kelly_frac,
                 "size_contracts": sizing.size_contracts,
                 "sizing_source": sizing.source,
-                "intent_id": f"ct-{candidate.ticker}-{int(time.time())}",
+                "intent_id": generate_correlation_id(datetime.now(timezone.utc), prefix="kalshi-trader"),
                 "ts": time.time(),
             }
 
