@@ -1,5 +1,5 @@
 {
-  "saved_at": 1775003264.3456385,
+  "saved_at": 1775003598.068804,
   "portfolios": {
     "matrix_btc_1771598174": {
       "starting_balance": 10000.0,
@@ -311,9 +311,9 @@
     },
     "slo_lat_0": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -322,11 +322,11 @@
           "user_id": "slo_lat_0",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.0528977,
           "market_type": "perp",
@@ -1676,14 +1676,31 @@
           "filled_at": 1775003263.701888,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_8_1775003597",
+          "user_id": "slo_lat_0",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.4075675,
+          "filled_at": 1775003597.4075727,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_1": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -1692,11 +1709,11 @@
           "user_id": "slo_lat_1",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.0807734,
           "market_type": "perp",
@@ -3046,14 +3063,31 @@
           "filled_at": 1775003263.7459073,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_9_1775003597",
+          "user_id": "slo_lat_1",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.4519186,
+          "filled_at": 1775003597.451923,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_2": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -3062,11 +3096,11 @@
           "user_id": "slo_lat_2",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.082776,
           "market_type": "perp",
@@ -4416,14 +4450,31 @@
           "filled_at": 1775003263.786915,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_10_1775003597",
+          "user_id": "slo_lat_2",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.493914,
+          "filled_at": 1775003597.4939194,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_3": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -4432,11 +4483,11 @@
           "user_id": "slo_lat_3",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.0851443,
           "market_type": "perp",
@@ -5786,14 +5837,31 @@
           "filled_at": 1775003263.827454,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_11_1775003597",
+          "user_id": "slo_lat_3",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.5374486,
+          "filled_at": 1775003597.5374556,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_4": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -5802,11 +5870,11 @@
           "user_id": "slo_lat_4",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.0871432,
           "market_type": "perp",
@@ -7156,14 +7224,31 @@
           "filled_at": 1775003263.8686194,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_12_1775003597",
+          "user_id": "slo_lat_4",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.579563,
+          "filled_at": 1775003597.5795686,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_5": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -7172,11 +7257,11 @@
           "user_id": "slo_lat_5",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.117241,
           "market_type": "perp",
@@ -8526,14 +8611,31 @@
           "filled_at": 1775003263.9104407,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_13_1775003597",
+          "user_id": "slo_lat_5",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.6218553,
+          "filled_at": 1775003597.6218615,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_6": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -8542,11 +8644,11 @@
           "user_id": "slo_lat_6",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.1461146,
           "market_type": "perp",
@@ -9896,14 +9998,31 @@
           "filled_at": 1775003263.9516935,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_14_1775003597",
+          "user_id": "slo_lat_6",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.6644404,
+          "filled_at": 1775003597.664446,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_7": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -9912,11 +10031,11 @@
           "user_id": "slo_lat_7",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.1487126,
           "market_type": "perp",
@@ -11266,14 +11385,31 @@
           "filled_at": 1775003263.9926808,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_15_1775003597",
+          "user_id": "slo_lat_7",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.7070265,
+          "filled_at": 1775003597.7070315,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_8": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -11282,11 +11418,11 @@
           "user_id": "slo_lat_8",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.1517906,
           "market_type": "perp",
@@ -12636,14 +12772,31 @@
           "filled_at": 1775003264.0331106,
           "market_type": "perp",
           "market_id": null
+        },
+        {
+          "order_id": "paper_order_16_1775003597",
+          "user_id": "slo_lat_8",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.7486553,
+          "filled_at": 1775003597.7486594,
+          "market_type": "perp",
+          "market_id": null
         }
       ]
     },
     "slo_lat_9": {
       "starting_balance": 10000.0,
-      "current_balance": 2100.0,
-      "total_pnl": 7.792207792206682,
-      "total_trades": 79,
+      "current_balance": 2000.0,
+      "total_pnl": 7.892107892106651,
+      "total_trades": 80,
       "winning_trades": 0,
       "losing_trades": 0,
       "positions": {
@@ -12652,11 +12805,11 @@
           "user_id": "slo_lat_9",
           "asset": "SLO-TEST",
           "side": "long",
-          "size_usd": 7900.0,
+          "size_usd": 8000.0,
           "entry_price": 100.1,
           "current_price": 100.0,
           "leverage": 1,
-          "unrealized_pnl": -7.892107892107443,
+          "unrealized_pnl": -7.9920079920075375,
           "realized_pnl": 0.0,
           "opened_at": 1771598289.1547146,
           "market_type": "perp",
@@ -14004,6 +14157,23 @@
           "filled_size": 100.0,
           "created_at": 1775003264.0732317,
           "filled_at": 1775003264.0732353,
+          "market_type": "perp",
+          "market_id": null
+        },
+        {
+          "order_id": "paper_order_17_1775003597",
+          "user_id": "slo_lat_9",
+          "asset": "SLO-TEST",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 100.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 100.1,
+          "filled_size": 100.0,
+          "created_at": 1775003597.7906709,
+          "filled_at": 1775003597.790676,
           "market_type": "perp",
           "market_id": null
         }
@@ -49852,7 +50022,7 @@
     "slo_eq_1775003220": {
       "starting_balance": 10000.0,
       "current_balance": 9000.0,
-      "total_pnl": 0.0,
+      "total_pnl": 0.9990009990015096,
       "total_trades": 1,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -49896,7 +50066,7 @@
     "matrix_btc_1775003263": {
       "starting_balance": 10000.0,
       "current_balance": 9500.0,
-      "total_pnl": 0.0,
+      "total_pnl": 38.922615845693144,
       "total_trades": 1,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -49940,7 +50110,7 @@
     "matrix_eth_1775003263": {
       "starting_balance": 10000.0,
       "current_balance": 9700.0,
-      "total_pnl": 0.0,
+      "total_pnl": 43.114028828314986,
       "total_trades": 1,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -49984,7 +50154,7 @@
     "matrix_sol_1775003263": {
       "starting_balance": 10000.0,
       "current_balance": 9800.0,
-      "total_pnl": 0.0,
+      "total_pnl": 0.19980019979993813,
       "total_trades": 1,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -50028,7 +50198,7 @@
     "matrix_mtm_1775003263": {
       "starting_balance": 10000.0,
       "current_balance": 9000.0,
-      "total_pnl": 0.0,
+      "total_pnl": 0.9990009990015096,
       "total_trades": 1,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -50072,7 +50242,7 @@
     "matrix_short_1775003263": {
       "starting_balance": 10000.0,
       "current_balance": 9500.0,
-      "total_pnl": 0.0,
+      "total_pnl": -70.999570999571,
       "total_trades": 1,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -50116,7 +50286,7 @@
     "matrix_aapl_1775003263": {
       "starting_balance": 10000.0,
       "current_balance": 9500.0,
-      "total_pnl": 0.0,
+      "total_pnl": 0.4995004994998453,
       "total_trades": 1,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -50160,7 +50330,7 @@
     "matrix_spy_1775003263": {
       "starting_balance": 10000.0,
       "current_balance": 9000.0,
-      "total_pnl": 0.0,
+      "total_pnl": 0.9990009990015096,
       "total_trades": 1,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -50204,7 +50374,7 @@
     "slo_bal_1775003264": {
       "starting_balance": 10000.0,
       "current_balance": 7500.0,
-      "total_pnl": 0.0,
+      "total_pnl": 2.4975024975010456,
       "total_trades": 5,
       "winning_trades": 0,
       "losing_trades": 0,
@@ -50328,9 +50498,9 @@
           "side": "long",
           "size_usd": 1000.0,
           "entry_price": 3002.9999999999995,
-          "current_price": 3002.9999999999995,
+          "current_price": 3000.0,
           "leverage": 1,
-          "unrealized_pnl": 0.0,
+          "unrealized_pnl": -0.9990009990008476,
           "realized_pnl": 0.0,
           "opened_at": 1775003264.345506,
           "market_type": "perp",
@@ -50352,6 +50522,470 @@
           "filled_size": 1000.0,
           "created_at": 1775003264.3454976,
           "filled_at": 1775003264.3455005,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "matrix_btc_1775003596": {
+      "starting_balance": 10000.0,
+      "current_balance": 9500.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "BTC_long_perp_paper": {
+          "position_id": "paper_pos_1_1775003596",
+          "user_id": "matrix_btc_1775003596",
+          "asset": "BTC",
+          "side": "long",
+          "size_usd": 500.0,
+          "entry_price": 65064.99999999999,
+          "current_price": 60000.0,
+          "leverage": 1,
+          "unrealized_pnl": -38.92261584569272,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003596.7596946,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_1_1775003596",
+          "user_id": "matrix_btc_1775003596",
+          "asset": "BTC",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 65064.99999999999,
+          "filled_size": 500.0,
+          "created_at": 1775003596.7596827,
+          "filled_at": 1775003596.759688,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "matrix_eth_1775003596": {
+      "starting_balance": 10000.0,
+      "current_balance": 9700.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "ETH_long_perp_paper": {
+          "position_id": "paper_pos_2_1775003596",
+          "user_id": "matrix_eth_1775003596",
+          "asset": "ETH",
+          "side": "long",
+          "size_usd": 300.0,
+          "entry_price": 3503.4999999999995,
+          "current_price": 3000.0,
+          "leverage": 1,
+          "unrealized_pnl": -43.11402882831451,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003596.8045182,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_2_1775003596",
+          "user_id": "matrix_eth_1775003596",
+          "asset": "ETH",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 300.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 3503.4999999999995,
+          "filled_size": 300.0,
+          "created_at": 1775003596.8045049,
+          "filled_at": 1775003596.8045104,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "matrix_sol_1775003596": {
+      "starting_balance": 10000.0,
+      "current_balance": 9800.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "SOL_long_perp_paper": {
+          "position_id": "paper_pos_3_1775003596",
+          "user_id": "matrix_sol_1775003596",
+          "asset": "SOL",
+          "side": "long",
+          "size_usd": 200.0,
+          "entry_price": 180.17999999999998,
+          "current_price": 180.0,
+          "leverage": 1,
+          "unrealized_pnl": -0.19980019980017585,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003596.8481374,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_3_1775003596",
+          "user_id": "matrix_sol_1775003596",
+          "asset": "SOL",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 200.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 180.17999999999998,
+          "filled_size": 200.0,
+          "created_at": 1775003596.8481283,
+          "filled_at": 1775003596.848132,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "matrix_mtm_1775003596": {
+      "starting_balance": 10000.0,
+      "current_balance": 9000.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "BTC_long_perp_paper": {
+          "position_id": "paper_pos_4_1775003596",
+          "user_id": "matrix_mtm_1775003596",
+          "asset": "BTC",
+          "side": "long",
+          "size_usd": 1000.0,
+          "entry_price": 60059.99999999999,
+          "current_price": 60000.0,
+          "leverage": 1,
+          "unrealized_pnl": -0.999000999000878,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003596.8925261,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_4_1775003596",
+          "user_id": "matrix_mtm_1775003596",
+          "asset": "BTC",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 1000.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 60059.99999999999,
+          "filled_size": 1000.0,
+          "created_at": 1775003596.8925161,
+          "filled_at": 1775003596.8925204,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "matrix_short_1775003596": {
+      "starting_balance": 10000.0,
+      "current_balance": 9500.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "ETH_short_perp_paper": {
+          "position_id": "paper_pos_5_1775003596",
+          "user_id": "matrix_short_1775003596",
+          "asset": "ETH",
+          "side": "short",
+          "size_usd": 500.0,
+          "entry_price": 3496.5,
+          "current_price": 3000.0,
+          "leverage": 1,
+          "unrealized_pnl": 70.99957099957099,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003596.9357333,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_5_1775003596",
+          "user_id": "matrix_short_1775003596",
+          "asset": "ETH",
+          "side": "short",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 3496.5,
+          "filled_size": 500.0,
+          "created_at": 1775003596.9357228,
+          "filled_at": 1775003596.9357274,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "matrix_aapl_1775003597": {
+      "starting_balance": 10000.0,
+      "current_balance": 9500.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "AAPL_long_perp_paper": {
+          "position_id": "paper_pos_6_1775003597",
+          "user_id": "matrix_aapl_1775003597",
+          "asset": "AAPL",
+          "side": "long",
+          "size_usd": 500.0,
+          "entry_price": 195.19499999999996,
+          "current_price": 195.0,
+          "leverage": 1,
+          "unrealized_pnl": -0.4995004995004093,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003597.1719449,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_6_1775003597",
+          "user_id": "matrix_aapl_1775003597",
+          "asset": "AAPL",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 195.19499999999996,
+          "filled_size": 500.0,
+          "created_at": 1775003597.1719337,
+          "filled_at": 1775003597.171939,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "matrix_spy_1775003597": {
+      "starting_balance": 10000.0,
+      "current_balance": 9000.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "SPY_long_perp_paper": {
+          "position_id": "paper_pos_7_1775003597",
+          "user_id": "matrix_spy_1775003597",
+          "asset": "SPY",
+          "side": "long",
+          "size_usd": 1000.0,
+          "entry_price": 520.52,
+          "current_price": 520.0,
+          "leverage": 1,
+          "unrealized_pnl": -0.9990009990009641,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003597.242326,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_7_1775003597",
+          "user_id": "matrix_spy_1775003597",
+          "asset": "SPY",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 1000.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 520.52,
+          "filled_size": 1000.0,
+          "created_at": 1775003597.242316,
+          "filled_at": 1775003597.24232,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "slo_bal_1775003597": {
+      "starting_balance": 10000.0,
+      "current_balance": 7500.0,
+      "total_pnl": 0.0,
+      "total_trades": 5,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "BTC_long_perp_paper": {
+          "position_id": "paper_pos_8_1775003597",
+          "user_id": "slo_bal_1775003597",
+          "asset": "BTC",
+          "side": "long",
+          "size_usd": 2500.0,
+          "entry_price": 60059.999999999985,
+          "current_price": 60000.0,
+          "leverage": 1,
+          "unrealized_pnl": -2.4975024975018925,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003597.856476,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_18_1775003597",
+          "user_id": "slo_bal_1775003597",
+          "asset": "BTC",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 60059.99999999999,
+          "filled_size": 500.0,
+          "created_at": 1775003597.8564656,
+          "filled_at": 1775003597.8564699,
+          "market_type": "perp",
+          "market_id": null
+        },
+        {
+          "order_id": "paper_order_19_1775003597",
+          "user_id": "slo_bal_1775003597",
+          "asset": "BTC",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 60059.99999999999,
+          "filled_size": 500.0,
+          "created_at": 1775003597.8985963,
+          "filled_at": 1775003597.8986015,
+          "market_type": "perp",
+          "market_id": null
+        },
+        {
+          "order_id": "paper_order_20_1775003597",
+          "user_id": "slo_bal_1775003597",
+          "asset": "BTC",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 60059.99999999999,
+          "filled_size": 500.0,
+          "created_at": 1775003597.9407606,
+          "filled_at": 1775003597.9407678,
+          "market_type": "perp",
+          "market_id": null
+        },
+        {
+          "order_id": "paper_order_21_1775003597",
+          "user_id": "slo_bal_1775003597",
+          "asset": "BTC",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 60059.99999999999,
+          "filled_size": 500.0,
+          "created_at": 1775003597.982845,
+          "filled_at": 1775003597.98285,
+          "market_type": "perp",
+          "market_id": null
+        },
+        {
+          "order_id": "paper_order_22_1775003598",
+          "user_id": "slo_bal_1775003597",
+          "asset": "BTC",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 500.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 60059.99999999999,
+          "filled_size": 500.0,
+          "created_at": 1775003598.02469,
+          "filled_at": 1775003598.0246968,
+          "market_type": "perp",
+          "market_id": null
+        }
+      ]
+    },
+    "slo_eq_1775003598": {
+      "starting_balance": 10000.0,
+      "current_balance": 9000.0,
+      "total_pnl": 0.0,
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "positions": {
+        "ETH_long_perp_paper": {
+          "position_id": "paper_pos_9_1775003598",
+          "user_id": "slo_eq_1775003598",
+          "asset": "ETH",
+          "side": "long",
+          "size_usd": 1000.0,
+          "entry_price": 3002.9999999999995,
+          "current_price": 3002.9999999999995,
+          "leverage": 1,
+          "unrealized_pnl": 0.0,
+          "realized_pnl": 0.0,
+          "opened_at": 1775003598.0686216,
+          "market_type": "perp",
+          "market_id": null
+        }
+      },
+      "trade_history": [
+        {
+          "order_id": "paper_order_23_1775003598",
+          "user_id": "slo_eq_1775003598",
+          "asset": "ETH",
+          "side": "long",
+          "order_type": "market",
+          "size_usd": 1000.0,
+          "price": null,
+          "leverage": 1,
+          "status": "filled",
+          "fill_price": 3002.9999999999995,
+          "filled_size": 1000.0,
+          "created_at": 1775003598.0686111,
+          "filled_at": 1775003598.0686154,
           "market_type": "perp",
           "market_id": null
         }
