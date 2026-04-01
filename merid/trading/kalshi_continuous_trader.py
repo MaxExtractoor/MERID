@@ -280,6 +280,9 @@ class KalshiContinuousTrader:
                 scan_total_input += filter_result.total_input
                 scan_rejected_volume_band += filter_result.rejected_volume_band
 
+                # Yield to event loop after processing each asset-timeframe combination
+                await asyncio.sleep(0)
+
         # Compute per-scan volume-band block rate and update rolling history.
         scan_block_rate = (
             scan_rejected_volume_band / scan_total_input
@@ -522,6 +525,9 @@ class KalshiContinuousTrader:
         """
         intents = []
         for candidate in self._candidates:
+            # Yield to event loop periodically during candidate processing
+            await asyncio.sleep(0)
+
             if spot_prices:
                 candidate.spot_price = spot_prices.get(candidate.underlying)
 
