@@ -177,6 +177,13 @@ class MeridLoop:
         self._liquidity_refresh_interval = 30.0  # 30 seconds — orderbook health sweep
         self._last_config_reload = 0.0
         self._config_reload_interval = 300.0  # 5 minutes — hot-reload risk limits / reality assertions
+        self._last_order_group_sync = 0.0
+        self._order_group_sync_interval = 30.0  # 30 seconds — Kalshi order group lifecycle sync
+
+        # Tick processing lag tracking
+        self._tick_in_progress = False
+        self._last_tick_duration_ms = 0.0
+        self._step_durations: Dict[str, float] = {}  # Track per-step timing
 
         # W6: pre-initialise ws_bridge so _refresh_liquidity can safely reference it
         # before run() is called (e.g. in tests or if tick() is called standalone).
@@ -264,6 +271,45 @@ class MeridLoop:
 
     # ── Core tick ─────────────────────────────────────────────────────
 
+    async def _run_step_with_timeout(
+        self,
+        coro,
+        step_name: str,
+        timeout_ms: Optional[float] = None,
+    ) -> bool:
+        """Run a tick step with optional timeout and timing tracking.
+
+        Args:
+            coro: The coroutine to run
+            step_name: Name for logging and metrics
+            timeout_ms: Optional timeout in milliseconds
+
+        Returns:
+            True if step completed successfully, False if timed out
+        """
+        step_start = time.perf_counter()
+        try:
+            if timeout_ms:
+                await asyncio.wait_for(coro, timeout=timeout_ms / 1000.0)
+            else:
+                await coro
+            step_elapsed_ms = (time.perf_counter() - step_start) * 1000
+            self._step_durations[step_name] = step_elapsed_ms
+            return True
+        except asyncio.TimeoutError:
+            step_elapsed_ms = (time.perf_counter() - step_start) * 1000
+            self._step_durations[step_name] = step_elapsed_ms
+            logger.error(
+                f"Step {step_name} exceeded timeout of {timeout_ms}ms "
+                f"(elapsed: {step_elapsed_ms:.1f}ms)"
+            )
+            return False
+        except Exception as e:
+            step_elapsed_ms = (time.perf_counter() - step_start) * 1000
+            self._step_durations[step_name] = step_elapsed_ms
+            logger.error(f"Step {step_name} failed: {e}")
+            raise
+
     async def tick(self, now: Optional[float] = None) -> Dict[str, Any]:
         """Run one full cycle of the swarm loop.
 
@@ -272,6 +318,19 @@ class MeridLoop:
         now = now or time.time()
         start = time.perf_counter()
         summary: Dict[str, Any] = {"tick": self.metrics.total_ticks + 1, "actions": []}
+
+        # Tick overlap detection
+        if self._tick_in_progress:
+            logger.warning(
+                f"Tick overlap detected - previous tick still running "
+                f"(last duration: {self._last_tick_duration_ms:.1f}ms)"
+            )
+            summary["tick_overlap"] = True
+            summary["skipped"] = "tick_overlap"
+            return summary
+
+        self._tick_in_progress = True
+        self._step_durations.clear()
 
         try:
             # Step 1: Refresh features
@@ -330,7 +389,9 @@ class MeridLoop:
 
             # Step 7b: Order group lifecycle sync (for prediction domain)
             if "prediction" in self.config.active_domains:
-                await self._sync_order_groups(summary)
+                if now - self._last_order_group_sync >= self._order_group_sync_interval:
+                    await self._sync_order_groups(summary)
+                    self._last_order_group_sync = now
 
             # Step 7c: Config hot-reload — re-register live assertions in RealityAuditor
             if now - self._last_config_reload >= self._config_reload_interval:
@@ -345,12 +406,19 @@ class MeridLoop:
             self.metrics.last_error = str(e)
             logger.error(f"Loop tick error: {e}\n{traceback.format_exc()}")
             summary["error"] = str(e)
+        finally:
+            self._tick_in_progress = False
 
         elapsed_ms = (time.perf_counter() - start) * 1000
         self.metrics.total_ticks += 1
         self.metrics.last_tick_at = now
         self.metrics.last_tick_duration_ms = elapsed_ms
+        self._last_tick_duration_ms = elapsed_ms
         summary["duration_ms"] = round(elapsed_ms, 1)
+        if self._step_durations:
+            summary["step_durations"] = {
+                k: round(v, 1) for k, v in self._step_durations.items()
+            }
 
         return summary
 
@@ -752,12 +820,38 @@ class MeridLoop:
                 except Exception as _wse:
                     logger.debug("ws_bridge mid-session subscribe skipped: %s", _wse)
 
+            # Parallel orderbook fetching with timeout and concurrency limit
+            semaphore = asyncio.Semaphore(10)  # max 10 concurrent fetches
+
+            async def fetch_orderbook_with_timeout(ticker: str):
+                """Fetch orderbook for a single ticker with timeout and concurrency control."""
+                async with semaphore:
+                    try:
+                        ob = await asyncio.wait_for(
+                            client.get_orderbook(ticker),
+                            timeout=0.5  # 500ms per market
+                        )
+                        if not ob:
+                            return None
+                        return (ticker, ob)
+                    except asyncio.TimeoutError:
+                        logger.debug(f"Orderbook timeout for {ticker}")
+                        return None
+                    except Exception as _te:
+                        logger.debug(f"liquidity_sweep {ticker} skipped: {_te}")
+                        return None
+
+            # Fetch all orderbooks in parallel
+            tasks = [fetch_orderbook_with_timeout(t) for t in tickers]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
             alerts_total = 0
-            for ticker in tickers:
+            for result in results:
+                if result is None or isinstance(result, Exception):
+                    continue
+                ticker, ob = result
                 try:
-                    ob = await client.get_orderbook(ticker)
-                    if not ob:
-                        continue
                     bid = float(ob.bids[0][0]) if ob.bids else 0.0
                     ask = float(ob.asks[0][0]) if ob.asks else 1.0
                     bid_sz = int(ob.bids[0][1]) if ob.bids else 0
@@ -785,9 +879,8 @@ class MeridLoop:
                                         _pos.current_price_cents = mid_cents
                         except Exception as _pe:
                             logger.debug("stop_loss price update skipped for %s: %s", ticker, _pe)
-
-                except Exception as _te:
-                    logger.debug("liquidity_sweep %s skipped: %s", ticker, _te)
+                except Exception as _pe:
+                    logger.debug("orderbook processing failed for %s: %s", ticker, _pe)
 
             summary["actions"].append(
                 f"liquidity_sweep:{len(tickers)}markets,{alerts_total}alerts"
