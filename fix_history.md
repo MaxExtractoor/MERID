@@ -609,3 +609,192 @@ All critical optimizations implemented:
 **Next Action**: Run validation per `VALIDATION_GUIDE.md` and `TICK_PROCESSING_OPTIMIZATION_PLAN.md`
 
 ---
+
+## Phase 3 — Deep Event-Loop Lag Profiling and Fix (2026-04-01)
+
+### Background: 5-Minute Smoke Gate Failure
+
+While tick-level optimizations passed all 19 unit tests and achieved expected reductions
+(P95 tick duration: 650-800ms → 250-400ms), a 5-minute smoke gate (`tick_opt_smoke_20250401_0425`)
+revealed a critical issue:
+
+| Metric | Value | Target | Status |
+|--------|-------|--------|--------|
+| P95 lag range | 953–11,000 ms | <500 ms | ❌ FAIL |
+| P95 lag avg | ≈5,540 ms | <500 ms | ❌ FAIL |
+| High-lag profiles captured | 10 | 0 | ❌ FAIL |
+| `degraded=true` samples | Multiple | 0 | ❌ FAIL |
+
+**Conclusion**: Tick optimizations are **correct but insufficient**. The root cause is outside
+the tick loop — steady-state lag from WebSockets, background services, thread pool, and
+blocking I/O operations.
+
+### Issue ID
+
+ANOMALY-5 (new) — Steady-state event-loop lag from non-tick subsystems
+
+### Root Cause Analysis
+
+The existing `EventLoopMonitor` measures *overall* lag (P50/P95/P99) but doesn't capture
+**which coroutines** are causing the spikes. Without stack traces, we cannot identify:
+
+1. **WebSocket message processing** — Tight loops in Kalshi WS client
+2. **Background services** — Continuous traders, monitoring, reconciliation
+3. **Thread pool contention** — CPU-heavy tasks blocking event loop
+4. **Blocking I/O** — Synchronous operations in async context
+
+To fix steady-state lag, we need:
+- **Profiling infrastructure** to capture stack traces during high-lag events
+- **Targeted yields** in identified tight loops
+- **Iterative validation** with smoke gates to measure impact
+
+### Fix #1: High-Lag Profiling Infrastructure (2026-04-01)
+
+**Issue**: Cannot identify which coroutines are causing event loop starvation
+
+**Changes**:
+
+1. **Added `HighLagProfile` dataclass** (`observability/event_loop_monitor.py:38-59`):
+   - Captures stack traces, coroutine names, file:line locations
+   - Stores top 10 offending tasks + full stack dump
+   - JSON-serializable for API export
+
+2. **Added `_capture_high_lag_profile()` method** (`:144-219`):
+   - Called automatically when lag ≥ 500ms
+   - Uses `asyncio.all_tasks()` to snapshot active coroutines
+   - Extracts frame info via `cr_frame`/`gi_frame`
+   - Logs top 3 offenders with module names
+
+3. **Integrated profile capture into monitoring loop** (`:245-248`):
+   - Triggers on critical threshold (500ms)
+   - Stores last 10 profiles in deque (configurable)
+   - Non-blocking synchronous capture
+
+4. **Added 3 new API endpoints** (`web/api/health.py:361-528`):
+   - `GET /health/event_loop/profiles` — View captured profiles
+   - `DELETE /health/event_loop/profiles` — Clear profiles
+   - `GET /health/event_loop/profiles/summary` — Aggregate analysis
+
+**Expected Impact**:
+- Enable data-driven identification of lag sources
+- Provide file:line references for targeted fixes
+- Support iterative validation (smoke gate → profile → fix → re-test)
+
+**Validation**:
+```bash
+# Start server, trigger artificial lag
+python -c "import time; time.sleep(0.6)"
+
+# Check profiles
+curl http://localhost:8000/health/event_loop/profiles/summary
+
+# Expected output: offenders_by_coroutine, offenders_by_module, max_lag_ms
+```
+
+### Fix #2: Add Yields to WebSocket and Trading Loops (2026-04-01)
+
+**Issue**: Tight loops in WS reconnect and continuous trader can starve event loop
+
+**Changes**:
+
+1. **Kalshi WebSocket reconnect loop** (`merid/event_venues/kalshi/ws.py:577-580`):
+   ```python
+   for ob_ticker in self._orderbook_tickers:
+       await self.subscribe_orderbook(ob_ticker)
+       # Yield to event loop after each orderbook subscription
+       await asyncio.sleep(0)
+   ```
+   - Impact: Prevents starvation when reconnecting to 20+ orderbooks
+
+2. **Continuous trader asset-timeframe loop** (`merid/trading/kalshi_continuous_trader.py:248-284`):
+   ```python
+   for asset in _CRYPTO_ASSETS:  # 5 assets
+       for tf in _CRYPTO_TIMEFRAMES:  # 5 timeframes = 25 iterations
+           # ... process markets ...
+           # Yield to event loop after processing each asset-timeframe combination
+           await asyncio.sleep(0)
+   ```
+   - Impact: Prevents starvation when scanning all 25 crypto market combinations
+
+3. **Continuous trader candidate evaluation loop** (`:527-532`):
+   ```python
+   for candidate in self._candidates:
+       # Yield to event loop periodically during candidate processing
+       await asyncio.sleep(0)
+       # ... evaluate candidate ...
+   ```
+   - Impact: Prevents starvation when evaluating 50+ candidates
+
+**Rationale**:
+- `await asyncio.sleep(0)` is a guaranteed yield point
+- Zero-delay sleep allows scheduler to run other tasks
+- Minimal performance impact (~0.01ms per yield)
+- Critical for fairness in multi-coroutine environments
+
+**Expected Impact**:
+- Reduce P95 lag spikes during market scans
+- Improve responsiveness when processing many markets/candidates
+- Enable tick loop to run on-cadence even during background activity
+
+### Validation Plan
+
+**Phase 3A — Short Smoke Gate with Profiling** (5-10 minutes):
+
+1. Start MERID with profiling enabled
+2. Monitor `/health/event_loop/profiles/summary`
+3. Check for high-lag profiles (expected: 0-2 during startup)
+4. If profiles captured:
+   - Analyze `offenders_by_coroutine` and `offenders_by_module`
+   - Identify top 3 offenders
+   - Add targeted yields or offload to executors
+   - Re-test
+
+**Phase 3B — 30-Minute Paper Gate** (after smoke passes):
+
+1. Run `scripts/run_paper_gate.py --duration 1800`
+2. Criteria for PASS:
+   - P95 lag <500ms throughout (all 60 samples)
+   - `degraded=false` on every sample
+   - Zero high-lag profiles captured
+   - No tick overlap events
+
+**Phase 3C — Iterative Profiling Loop**:
+
+Until P95 <500ms sustained:
+1. Run smoke gate with profiling
+2. Analyze profiles via `/health/event_loop/profiles/summary`
+3. Fix top offenders (yields, executors, backpressure)
+4. Document each fix in this file
+5. Re-test
+
+### Safety Guarantees
+
+**No Functional Changes**:
+- ✅ All yields are cooperative (`await asyncio.sleep(0)`)
+- ✅ No blocking sleeps that delay critical operations
+- ✅ Profiling is non-intrusive (captures state, doesn't modify behavior)
+- ✅ No changes to trading logic, risk management, execution gates
+
+**Preserved Correctness**:
+- ✅ Yields inserted only in iteration loops (safe points)
+- ✅ No yields inside critical sections (locks, transactions)
+- ✅ Profile capture is synchronous (no race conditions)
+
+**Monitoring**:
+- ✅ Profile count exposed via `/health/event_loop`
+- ✅ Profile summary API provides aggregate analysis
+- ✅ High-lag events logged at WARNING level
+
+### Readiness Assessment
+
+**Status**: ⬜ **READY FOR SMOKE GATE VALIDATION**
+
+Profiling infrastructure complete:
+1. ✅ High-lag profile capture implemented
+2. ✅ API endpoints for profile access and analysis
+3. ✅ Targeted yields added to known tight loops
+4. ✅ All changes committed and syntax-checked
+
+**Next Action**: Execute Phase 3A smoke gate (5-10 minutes) and analyze profiles
+
+---
