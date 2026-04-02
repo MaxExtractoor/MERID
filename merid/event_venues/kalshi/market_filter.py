@@ -51,36 +51,36 @@ logger = get_logger("merid.event_venues.kalshi.market_filter")
 # based on optimization analysis via scripts/optimize_spot_bands.py.
 #
 SPOT_BANDS: Dict[Tuple[str, str], float] = {
-    # BTC — Liquid, tight spreads → can use tighter bands
-    ("BTC", "15m"): 0.125,
-    ("BTC", "1h"): 0.125,
-    ("BTC", "daily"): 0.125,
-    ("BTC", "weekly"): 0.125,
-    ("BTC", "monthly"): 0.125,
-    # ETH — Moderately liquid → slightly wider bands
-    ("ETH", "15m"): 0.125,
-    ("ETH", "1h"): 0.125,
-    ("ETH", "daily"): 0.125,
-    ("ETH", "weekly"): 0.125,
-    ("ETH", "monthly"): 0.125,
-    # SOL — Less liquid → wider bands for sufficient candidates
-    ("SOL", "15m"): 0.125,
-    ("SOL", "1h"): 0.125,
-    ("SOL", "daily"): 0.125,
-    ("SOL", "weekly"): 0.125,
-    ("SOL", "monthly"): 0.125,
-    # XRP — Similar to SOL
-    ("XRP", "15m"): 0.125,
-    ("XRP", "1h"): 0.125,
-    ("XRP", "daily"): 0.125,
-    ("XRP", "weekly"): 0.125,
-    ("XRP", "monthly"): 0.125,
-    # DOGE — Least liquid → widest bands
-    ("DOGE", "15m"): 0.125,
-    ("DOGE", "1h"): 0.125,
-    ("DOGE", "daily"): 0.125,
-    ("DOGE", "weekly"): 0.125,
-    ("DOGE", "monthly"): 0.125,
+    # BTC — Liquid, tight spreads → tighter bands for quality focus
+    ("BTC", "15m"): 0.20,    # 20% - tight focus on near-the-money
+    ("BTC", "1h"): 0.25,     # 25% - balance quality and quantity
+    ("BTC", "daily"): 0.30,  # 30% - wider for daily strikes
+    ("BTC", "weekly"): 0.35, # 35% - capture weekly candidates
+    ("BTC", "monthly"): 0.40, # 40% - sufficient long-dated strikes
+    # ETH — Moderately liquid → balanced bands
+    ("ETH", "15m"): 0.25,    # 25% - moderate focus
+    ("ETH", "1h"): 0.30,     # 30% - good candidate pool
+    ("ETH", "daily"): 0.35,  # 35% - daily coverage
+    ("ETH", "weekly"): 0.40, # 40% - weekly strikes
+    ("ETH", "monthly"): 0.45, # 45% - long-dated coverage
+    # SOL — Less liquid → wider bands for throughput
+    ("SOL", "15m"): 0.30,    # 30% - ensure candidates
+    ("SOL", "1h"): 0.35,     # 35% - adequate pool
+    ("SOL", "daily"): 0.40,  # 40% - daily coverage
+    ("SOL", "weekly"): 0.45, # 45% - weekly strikes
+    ("SOL", "monthly"): 0.50, # 50% - max coverage
+    # XRP — Similar to SOL, wider for liquidity
+    ("XRP", "15m"): 0.30,    # 30% - sufficient candidates
+    ("XRP", "1h"): 0.35,     # 35% - good pool
+    ("XRP", "daily"): 0.40,  # 40% - daily strikes
+    ("XRP", "weekly"): 0.45, # 45% - weekly coverage
+    ("XRP", "monthly"): 0.50, # 50% - long-dated strikes
+    # DOGE — Least liquid → widest bands for candidate availability
+    ("DOGE", "15m"): 0.35,   # 35% - wide search needed
+    ("DOGE", "1h"): 0.40,    # 40% - ensure pool
+    ("DOGE", "daily"): 0.45, # 45% - daily coverage
+    ("DOGE", "weekly"): 0.50, # 50% - weekly strikes
+    ("DOGE", "monthly"): 0.50, # 50% - max coverage
 }
 
 
