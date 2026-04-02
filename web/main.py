@@ -2245,6 +2245,12 @@ async def _app_lifespan(application: FastAPI):
 
     # CFGI fear/greed refresh loop — periodic push of F&G index into MarketMoodBus
     async def _cfgi_refresh_loop():
+        import random
+        # Add random initial offset (20-70 seconds) to desynchronize from other 5-min tasks
+        _initial_offset = random.uniform(20.0, 70.0)
+        logger.debug(f"CFGI refresh loop: initial offset {_initial_offset:.1f}s")
+        await asyncio.sleep(_initial_offset)
+
         _assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
         while True:
             try:
@@ -2533,12 +2539,18 @@ async def _app_lifespan(application: FastAPI):
     # ── Start periodic Kalshi venue reconciliation ───────────────────
     try:
         import threading as _recon_threading
+        import random
         from merid.reconciliation import reconcile_all_venues
 
         _kalshi_recon_stop = _recon_threading.Event()
 
         def _kalshi_recon_loop() -> None:
-            logger.info("Periodic Kalshi venue reconciliation started (every 300s)")
+            # Add random initial offset (40-110 seconds) to desynchronize from catalog refresh
+            import time as _time
+            _initial_offset = random.uniform(40.0, 110.0)
+            logger.info(f"Periodic Kalshi venue reconciliation started (every 300s, offset {_initial_offset:.1f}s)")
+            _time.sleep(_initial_offset)
+
             while not _kalshi_recon_stop.wait(timeout=300.0):
                 try:
                     discs = reconcile_all_venues(["kalshi"])
