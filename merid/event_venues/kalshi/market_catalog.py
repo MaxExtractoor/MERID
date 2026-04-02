@@ -218,7 +218,7 @@ class KalshiMarketCatalog:
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start periodic refresh loop."""
+        """Start periodic refresh loop with desynchronized initial delay."""
         if self._task and not self._task.done():
             return
         self._shutdown.clear()
@@ -238,6 +238,13 @@ class KalshiMarketCatalog:
         logger.info("KalshiMarketCatalog stopped")
 
     async def _refresh_loop(self) -> None:
+        """Periodic refresh loop with desynchronized schedule to avoid T+5min storms."""
+        import random
+        # Add random initial offset (30-90 seconds) to desynchronize from other 5-min tasks
+        initial_offset = random.uniform(30.0, 90.0)
+        logger.debug(f"Catalog refresh loop: initial offset {initial_offset:.1f}s")
+        await asyncio.sleep(initial_offset)
+
         while not self._shutdown.is_set():
             try:
                 await asyncio.sleep(self._refresh_interval)
