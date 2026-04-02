@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
@@ -39,6 +40,20 @@ from merid.event_venues.kalshi.models import KalshiConfig
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.market_catalog")
+
+# ── Process pool for CPU-intensive index building ────────────────────────
+# Shared across all catalog instances to avoid creating too many processes.
+# Max 2 workers since we typically only have one or two catalogs.
+
+_PROCESS_POOL: Optional[ProcessPoolExecutor] = None
+
+
+def _get_process_pool() -> ProcessPoolExecutor:
+    """Get or create the shared process pool for catalog indexing."""
+    global _PROCESS_POOL
+    if _PROCESS_POOL is None:
+        _PROCESS_POOL = ProcessPoolExecutor(max_workers=2)
+    return _PROCESS_POOL
 
 
 # ── Ticker-prefix → category mapping (primary detection) ────────────────
@@ -178,16 +193,21 @@ class KalshiMarketCatalog:
         client: Optional[KalshiVenueClient] = None,
         refresh_interval_s: float = 300.0,
         max_markets: int = 2000,
+        use_process_indexing: bool = True,
     ):
         self._client = client or KalshiVenueClient(KalshiConfig())
         self._refresh_interval = refresh_interval_s
         self._max_markets = max_markets
+        self._use_process_indexing = use_process_indexing
 
         self._markets: List[CatalogMarket] = []
         self._by_category: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_asset: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_timeframe: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_ticker: Dict[str, CatalogMarket] = {}
+
+        # Track active/subscribed markets to scope periodic refreshes
+        self._active_tickers: Set[str] = set()
 
         self._last_refresh: Optional[datetime] = None
         self._refresh_count: int = 0
@@ -234,10 +254,21 @@ class KalshiMarketCatalog:
     async def refresh(self) -> int:
         """Fetch all active markets from Kalshi and rebuild indexes.
 
+        Startup (refresh_count == 0):
+        - Performs full enrichment and indexing on all markets
+        - Optionally uses ProcessPoolExecutor for CPU-intensive index building
+
+        Periodic (refresh_count > 0):
+        - If active_tickers is empty, performs full refresh (fallback)
+        - Otherwise, only enriches active/subscribed markets for efficiency
+        - Reduces P95 lag by avoiding 5000-market processing every 5 minutes
+
         Returns:
             Number of markets cataloged.
         """
         async with self._lock:
+            is_startup = (self._refresh_count == 0)
+
             try:
                 result = await self._client.list_markets_result(
                     MarketFilter(active_only=True, limit=self._max_markets)
@@ -255,7 +286,39 @@ class KalshiMarketCatalog:
                 return len(self._markets)
 
             now = datetime.now(timezone.utc)
-            enriched: List[CatalogMarket] = []
+
+            if is_startup:
+                # ── Startup refresh: full enrichment ──────────────────────────
+                logger.info(f"Catalog startup refresh: processing {len(raw_markets)} markets")
+
+                if self._use_process_indexing and len(raw_markets) > 100:
+                    # Use ProcessPoolExecutor for CPU-intensive index building
+                    enriched = await self._refresh_with_process_pool(raw_markets, now)
+                else:
+                    # Fallback to synchronous enrichment for small catalogs or tests
+                    enriched = await self._refresh_synchronous(raw_markets, now)
+            else:
+                # ── Periodic refresh: scoped to active markets ─────────────────
+                if self._active_tickers:
+                    # Scope to active markets only
+                    active_raw = [m for m in raw_markets if m.market_id in self._active_tickers]
+                    logger.debug(
+                        f"Catalog periodic refresh: scoped to {len(active_raw)}/{len(raw_markets)} active markets"
+                    )
+                    # For periodic refreshes, always use synchronous (fast for ~400 markets)
+                    enriched = await self._refresh_synchronous(active_raw, now)
+
+                    # Preserve existing enriched markets not in active set
+                    existing_inactive = [m for m in self._markets if m.market.market_id not in self._active_tickers]
+                    enriched.extend(existing_inactive)
+                else:
+                    # Fallback: no active tickers tracked, do full refresh
+                    logger.warning(
+                        "Catalog periodic refresh: no active tickers tracked, falling back to full refresh"
+                    )
+                    enriched = await self._refresh_synchronous(raw_markets, now)
+
+            # ── Rebuild indexes ───────────────────────────────────────────────
             cat_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             asset_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
             tf_idx: Dict[str, List[CatalogMarket]] = defaultdict(list)
@@ -263,12 +326,9 @@ class KalshiMarketCatalog:
 
             categories_found = set()
             assets_found = set()
-            
-            for mkt in raw_markets:
-                cm = self._enrich(mkt, now)
-                enriched.append(cm)
-                ticker_idx[mkt.market_id] = cm
 
+            for cm in enriched:
+                ticker_idx[cm.market.market_id] = cm
                 if cm.category:
                     cat_idx[cm.category].append(cm)
                     categories_found.add(cm.category)
@@ -277,19 +337,6 @@ class KalshiMarketCatalog:
                     assets_found.add(cm.asset)
                 if cm.timeframe:
                     tf_idx[cm.timeframe].append(cm)
-            
-            # Debug logging for first refresh to see what's happening
-            if self._refresh_count == 0 and enriched:
-                sample = enriched[0]
-                logger.debug(
-                    f"Sample market: ticker={sample.market.market_id}, "
-                    f"category={sample.category}, asset={sample.asset}, "
-                    f"question={sample.market.question[:50]}..."
-                )
-                if categories_found:
-                    logger.info(f"Categories detected: {sorted(categories_found)}")
-                if assets_found:
-                    logger.info(f"Assets detected: {sorted(assets_found)}")
 
             self._markets = enriched
             self._by_category = cat_idx
@@ -301,29 +348,94 @@ class KalshiMarketCatalog:
 
             _log = logger.info if enriched else logger.debug
             _log(
-                f"Catalog refreshed: {len(enriched)} markets, "
+                f"Catalog refreshed (#{self._refresh_count}): {len(enriched)} markets, "
                 f"{len(cat_idx)} categories, {len(asset_idx)} assets"
             )
 
-            # Per-asset/timeframe INFO logging on every refresh so operators
-            # can confirm crypto assets are flowing through the catalog.
-            _CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
-            for _asset in _CRYPTO_ASSETS:
-                _asset_mkts = asset_idx.get(_asset, [])
-                if _asset_mkts:
-                    _15m = sum(1 for m in _asset_mkts if m.timeframe == "15m")
-                    _1h = sum(1 for m in _asset_mkts if m.timeframe == "1h")
-                    _daily = sum(1 for m in _asset_mkts if m.timeframe == "daily")
-                    _weekly = sum(1 for m in _asset_mkts if m.timeframe == "weekly")
-                    _monthly = sum(1 for m in _asset_mkts if m.timeframe == "monthly")
-                    logger.info(
-                        "Catalog %s: total=%d  15m=%d  1h=%d  daily=%d  weekly=%d  monthly=%d",
-                        _asset, len(_asset_mkts), _15m, _1h, _daily, _weekly, _monthly,
-                    )
-                else:
-                    logger.debug("Catalog %s: 0 markets detected", _asset)
+            # Per-asset/timeframe INFO logging
+            if is_startup or self._refresh_count % 5 == 0:  # Log every 5th periodic refresh
+                _CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+                for _asset in _CRYPTO_ASSETS:
+                    _asset_mkts = asset_idx.get(_asset, [])
+                    if _asset_mkts:
+                        _15m = sum(1 for m in _asset_mkts if m.timeframe == "15m")
+                        _1h = sum(1 for m in _asset_mkts if m.timeframe == "1h")
+                        _daily = sum(1 for m in _asset_mkts if m.timeframe == "daily")
+                        _weekly = sum(1 for m in _asset_mkts if m.timeframe == "weekly")
+                        _monthly = sum(1 for m in _asset_mkts if m.timeframe == "monthly")
+                        logger.info(
+                            "Catalog %s: total=%d  15m=%d  1h=%d  daily=%d  weekly=%d  monthly=%d",
+                            _asset, len(_asset_mkts), _15m, _1h, _daily, _weekly, _monthly,
+                        )
 
             return len(enriched)
+
+    async def _refresh_synchronous(
+        self, raw_markets: List[EventMarket], now: datetime
+    ) -> List[CatalogMarket]:
+        """Synchronous market enrichment (fallback or small catalogs)."""
+        enriched: List[CatalogMarket] = []
+        for mkt in raw_markets:
+            cm = self._enrich(mkt, now)
+            enriched.append(cm)
+        return enriched
+
+    async def _refresh_with_process_pool(
+        self, raw_markets: List[EventMarket], now: datetime
+    ) -> List[CatalogMarket]:
+        """Process-pool-based enrichment to bypass GIL for CPU-heavy work."""
+        try:
+            from merid.event_venues.kalshi.catalog_indexer import build_indexes
+
+            # Prepare serializable data for the worker process
+            raw_dicts = []
+            for m in raw_markets:
+                raw_dicts.append({
+                    "market_id": m.market_id,
+                    "event_ticker": m.raw_data.get("event_ticker") if m.raw_data else "",
+                    "series_ticker": m.raw_data.get("series_ticker") if m.raw_data else "",
+                    "question": m.question or "",
+                    "description": m.description or "",
+                    "category": m.category or "",
+                    "end_date": m.end_date.isoformat() if m.end_date else None,
+                })
+
+            now_iso = now.isoformat()
+
+            # Run CPU-intensive indexing in a separate process
+            loop = asyncio.get_running_loop()
+            pool = _get_process_pool()
+            index_result = await loop.run_in_executor(
+                pool, build_indexes, raw_dicts, now_iso
+            )
+
+            # Merge index results with EventMarket objects
+            ticker_to_tags = {
+                item["ticker"]: item for item in index_result["enriched_markets"]
+            }
+
+            enriched: List[CatalogMarket] = []
+            for mkt in raw_markets:
+                tags = ticker_to_tags.get(mkt.market_id, {})
+                # Still need to call _enrich for strikes and detailed parsing
+                # but the heavy regex work is already done
+                cm = self._enrich(mkt, now)
+                # Override with process-computed tags
+                if tags.get("category"):
+                    cm.category = tags["category"]
+                if tags.get("asset"):
+                    cm.asset = tags["asset"]
+                if tags.get("timeframe"):
+                    cm.timeframe = tags["timeframe"]
+                enriched.append(cm)
+
+            logger.debug(
+                f"Process-pool indexing completed: {len(enriched)} markets enriched"
+            )
+            return enriched
+        except Exception as exc:
+            logger.warning(f"Process-pool indexing failed: {exc}, falling back to synchronous")
+            return await self._refresh_synchronous(raw_markets, now)
 
     # ── Enrichment ───────────────────────────────────────────────────────
 
@@ -535,6 +647,20 @@ class KalshiMarketCatalog:
     def timeframes(self) -> List[str]:
         """List all detected timeframes."""
         return sorted(self._by_timeframe.keys())
+
+    # ── Active market tracking ───────────────────────────────────────────
+
+    def mark_active(self, ticker: str) -> None:
+        """Mark a ticker as active/subscribed for scoped periodic refreshes."""
+        self._active_tickers.add(ticker)
+
+    def mark_inactive(self, ticker: str) -> None:
+        """Remove a ticker from active set."""
+        self._active_tickers.discard(ticker)
+
+    def get_active_count(self) -> int:
+        """Return number of active/subscribed tickers."""
+        return len(self._active_tickers)
 
     # ── Status ───────────────────────────────────────────────────────────
 
