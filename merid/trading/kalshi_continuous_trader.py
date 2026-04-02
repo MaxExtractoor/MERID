@@ -28,7 +28,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
 from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig
@@ -49,6 +49,51 @@ _DEFAULT_BANKROLL_FRACTION = float(os.getenv("MERID_BANKROLL_FRACTION", "0.01"))
 _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
 _DEFAULT_KELLY_FRACTION = float(os.getenv("MERID_KELLY_FRACTION", "0.25"))
 _DEFAULT_MIN_EDGE = float(os.getenv("MERID_MIN_EDGE", "0.02"))
+
+# ── Per-asset, per-timeframe minimum edge thresholds ──────────────────────
+#
+# Minimum net edge (after fees) required for a candidate to be tradable.
+# Keys are (asset, timeframe) tuples; values are edge fractions (e.g. 0.03 = 3%).
+#
+# Strategy:
+#   - BTC: 15m/1h = 2-3%, daily/weekly = 4-5%
+#   - ETH: 15m/1h = 3-4%, daily/weekly = 5-6%
+#   - SOL/XRP/DOGE: 15m/1h = 4-6%, daily/weekly = 6-8%
+#
+# If a specific (asset, timeframe) is not found, falls back to _DEFAULT_MIN_EDGE.
+#
+EDGE_THRESHOLDS: Dict[Tuple[str, str], float] = {
+    # BTC
+    ("BTC", "15m"): 0.02,
+    ("BTC", "1h"): 0.03,
+    ("BTC", "daily"): 0.04,
+    ("BTC", "weekly"): 0.05,
+    ("BTC", "monthly"): 0.05,  # same as weekly
+    # ETH
+    ("ETH", "15m"): 0.03,
+    ("ETH", "1h"): 0.04,
+    ("ETH", "daily"): 0.05,
+    ("ETH", "weekly"): 0.06,
+    ("ETH", "monthly"): 0.06,  # same as weekly
+    # SOL
+    ("SOL", "15m"): 0.04,
+    ("SOL", "1h"): 0.06,
+    ("SOL", "daily"): 0.06,
+    ("SOL", "weekly"): 0.08,
+    ("SOL", "monthly"): 0.08,  # same as weekly
+    # XRP
+    ("XRP", "15m"): 0.04,
+    ("XRP", "1h"): 0.06,
+    ("XRP", "daily"): 0.06,
+    ("XRP", "weekly"): 0.08,
+    ("XRP", "monthly"): 0.08,  # same as weekly
+    # DOGE
+    ("DOGE", "15m"): 0.04,
+    ("DOGE", "1h"): 0.06,
+    ("DOGE", "daily"): 0.06,
+    ("DOGE", "weekly"): 0.08,
+    ("DOGE", "monthly"): 0.08,  # same as weekly
+}
 
 # Fallback YES price (cents) when a candidate has no best_ask or mid price data.
 # Used only in the max-price guard inside trade_cycle().
@@ -327,6 +372,22 @@ class KalshiContinuousTrader:
 
     # ── Sizing / risk ─────────────────────────────────────────────────────
 
+    def _get_min_edge(self, candidate: TradingCandidate) -> float:
+        """Get the minimum edge threshold for a candidate based on asset and timeframe.
+
+        Looks up the threshold in EDGE_THRESHOLDS using (asset, timeframe) key.
+        Falls back to self._min_edge if no specific threshold is configured.
+
+        Args:
+            candidate: The trading candidate to evaluate.
+
+        Returns:
+            Minimum edge threshold as a decimal (e.g., 0.03 for 3%).
+        """
+        key = (candidate.underlying.upper(), candidate.timeframe.lower())
+        threshold = EDGE_THRESHOLDS.get(key, self._min_edge)
+        return threshold
+
     def signal_to_sizing(
         self,
         candidate: TradingCandidate,
@@ -398,17 +459,21 @@ class KalshiContinuousTrader:
         q = 1.0 - p
         kelly_raw = (p * b - q) / b if b > 0 else 0.0
 
+        # Get the appropriate minimum edge threshold for this candidate
+        min_edge_threshold = self._get_min_edge(candidate)
+
         # Clamp negative Kelly → no trade; negative edge always skips regardless of magnitude
-        if kelly_raw <= 0 or edge < self._min_edge:
+        if kelly_raw <= 0 or edge < min_edge_threshold:
             result = SizingResult(
                 edge=edge, win_prob=win_prob, payout_cents=float(payout_cents),
                 kelly_raw=kelly_raw, source=source,
             )
             logger.info(
                 "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
-                "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) source=%s",
+                "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) source=%s min_edge_threshold=%.4f [%s/%s] REJECTED",
                 candidate.ticker, edge, win_prob, float(payout_cents),
                 kelly_raw, 0.0, self._kelly_fraction * 100, source,
+                min_edge_threshold, candidate.underlying, candidate.timeframe,
             )
             return result
 
@@ -429,10 +494,11 @@ class KalshiContinuousTrader:
         )
         logger.info(
             "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
-            "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) size=%d source=%s",
+            "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) size=%d source=%s min_edge_threshold=%.4f [%s/%s] ACCEPTED",
             candidate.ticker, edge, win_prob, float(payout_cents),
             kelly_raw, kelly_frac, self._kelly_fraction * 100,
             size_contracts, source,
+            min_edge_threshold, candidate.underlying, candidate.timeframe,
         )
         return result
 
