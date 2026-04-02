@@ -36,6 +36,77 @@ from utils.logger import get_logger
 logger = get_logger("merid.event_venues.kalshi.market_filter")
 
 
+# ── Per-asset, per-timeframe spot band configuration ─────────────────────
+#
+# Spot band percentage: maximum distance from spot price (as a percentage of
+# spot) for strikes to be considered. Tighter bands focus on near-the-money
+# contracts with higher liquidity; wider bands capture more candidates but may
+# include illiquid far-OTM/ITM strikes.
+#
+# This configuration mirrors the EDGE_THRESHOLDS pattern in kalshi_continuous_trader.py.
+# Each entry is keyed by (asset, timeframe) and specifies the band percentage
+# as a decimal (e.g., 0.25 = ±25% from spot).
+#
+# Values are initially set to the legacy default (12.5%) and should be updated
+# based on optimization analysis via scripts/optimize_spot_bands.py.
+#
+SPOT_BANDS: Dict[Tuple[str, str], float] = {
+    # BTC — Liquid, tight spreads → can use tighter bands
+    ("BTC", "15m"): 0.125,
+    ("BTC", "1h"): 0.125,
+    ("BTC", "daily"): 0.125,
+    ("BTC", "weekly"): 0.125,
+    ("BTC", "monthly"): 0.125,
+    # ETH — Moderately liquid → slightly wider bands
+    ("ETH", "15m"): 0.125,
+    ("ETH", "1h"): 0.125,
+    ("ETH", "daily"): 0.125,
+    ("ETH", "weekly"): 0.125,
+    ("ETH", "monthly"): 0.125,
+    # SOL — Less liquid → wider bands for sufficient candidates
+    ("SOL", "15m"): 0.125,
+    ("SOL", "1h"): 0.125,
+    ("SOL", "daily"): 0.125,
+    ("SOL", "weekly"): 0.125,
+    ("SOL", "monthly"): 0.125,
+    # XRP — Similar to SOL
+    ("XRP", "15m"): 0.125,
+    ("XRP", "1h"): 0.125,
+    ("XRP", "daily"): 0.125,
+    ("XRP", "weekly"): 0.125,
+    ("XRP", "monthly"): 0.125,
+    # DOGE — Least liquid → widest bands
+    ("DOGE", "15m"): 0.125,
+    ("DOGE", "1h"): 0.125,
+    ("DOGE", "daily"): 0.125,
+    ("DOGE", "weekly"): 0.125,
+    ("DOGE", "monthly"): 0.125,
+}
+
+
+def get_spot_band(asset: str, timeframe: str, default: float = 12.5) -> float:
+    """Get the spot band percentage for a given (asset, timeframe) pair.
+
+    Args:
+        asset: Asset symbol (e.g., "BTC", "ETH")
+        timeframe: Timeframe (e.g., "15m", "1h", "daily")
+        default: Fallback value if no specific band is configured (default: 12.5%)
+                 Can be provided as percentage (12.5) or decimal (0.125)
+
+    Returns:
+        Spot band percentage (e.g., 12.5 for ±12.5%, NOT 0.125)
+    """
+    key = (asset.upper(), timeframe.lower())
+    band = SPOT_BANDS.get(key)
+
+    if band is not None:
+        # SPOT_BANDS stores decimals (0.125), convert to percentage for evaluate()
+        return band * 100.0 if band < 1.0 else band
+
+    # Use default, no conversion needed (already in percentage form)
+    return default
+
+
 # ── Configuration ────────────────────────────────────────────────────────
 
 @dataclass
@@ -322,11 +393,13 @@ class MarketFilter:
                 return False, f"price {mid}c > {cfg.max_price_cents}c"
 
         # Strike distance check — skip if strike too far from spot
-        if cfg.spot_band_pct > 0:
+        # Use dynamic per-(asset, timeframe) band if available, otherwise fall back to config default
+        spot_band = get_spot_band(market.underlying, market.timeframe, default=cfg.spot_band_pct)
+        if spot_band > 0:
             dist = market.distance_from_spot_pct
-            if dist is not None and dist > cfg.spot_band_pct:
+            if dist is not None and dist > spot_band:
                 return False, (
-                    f"distance {dist:.1f}% from spot exceeds band ±{cfg.spot_band_pct}%"
+                    f"distance {dist:.1f}% from spot exceeds band ±{spot_band:.1f}%"
                 )
 
         # Edge dead-zone check — skip near-50% coin-flips
