@@ -1,0 +1,207 @@
+name: Validate Gate Tooling
+
+# This workflow validates that trading gate validation tooling and documentation
+# are present and correct. It does NOT run 10-30 minute gates (those must run in staging).
+#
+# Purpose:
+# - Ensure validation scripts exist and can show help
+# - Verify documentation files are present and up-to-date
+# - Check that gate runner imports succeed
+#
+# This is a static/smoke check only. Actual gate execution happens in staging
+# per STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'scripts/run_trading_gate.py'
+      - 'scripts/run_paper_gate.py'
+      - 'scripts/analyze_gate_results.py'
+      - 'docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md'
+      - 'docs/PRE_LIVE_CHECKLIST.md'
+      - 'docs/FULL_TRADING_MODE_GATE_VALIDATION.md'
+      - 'VALIDATION_GUIDE.md'
+      - '.github/workflows/validate-gate-tooling.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/run_trading_gate.py'
+      - 'scripts/run_paper_gate.py'
+      - 'scripts/analyze_gate_results.py'
+      - 'docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md'
+      - 'docs/PRE_LIVE_CHECKLIST.md'
+      - 'docs/FULL_TRADING_MODE_GATE_VALIDATION.md'
+      - 'VALIDATION_GUIDE.md'
+      - '.github/workflows/validate-gate-tooling.yml'
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  validate-gate-scripts:
+    name: Validate Gate Scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install minimal dependencies
+        run: |
+          pip install --upgrade pip
+          # Install only dependencies needed for script imports (not full MERID stack)
+          pip install pydantic aiohttp httpx
+
+      - name: Verify gate scripts exist
+        run: |
+          echo "Checking that validation scripts exist..."
+          test -f scripts/run_trading_gate.py || { echo "❌ run_trading_gate.py missing"; exit 1; }
+          test -f scripts/run_paper_gate.py || { echo "❌ run_paper_gate.py missing"; exit 1; }
+          test -f scripts/analyze_gate_results.py || { echo "❌ analyze_gate_results.py missing"; exit 1; }
+          echo "✅ All validation scripts present"
+
+      - name: Verify scripts can show help
+        run: |
+          echo "Testing run_trading_gate.py --help..."
+          python scripts/run_trading_gate.py --help || { echo "❌ run_trading_gate.py --help failed"; exit 1; }
+
+          echo "Testing run_paper_gate.py --help..."
+          python scripts/run_paper_gate.py --help || { echo "❌ run_paper_gate.py --help failed"; exit 1; }
+
+          echo "Testing analyze_gate_results.py --help..."
+          python scripts/analyze_gate_results.py --help || { echo "❌ analyze_gate_results.py --help failed"; exit 1; }
+
+          echo "✅ All scripts can show help"
+
+      - name: Verify scripts can import (dry-run)
+        run: |
+          echo "Testing run_paper_gate.py --dry-run..."
+          python scripts/run_paper_gate.py --dry-run || { echo "❌ run_paper_gate.py --dry-run failed"; exit 1; }
+          echo "✅ Gate runner imports succeed"
+
+      - name: Verify gate runner can be invoked programmatically
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, 'scripts')
+
+          # Test imports
+          from run_paper_gate import GateResult, PollSample, run_gate
+          from analyze_gate_results import SampleAnalysis, analyze_samples, load_gate_result
+
+          print('✅ Gate modules import successfully')
+          "
+
+  validate-documentation:
+    name: Validate Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify documentation files exist
+        run: |
+          echo "Checking that documentation files exist..."
+          test -f docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md missing"; exit 1; }
+          test -f docs/PRE_LIVE_CHECKLIST.md || { echo "❌ PRE_LIVE_CHECKLIST.md missing"; exit 1; }
+          test -f docs/FULL_TRADING_MODE_GATE_VALIDATION.md || { echo "❌ FULL_TRADING_MODE_GATE_VALIDATION.md missing"; exit 1; }
+          test -f VALIDATION_GUIDE.md || { echo "❌ VALIDATION_GUIDE.md missing"; exit 1; }
+          echo "✅ All documentation files present"
+
+      - name: Verify runbook has required sections
+        run: |
+          echo "Checking STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md structure..."
+
+          # Check for key sections
+          grep -q "## Prerequisites" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Missing Prerequisites section"; exit 1; }
+          grep -q "## Step 1: 5-Minute Smoke Test" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Missing smoke test section"; exit 1; }
+          grep -q "## Step 2: 10-Minute Validation Gate" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Missing 10-min gate section"; exit 1; }
+          grep -q "## Step 3: 30-Minute Go-Live Gate" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Missing 30-min gate section"; exit 1; }
+          grep -q "Go/No-Go Criteria" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Missing go/no-go criteria"; exit 1; }
+
+          # Check for explicit CI constraint
+          grep -q "CI cannot run" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "⚠️  Should mention CI constraint"; }
+          grep -q "staging" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Should mention staging environment"; exit 1; }
+
+          # Check for exact commands
+          grep -q "python scripts/run_trading_gate.py" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Missing run_trading_gate.py command"; exit 1; }
+          grep -q "python scripts/analyze_gate_results.py" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Missing analyze_gate_results.py command"; exit 1; }
+          grep -q "VALIDATION_MODE=0" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Missing VALIDATION_MODE=0 requirement"; exit 1; }
+
+          echo "✅ Runbook structure validated"
+
+      - name: Verify PRE_LIVE_CHECKLIST links to runbook
+        run: |
+          echo "Checking PRE_LIVE_CHECKLIST.md references runbook..."
+          grep -q "STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md" docs/PRE_LIVE_CHECKLIST.md || { echo "❌ Checklist doesn't link to runbook"; exit 1; }
+          grep -q "Section 4A" docs/PRE_LIVE_CHECKLIST.md || { echo "❌ Missing Section 4A (staging gates)"; exit 1; }
+          grep -q "10-minute gate" docs/PRE_LIVE_CHECKLIST.md || { echo "❌ Missing 10-minute gate requirement"; exit 1; }
+          grep -q "30-minute gate" docs/PRE_LIVE_CHECKLIST.md || { echo "❌ Missing 30-minute gate requirement"; exit 1; }
+          echo "✅ PRE_LIVE_CHECKLIST properly references runbook"
+
+      - name: Verify go/no-go thresholds are consistent
+        run: |
+          echo "Checking that thresholds are consistent across docs..."
+
+          # All docs should mention P95 < 500ms
+          grep -q "P95.*500.*ms" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Runbook missing P95 < 500ms"; exit 1; }
+          grep -q "P95.*500.*ms" docs/FULL_TRADING_MODE_GATE_VALIDATION.md || { echo "❌ Validation guide missing P95 < 500ms"; exit 1; }
+
+          # Check for P99 < 800ms and Max < 1000ms
+          grep -q "P99.*800.*ms" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Runbook missing P99 < 800ms"; exit 1; }
+          grep -q "Max.*1000.*ms" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Runbook missing Max < 1000ms"; exit 1; }
+
+          # Check for degraded_samples = 0
+          grep -q "degraded.*=.*0" docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md || { echo "❌ Runbook missing degraded_samples = 0"; exit 1; }
+
+          echo "✅ Thresholds are consistent"
+
+  summary:
+    name: Validation Summary
+    runs-on: ubuntu-latest
+    needs: [validate-gate-scripts, validate-documentation]
+    if: always()
+
+    steps:
+      - name: Check all jobs passed
+        run: |
+          echo "========================================================================"
+          echo "Gate Tooling Validation Summary"
+          echo "========================================================================"
+          echo ""
+          echo "This workflow validates that gate validation tooling is correct."
+          echo "It does NOT run actual 10-30 minute gates."
+          echo ""
+          echo "✅ Gate scripts exist and can show help"
+          echo "✅ Documentation is present and properly structured"
+          echo "✅ Scripts can be imported without errors"
+          echo ""
+          echo "For actual gate execution, see:"
+          echo "  docs/STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md"
+          echo ""
+          echo "Actual 10-30 minute gates must be run in staging environment with:"
+          echo "  - VALIDATION_MODE=0 (full trading mode)"
+          echo "  - Full MERID stack running"
+          echo "  - Production-like infrastructure"
+          echo ""
+          echo "========================================================================"
+
+          if [ "${{ needs.validate-gate-scripts.result }}" != "success" ]; then
+            echo "❌ Gate scripts validation failed"
+            exit 1
+          fi
+
+          if [ "${{ needs.validate-documentation.result }}" != "success" ]; then
+            echo "❌ Documentation validation failed"
+            exit 1
+          fi
+
+          echo "✅ All validation checks passed"
