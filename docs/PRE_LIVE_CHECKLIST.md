@@ -59,6 +59,23 @@ diagnostic runbook (`/diagnostic-runbook`), `VALIDATION_GUIDE.md`, and
 
 ---
 
+## Section 4A — Staging Full Trading Mode Validation
+
+> **Critical**: These gates must be run in staging environment with `VALIDATION_MODE=0` (full trading mode), not in CI.
+> See [STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md](STAGING_FULL_TRADING_VALIDATION_RUNBOOK.md) for complete procedures.
+
+| # | Check | How to verify | Status |
+|---|-------|--------------|--------|
+| 4A.1 | **10-minute gate passed in staging** | Run `python scripts/run_trading_gate.py --duration 10` and analyze results with `--highlight-5min` | ⬜ |
+| 4A.2 | 10-minute gate shows P95 < 500ms for all samples including T+5min windows | Check analyzer output: all samples show ✅ | ⬜ |
+| 4A.3 | **30-minute gate passed in staging** | Run `python scripts/run_trading_gate.py --duration 30` and analyze results | ⬜ |
+| 4A.4 | 30-minute gate meets all 5 go/no-go criteria | P95<500ms, P99<800ms, Max<1000ms, degraded=0, failed_polls=0 | ⬜ |
+| 4A.5 | Gate results archived with analyzer output | Copy gate JSON + analyzer output to `reports/LIVE_READY_*` and commit/upload | ⬜ |
+
+**Go/No-Go Decision**: If **any** criterion in 4A.1-4A.4 fails, **DO NOT go live**. Fix issues and re-run gates.
+
+---
+
 ## Section 5 — Unresolved Anomalies
 
 | # | Check | How to verify | Status |
