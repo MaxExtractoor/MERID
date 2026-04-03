@@ -121,6 +121,7 @@ jobs:
                            tests/test_unified_pipeline.py \
                            tests/test_canonical_agents.py \
                            tests/test_hardening.py \
+                           tests/test_sprint_d_g.py \
                            -v --tb=short --junitxml=reports/backend.xml
 
       - name: Upload test report
