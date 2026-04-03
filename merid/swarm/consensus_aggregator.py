@@ -12,7 +12,7 @@ Output: Consensus decisions feed into MarketMoodBus as InsightObjects.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Literal, Optional, Any, Callable
 from enum import Enum
 import asyncio
 import logging
@@ -47,7 +47,7 @@ class AgentProposal:
     # Agent metadata
     agent_archetype: str  # "trend", "mean_reversion", "momentum", etc.
     agent_track_record: Optional[Dict[str, float]] = None  # win_rate, sharpe, etc.
-    mode: str = "SIM"  # "SIM" or "LIVE" — propagated from the submitting agent
+    mode: Literal["SIM", "LIVE"] = "SIM"  # propagated from the submitting agent
 
 
 @dataclass
@@ -402,10 +402,10 @@ class SwarmConsensusAggregator:
         # Determine status
         if len(proposals) < self.min_agents:
             status = ConsensusStatus.FORMING
-            forming_reason = f"insufficient_proposals(have={len(proposals)} need={self.min_agents})"
+            forming_reason = f"insufficient_proposals: have={len(proposals)} need={self.min_agents}"
         elif len(archetypes) < min_archetypes:
             status = ConsensusStatus.FORMING  # Block consensus without diversity
-            forming_reason = f"insufficient_archetypes(have={len(archetypes)} need={min_archetypes})"
+            forming_reason = f"insufficient_archetypes: have={len(archetypes)} need={min_archetypes}"
         elif agreement_ratio < self.consensus_threshold:
             status = ConsensusStatus.CONFLICTED
             forming_reason = ""
@@ -413,12 +413,17 @@ class SwarmConsensusAggregator:
             status = ConsensusStatus.READY
             forming_reason = ""
 
-        # Emit a structured log so every recompute is auditable at a glance
-        sources = [p.agent_id for p in proposals]
-        modes = [p.mode for p in proposals]
-        sim_sources = [p.agent_id for p in proposals if p.mode == "SIM"]
-        live_sources = [p.agent_id for p in proposals if p.mode == "LIVE"]
-        forming_detail = f" forming_reason={forming_reason}" if forming_reason else ""
+        # Emit a structured log so every recompute is auditable at a glance;
+        # single-pass extraction of source metadata avoids repeated iteration.
+        sources: List[str] = []
+        modes: List[str] = []
+        sim_sources: List[str] = []
+        live_sources: List[str] = []
+        for p in proposals:
+            sources.append(p.agent_id)
+            modes.append(p.mode)
+            (live_sources if p.mode == "LIVE" else sim_sources).append(p.agent_id)
+        forming_detail = f" forming_reason={forming_reason!r}" if forming_reason else ""
         sim_detail = f" sim_sources={sim_sources}" if sim_sources else ""
         live_detail = f" live_sources={live_sources}" if live_sources else ""
         logger.info(
