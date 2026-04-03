@@ -55,44 +55,46 @@ _DEFAULT_MIN_EDGE = float(os.getenv("MERID_MIN_EDGE", "0.02"))
 # Minimum net edge (after fees) required for a candidate to be tradable.
 # Keys are (asset, timeframe) tuples; values are edge fractions (e.g. 0.03 = 3%).
 #
-# Strategy:
-#   - BTC: 15m/1h = 2-3%, daily/weekly = 4-5%
-#   - ETH: 15m/1h = 3-4%, daily/weekly = 5-6%
-#   - SOL/XRP/DOGE: 15m/1h = 4-6%, daily/weekly = 6-8%
+# Strategy (revised for 10-15 trades/hour with quality opportunities):
+#   - BTC: 15m/1h = 1.0-1.5%, daily/weekly = 2.0-2.5% (most liquid)
+#   - ETH: 15m/1h = 1.5-2.0%, daily/weekly = 2.5-3.0% (liquid)
+#   - SOL/XRP/DOGE: 15m/1h = 2.0-3.0%, daily/weekly = 3.0-4.0% (less liquid, more volatile)
 #
-# If a specific (asset, timeframe) is not found, falls back to _DEFAULT_MIN_EDGE.
+# Reduced by ~50% from original conservative thresholds to increase trade frequency
+# while maintaining quality. If a specific (asset, timeframe) is not found,
+# falls back to _DEFAULT_MIN_EDGE.
 #
 EDGE_THRESHOLDS: Dict[Tuple[str, str], float] = {
-    # BTC
-    ("BTC", "15m"): 0.02,
-    ("BTC", "1h"): 0.03,
-    ("BTC", "daily"): 0.04,
-    ("BTC", "weekly"): 0.05,
-    ("BTC", "monthly"): 0.05,  # same as weekly
-    # ETH
-    ("ETH", "15m"): 0.03,
-    ("ETH", "1h"): 0.04,
-    ("ETH", "daily"): 0.05,
-    ("ETH", "weekly"): 0.06,
-    ("ETH", "monthly"): 0.06,  # same as weekly
-    # SOL
-    ("SOL", "15m"): 0.04,
-    ("SOL", "1h"): 0.06,
-    ("SOL", "daily"): 0.06,
-    ("SOL", "weekly"): 0.08,
-    ("SOL", "monthly"): 0.08,  # same as weekly
-    # XRP
-    ("XRP", "15m"): 0.04,
-    ("XRP", "1h"): 0.06,
-    ("XRP", "daily"): 0.06,
-    ("XRP", "weekly"): 0.08,
-    ("XRP", "monthly"): 0.08,  # same as weekly
-    # DOGE
-    ("DOGE", "15m"): 0.04,
-    ("DOGE", "1h"): 0.06,
-    ("DOGE", "daily"): 0.06,
-    ("DOGE", "weekly"): 0.08,
-    ("DOGE", "monthly"): 0.08,  # same as weekly
+    # BTC - Most liquid, tightest spreads, highest trade frequency
+    ("BTC", "15m"): 0.010,    # 1.0% (was 2.0%)
+    ("BTC", "1h"): 0.015,     # 1.5% (was 3.0%)
+    ("BTC", "daily"): 0.020,  # 2.0% (was 4.0%)
+    ("BTC", "weekly"): 0.025, # 2.5% (was 5.0%)
+    ("BTC", "monthly"): 0.025,# 2.5% (was 5.0%)
+    # ETH - Liquid, moderate spreads
+    ("ETH", "15m"): 0.015,    # 1.5% (was 3.0%)
+    ("ETH", "1h"): 0.020,     # 2.0% (was 4.0%)
+    ("ETH", "daily"): 0.025,  # 2.5% (was 5.0%)
+    ("ETH", "weekly"): 0.030, # 3.0% (was 6.0%)
+    ("ETH", "monthly"): 0.030,# 3.0% (was 6.0%)
+    # SOL - Less liquid, higher volatility
+    ("SOL", "15m"): 0.020,    # 2.0% (was 4.0%)
+    ("SOL", "1h"): 0.030,     # 3.0% (was 6.0%)
+    ("SOL", "daily"): 0.030,  # 3.0% (was 6.0%)
+    ("SOL", "weekly"): 0.040, # 4.0% (was 8.0%)
+    ("SOL", "monthly"): 0.040,# 4.0% (was 8.0%)
+    # XRP - Less liquid, higher volatility
+    ("XRP", "15m"): 0.020,    # 2.0% (was 4.0%)
+    ("XRP", "1h"): 0.030,     # 3.0% (was 6.0%)
+    ("XRP", "daily"): 0.030,  # 3.0% (was 6.0%)
+    ("XRP", "weekly"): 0.040, # 4.0% (was 8.0%)
+    ("XRP", "monthly"): 0.040,# 4.0% (was 8.0%)
+    # DOGE - Less liquid, highest volatility
+    ("DOGE", "15m"): 0.020,   # 2.0% (was 4.0%)
+    ("DOGE", "1h"): 0.030,    # 3.0% (was 6.0%)
+    ("DOGE", "daily"): 0.030, # 3.0% (was 6.0%)
+    ("DOGE", "weekly"): 0.040,# 4.0% (was 8.0%)
+    ("DOGE", "monthly"): 0.040,# 4.0% (was 8.0%)
 }
 
 # Fallback YES price (cents) when a candidate has no best_ask or mid price data.

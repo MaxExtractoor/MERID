@@ -49,11 +49,12 @@ class ExpiryPhase(str, Enum):
 class StrategyConfig:
     """Tunable parameters for KalshiStrategy."""
     # Edge thresholds (as probability fraction, e.g. 0.03 = 3 %)
-    min_edge_early: Decimal = Decimal("0.05")      # 5 % edge required early
-    min_edge_mid: Decimal = Decimal("0.04")
-    min_edge_late: Decimal = Decimal("0.03")
-    min_edge_terminal: Decimal = Decimal("0.02")
-    min_arb_edge: Decimal = Decimal("0.005")        # 0.5 % for pure arb
+    # Reduced by ~50% to allow 10-15 quality trades/hour while maintaining risk discipline
+    min_edge_early: Decimal = Decimal("0.025")     # 2.5% edge required early (was 5%)
+    min_edge_mid: Decimal = Decimal("0.020")       # 2.0% (was 4%)
+    min_edge_late: Decimal = Decimal("0.015")      # 1.5% (was 3%)
+    min_edge_terminal: Decimal = Decimal("0.010")  # 1.0% (was 2%)
+    min_arb_edge: Decimal = Decimal("0.005")       # 0.5% for pure arb (unchanged)
 
     # Position sizing
     max_contracts_per_market: int = 100

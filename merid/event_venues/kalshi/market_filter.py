@@ -152,8 +152,9 @@ class MarketFilterConfig:
 
     # "Dead zone" around 50% win-probability: markets whose mid-price is
     # within this many percentage points of 50¢ are skipped (coin-flip bleed).
-    # 0.0 = disabled.  E.g. 3.0 skips markets with mid in [47¢, 53¢].
-    min_edge_dead_zone_pct: float = 3.0
+    # 0.0 = disabled.  E.g. 2.0 skips markets with mid in [48¢, 52¢].
+    # Reduced from 3.0 to 2.0 to allow more tradable opportunities near 50/50.
+    min_edge_dead_zone_pct: float = 2.0
 
     # Maximum candidates to return per underlying asset after all other
     # filters.  The candidates closest to spot are preferred.  0 = no limit.
