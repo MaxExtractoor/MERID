@@ -590,6 +590,10 @@ class KalshiContinuousTrader:
         Returns None if no strategy is wired or if the strategy declines.
         """
         if self._strategy is None:
+            logger.debug(
+                "[CT-UPSTREAM] ticker=%s asset=%s tf=%s veto=no_strategy_wired",
+                candidate.ticker, candidate.underlying, candidate.timeframe,
+            )
             return None
 
         explanation = OpinionExplanation(inputs_used=[], contributions={}, rationale="")
@@ -600,11 +604,34 @@ class KalshiContinuousTrader:
             category=candidate.category,
             context=context,
         )
+
         if estimate is None:
+            logger.info(
+                "[CT-UPSTREAM] ticker=%s asset=%s tf=%s strategy=%s market_prob=%.4f "
+                "veto=strategy_declined reason=min_edge_or_extreme_prob",
+                candidate.ticker, candidate.underlying, candidate.timeframe,
+                getattr(self._strategy, 'name', 'unknown'), market_prob,
+            )
             return None
+
+        # Log successful estimate with strategy details
+        logger.info(
+            "[CT-UPSTREAM] ticker=%s asset=%s tf=%s strategy=%s market_prob=%.4f "
+            "model_prob=%.4f edge=%.4f confidence=%.4f reasoning=%s sources=%s",
+            candidate.ticker, candidate.underlying, candidate.timeframe,
+            getattr(self._strategy, 'name', 'unknown'), market_prob,
+            estimate.agent_prob, estimate.edge, estimate.confidence,
+            estimate.reasoning_tag, ','.join(estimate.signal_sources),
+        )
 
         # Always apply the confidence clamp from the wired strategy
         clamped_conf = self._strategy._apply_confidence_clamp(estimate.confidence, explanation)
+        if clamped_conf != estimate.confidence:
+            logger.debug(
+                "[CT-UPSTREAM] ticker=%s confidence_clamped from=%.4f to=%.4f",
+                candidate.ticker, estimate.confidence, clamped_conf,
+            )
+
         return OpinionEstimate(
             agent_prob=estimate.agent_prob,
             confidence=clamped_conf,
