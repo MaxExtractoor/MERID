@@ -82,6 +82,10 @@ export interface CTStatus {
     kelly_fraction: number;
     min_edge: number | Record<string, number>;
     edge_profile: string;
+    /** Dead zone threshold (¢ around 50¢); 0 = disabled. */
+    filter_dead_zone_pct: number;
+    /** Spot-band percentage; 0 = disabled. */
+    filter_spot_band_pct: number;
   };
   risk: {
     group_notional: Record<string, number>;
