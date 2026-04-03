@@ -1731,6 +1731,29 @@ async def _app_lifespan(application: FastAPI):
     logger.info("STARTUP EVENT: Legacy WS publishers SKIPPED (Kalshi-only mode)")
     logger.info("=" * 80)
 
+    # ── Startup reconciliation — unblock execution gate BEFORE trading starts ─────
+    # CRITICAL: Must run before Kalshi Agent Grid to set _reconciliation_has_run = True
+    # and unblock the execution gate. Otherwise has_critical_discrepancies() returns True
+    # and blocks all trading on the first cycle.
+    try:
+        from merid.reconciliation import reconcile_all_venues, has_critical_discrepancies
+        logger.info("Running startup reconciliation to unblock execution gate...")
+        discrepancies = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: reconcile_all_venues(["kalshi"])
+        )
+        n_crit = sum(1 for d in discrepancies if d.severity == "critical")
+        n_warn = sum(1 for d in discrepancies if d.severity == "warning")
+        logger.info(
+            "✅ Startup reconciliation: %d discrepancies (%d critical, %d warning)",
+            len(discrepancies), n_crit, n_warn,
+        )
+        if has_critical_discrepancies():
+            logger.warning("⚠️  Execution gate BLOCKED (critical reconciliation issues)")
+        else:
+            logger.info("✅ Execution gate CLEAR — trades can proceed")
+    except Exception as exc:
+        logger.warning("Startup reconciliation failed (gate may remain blocked): %s", exc)
+
     # ── Phase 0.5: Kalshi Agent Grid ───────────────────────────────────
     logger.info("=" * 80)
     logger.info("🤖 Starting Kalshi Trading Agent Grid")
@@ -2508,26 +2531,6 @@ async def _app_lifespan(application: FastAPI):
         logger.warning(f"⚠️  Some services failed - system in degraded mode ({startup_duration:.2f}s)")
     logger.info("🚀 MERID STARTUP COMPLETE - System Ready")
     logger.info("=" * 80)
-
-    # ── Startup reconciliation — unblock execution gate immediately ─────
-    try:
-        from merid.reconciliation import reconcile_all_venues, has_critical_discrepancies
-        logger.info("Running startup reconciliation to unblock execution gate...")
-        discrepancies = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: reconcile_all_venues(["kalshi"])
-        )
-        n_crit = sum(1 for d in discrepancies if d.severity == "critical")
-        n_warn = sum(1 for d in discrepancies if d.severity == "warning")
-        logger.info(
-            "✅ Startup reconciliation: %d discrepancies (%d critical, %d warning)",
-            len(discrepancies), n_crit, n_warn,
-        )
-        if has_critical_discrepancies():
-            logger.warning("⚠️  Execution gate BLOCKED (critical reconciliation issues)")
-        else:
-            logger.info("✅ Execution gate CLEAR — trades can proceed")
-    except Exception as exc:
-        logger.warning("Startup reconciliation failed (gate may remain blocked): %s", exc)
 
     # ── Start periodic reconciliation ──────────────────────────────────
     try:
