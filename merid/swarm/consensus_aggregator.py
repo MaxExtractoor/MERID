@@ -185,8 +185,8 @@ class SwarmConsensusAggregator:
                     min_archetypes_for_consensus,
                 )
 
-        self.min_agents = min_agents_for_consensus
-        self.min_archetypes = min_archetypes_for_consensus
+        self.min_agents = max(1, min_agents_for_consensus)
+        self.min_archetypes = max(1, min_archetypes_for_consensus)
         self.max_age = timedelta(seconds=max_proposal_age_seconds)
         self.consensus_threshold = consensus_threshold
         
@@ -202,8 +202,8 @@ class SwarmConsensusAggregator:
         self._initialized = True
         logger.info(
             "SwarmConsensusAggregator initialized (min_agents=%d min_archetypes=%d)",
-            min_agents_for_consensus,
-            min_archetypes_for_consensus,
+            self.min_agents,
+            self.min_archetypes,
         )
     
     def submit_proposal(self, proposal: AgentProposal) -> None:
