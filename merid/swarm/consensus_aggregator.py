@@ -453,7 +453,7 @@ class SwarmConsensusAggregator:
         # Determine status
         if len(proposals) < eff_min_agents:
             status = ConsensusStatus.FORMING
-            forming_reason = f"insufficient_proposals: have={len(proposals)} need={eff_min_agents}"
+            forming_reason: str = f"insufficient_proposals: have={len(proposals)} need={eff_min_agents}"
         elif len(archetypes) < eff_min_archetypes:
             status = ConsensusStatus.FORMING  # Block consensus without diversity
             forming_reason = f"insufficient_archetypes: have={len(archetypes)} need={eff_min_archetypes}"
@@ -465,9 +465,8 @@ class SwarmConsensusAggregator:
             forming_reason = ""
 
         # Emit a structured log so every recompute is auditable at a glance;
-        # single-pass extraction of source metadata avoids repeated iteration.
-        has_live = any(p.mode == "LIVE" for p in proposals)
-        mode_context = "LIVE" if has_live else "SIM"
+        # single-pass extraction folds the has_live check into the iteration.
+        has_live = False
         sources: List[str] = []
         modes: List[str] = []
         sim_sources: List[str] = []
@@ -475,7 +474,12 @@ class SwarmConsensusAggregator:
         for p in proposals:
             sources.append(p.agent_id)
             modes.append(p.mode)
-            (live_sources if p.mode == "LIVE" else sim_sources).append(p.agent_id)
+            if p.mode == "LIVE":
+                has_live = True
+                live_sources.append(p.agent_id)
+            else:
+                sim_sources.append(p.agent_id)
+        mode_context = "LIVE" if has_live else "SIM"
         forming_detail = f" forming_reason={forming_reason!r}" if forming_reason else ""
         sim_detail = f" sim_sources={sim_sources}" if sim_sources else ""
         live_detail = f" live_sources={live_sources}" if live_sources else ""
