@@ -11,6 +11,7 @@ import { API_ENDPOINTS, API_BASE_URL, DEFAULTS } from '../config/constants';
 import KalshiTradeTicket from '../components/KalshiTradeTicket';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiModeBadge from '../components/KalshiModeBadge';
+import CTStatusPanel from '../components/CTStatusPanel';
 import { logUxEvent } from '../utils/uxTelemetry';
 import { useKalshiMode } from '../context/KalshiModeContext';
 import type { SizingMetrics, CatalogMarket } from '../types/kalshi';
@@ -619,6 +620,9 @@ const KalshiDashboardView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Continuous Trader diagnostics panel */}
+      <CTStatusPanel />
 
       {/* Quick-Filter Tabs */}
       <div className="flex items-center gap-1 bg-slate-900 rounded-xl p-1 border border-slate-800 overflow-x-auto">
