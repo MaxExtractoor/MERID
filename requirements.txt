@@ -11,13 +11,13 @@ starlette>=0.36.0
 
 # ── HTTP Clients ────────────────────────────────────────────────
 httpx==0.28.1
-aiohttp==3.10.11
+aiohttp==3.13.3
 requests==2.32.3
 websockets==13.1
 websocket-client==1.9.0
 
 # ── Data & Numerics ────────────────────────────────────────────
-numpy==1.24.3
+numpy>=1.26.4,<3
 pandas==2.2.3
 scipy==1.15.1
 
