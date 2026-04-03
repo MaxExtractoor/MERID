@@ -50,50 +50,92 @@ _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
 _DEFAULT_KELLY_FRACTION = float(os.getenv("MERID_KELLY_FRACTION", "0.25"))
 _DEFAULT_MIN_EDGE = float(os.getenv("MERID_MIN_EDGE", "0.02"))
 
+# Edge profile selection: "initial_live" (permissive) or "production" (conservative)
+_EDGE_PROFILE = os.getenv("KALSHI_CT_EDGE_PROFILE", "production")
+
 # ── Per-asset, per-timeframe minimum edge thresholds ──────────────────────
 #
 # Minimum net edge (after fees) required for a candidate to be tradable.
 # Keys are (asset, timeframe) tuples; values are edge fractions (e.g. 0.03 = 3%).
 #
-# Strategy:
-#   - BTC: 15m/1h = 2-3%, daily/weekly = 4-5%
-#   - ETH: 15m/1h = 3-4%, daily/weekly = 5-6%
-#   - SOL/XRP/DOGE: 15m/1h = 4-6%, daily/weekly = 6-8%
+# Two profiles:
+#   - "initial_live": Permissive thresholds for micro-size trading (0.5-1.5%)
+#   - "production": Conservative thresholds for full-size trading (2-8%)
 #
 # If a specific (asset, timeframe) is not found, falls back to _DEFAULT_MIN_EDGE.
 #
-EDGE_THRESHOLDS: Dict[Tuple[str, str], float] = {
+
+# INITIAL_LIVE profile: Relaxed thresholds for getting live with micro-size
+EDGE_THRESHOLDS_INITIAL_LIVE: Dict[Tuple[str, str], float] = {
+    # BTC - most liquid, tightest spreads
+    ("BTC", "15m"): 0.005,    # 0.5% - very permissive for initial live
+    ("BTC", "1h"): 0.008,     # 0.8%
+    ("BTC", "daily"): 0.012,  # 1.2%
+    ("BTC", "weekly"): 0.015, # 1.5%
+    ("BTC", "monthly"): 0.015,
+    # ETH - second most liquid
+    ("ETH", "15m"): 0.008,
+    ("ETH", "1h"): 0.010,
+    ("ETH", "daily"): 0.015,
+    ("ETH", "weekly"): 0.018,
+    ("ETH", "monthly"): 0.018,
+    # SOL/XRP/DOGE - wider spreads, more volatile
+    ("SOL", "15m"): 0.010,
+    ("SOL", "1h"): 0.012,
+    ("SOL", "daily"): 0.015,
+    ("SOL", "weekly"): 0.020,
+    ("SOL", "monthly"): 0.020,
+    ("XRP", "15m"): 0.010,
+    ("XRP", "1h"): 0.012,
+    ("XRP", "daily"): 0.015,
+    ("XRP", "weekly"): 0.020,
+    ("XRP", "monthly"): 0.020,
+    ("DOGE", "15m"): 0.010,
+    ("DOGE", "1h"): 0.012,
+    ("DOGE", "daily"): 0.015,
+    ("DOGE", "weekly"): 0.020,
+    ("DOGE", "monthly"): 0.020,
+}
+
+# PRODUCTION profile: Conservative thresholds (original values)
+EDGE_THRESHOLDS_PRODUCTION: Dict[Tuple[str, str], float] = {
     # BTC
     ("BTC", "15m"): 0.02,
     ("BTC", "1h"): 0.03,
     ("BTC", "daily"): 0.04,
     ("BTC", "weekly"): 0.05,
-    ("BTC", "monthly"): 0.05,  # same as weekly
+    ("BTC", "monthly"): 0.05,
     # ETH
     ("ETH", "15m"): 0.03,
     ("ETH", "1h"): 0.04,
     ("ETH", "daily"): 0.05,
     ("ETH", "weekly"): 0.06,
-    ("ETH", "monthly"): 0.06,  # same as weekly
+    ("ETH", "monthly"): 0.06,
     # SOL
     ("SOL", "15m"): 0.04,
     ("SOL", "1h"): 0.06,
     ("SOL", "daily"): 0.06,
     ("SOL", "weekly"): 0.08,
-    ("SOL", "monthly"): 0.08,  # same as weekly
+    ("SOL", "monthly"): 0.08,
     # XRP
     ("XRP", "15m"): 0.04,
     ("XRP", "1h"): 0.06,
     ("XRP", "daily"): 0.06,
     ("XRP", "weekly"): 0.08,
-    ("XRP", "monthly"): 0.08,  # same as weekly
+    ("XRP", "monthly"): 0.08,
     # DOGE
     ("DOGE", "15m"): 0.04,
     ("DOGE", "1h"): 0.06,
     ("DOGE", "daily"): 0.06,
     ("DOGE", "weekly"): 0.08,
-    ("DOGE", "monthly"): 0.08,  # same as weekly
+    ("DOGE", "monthly"): 0.08,
 }
+
+# Select active thresholds based on profile
+EDGE_THRESHOLDS: Dict[Tuple[str, str], float] = (
+    EDGE_THRESHOLDS_INITIAL_LIVE if _EDGE_PROFILE == "initial_live"
+    else EDGE_THRESHOLDS_PRODUCTION
+)
 
 # Fallback YES price (cents) when a candidate has no best_ask or mid price data.
 # Used only in the max-price guard inside trade_cycle().
@@ -548,6 +590,10 @@ class KalshiContinuousTrader:
         Returns None if no strategy is wired or if the strategy declines.
         """
         if self._strategy is None:
+            logger.debug(
+                "[CT-UPSTREAM] ticker=%s asset=%s tf=%s veto=no_strategy_wired",
+                candidate.ticker, candidate.underlying, candidate.timeframe,
+            )
             return None
 
         explanation = OpinionExplanation(inputs_used=[], contributions={}, rationale="")
@@ -558,11 +604,34 @@ class KalshiContinuousTrader:
             category=candidate.category,
             context=context,
         )
+
         if estimate is None:
+            logger.info(
+                "[CT-UPSTREAM] ticker=%s asset=%s tf=%s strategy=%s market_prob=%.4f "
+                "veto=strategy_declined reason=min_edge_or_extreme_prob",
+                candidate.ticker, candidate.underlying, candidate.timeframe,
+                getattr(self._strategy, 'name', 'unknown'), market_prob,
+            )
             return None
+
+        # Log successful estimate with strategy details
+        logger.info(
+            "[CT-UPSTREAM] ticker=%s asset=%s tf=%s strategy=%s market_prob=%.4f "
+            "model_prob=%.4f edge=%.4f confidence=%.4f reasoning=%s sources=%s",
+            candidate.ticker, candidate.underlying, candidate.timeframe,
+            getattr(self._strategy, 'name', 'unknown'), market_prob,
+            estimate.agent_prob, estimate.edge, estimate.confidence,
+            estimate.reasoning_tag, ','.join(estimate.signal_sources),
+        )
 
         # Always apply the confidence clamp from the wired strategy
         clamped_conf = self._strategy._apply_confidence_clamp(estimate.confidence, explanation)
+        if clamped_conf != estimate.confidence:
+            logger.debug(
+                "[CT-UPSTREAM] ticker=%s confidence_clamped from=%.4f to=%.4f",
+                candidate.ticker, estimate.confidence, clamped_conf,
+            )
+
         return OpinionEstimate(
             agent_prob=estimate.agent_prob,
             confidence=clamped_conf,
@@ -599,14 +668,65 @@ class KalshiContinuousTrader:
 
             mid_prob = candidate.mid_price_cents / 100.0 if candidate.mid_price_cents else 0.5
             estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
+
+            veto_reason = None
             if estimate is None:
+                veto_reason = "no_estimate"
+                logger.info(
+                    "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                    "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                    candidate.ticker, candidate.underlying, "none", 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0, veto_reason,
+                )
                 continue
 
             # Use signal_to_sizing for Kelly-based notional
             sizing = self.signal_to_sizing(candidate, bankroll)
 
+            # Determine side based on estimate vs market probability
+            side = "YES" if estimate.agent_prob > mid_prob else "NO"
+
+            # Convert edge to basis points
+            edge_bps = sizing.edge * 10000.0
+
+            # Check if sizing was rejected (size = 0)
+            if sizing.size_contracts == 0:
+                # Determine veto reason from sizing
+                min_edge = self._get_min_edge(candidate)
+                if sizing.edge < min_edge:
+                    veto_reason = "edge_too_low"
+                elif sizing.kelly_raw <= 0:
+                    veto_reason = "negative_kelly"
+                else:
+                    veto_reason = "bankroll_says_0"
+
+                logger.info(
+                    "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                    "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                    candidate.ticker, candidate.underlying, side, sizing.win_prob,
+                    sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
+                    sizing.size_contracts, veto_reason,
+                )
+                continue
+
             notional = self._apply_risk_checks(candidate, estimate, bankroll)
             if notional is None:
+                # Determine which risk check failed
+                group_used = self._risk.group_used(candidate.group_id)
+                if group_used >= self._max_group_notional:
+                    veto_reason = "group_notional_cap"
+                elif estimate.confidence < self._min_confidence:
+                    veto_reason = "low_confidence"
+                else:
+                    veto_reason = "risk_check_failed"
+
+                logger.info(
+                    "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                    "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                    candidate.ticker, candidate.underlying, side, sizing.win_prob,
+                    sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
+                    sizing.size_contracts, veto_reason,
+                )
                 continue
 
             # When Kelly sizing produces a positive notional, prefer it
@@ -635,6 +755,14 @@ class KalshiContinuousTrader:
                 yes_price_cents = candidate.best_ask_cents or candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
                 max_cents = int(self._max_yes_price * 100)
                 if yes_price_cents > max_cents:
+                    veto_reason = "max_yes_price_cap"
+                    logger.info(
+                        "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                        "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                        candidate.ticker, candidate.underlying, side, sizing.win_prob,
+                        sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
+                        sizing.size_contracts, veto_reason,
+                    )
                     logger.info(
                         "ContinuousTrader: MAX_YES_PRICE_CAP dropped YES intent "
                         "ticker=%s price=%d¢ cap=%d¢",
@@ -643,6 +771,15 @@ class KalshiContinuousTrader:
                     self._risk.execution_rejections += 1
                     self._emit_rejection(candidate.ticker, "max_yes_price_cap", intent["intent_id"])
                     continue
+
+            # Log successful intent with no veto
+            logger.info(
+                "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                candidate.ticker, candidate.underlying, side, sizing.win_prob,
+                sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
+                sizing.size_contracts, "none",
+            )
 
             self._risk.add_notional(candidate.group_id, notional)
             self._risk.trade_count += 1
@@ -708,6 +845,7 @@ class KalshiContinuousTrader:
                 "max_yes_price": self._max_yes_price,
                 "kelly_fraction": self._kelly_fraction,
                 "min_edge": self._min_edge,
+                "edge_profile": _EDGE_PROFILE,  # Show which profile is active
             },
             # ── Filter telemetry (populated after first _refresh_candidates call) ──
             # Use these to audit the relative-volume band: a healthy block_rate is
