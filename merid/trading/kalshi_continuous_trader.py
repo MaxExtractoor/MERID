@@ -599,14 +599,65 @@ class KalshiContinuousTrader:
 
             mid_prob = candidate.mid_price_cents / 100.0 if candidate.mid_price_cents else 0.5
             estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
+
+            veto_reason = None
             if estimate is None:
+                veto_reason = "no_estimate"
+                logger.info(
+                    "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                    "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                    candidate.ticker, candidate.underlying, "none", 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0, veto_reason,
+                )
                 continue
 
             # Use signal_to_sizing for Kelly-based notional
             sizing = self.signal_to_sizing(candidate, bankroll)
 
+            # Determine side based on estimate vs market probability
+            side = "YES" if estimate.agent_prob > mid_prob else "NO"
+
+            # Convert edge to basis points
+            edge_bps = sizing.edge * 10000.0
+
+            # Check if sizing was rejected (size = 0)
+            if sizing.size_contracts == 0:
+                # Determine veto reason from sizing
+                min_edge = self._get_min_edge(candidate)
+                if sizing.edge < min_edge:
+                    veto_reason = "edge_too_low"
+                elif sizing.kelly_raw <= 0:
+                    veto_reason = "negative_kelly"
+                else:
+                    veto_reason = "bankroll_says_0"
+
+                logger.info(
+                    "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                    "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                    candidate.ticker, candidate.underlying, side, sizing.win_prob,
+                    sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
+                    sizing.size_contracts, veto_reason,
+                )
+                continue
+
             notional = self._apply_risk_checks(candidate, estimate, bankroll)
             if notional is None:
+                # Determine which risk check failed
+                group_used = self._risk.group_used(candidate.group_id)
+                if group_used >= self._max_group_notional:
+                    veto_reason = "group_notional_cap"
+                elif estimate.confidence < self._min_confidence:
+                    veto_reason = "low_confidence"
+                else:
+                    veto_reason = "risk_check_failed"
+
+                logger.info(
+                    "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                    "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                    candidate.ticker, candidate.underlying, side, sizing.win_prob,
+                    sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
+                    sizing.size_contracts, veto_reason,
+                )
                 continue
 
             # When Kelly sizing produces a positive notional, prefer it
@@ -635,6 +686,14 @@ class KalshiContinuousTrader:
                 yes_price_cents = candidate.best_ask_cents or candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
                 max_cents = int(self._max_yes_price * 100)
                 if yes_price_cents > max_cents:
+                    veto_reason = "max_yes_price_cap"
+                    logger.info(
+                        "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                        "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                        candidate.ticker, candidate.underlying, side, sizing.win_prob,
+                        sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
+                        sizing.size_contracts, veto_reason,
+                    )
                     logger.info(
                         "ContinuousTrader: MAX_YES_PRICE_CAP dropped YES intent "
                         "ticker=%s price=%d¢ cap=%d¢",
@@ -643,6 +702,15 @@ class KalshiContinuousTrader:
                     self._risk.execution_rejections += 1
                     self._emit_rejection(candidate.ticker, "max_yes_price_cap", intent["intent_id"])
                     continue
+
+            # Log successful intent with no veto
+            logger.info(
+                "[CT-TRACE] ticker=%s asset=%s side=%s win_prob=%.4f payout=%.2f edge_bps=%.1f "
+                "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
+                candidate.ticker, candidate.underlying, side, sizing.win_prob,
+                sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
+                sizing.size_contracts, "none",
+            )
 
             self._risk.add_notional(candidate.group_id, notional)
             self._risk.trade_count += 1
