@@ -525,6 +525,14 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             client_order_id=f"merid_{intent.source}_{int(time.time() * 1000)}",
         )
 
+        # Log order intent before submission
+        logger.info(
+            "[KALSHI_ORDER_INTENT] ticker=%s side=%s action=%s count=%d price=%dc "
+            "type=%s tif=%s client_order_id=%s trace_id=%s",
+            intent.ticker, intent.side, intent.action, intent.count, intent.price_cents,
+            intent.order_type, tif, order.client_order_id, intent.trace_id[:8] if intent.trace_id else "none",
+        )
+
         placed_res = await client.place_order_result(
             order,
             order_group_id=intent.order_group_id,
@@ -533,6 +541,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         latency = (time.monotonic() - t0) * 1000
         if not placed_res.success or placed_res.data is None:
             reason = getattr(placed_res, "error_message", None) or str(placed_res.error) if placed_res.error else "live_order_failed"
+            logger.warning(
+                "[KALSHI_ORDER_RESULT] ticker=%s status=REJECTED reason=%s latency_ms=%.2f "
+                "client_order_id=%s",
+                intent.ticker, reason, latency, order.client_order_id,
+            )
             return OrderResult(
                 status="rejected",
                 mode=mode,
@@ -546,6 +559,15 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         remaining_count = int(placed.remaining_size) if placed.remaining_size is not None else max(0, requested_count - filled_count)
         fill_price_cents = int((placed.price or Decimal(intent.price_cents) / Decimal("100")) * 100)
         fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count)
+
+        # Log successful order result
+        logger.info(
+            "[KALSHI_ORDER_RESULT] ticker=%s status=%s order_id=%s requested=%d filled=%d "
+            "remaining=%d price=%dc fee=%dc latency_ms=%.2f client_order_id=%s",
+            intent.ticker, placed.status or "unknown", placed.order_id or "none",
+            requested_count, filled_count, remaining_count, fill_price_cents,
+            fee_cents, latency, order.client_order_id,
+        )
 
         if filled_count >= requested_count and requested_count > 0:
             status = "filled_live"
