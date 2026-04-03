@@ -193,6 +193,7 @@ from web.api.swarm import router as swarm_router
 from web.api.moat import router as moat_router
 from web.api.health import router as health_router
 from web.api.crypto_readiness import router as crypto_readiness_router
+from web.api.ct_api import router as ct_router
 from web.api.analytics import router as analytics_router
 from web.api.brier_metrics import router as brier_metrics_router
 from web.api.feedback import router as feedback_router
@@ -494,6 +495,7 @@ def create_app(lifespan=None) -> FastAPI:
     application.include_router(kalshi_deployment_router)
     application.include_router(kalshi_metrics_api_router)
     application.include_router(correlation_api_router)
+    application.include_router(ct_router)
     application.include_router(swarm_bus_api_router)
     application.include_router(sentiment_api_router)
     application.include_router(xtf_api_router)

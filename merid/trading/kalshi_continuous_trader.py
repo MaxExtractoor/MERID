@@ -299,6 +299,11 @@ class KalshiContinuousTrader:
             maxlen=_VOLUME_BAND_RATE_HISTORY_MAXLEN
         )
 
+        # ── Cycle diagnostics ────────────────────────────────────────────────
+        # Per-cycle stats from the most recent trade_cycle() call.
+        # Empty dict until the first cycle completes.
+        self._last_cycle_stats: Dict[str, Any] = {}
+
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -659,9 +664,16 @@ class KalshiContinuousTrader:
         Returns list of approved intent dicts (does NOT submit orders).
         """
         intents = []
+        candidates_seen = 0
+        markets_with_any_edge = 0
+        vetoed_by_reason: Dict[str, int] = {}
+        ticker_diagnostics: List[Dict[str, Any]] = []
+
         for candidate in self._candidates:
             # Yield to event loop periodically during candidate processing
             await asyncio.sleep(0)
+
+            candidates_seen += 1
 
             if spot_prices:
                 candidate.spot_price = spot_prices.get(candidate.underlying)
@@ -678,6 +690,19 @@ class KalshiContinuousTrader:
                     candidate.ticker, candidate.underlying, "none", 0.0, 0.0, 0.0,
                     0.0, 0.0, 0, veto_reason,
                 )
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": mid_prob,
+                    "model_win_prob": 0.0,
+                    "edge_bps": 0.0,
+                    "side": "none",
+                    "kelly_raw": 0.0,
+                    "kelly_frac": 0.0,
+                    "veto_reason": veto_reason,
+                })
                 continue
 
             # Use signal_to_sizing for Kelly-based notional
@@ -688,6 +713,9 @@ class KalshiContinuousTrader:
 
             # Convert edge to basis points
             edge_bps = sizing.edge * 10000.0
+
+            if edge_bps > 0:
+                markets_with_any_edge += 1
 
             # Check if sizing was rejected (size = 0)
             if sizing.size_contracts == 0:
@@ -707,6 +735,19 @@ class KalshiContinuousTrader:
                     sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
                     sizing.size_contracts, veto_reason,
                 )
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": mid_prob,
+                    "model_win_prob": sizing.win_prob,
+                    "edge_bps": edge_bps,
+                    "side": side,
+                    "kelly_raw": sizing.kelly_raw,
+                    "kelly_frac": sizing.kelly_frac,
+                    "veto_reason": veto_reason,
+                })
                 continue
 
             notional = self._apply_risk_checks(candidate, estimate, bankroll)
@@ -727,6 +768,19 @@ class KalshiContinuousTrader:
                     sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
                     sizing.size_contracts, veto_reason,
                 )
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": mid_prob,
+                    "model_win_prob": sizing.win_prob,
+                    "edge_bps": edge_bps,
+                    "side": side,
+                    "kelly_raw": sizing.kelly_raw,
+                    "kelly_frac": sizing.kelly_frac,
+                    "veto_reason": veto_reason,
+                })
                 continue
 
             # When Kelly sizing produces a positive notional, prefer it
@@ -770,6 +824,19 @@ class KalshiContinuousTrader:
                     )
                     self._risk.execution_rejections += 1
                     self._emit_rejection(candidate.ticker, "max_yes_price_cap", intent["intent_id"])
+                    vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                    ticker_diagnostics.append({
+                        "ticker": candidate.ticker,
+                        "asset": candidate.underlying,
+                        "timeframe": candidate.timeframe,
+                        "implied_yes_prob": mid_prob,
+                        "model_win_prob": sizing.win_prob,
+                        "edge_bps": edge_bps,
+                        "side": side,
+                        "kelly_raw": sizing.kelly_raw,
+                        "kelly_frac": sizing.kelly_frac,
+                        "veto_reason": veto_reason,
+                    })
                     continue
 
             # Log successful intent with no veto
@@ -784,6 +851,18 @@ class KalshiContinuousTrader:
             self._risk.add_notional(candidate.group_id, notional)
             self._risk.trade_count += 1
             intents.append(intent)
+            ticker_diagnostics.append({
+                "ticker": candidate.ticker,
+                "asset": candidate.underlying,
+                "timeframe": candidate.timeframe,
+                "implied_yes_prob": mid_prob,
+                "model_win_prob": sizing.win_prob,
+                "edge_bps": edge_bps,
+                "side": side,
+                "kelly_raw": sizing.kelly_raw,
+                "kelly_frac": sizing.kelly_frac,
+                "veto_reason": None,
+            })
             logger.info(
                 "ContinuousTrader: INTENT %s %s notional=%.2f conf=%.3f edge=%.4f "
                 "kelly_raw=%.4f kelly_frac=%.4f size=%d source=%s",
@@ -792,6 +871,17 @@ class KalshiContinuousTrader:
                 sizing.kelly_raw, sizing.kelly_frac,
                 sizing.size_contracts, sizing.source,
             )
+
+        # Persist cycle summary for status() / API consumers
+        self._last_cycle_stats = {
+            "candidates_seen": candidates_seen,
+            "markets_with_any_edge": markets_with_any_edge,
+            "markets_after_risk_veto": len(intents),
+            "vetoed_total": candidates_seen - len(intents),
+            "vetoed_by_reason": vetoed_by_reason,
+            "ticker_diagnostics": ticker_diagnostics,
+            "cycle_ts": time.time(),
+        }
 
         return intents
 
@@ -852,6 +942,14 @@ class KalshiContinuousTrader:
             # 15–40% of input candidates.  Below 10% the band may be too loose;
             # above 60% it may be too restrictive.  rolling_avg smooths scan noise.
             "filter": dict(self._last_scan_filter_stats),
+            # ── Per-cycle diagnostics (populated after each trade_cycle() call) ──
+            # candidates_seen:       total candidates evaluated this cycle
+            # markets_with_any_edge: how many had edge_bps > 0 before risk checks
+            # markets_after_risk_veto: how many intents were approved (no veto)
+            # vetoed_total:          candidates_seen - markets_after_risk_veto
+            # vetoed_by_reason:      breakdown dict {reason: count}
+            # ticker_diagnostics:    per-ticker list with full edge/veto detail
+            "last_cycle": dict(self._last_cycle_stats),
         }
 
     @property
