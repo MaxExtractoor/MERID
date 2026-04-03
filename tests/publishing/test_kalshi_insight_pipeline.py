@@ -17,6 +17,7 @@ from merid.publishing.kalshi_insight_pipeline import (
     MIN_VOLUME,
     CONFIDENCE_FLOOR,
 )
+from merid.event_venues.kalshi.market_filter import MarketFilter
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -61,6 +62,7 @@ def make_pipeline(**kwargs) -> KalshiInsightPipeline:
     p._running = False
     p._tasks = []
     p._consumers = []
+    p._market_filter = MarketFilter()
     p._last_prob = {}
     p._last_post_ts = {}
     p._seen_tickers = set()
@@ -71,6 +73,11 @@ def make_pipeline(**kwargs) -> KalshiInsightPipeline:
         "by_action": {},
         "errors": 0,
         "started_at": None,
+        "filter_stats": {
+            "total_filtered": 0,
+            "total_passed": 0,
+            "rejection_breakdown": {},
+        },
     }
     for k, v in kwargs.items():
         setattr(p, k, v)
@@ -293,6 +300,93 @@ class TestStatusDict:
         p._stats["by_category"] = {"Crypto": 5, "Politics": 3}
         status = p.summary()
         assert status["by_category"]["Crypto"] == 5
+
+    def test_status_includes_filter_stats(self):
+        p = make_pipeline()
+        p._stats["filter_stats"]["total_filtered"] = 100
+        p._stats["filter_stats"]["total_passed"] = 25
+        status = p.summary()
+        assert status["filter_stats"]["total_filtered"] == 100
+        assert status["filter_stats"]["total_passed"] == 25
+
+
+# ── Market filtering ──────────────────────────────────────────────────────────
+
+class TestMarketFiltering:
+    def test_to_market_candidates_converts_markets(self):
+        p = make_pipeline()
+        markets = [
+            make_market(ticker="KXBTC-1H-T95000", volume=1000, open_interest=500),
+            make_market(ticker="KXETH-15M-T3000", volume=800, open_interest=300),
+        ]
+        candidates = p._to_market_candidates(markets)
+        assert len(candidates) == 2
+        assert candidates[0].ticker == "KXBTC-1H-T95000"
+        assert candidates[0].underlying == "BTC"
+        assert candidates[0].timeframe == "1h"
+        assert candidates[1].underlying == "ETH"
+        assert candidates[1].timeframe == "15m"
+
+    def test_to_market_candidates_parses_timeframe_from_ticker(self):
+        p = make_pipeline()
+        test_cases = [
+            ("KXBTC-15M-T95000", "15m"),
+            ("KXBTC-1H-T95000", "1h"),
+            ("KXBTC-D-T95000", "daily"),
+            ("KXBTC-DAILY-T95000", "daily"),
+            ("KXBTC-W-T95000", "weekly"),
+            ("KXBTC-WEEKLY-T95000", "weekly"),
+            ("KXBTC-M-T95000", "monthly"),
+            ("KXBTC-MONTHLY-T95000", "monthly"),
+            ("KXBTC-HOURLY-T95000", "1h"),
+        ]
+        for ticker, expected_timeframe in test_cases:
+            market = make_market(ticker=ticker)
+            candidates = p._to_market_candidates([market])
+            assert candidates[0].timeframe == expected_timeframe, \
+                f"Failed for ticker {ticker}: expected {expected_timeframe}, got {candidates[0].timeframe}"
+
+    def test_to_market_candidates_parses_underlying_from_ticker(self):
+        p = make_pipeline()
+        test_cases = [
+            ("KXBTC-1H-T95000", "BTC"),
+            ("KXETH-1H-T3000", "ETH"),
+            ("KXSOL-1H-T200", "SOL"),
+            ("KXXRP-1H-T1", "XRP"),
+            ("KXDOG-1H-T0", "DOGE"),  # DOG -> DOGE mapping
+        ]
+        for ticker, expected_underlying in test_cases:
+            market = make_market(ticker=ticker)
+            candidates = p._to_market_candidates([market])
+            assert candidates[0].underlying == expected_underlying, \
+                f"Failed for ticker {ticker}: expected {expected_underlying}, got {candidates[0].underlying}"
+
+    def test_from_market_candidates_filters_markets(self):
+        p = make_pipeline()
+        markets = [
+            make_market(ticker="KEEP-1", volume=1000),
+            make_market(ticker="DROP-1", volume=500),
+            make_market(ticker="KEEP-2", volume=800),
+        ]
+        from merid.event_venues.kalshi.market_filter import MarketCandidate
+        # Only keep markets with "KEEP" in ticker
+        kept_candidates = [
+            MarketCandidate(
+                ticker="KEEP-1", underlying="BTC", timeframe="1h",
+                expiry_ts=0.0, volume=1000, open_interest=500,
+                best_bid_cents=50, best_ask_cents=60, spread_cents=10,
+                mid_price_cents=55, category="Crypto"
+            ),
+            MarketCandidate(
+                ticker="KEEP-2", underlying="BTC", timeframe="1h",
+                expiry_ts=0.0, volume=800, open_interest=400,
+                best_bid_cents=50, best_ask_cents=60, spread_cents=10,
+                mid_price_cents=55, category="Crypto"
+            ),
+        ]
+        filtered = p._from_market_candidates(kept_candidates, markets)
+        assert len(filtered) == 2
+        assert all(m.ticker.startswith("KEEP") for m in filtered)
 
 
 # ── Category cadence constants ────────────────────────────────────────────────

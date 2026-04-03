@@ -25,6 +25,12 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from merid.event_venues.kalshi.market_filter import (
+    MarketFilter,
+    MarketFilterConfig,
+    MarketCandidate,
+    FilterResult,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.publishing.kalshi_insight_pipeline")
@@ -150,10 +156,13 @@ class KalshiInsightPipeline:
         await pipeline.run()
     """
 
-    def __init__(self) -> None:
+    def __init__(self, filter_config: Optional[MarketFilterConfig] = None) -> None:
         self._consumers: List[Callable[[InsightObject], Any]] = []
         self._running = False
         self._tasks: List[asyncio.Task] = []
+
+        # Market quality filter
+        self._market_filter = MarketFilter(filter_config)
 
         # State: ticker → last known prob + last post time
         self._last_prob: Dict[str, float] = {}
@@ -166,6 +175,11 @@ class KalshiInsightPipeline:
             "by_action": {},
             "errors": 0,
             "started_at": None,
+            "filter_stats": {
+                "total_filtered": 0,
+                "total_passed": 0,
+                "rejection_breakdown": {},
+            },
         }
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -216,7 +230,39 @@ class KalshiInsightPipeline:
                 # before processing begins, preventing burst lag when many markets are returned.
                 await asyncio.sleep(0)
 
-                for market in markets:
+                # Apply market quality filter
+                candidates = self._to_market_candidates(markets)
+                filter_result = self._market_filter.filter_markets(candidates)
+
+                # Update filter statistics
+                self._stats["filter_stats"]["total_filtered"] += filter_result.total_input
+                self._stats["filter_stats"]["total_passed"] += filter_result.passed
+                if filter_result.rejected_volume > 0:
+                    self._stats["filter_stats"]["rejection_breakdown"]["volume"] = \
+                        self._stats["filter_stats"]["rejection_breakdown"].get("volume", 0) + filter_result.rejected_volume
+                if filter_result.rejected_oi > 0:
+                    self._stats["filter_stats"]["rejection_breakdown"]["open_interest"] = \
+                        self._stats["filter_stats"]["rejection_breakdown"].get("open_interest", 0) + filter_result.rejected_oi
+                if filter_result.rejected_spread > 0:
+                    self._stats["filter_stats"]["rejection_breakdown"]["spread"] = \
+                        self._stats["filter_stats"]["rejection_breakdown"].get("spread", 0) + filter_result.rejected_spread
+                if filter_result.rejected_price > 0:
+                    self._stats["filter_stats"]["rejection_breakdown"]["price"] = \
+                        self._stats["filter_stats"]["rejection_breakdown"].get("price", 0) + filter_result.rejected_price
+                if filter_result.rejected_distance > 0:
+                    self._stats["filter_stats"]["rejection_breakdown"]["distance"] = \
+                        self._stats["filter_stats"]["rejection_breakdown"].get("distance", 0) + filter_result.rejected_distance
+                if filter_result.rejected_edge_deadzone > 0:
+                    self._stats["filter_stats"]["rejection_breakdown"]["edge_deadzone"] = \
+                        self._stats["filter_stats"]["rejection_breakdown"].get("edge_deadzone", 0) + filter_result.rejected_edge_deadzone
+                if filter_result.rejected_volume_band > 0:
+                    self._stats["filter_stats"]["rejection_breakdown"]["volume_band"] = \
+                        self._stats["filter_stats"]["rejection_breakdown"].get("volume_band", 0) + filter_result.rejected_volume_band
+
+                # Convert filtered candidates back to KalshiMarket format for processing
+                filtered_markets = self._from_market_candidates(filter_result.candidates, markets)
+
+                for market in filtered_markets:
                     # FIX-2: Yield between market processing to prevent long bursts
                     # when processing many markets without giving other tasks a chance.
                     await asyncio.sleep(0)
@@ -227,6 +273,63 @@ class KalshiInsightPipeline:
                 self._stats["errors"] += 1
                 logger.warning("Category loop error [%s]: %s", category, exc)
             await asyncio.sleep(cadence)
+
+    # ── Market filtering ──────────────────────────────────────────────────────────
+
+    def _to_market_candidates(self, markets: List[KalshiMarket]) -> List[MarketCandidate]:
+        """Convert KalshiMarket objects to MarketCandidate objects for filtering."""
+        candidates = []
+        for m in markets:
+            # Parse timeframe from ticker or category if available
+            timeframe = "hourly"  # default
+            ticker_upper = m.ticker.upper()
+            if "-15M-" in ticker_upper or "-15MIN-" in ticker_upper:
+                timeframe = "15m"
+            elif "-1H-" in ticker_upper or "-HOURLY-" in ticker_upper:
+                timeframe = "1h"
+            elif "-D-" in ticker_upper or "-DAILY-" in ticker_upper:
+                timeframe = "daily"
+            elif "-W-" in ticker_upper or "-WEEKLY-" in ticker_upper:
+                timeframe = "weekly"
+            elif "-M-" in ticker_upper or "-MONTHLY-" in ticker_upper:
+                timeframe = "monthly"
+
+            # Try to parse underlying from ticker (e.g., KXBTC-...)
+            underlying = "UNKNOWN"
+            if m.ticker.startswith("KX"):
+                parts = m.ticker[2:].split("-")
+                if parts:
+                    potential_underlying = parts[0][:3]  # e.g., BTC, ETH
+                    if potential_underlying.upper() in ["BTC", "ETH", "SOL", "XRP", "DOG"]:
+                        underlying = potential_underlying.upper()
+                        if underlying == "DOG":
+                            underlying = "DOGE"
+
+            candidate = MarketCandidate(
+                ticker=m.ticker,
+                underlying=underlying,
+                timeframe=timeframe,
+                expiry_ts=0.0,  # Could parse from end_date if needed
+                volume=m.volume,
+                open_interest=m.open_interest,
+                best_bid_cents=int(m.yes_price) if m.yes_price else 0,
+                best_ask_cents=int(m.no_price) if m.no_price else 0,
+                spread_cents=int(abs(m.yes_price - m.no_price)) if m.yes_price and m.no_price else 0,
+                mid_price_cents=int(m.yes_price) if m.yes_price else 0,
+                category=m.category,
+            )
+            candidates.append(candidate)
+        return candidates
+
+    def _from_market_candidates(
+        self, candidates: List[MarketCandidate], original_markets: List[KalshiMarket]
+    ) -> List[KalshiMarket]:
+        """Convert MarketCandidate objects back to KalshiMarket objects.
+
+        Matches candidates with their original KalshiMarket by ticker.
+        """
+        candidate_tickers = {c.ticker for c in candidates}
+        return [m for m in original_markets if m.ticker in candidate_tickers]
 
     # ── Market fetching ───────────────────────────────────────────────────────
 
