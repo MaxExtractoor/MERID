@@ -47,6 +47,7 @@ class AgentProposal:
     # Agent metadata
     agent_archetype: str  # "trend", "mean_reversion", "momentum", etc.
     agent_track_record: Optional[Dict[str, float]] = None  # win_rate, sharpe, etc.
+    mode: str = "SIM"  # "SIM" or "LIVE" — propagated from the submitting agent
 
 
 @dataclass
@@ -228,12 +229,14 @@ class SwarmConsensusAggregator:
         proposals = self._proposals[key]
         if len(proposals) < self.min_agents:
             sources = [p.agent_id for p in proposals]
+            modes = [p.mode for p in proposals]
             logger.info(
-                "Consensus %s: FORMING (proposals=%d required=%d sources=%s)",
+                "Consensus %s: FORMING (have=%d required=%d sources=%s modes=%s)",
                 key,
                 len(proposals),
                 self.min_agents,
                 sources,
+                modes,
             )
             return
         
@@ -399,27 +402,41 @@ class SwarmConsensusAggregator:
         # Determine status
         if len(proposals) < self.min_agents:
             status = ConsensusStatus.FORMING
+            forming_reason = f"insufficient_proposals(have={len(proposals)} need={self.min_agents})"
         elif len(archetypes) < min_archetypes:
             status = ConsensusStatus.FORMING  # Block consensus without diversity
+            forming_reason = f"insufficient_archetypes(have={len(archetypes)} need={min_archetypes})"
         elif agreement_ratio < self.consensus_threshold:
             status = ConsensusStatus.CONFLICTED
+            forming_reason = ""
         else:
             status = ConsensusStatus.READY
+            forming_reason = ""
 
         # Emit a structured log so every recompute is auditable at a glance
         sources = [p.agent_id for p in proposals]
+        modes = [p.mode for p in proposals]
+        sim_sources = [p.agent_id for p in proposals if p.mode == "SIM"]
+        live_sources = [p.agent_id for p in proposals if p.mode == "LIVE"]
+        forming_detail = f" forming_reason={forming_reason}" if forming_reason else ""
+        sim_detail = f" sim_sources={sim_sources}" if sim_sources else ""
+        live_detail = f" live_sources={live_sources}" if live_sources else ""
         logger.info(
-            "Consensus %s:%s: proposals=%d required=%d sources=%s "
-            "archetypes=%d direction=%s agreement=%.0f%% status=%s",
+            "Consensus %s:%s: have=%d required=%d sources=%s modes=%s "
+            "archetypes=%d direction=%s agreement=%.0f%% status=%s%s%s%s",
             asset,
             timeframe,
             len(proposals),
             self.min_agents,
             sources,
+            modes,
             len(archetypes),
             winning_dir,
             agreement_ratio * 100,
             status.value.upper(),
+            forming_detail,
+            sim_detail,
+            live_detail,
         )
         
         # Size band recommendation
