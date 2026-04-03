@@ -390,7 +390,6 @@ class TestAdaptiveQuorum:
         view = agg.get_consensus("TESTADAPTIVE", "sim_test")
         assert view is not None, "Expected a ConsensusView to be cached after submit"
         assert view.status == ConsensusStatus.READY
-# ═══════════════════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════════════════
