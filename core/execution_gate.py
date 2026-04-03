@@ -334,6 +334,22 @@ def check_price_feed_staleness() -> dict:
     critical_count = 0
     total_checked = 0
 
+    # If the cache is empty, don't block execution — this is normal on first cycle
+    # before price feeds have been populated. Return safe_to_trade=True.
+    if not feed.price_cache:
+        return {
+            "safe_to_trade": True,
+            "stale_symbols": [],
+            "critical_count": 0,
+            "total_checked": 0,
+            "timestamp": now,
+            "groups": [
+                {"name": g.name, "threshold_seconds": g.threshold_seconds, "critical": g.critical, "symbol_count": len(g.symbols)}
+                for g in _staleness_config
+            ],
+            "empty_cache": True,
+        }
+
     for symbol, price_data in feed.price_cache.items():
         total_checked += 1
         threshold, is_critical, group_name = _get_threshold_for_symbol(symbol)
