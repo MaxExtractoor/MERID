@@ -691,7 +691,13 @@ class BTC15MLane:
                 return result
 
             if consensus.get("direction") == "neutral":
-                result.blocked_reason = "swarm_neutral"
+                consensus_status = consensus.get("status", "neutral")
+                result.blocked_reason = f"swarm_neutral:{consensus_status}"
+                logger.info(
+                    "[%s] CONSENSUS_STATUS=%s skip_size_and_execute",
+                    cycle_id,
+                    consensus_status.upper(),
+                )
                 return result
 
             # 3b. Loss-streak circuit breaker (5+ consecutive losses)
@@ -1065,6 +1071,13 @@ class BTC15MLane:
             consensus_view = self._consensus_agg.get_consensus(self.config.asset, self.config.timeframe)
 
             if consensus_view is None:
+                logger.info(
+                    "CONSENSUS_STATUS=FORMING proposals=%d required=%d "
+                    "sources=%s — skip_size_and_execute",
+                    len(proposals),
+                    self._consensus_agg.min_agents,
+                    [p.agent_id for p in proposals],
+                )
                 return {"status": "forming", "direction": "neutral"}
 
             return {
