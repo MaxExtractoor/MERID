@@ -1545,6 +1545,7 @@ class KalshiTradingAgent:
             # Build proposal
             asset = self.config.assets[0] if self.config.assets else ""
             timeframe = self.config.timeframes[0] if self.config.timeframes else ""
+            proposal_mode = "SIM" if self._venue_gate.should_simulate_fill() else "LIVE"
 
             proposal = AgentProposal(
                 agent_id=self.agent_id,
@@ -1559,6 +1560,7 @@ class KalshiTradingAgent:
                 timestamp=datetime.now(timezone.utc),
                 agent_archetype=self.config.archetype,
                 agent_track_record=track_record,
+                mode=proposal_mode,
             )
 
             # Submit to aggregator

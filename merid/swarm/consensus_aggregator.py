@@ -12,7 +12,7 @@ Output: Consensus decisions feed into MarketMoodBus as InsightObjects.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Literal, Optional, Any, Callable, Tuple
 from enum import Enum
 import asyncio
 import logging
@@ -47,6 +47,7 @@ class AgentProposal:
     # Agent metadata
     agent_archetype: str  # "trend", "mean_reversion", "momentum", etc.
     agent_track_record: Optional[Dict[str, float]] = None  # win_rate, sharpe, etc.
+    mode: Literal["SIM", "LIVE"] = "SIM"  # propagated from the submitting agent
 
 
 @dataclass
@@ -158,6 +159,8 @@ class SwarmConsensusAggregator:
         max_proposal_age_seconds: float = 300.0,
         consensus_threshold: float = 0.6,  # 60% agreement
         min_archetypes_for_consensus: int = 2,
+        sim_min_agents_for_consensus: int = 1,
+        sim_min_archetypes_for_consensus: int = 1,
     ):
         if self._initialized:
             return
@@ -185,8 +188,35 @@ class SwarmConsensusAggregator:
                     min_archetypes_for_consensus,
                 )
 
+        # Allow env-var overrides for SIM / paper quorum (relaxed defaults)
+        env_sim_min = os.environ.get("CONSENSUS_SIM_MIN_AGENTS")
+        if env_sim_min is not None:
+            try:
+                sim_min_agents_for_consensus = int(env_sim_min)
+            except ValueError:
+                logger.warning(
+                    "CONSENSUS_SIM_MIN_AGENTS=%r is not a valid integer; using default %d",
+                    env_sim_min,
+                    sim_min_agents_for_consensus,
+                )
+
+        env_sim_archetypes = os.environ.get("CONSENSUS_SIM_MIN_ARCHETYPES")
+        if env_sim_archetypes is not None:
+            try:
+                sim_min_archetypes_for_consensus = int(env_sim_archetypes)
+            except ValueError:
+                logger.warning(
+                    "CONSENSUS_SIM_MIN_ARCHETYPES=%r is not a valid integer; using default %d",
+                    env_sim_archetypes,
+                    sim_min_archetypes_for_consensus,
+                )
+
         self.min_agents = max(1, min_agents_for_consensus)
         self.min_archetypes = max(1, min_archetypes_for_consensus)
+        # SIM thresholds are clamped to [1, live_threshold] so they can never
+        # be *stricter* than the live requirement by accident.
+        self.sim_min_agents = max(1, min(sim_min_agents_for_consensus, self.min_agents))
+        self.sim_min_archetypes = max(1, min(sim_min_archetypes_for_consensus, self.min_archetypes))
         self.max_age = timedelta(seconds=max_proposal_age_seconds)
         self.consensus_threshold = consensus_threshold
         
@@ -201,11 +231,32 @@ class SwarmConsensusAggregator:
         
         self._initialized = True
         logger.info(
-            "SwarmConsensusAggregator initialized (min_agents=%d min_archetypes=%d)",
+            "SwarmConsensusAggregator initialized "
+            "(live: min_agents=%d min_archetypes=%d | sim: min_agents=%d min_archetypes=%d)",
             self.min_agents,
             self.min_archetypes,
+            self.sim_min_agents,
+            self.sim_min_archetypes,
         )
-    
+
+    def _effective_thresholds(
+        self, proposals: List[AgentProposal]
+    ) -> Tuple[int, int]:
+        """Return (eff_min_agents, eff_min_archetypes) adaptive to proposal modes.
+
+        Rules:
+        - All proposals are SIM  → use relaxed SIM thresholds (default: 1 each).
+          This lets the downstream SIZE / EXECUTE path exercise on single-source
+          signals without compromising live safety.
+        - Any proposal is LIVE  → full LIVE quorum applies (default: 2 each).
+          One LIVE proposal is enough to mandate multi-agent confirmation.
+        - Empty proposal list   → return SIM thresholds (no LIVE exposure).
+        """
+        has_live = any(p.mode == "LIVE" for p in proposals)
+        if has_live:
+            return self.min_agents, self.min_archetypes
+        return self.sim_min_agents, self.sim_min_archetypes
+
     def submit_proposal(self, proposal: AgentProposal) -> None:
         """Submit an agent proposal for consensus."""
         key = f"{proposal.asset}:{proposal.timeframe}"
@@ -226,14 +277,17 @@ class SwarmConsensusAggregator:
     def _recompute_consensus(self, key: str) -> None:
         """Recompute consensus for an asset/timeframe."""
         proposals = self._proposals[key]
-        if len(proposals) < self.min_agents:
+        eff_min_agents, _ = self._effective_thresholds(proposals)
+        if len(proposals) < eff_min_agents:
             sources = [p.agent_id for p in proposals]
+            modes = [p.mode for p in proposals]
             logger.info(
-                "Consensus %s: FORMING (proposals=%d required=%d sources=%s)",
+                "Consensus %s: FORMING (have=%d required=%d sources=%s modes=%s)",
                 key,
                 len(proposals),
-                self.min_agents,
+                eff_min_agents,
                 sources,
+                modes,
             )
             return
         
@@ -388,38 +442,64 @@ class SwarmConsensusAggregator:
         elif len(archetypes) == 1:
             disagreement_flags.append("Single archetype bias")
         
-        # Sprint D: Minimum diversity requirement
-        min_archetypes = self.min_archetypes
-        if len(archetypes) < min_archetypes and len(proposals) >= self.min_agents:
+        # Adaptive quorum: relax thresholds in SIM-only mode
+        eff_min_agents, eff_min_archetypes = self._effective_thresholds(proposals)
+        if len(archetypes) < eff_min_archetypes and len(proposals) >= eff_min_agents:
             disagreement_flags.append(
-                f"Insufficient diversity: {len(archetypes)} archetype(s), need {min_archetypes}+"
+                f"Insufficient diversity: {len(archetypes)} archetype(s), need {eff_min_archetypes}+"
             )
             consensus_confidence *= 0.6  # Penalize low-diversity consensus
 
         # Determine status
-        if len(proposals) < self.min_agents:
+        if len(proposals) < eff_min_agents:
             status = ConsensusStatus.FORMING
-        elif len(archetypes) < min_archetypes:
+            forming_reason: str = f"insufficient_proposals: have={len(proposals)} need={eff_min_agents}"
+        elif len(archetypes) < eff_min_archetypes:
             status = ConsensusStatus.FORMING  # Block consensus without diversity
+            forming_reason = f"insufficient_archetypes: have={len(archetypes)} need={eff_min_archetypes}"
         elif agreement_ratio < self.consensus_threshold:
             status = ConsensusStatus.CONFLICTED
+            forming_reason = ""
         else:
             status = ConsensusStatus.READY
+            forming_reason = ""
 
-        # Emit a structured log so every recompute is auditable at a glance
-        sources = [p.agent_id for p in proposals]
+        # Emit a structured log so every recompute is auditable at a glance;
+        # single-pass extraction folds the has_live check into the iteration.
+        has_live = False
+        sources: List[str] = []
+        modes: List[str] = []
+        sim_sources: List[str] = []
+        live_sources: List[str] = []
+        for p in proposals:
+            sources.append(p.agent_id)
+            modes.append(p.mode)
+            if p.mode == "LIVE":
+                has_live = True
+                live_sources.append(p.agent_id)
+            else:
+                sim_sources.append(p.agent_id)
+        mode_context = "LIVE" if has_live else "SIM"
+        forming_detail = f" forming_reason={forming_reason!r}" if forming_reason else ""
+        sim_detail = f" sim_sources={sim_sources}" if sim_sources else ""
+        live_detail = f" live_sources={live_sources}" if live_sources else ""
         logger.info(
-            "Consensus %s:%s: proposals=%d required=%d sources=%s "
-            "archetypes=%d direction=%s agreement=%.0f%% status=%s",
+            "Consensus %s:%s: have=%d required=%d sources=%s modes=%s "
+            "archetypes=%d direction=%s agreement=%.0f%% status=%s mode_context=%s%s%s%s",
             asset,
             timeframe,
             len(proposals),
-            self.min_agents,
+            eff_min_agents,
             sources,
+            modes,
             len(archetypes),
             winning_dir,
             agreement_ratio * 100,
             status.value.upper(),
+            mode_context,
+            forming_detail,
+            sim_detail,
+            live_detail,
         )
         
         # Size band recommendation

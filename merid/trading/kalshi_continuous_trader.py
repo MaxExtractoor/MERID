@@ -50,8 +50,16 @@ _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
 _DEFAULT_KELLY_FRACTION = float(os.getenv("MERID_KELLY_FRACTION", "0.25"))
 _DEFAULT_MIN_EDGE = float(os.getenv("MERID_MIN_EDGE", "0.02"))
 
-# Edge profile selection: "initial_live" (permissive) or "production" (conservative)
-_EDGE_PROFILE = os.getenv("KALSHI_CT_EDGE_PROFILE", "production")
+# Edge profile selection: "initial_live" (permissive) or "production" (conservative).
+#
+# Defaults to "initial_live" (0.5–2% thresholds) so that CT can generate trade
+# intents in typical live Kalshi books.  Switch to "production" (2–8%) only after
+# validating that the model delivers consistent edge above those thresholds.
+#
+# Override via environment variable:
+#   KALSHI_CT_EDGE_PROFILE=production   → conservative 2-8% thresholds
+#   KALSHI_CT_EDGE_PROFILE=initial_live → permissive  0.5-2% thresholds (default)
+_EDGE_PROFILE = os.getenv("KALSHI_CT_EDGE_PROFILE", "initial_live")
 
 # ── Per-asset, per-timeframe minimum edge thresholds ──────────────────────
 #
@@ -282,6 +290,12 @@ class KalshiContinuousTrader:
         self._filter_config = MarketFilterConfig(
             allowed_underlyings=list(_CRYPTO_ASSETS),
             allowed_timeframes=list(_CRYPTO_TIMEFRAMES),
+            # Disable the pre-CT dead zone filter.  The dead zone check rejects
+            # markets whose mid price is within ±N¢ of 50¢ — but short-term crypto
+            # binary options routinely trade at 47-53¢ when the outcome is uncertain.
+            # CT has its own per-asset/timeframe edge thresholds (EDGE_THRESHOLDS) so
+            # the pre-filter version is both redundant and counterproductive here.
+            min_edge_dead_zone_pct=0.0,
         )
         self._filter = MarketFilter(self._filter_config)
 
@@ -298,6 +312,11 @@ class KalshiContinuousTrader:
         self._volume_band_rate_history: Deque[float] = deque(
             maxlen=_VOLUME_BAND_RATE_HISTORY_MAXLEN
         )
+
+        # ── Cycle diagnostics ────────────────────────────────────────────────
+        # Per-cycle stats from the most recent trade_cycle() call.
+        # Empty dict until the first cycle completes.
+        self._last_cycle_stats: Dict[str, Any] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -331,6 +350,11 @@ class KalshiContinuousTrader:
         # Accumulators for cross-asset/timeframe filter telemetry for this scan run.
         scan_total_input: int = 0
         scan_rejected_volume_band: int = 0
+        scan_rejected_edge_deadzone: int = 0
+        scan_rejected_distance: int = 0
+        scan_rejected_price: int = 0
+        scan_rejected_spread: int = 0
+        scan_rejected_volume: int = 0
 
         for asset in _CRYPTO_ASSETS:
             for tf in _CRYPTO_TIMEFRAMES:
@@ -339,20 +363,56 @@ class KalshiContinuousTrader:
                     logger.debug("ContinuousTrader: no catalog markets for %s %s", asset, tf)
                     continue
 
-                # Convert catalog → base MarketCandidate list for filter
-                raw_candidates = [
-                    MarketCandidate(
-                        ticker=cm.market.market_id,
-                        underlying=asset,
-                        timeframe=tf,
-                        expiry_ts=cm.expires_at.timestamp() if cm.expires_at else 0.0,
-                        volume=int(cm.market.volume) if cm.market.volume else 0,
-                        open_interest=int(cm.market.open_interest) if cm.market.open_interest else 0,
-                        category=cm.category or "",
-                        strike_price=cm.strike_price,
+                # Convert catalog → base MarketCandidate list for filter.
+                # Try to extract real bid/ask/mid prices from the EventMarket outcomes
+                # so that the spread filter and CT's signal_to_sizing work with real
+                # book data instead of fallback constants.
+                raw_candidates = []
+                for cm in catalog_markets:
+                    best_bid_cents: int = 0
+                    best_ask_cents: int = 0
+                    mid_price_cents: int = 0
+
+                    try:
+                        outcomes = getattr(cm.market, "outcomes", None) or []
+                        yes_outcome = next(
+                            (o for o in outcomes if getattr(o, "outcome_id", "").lower() == "yes"),
+                            None,
+                        )
+                        if yes_outcome is not None:
+                            raw_bid = getattr(yes_outcome, "best_bid", None)
+                            raw_ask = getattr(yes_outcome, "best_ask", None)
+                            # Kalshi API prices are in cents (1-99 integer range).
+                            # Guard against 0.0-1.0 decimal format by checking magnitude.
+                            if raw_bid is not None and raw_ask is not None:
+                                bid_float = float(raw_bid)
+                                ask_float = float(raw_ask)
+                                # Convert decimal (0-1) to cents if needed
+                                if bid_float <= 1.0 and bid_float > 0.0:
+                                    bid_float *= 100
+                                    ask_float *= 100
+                                best_bid_cents = int(round(bid_float))
+                                best_ask_cents = int(round(ask_float))
+                                if best_bid_cents > 0 and best_ask_cents > 0:
+                                    mid_price_cents = (best_bid_cents + best_ask_cents) // 2
+                    except Exception:
+                        pass  # Price enrichment is best-effort; filter still works without it
+
+                    raw_candidates.append(
+                        MarketCandidate(
+                            ticker=cm.market.market_id,
+                            underlying=asset,
+                            timeframe=tf,
+                            expiry_ts=cm.expires_at.timestamp() if cm.expires_at else 0.0,
+                            volume=int(cm.market.volume) if cm.market.volume else 0,
+                            open_interest=int(cm.market.open_interest) if cm.market.open_interest else 0,
+                            category=cm.category or "",
+                            strike_price=cm.strike_price,
+                            best_bid_cents=best_bid_cents,
+                            best_ask_cents=best_ask_cents,
+                            mid_price_cents=mid_price_cents,
+                        )
                     )
-                    for cm in catalog_markets
-                ]
 
                 filter_result = self._filter.filter_markets(raw_candidates)
                 for c in filter_result.candidates:
@@ -363,9 +423,33 @@ class KalshiContinuousTrader:
                 counts = asset_counts.setdefault(asset, {})
                 counts[tf] = len(filter_result.candidates)
 
+                # Log per-asset/timeframe filter drops at DEBUG so individual filter
+                # vetoes are visible in logs without flooding INFO.
+                if filter_result.total_input > 0 and filter_result.passed < filter_result.total_input:
+                    logger.debug(
+                        "ContinuousTrader filter %s %s: "
+                        "input=%d passed=%d | "
+                        "vol_band=%d spread=%d price=%d distance=%d dead_zone=%d vol=%d oi=%d cap=%d",
+                        asset, tf,
+                        filter_result.total_input, filter_result.passed,
+                        filter_result.rejected_volume_band,
+                        filter_result.rejected_spread,
+                        filter_result.rejected_price,
+                        filter_result.rejected_distance,
+                        filter_result.rejected_edge_deadzone,
+                        filter_result.rejected_volume,
+                        filter_result.rejected_oi,
+                        filter_result.capped_per_asset,
+                    )
+
                 # Accumulate filter telemetry across all (asset, timeframe) loops.
                 scan_total_input += filter_result.total_input
                 scan_rejected_volume_band += filter_result.rejected_volume_band
+                scan_rejected_edge_deadzone += filter_result.rejected_edge_deadzone
+                scan_rejected_distance += filter_result.rejected_distance
+                scan_rejected_price += filter_result.rejected_price
+                scan_rejected_spread += filter_result.rejected_spread
+                scan_rejected_volume += filter_result.rejected_volume
 
                 # Yield to event loop after processing each asset-timeframe combination
                 await asyncio.sleep(0)
@@ -387,16 +471,45 @@ class KalshiContinuousTrader:
         self._last_scan_filter_stats = {
             "scan_total_input": scan_total_input,
             "scan_rejected_volume_band": scan_rejected_volume_band,
+            "scan_rejected_edge_deadzone": scan_rejected_edge_deadzone,
+            "scan_rejected_distance": scan_rejected_distance,
+            "scan_rejected_price": scan_rejected_price,
+            "scan_rejected_spread": scan_rejected_spread,
+            "scan_rejected_volume": scan_rejected_volume,
             "volume_band_block_rate": round(scan_block_rate, 4),
             "volume_band_block_rate_rolling_avg": round(rolling_avg, 4),
             "rolling_window_scans": len(self._volume_band_rate_history),
         }
+        # Build a concise summary of ALL non-zero filter drops for the INFO log line.
+        drops = []
+        if scan_rejected_edge_deadzone:
+            drops.append(f"dead_zone={scan_rejected_edge_deadzone}")
+        if scan_rejected_distance:
+            drops.append(f"distance={scan_rejected_distance}")
+        if scan_rejected_price:
+            drops.append(f"price={scan_rejected_price}")
+        if scan_rejected_spread:
+            drops.append(f"spread={scan_rejected_spread}")
+        if scan_rejected_volume:
+            drops.append(f"volume={scan_rejected_volume}")
+        if scan_rejected_volume_band:
+            drops.append(f"vol_band={scan_rejected_volume_band}")
+        drop_summary = " ".join(drops) if drops else "none"
         logger.info(
             "ContinuousTrader filter: total_input=%d volume_band_rejected=%d "
-            "block_rate=%.3f rolling_avg=%.3f (window=%d scans)",
+            "block_rate=%.3f rolling_avg=%.3f (window=%d scans) drops=[%s]",
             scan_total_input, scan_rejected_volume_band,
             scan_block_rate, rolling_avg, len(self._volume_band_rate_history),
+            drop_summary,
         )
+        if scan_rejected_edge_deadzone > 0:
+            logger.warning(
+                "ContinuousTrader: %d candidates dropped by dead-zone filter "
+                "(mid_price within ±%.1f¢ of 50¢).  "
+                "Consider lowering min_edge_dead_zone_pct or enriching book prices.",
+                scan_rejected_edge_deadzone,
+                self._filter_config.min_edge_dead_zone_pct,
+            )
 
         # Log per-asset/timeframe counts at INFO level
         for asset, tfs in asset_counts.items():
@@ -659,9 +772,16 @@ class KalshiContinuousTrader:
         Returns list of approved intent dicts (does NOT submit orders).
         """
         intents = []
+        candidates_seen = 0
+        markets_with_any_edge = 0
+        vetoed_by_reason: Dict[str, int] = {}
+        ticker_diagnostics: List[Dict[str, Any]] = []
+
         for candidate in self._candidates:
             # Yield to event loop periodically during candidate processing
             await asyncio.sleep(0)
+
+            candidates_seen += 1
 
             if spot_prices:
                 candidate.spot_price = spot_prices.get(candidate.underlying)
@@ -678,6 +798,19 @@ class KalshiContinuousTrader:
                     candidate.ticker, candidate.underlying, "none", 0.0, 0.0, 0.0,
                     0.0, 0.0, 0, veto_reason,
                 )
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": mid_prob,
+                    "model_win_prob": 0.0,
+                    "edge_bps": 0.0,
+                    "side": "none",
+                    "kelly_raw": 0.0,
+                    "kelly_frac": 0.0,
+                    "veto_reason": veto_reason,
+                })
                 continue
 
             # Use signal_to_sizing for Kelly-based notional
@@ -688,6 +821,9 @@ class KalshiContinuousTrader:
 
             # Convert edge to basis points
             edge_bps = sizing.edge * 10000.0
+
+            if edge_bps > 0:
+                markets_with_any_edge += 1
 
             # Check if sizing was rejected (size = 0)
             if sizing.size_contracts == 0:
@@ -707,6 +843,19 @@ class KalshiContinuousTrader:
                     sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
                     sizing.size_contracts, veto_reason,
                 )
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": mid_prob,
+                    "model_win_prob": sizing.win_prob,
+                    "edge_bps": edge_bps,
+                    "side": side,
+                    "kelly_raw": sizing.kelly_raw,
+                    "kelly_frac": sizing.kelly_frac,
+                    "veto_reason": veto_reason,
+                })
                 continue
 
             notional = self._apply_risk_checks(candidate, estimate, bankroll)
@@ -727,6 +876,19 @@ class KalshiContinuousTrader:
                     sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
                     sizing.size_contracts, veto_reason,
                 )
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": mid_prob,
+                    "model_win_prob": sizing.win_prob,
+                    "edge_bps": edge_bps,
+                    "side": side,
+                    "kelly_raw": sizing.kelly_raw,
+                    "kelly_frac": sizing.kelly_frac,
+                    "veto_reason": veto_reason,
+                })
                 continue
 
             # When Kelly sizing produces a positive notional, prefer it
@@ -770,6 +932,19 @@ class KalshiContinuousTrader:
                     )
                     self._risk.execution_rejections += 1
                     self._emit_rejection(candidate.ticker, "max_yes_price_cap", intent["intent_id"])
+                    vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                    ticker_diagnostics.append({
+                        "ticker": candidate.ticker,
+                        "asset": candidate.underlying,
+                        "timeframe": candidate.timeframe,
+                        "implied_yes_prob": mid_prob,
+                        "model_win_prob": sizing.win_prob,
+                        "edge_bps": edge_bps,
+                        "side": side,
+                        "kelly_raw": sizing.kelly_raw,
+                        "kelly_frac": sizing.kelly_frac,
+                        "veto_reason": veto_reason,
+                    })
                     continue
 
             # Log successful intent with no veto
@@ -784,6 +959,18 @@ class KalshiContinuousTrader:
             self._risk.add_notional(candidate.group_id, notional)
             self._risk.trade_count += 1
             intents.append(intent)
+            ticker_diagnostics.append({
+                "ticker": candidate.ticker,
+                "asset": candidate.underlying,
+                "timeframe": candidate.timeframe,
+                "implied_yes_prob": mid_prob,
+                "model_win_prob": sizing.win_prob,
+                "edge_bps": edge_bps,
+                "side": side,
+                "kelly_raw": sizing.kelly_raw,
+                "kelly_frac": sizing.kelly_frac,
+                "veto_reason": None,
+            })
             logger.info(
                 "ContinuousTrader: INTENT %s %s notional=%.2f conf=%.3f edge=%.4f "
                 "kelly_raw=%.4f kelly_frac=%.4f size=%d source=%s",
@@ -792,6 +979,17 @@ class KalshiContinuousTrader:
                 sizing.kelly_raw, sizing.kelly_frac,
                 sizing.size_contracts, sizing.source,
             )
+
+        # Persist cycle summary for status() / API consumers
+        self._last_cycle_stats = {
+            "candidates_seen": candidates_seen,
+            "markets_with_any_edge": markets_with_any_edge,
+            "markets_after_risk_veto": len(intents),
+            "vetoed_total": candidates_seen - len(intents),
+            "vetoed_by_reason": vetoed_by_reason,
+            "ticker_diagnostics": ticker_diagnostics,
+            "cycle_ts": time.time(),
+        }
 
         return intents
 
@@ -846,12 +1044,29 @@ class KalshiContinuousTrader:
                 "kelly_fraction": self._kelly_fraction,
                 "min_edge": self._min_edge,
                 "edge_profile": _EDGE_PROFILE,  # Show which profile is active
+                # Surface the pre-CT filter's dead zone setting so the dashboard can
+                # warn when it would drop near-50¢ candidates.
+                "filter_dead_zone_pct": self._filter_config.min_edge_dead_zone_pct,
+                "filter_spot_band_pct": self._filter_config.spot_band_pct,
             },
             # ── Filter telemetry (populated after first _refresh_candidates call) ──
             # Use these to audit the relative-volume band: a healthy block_rate is
             # 15–40% of input candidates.  Below 10% the band may be too loose;
             # above 60% it may be too restrictive.  rolling_avg smooths scan noise.
+            # Also includes per-filter rejection counts:
+            #   scan_rejected_edge_deadzone: markets dropped because mid was in dead zone
+            #   scan_rejected_distance:      markets dropped because strike too far from spot
+            #   scan_rejected_price:         markets dropped by price range gate
+            #   scan_rejected_spread:        markets dropped by spread gate
             "filter": dict(self._last_scan_filter_stats),
+            # ── Per-cycle diagnostics (populated after each trade_cycle() call) ──
+            # candidates_seen:       total candidates evaluated this cycle
+            # markets_with_any_edge: how many had edge_bps > 0 before risk checks
+            # markets_after_risk_veto: how many intents were approved (no veto)
+            # vetoed_total:          candidates_seen - markets_after_risk_veto
+            # vetoed_by_reason:      breakdown dict {reason: count}
+            # ticker_diagnostics:    per-ticker list with full edge/veto detail
+            "last_cycle": dict(self._last_cycle_stats),
         }
 
     @property

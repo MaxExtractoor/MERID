@@ -1031,6 +1031,7 @@ class BTC15MLane:
                     edge_estimate=abs(sent_score) * 5.0,
                     timestamp=datetime.now(timezone.utc),
                     agent_archetype="sentiment",
+                    mode="LIVE" if self.lane_live else "SIM",
                 )
             )
 
@@ -1061,6 +1062,7 @@ class BTC15MLane:
                     edge_estimate=fg_conf * 3.0,
                     timestamp=datetime.now(timezone.utc),
                     agent_archetype="contrarian",
+                    mode="LIVE" if self.lane_live else "SIM",
                 )
             )
 
@@ -1072,11 +1074,12 @@ class BTC15MLane:
 
             if consensus_view is None:
                 logger.info(
-                    "CONSENSUS_STATUS=FORMING proposals=%d required=%d "
-                    "sources=%s — skip_size_and_execute",
+                    "CONSENSUS_STATUS=FORMING have=%d required=%d "
+                    "sources=%s modes=%s — skip_size_and_execute",
                     len(proposals),
                     self._consensus_agg.min_agents,
                     [p.agent_id for p in proposals],
+                    [p.mode for p in proposals],
                 )
                 return {"status": "forming", "direction": "neutral"}
 

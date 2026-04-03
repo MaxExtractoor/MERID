@@ -290,6 +290,9 @@ export const API_ENDPOINTS = {
   UI_MODE_INDICATOR: "/api/v1/ui/mode-indicator",
   UI_WORKFLOW: "/api/v1/ui/workflow",
 
+  // ── Continuous Trader (CT) diagnostics ───────────────────────────────
+  CT_STATUS: "/api/v1/ct/status",
+
 } as const;
 
 // WebSocket Events
