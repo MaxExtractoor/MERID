@@ -52,6 +52,125 @@ TIMEFRAME_ALIASES: Dict[str, str] = {
 }
 
 
+# ── Per-asset, per-timeframe spend caps ──────────────────────────────────
+#
+# Maximum exposure as a percentage of total bankroll for each (asset, timeframe) pair.
+# These caps ensure Kelly output is clipped to reasonable position sizes that scale
+# with liquidity and timeframe characteristics.
+#
+# Values are stored as tuples: (min_pct, max_pct) representing the range.
+# The sizing logic uses the midpoint by default but can be tuned based on conditions.
+#
+# Strategy (per single position):
+#   - BTC: 15m: 5-7%, 1h: 4-6%, daily: 3-5%, weekly/monthly: 2-4%
+#   - ETH: 15m: 4-6%, 1h: 3-5%, daily: 2-4%, weekly/monthly: 2-3%
+#   - SOL/XRP: 15m: 3-5%, 1h: 2-4%, daily: 2-3%, weekly/monthly: 1-2%
+#   - DOGE: 15m: 2-4%, 1h: 2-3%, daily/weekly/monthly: 1-2%
+#
+SPEND_CAPS: Dict[Tuple[str, str], Tuple[float, float]] = {
+    # BTC — Most liquid, highest caps
+    ("BTC", "15m"): (0.05, 0.07),      # 5-7% of bankroll
+    ("BTC", "1h"): (0.04, 0.06),       # 4-6%
+    ("BTC", "daily"): (0.03, 0.05),    # 3-5%
+    ("BTC", "weekly"): (0.02, 0.04),   # 2-4%
+    ("BTC", "monthly"): (0.02, 0.04),  # 2-4%
+    # ETH — High liquidity
+    ("ETH", "15m"): (0.04, 0.06),      # 4-6%
+    ("ETH", "1h"): (0.03, 0.05),       # 3-5%
+    ("ETH", "daily"): (0.02, 0.04),    # 2-4%
+    ("ETH", "weekly"): (0.02, 0.03),   # 2-3%
+    ("ETH", "monthly"): (0.02, 0.03),  # 2-3%
+    # SOL — Moderate liquidity
+    ("SOL", "15m"): (0.03, 0.05),      # 3-5%
+    ("SOL", "1h"): (0.02, 0.04),       # 2-4%
+    ("SOL", "daily"): (0.02, 0.03),    # 2-3%
+    ("SOL", "weekly"): (0.01, 0.02),   # 1-2%
+    ("SOL", "monthly"): (0.01, 0.02),  # 1-2%
+    # XRP — Similar to SOL
+    ("XRP", "15m"): (0.03, 0.05),      # 3-5%
+    ("XRP", "1h"): (0.02, 0.04),       # 2-4%
+    ("XRP", "daily"): (0.02, 0.03),    # 2-3%
+    ("XRP", "weekly"): (0.01, 0.02),   # 1-2%
+    ("XRP", "monthly"): (0.01, 0.02),  # 1-2%
+    # DOGE — Lower liquidity, more conservative
+    ("DOGE", "15m"): (0.02, 0.04),     # 2-4%
+    ("DOGE", "1h"): (0.02, 0.03),      # 2-3%
+    ("DOGE", "daily"): (0.01, 0.02),   # 1-2%
+    ("DOGE", "weekly"): (0.01, 0.02),  # 1-2%
+    ("DOGE", "monthly"): (0.01, 0.02), # 1-2%
+}
+
+# Global portfolio caps
+# Maximum total exposure per asset across all timeframes (as % of bankroll)
+PER_ASSET_TOTAL_CAP: Dict[str, Tuple[float, float]] = {
+    "BTC": (0.20, 0.25),   # 20-25% total across all BTC positions
+    "ETH": (0.20, 0.25),   # 20-25%
+    "SOL": (0.20, 0.25),   # 20-25%
+    "XRP": (0.20, 0.25),   # 20-25%
+    "DOGE": (0.20, 0.25),  # 20-25%
+}
+
+# Global portfolio maximum exposure cap (all positions combined)
+PORTFOLIO_GLOBAL_CAP: float = 0.40  # 40% max exposure at any time
+
+
+def get_spend_cap(asset: str, timeframe: str) -> Tuple[float, float]:
+    """Get the spend cap range for a given (asset, timeframe) pair.
+
+    Args:
+        asset: Asset symbol (e.g., "BTC", "ETH")
+        timeframe: Timeframe (e.g., "15m", "1h", "daily")
+
+    Returns:
+        Tuple of (min_pct, max_pct) representing the spend cap range.
+        If no specific cap is configured, returns a conservative default (1%, 2%).
+    """
+    key = (asset.upper(), timeframe.lower())
+    return SPEND_CAPS.get(key, (0.01, 0.02))
+
+
+def get_spend_cap_midpoint(asset: str, timeframe: str) -> float:
+    """Get the midpoint spend cap for a given (asset, timeframe) pair.
+
+    This is the default sizing cap used by the risk engine.
+
+    Args:
+        asset: Asset symbol (e.g., "BTC", "ETH")
+        timeframe: Timeframe (e.g., "15m", "1h", "daily")
+
+    Returns:
+        Midpoint of the spend cap range as a decimal (e.g., 0.055 for 5.5%).
+    """
+    min_cap, max_cap = get_spend_cap(asset, timeframe)
+    return (min_cap + max_cap) / 2.0
+
+
+def get_per_asset_total_cap(asset: str) -> Tuple[float, float]:
+    """Get the total exposure cap for an asset across all timeframes.
+
+    Args:
+        asset: Asset symbol (e.g., "BTC", "ETH")
+
+    Returns:
+        Tuple of (min_pct, max_pct) for total asset exposure.
+        If no specific cap is configured, returns (15%, 20%).
+    """
+    return PER_ASSET_TOTAL_CAP.get(asset.upper(), (0.15, 0.20))
+
+
+def get_per_asset_total_cap_midpoint(asset: str) -> float:
+    """Get the midpoint of the per-asset total exposure cap.
+
+    Args:
+        asset: Asset symbol (e.g., "BTC", "ETH")
+
+    Returns:
+        Midpoint of the total asset cap range as a decimal.
+    """
+    min_cap, max_cap = get_per_asset_total_cap(asset)
+    return (min_cap + max_cap) / 2.0
+
+
 # ── Per-asset risk profile ────────────────────────────────────────────────
 
 @dataclass
@@ -329,6 +448,7 @@ class KalshiCryptoRiskEngine:
         max_risk_pct_trade: Optional[float] = None,
         cushion_pct_trade: Optional[float] = None,
         asset: Optional[str] = None,
+        timeframe: Optional[str] = None,
     ) -> int:
         """Compute how many contracts to buy given bankroll and contract price.
 
@@ -341,6 +461,9 @@ class KalshiCryptoRiskEngine:
             risk_usd = bankroll * (max_risk_pct_trade - cushion_pct_trade)
             contracts = floor(risk_usd / price)
 
+        If asset and timeframe are provided, the result is clipped to the
+        spend cap for that (asset, timeframe) pair.
+
         Returns 0 if the resulting size is non-positive.
         """
         if price <= 0:
@@ -352,9 +475,57 @@ class KalshiCryptoRiskEngine:
             asset=asset,
         )
         contracts = math.floor(risk_usd / price)
-        return max(0, contracts)
+        contracts = max(0, contracts)
+
+        # Apply spend cap if asset and timeframe are provided
+        if contracts > 0 and asset is not None and timeframe is not None:
+            contracts = self.apply_spend_cap(contracts, price, bankroll, asset, timeframe)
+
+        return contracts
 
     # ── Portfolio risk ────────────────────────────────────────────────────
+
+    def apply_spend_cap(
+        self,
+        contracts: int,
+        price: float,
+        bankroll: float,
+        asset: str,
+        timeframe: str,
+    ) -> int:
+        """Clip contract size to the spend cap for (asset, timeframe).
+
+        The spend cap defines the maximum exposure as a percentage of bankroll
+        for a single position in this asset/timeframe combination.
+
+        Args:
+            contracts: Uncapped contract size from Kelly or other sizing logic.
+            price: Contract price (decimal 0-1).
+            bankroll: Total bankroll.
+            asset: Asset symbol.
+            timeframe: Timeframe string.
+
+        Returns:
+            Clipped contract size respecting the spend cap.
+        """
+        if contracts <= 0:
+            return 0
+
+        # Get the spend cap midpoint for this (asset, timeframe)
+        cap_pct = get_spend_cap_midpoint(asset, timeframe)
+        max_exposure_usd = bankroll * cap_pct
+        max_contracts = int(math.floor(max_exposure_usd / price)) if price > 0 else 0
+
+        if contracts > max_contracts:
+            logger.info(
+                "apply_spend_cap: %s/%s contracts=%d capped to %d "
+                "(cap=%.1f%% of bankroll, max_exposure=$%.2f)",
+                asset, timeframe, contracts, max_contracts,
+                cap_pct * 100, max_exposure_usd,
+            )
+            return max_contracts
+
+        return contracts
 
     def compute_portfolio_risk(
         self,
@@ -393,12 +564,16 @@ class KalshiCryptoRiskEngine:
     ) -> Tuple[bool, str]:
         """Determine whether a new order is permissible.
 
-        Enforces three independent constraints in order:
+        Enforces five independent constraints in order:
 
         1. **Drawdown stop-out**: equity must not be below the drawdown floor.
-        2. **Portfolio risk cap**: aggregate open risk after the new order must
+        2. **Global portfolio cap**: total exposure across ALL positions must stay
+           within ``PORTFOLIO_GLOBAL_CAP`` (40% default).
+        3. **Portfolio risk cap**: aggregate open risk after the new order must
            stay within ``max_risk_pct_portfolio`` of the *total* bankroll.
-        3. **Per-asset exposure cap**: asset-level open risk after the new order
+        4. **Per-asset total cap**: total exposure for this asset across all
+           timeframes must stay within ``PER_ASSET_TOTAL_CAP`` (20-25% default).
+        5. **Per-asset exposure cap**: asset-level open risk after the new order
            must stay within the asset profile's ``max_risk_pct_portfolio`` of
            the *asset* bankroll slice.
 
@@ -420,6 +595,7 @@ class KalshiCryptoRiskEngine:
             return False, "zero_or_negative_contracts"
 
         ref_bankroll = initial_bankroll if initial_bankroll is not None else total_bankroll
+        new_order_risk = contracts * price
 
         # 1. Drawdown stop-out ─────────────────────────────────────────────
         if ref_bankroll > 0:
@@ -427,15 +603,44 @@ class KalshiCryptoRiskEngine:
             if drawdown >= self._risk_cfg.max_total_drawdown_pct:
                 return False, "max_drawdown_reached"
 
-        # 2. Portfolio-wide risk cap ───────────────────────────────────────
+        # 2. Global portfolio cap ──────────────────────────────────────────
+        # Total exposure across ALL positions (all assets and timeframes)
+        current_total_exposure = self.compute_portfolio_risk(open_positions)
+        total_exposure_after = current_total_exposure + new_order_risk
+        global_cap = total_bankroll * PORTFOLIO_GLOBAL_CAP
+        if total_exposure_after > global_cap:
+            logger.debug(
+                "check_can_add_order: REJECTED — global_portfolio_cap "
+                "current=%.2f new=%.2f total=%.2f cap=%.2f (%.1f%%)",
+                current_total_exposure, new_order_risk, total_exposure_after,
+                global_cap, PORTFOLIO_GLOBAL_CAP * 100,
+            )
+            return False, "global_portfolio_cap"
+
+        # 3. Portfolio-wide risk cap ───────────────────────────────────────
         current_port_risk = self.compute_portfolio_risk(open_positions)
-        new_order_risk = contracts * price
         port_risk_after = current_port_risk + new_order_risk
         port_cap = total_bankroll * self._risk_cfg.max_risk_pct_portfolio
         if port_risk_after > port_cap:
             return False, "portfolio_risk_limit"
 
-        # 3. Per-asset exposure cap ────────────────────────────────────────
+        # 4. Per-asset total cap ───────────────────────────────────────────
+        # Total exposure for this asset across all timeframes
+        asset_total_exposure = self.compute_portfolio_risk(open_positions, asset_filter=asset)
+        asset_total_exposure_after = asset_total_exposure + new_order_risk
+        asset_total_cap_pct = get_per_asset_total_cap_midpoint(asset)
+        asset_total_cap = total_bankroll * asset_total_cap_pct
+        if asset_total_exposure_after > asset_total_cap:
+            logger.debug(
+                "check_can_add_order: REJECTED — per_asset_total_cap asset=%s "
+                "current=%.2f new=%.2f total=%.2f cap=%.2f (%.1f%%)",
+                asset, asset_total_exposure, new_order_risk,
+                asset_total_exposure_after, asset_total_cap,
+                asset_total_cap_pct * 100,
+            )
+            return False, f"per_asset_total_cap:{asset}"
+
+        # 5. Per-asset exposure cap ────────────────────────────────────────
         profile = self._risk_cfg.asset_profiles.get(asset)
         if profile is not None:
             asset_bl = total_bankroll * profile.bankroll_share_pct
