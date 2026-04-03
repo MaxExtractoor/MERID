@@ -324,7 +324,10 @@ class KalshiTradingAgent:
                         )
                         continue
                     elif not consensus:
-                        self.logger.debug("No consensus yet, signal held")
+                        self.logger.info(
+                            "CONSENSUS_STATUS=FORMING market=%s — signal held pending more proposals",
+                            market.market_id,
+                        )
                         continue
             except Exception as exc:
                 self.logger.warning(f"Error evaluating {market.market_id}: {exc}")

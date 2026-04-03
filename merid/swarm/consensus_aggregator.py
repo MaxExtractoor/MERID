@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 import asyncio
 import logging
+import os
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -156,11 +157,36 @@ class SwarmConsensusAggregator:
         min_agents_for_consensus: int = 2,
         max_proposal_age_seconds: float = 300.0,
         consensus_threshold: float = 0.6,  # 60% agreement
+        min_archetypes_for_consensus: int = 2,
     ):
         if self._initialized:
             return
-        
-        self.min_agents = min_agents_for_consensus
+
+        # Allow env-var overrides so SIM/paper runs can set CONSENSUS_MIN_AGENTS=1
+        env_min = os.environ.get("CONSENSUS_MIN_AGENTS")
+        if env_min is not None:
+            try:
+                min_agents_for_consensus = int(env_min)
+            except ValueError:
+                logger.warning(
+                    "CONSENSUS_MIN_AGENTS=%r is not a valid integer; using default %d",
+                    env_min,
+                    min_agents_for_consensus,
+                )
+
+        env_archetypes = os.environ.get("CONSENSUS_MIN_ARCHETYPES")
+        if env_archetypes is not None:
+            try:
+                min_archetypes_for_consensus = int(env_archetypes)
+            except ValueError:
+                logger.warning(
+                    "CONSENSUS_MIN_ARCHETYPES=%r is not a valid integer; using default %d",
+                    env_archetypes,
+                    min_archetypes_for_consensus,
+                )
+
+        self.min_agents = max(1, min_agents_for_consensus)
+        self.min_archetypes = max(1, min_archetypes_for_consensus)
         self.max_age = timedelta(seconds=max_proposal_age_seconds)
         self.consensus_threshold = consensus_threshold
         
@@ -174,7 +200,11 @@ class SwarmConsensusAggregator:
         self._subscribers: List[Callable[[ConsensusView], None]] = []
         
         self._initialized = True
-        logger.info(f"SwarmConsensusAggregator initialized (min={min_agents_for_consensus})")
+        logger.info(
+            "SwarmConsensusAggregator initialized (min_agents=%d min_archetypes=%d)",
+            self.min_agents,
+            self.min_archetypes,
+        )
     
     def submit_proposal(self, proposal: AgentProposal) -> None:
         """Submit an agent proposal for consensus."""
@@ -197,6 +227,14 @@ class SwarmConsensusAggregator:
         """Recompute consensus for an asset/timeframe."""
         proposals = self._proposals[key]
         if len(proposals) < self.min_agents:
+            sources = [p.agent_id for p in proposals]
+            logger.info(
+                "Consensus %s: FORMING (proposals=%d required=%d sources=%s)",
+                key,
+                len(proposals),
+                self.min_agents,
+                sources,
+            )
             return
         
         asset, timeframe = key.split(":")
@@ -351,7 +389,7 @@ class SwarmConsensusAggregator:
             disagreement_flags.append("Single archetype bias")
         
         # Sprint D: Minimum diversity requirement
-        min_archetypes = 2
+        min_archetypes = self.min_archetypes
         if len(archetypes) < min_archetypes and len(proposals) >= self.min_agents:
             disagreement_flags.append(
                 f"Insufficient diversity: {len(archetypes)} archetype(s), need {min_archetypes}+"
@@ -367,6 +405,22 @@ class SwarmConsensusAggregator:
             status = ConsensusStatus.CONFLICTED
         else:
             status = ConsensusStatus.READY
+
+        # Emit a structured log so every recompute is auditable at a glance
+        sources = [p.agent_id for p in proposals]
+        logger.info(
+            "Consensus %s:%s: proposals=%d required=%d sources=%s "
+            "archetypes=%d direction=%s agreement=%.0f%% status=%s",
+            asset,
+            timeframe,
+            len(proposals),
+            self.min_agents,
+            sources,
+            len(archetypes),
+            winning_dir,
+            agreement_ratio * 100,
+            status.value.upper(),
+        )
         
         # Size band recommendation
         size_band = self._calculate_size_band(
