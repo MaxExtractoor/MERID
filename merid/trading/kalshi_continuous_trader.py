@@ -50,50 +50,92 @@ _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
 _DEFAULT_KELLY_FRACTION = float(os.getenv("MERID_KELLY_FRACTION", "0.25"))
 _DEFAULT_MIN_EDGE = float(os.getenv("MERID_MIN_EDGE", "0.02"))
 
+# Edge profile selection: "initial_live" (permissive) or "production" (conservative)
+_EDGE_PROFILE = os.getenv("KALSHI_CT_EDGE_PROFILE", "production")
+
 # ── Per-asset, per-timeframe minimum edge thresholds ──────────────────────
 #
 # Minimum net edge (after fees) required for a candidate to be tradable.
 # Keys are (asset, timeframe) tuples; values are edge fractions (e.g. 0.03 = 3%).
 #
-# Strategy:
-#   - BTC: 15m/1h = 2-3%, daily/weekly = 4-5%
-#   - ETH: 15m/1h = 3-4%, daily/weekly = 5-6%
-#   - SOL/XRP/DOGE: 15m/1h = 4-6%, daily/weekly = 6-8%
+# Two profiles:
+#   - "initial_live": Permissive thresholds for micro-size trading (0.5-1.5%)
+#   - "production": Conservative thresholds for full-size trading (2-8%)
 #
 # If a specific (asset, timeframe) is not found, falls back to _DEFAULT_MIN_EDGE.
 #
-EDGE_THRESHOLDS: Dict[Tuple[str, str], float] = {
+
+# INITIAL_LIVE profile: Relaxed thresholds for getting live with micro-size
+EDGE_THRESHOLDS_INITIAL_LIVE: Dict[Tuple[str, str], float] = {
+    # BTC - most liquid, tightest spreads
+    ("BTC", "15m"): 0.005,    # 0.5% - very permissive for initial live
+    ("BTC", "1h"): 0.008,     # 0.8%
+    ("BTC", "daily"): 0.012,  # 1.2%
+    ("BTC", "weekly"): 0.015, # 1.5%
+    ("BTC", "monthly"): 0.015,
+    # ETH - second most liquid
+    ("ETH", "15m"): 0.008,
+    ("ETH", "1h"): 0.010,
+    ("ETH", "daily"): 0.015,
+    ("ETH", "weekly"): 0.018,
+    ("ETH", "monthly"): 0.018,
+    # SOL/XRP/DOGE - wider spreads, more volatile
+    ("SOL", "15m"): 0.010,
+    ("SOL", "1h"): 0.012,
+    ("SOL", "daily"): 0.015,
+    ("SOL", "weekly"): 0.020,
+    ("SOL", "monthly"): 0.020,
+    ("XRP", "15m"): 0.010,
+    ("XRP", "1h"): 0.012,
+    ("XRP", "daily"): 0.015,
+    ("XRP", "weekly"): 0.020,
+    ("XRP", "monthly"): 0.020,
+    ("DOGE", "15m"): 0.010,
+    ("DOGE", "1h"): 0.012,
+    ("DOGE", "daily"): 0.015,
+    ("DOGE", "weekly"): 0.020,
+    ("DOGE", "monthly"): 0.020,
+}
+
+# PRODUCTION profile: Conservative thresholds (original values)
+EDGE_THRESHOLDS_PRODUCTION: Dict[Tuple[str, str], float] = {
     # BTC
     ("BTC", "15m"): 0.02,
     ("BTC", "1h"): 0.03,
     ("BTC", "daily"): 0.04,
     ("BTC", "weekly"): 0.05,
-    ("BTC", "monthly"): 0.05,  # same as weekly
+    ("BTC", "monthly"): 0.05,
     # ETH
     ("ETH", "15m"): 0.03,
     ("ETH", "1h"): 0.04,
     ("ETH", "daily"): 0.05,
     ("ETH", "weekly"): 0.06,
-    ("ETH", "monthly"): 0.06,  # same as weekly
+    ("ETH", "monthly"): 0.06,
     # SOL
     ("SOL", "15m"): 0.04,
     ("SOL", "1h"): 0.06,
     ("SOL", "daily"): 0.06,
     ("SOL", "weekly"): 0.08,
-    ("SOL", "monthly"): 0.08,  # same as weekly
+    ("SOL", "monthly"): 0.08,
     # XRP
     ("XRP", "15m"): 0.04,
     ("XRP", "1h"): 0.06,
     ("XRP", "daily"): 0.06,
     ("XRP", "weekly"): 0.08,
-    ("XRP", "monthly"): 0.08,  # same as weekly
+    ("XRP", "monthly"): 0.08,
     # DOGE
     ("DOGE", "15m"): 0.04,
     ("DOGE", "1h"): 0.06,
     ("DOGE", "daily"): 0.06,
     ("DOGE", "weekly"): 0.08,
-    ("DOGE", "monthly"): 0.08,  # same as weekly
+    ("DOGE", "monthly"): 0.08,
 }
+
+# Select active thresholds based on profile
+EDGE_THRESHOLDS: Dict[Tuple[str, str], float] = (
+    EDGE_THRESHOLDS_INITIAL_LIVE if _EDGE_PROFILE == "initial_live"
+    else EDGE_THRESHOLDS_PRODUCTION
+)
 
 # Fallback YES price (cents) when a candidate has no best_ask or mid price data.
 # Used only in the max-price guard inside trade_cycle().
@@ -776,6 +818,7 @@ class KalshiContinuousTrader:
                 "max_yes_price": self._max_yes_price,
                 "kelly_fraction": self._kelly_fraction,
                 "min_edge": self._min_edge,
+                "edge_profile": _EDGE_PROFILE,  # Show which profile is active
             },
             # ── Filter telemetry (populated after first _refresh_candidates call) ──
             # Use these to audit the relative-volume band: a healthy block_rate is
