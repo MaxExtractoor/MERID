@@ -227,7 +227,7 @@ class TestConsensusDiversityGate:
         assert "Insufficient diversity" in source
 
     def test_single_archetype_blocks_consensus(self):
-        """With only one archetype type, consensus should be FORMING."""
+        """With only one archetype type in LIVE mode, consensus should be FORMING."""
         from merid.swarm.consensus_aggregator import (
             SwarmConsensusAggregator, AgentProposal, ConsensusStatus
         )
@@ -247,6 +247,7 @@ class TestConsensusDiversityGate:
                 size_preference="base",
                 rationale="test",
                 timestamp=datetime.now(timezone.utc),
+                mode="LIVE",  # LIVE mode requires archetype diversity (min_archetypes=2)
             )
             for i in range(3)
         ]
@@ -282,6 +283,114 @@ class TestConsensusDiversityGate:
 
         view = agg._aggregate_proposals("BTC", "15m", proposals)
         assert view.status == ConsensusStatus.READY
+
+
+class TestAdaptiveQuorum:
+    """Adaptive quorum: SIM mode relaxes thresholds; LIVE keeps full quorum."""
+
+    def _make_proposal(self, agent_id: str, archetype: str, mode: str, asset: str = "BTC", timeframe: str = "daily"):
+        from merid.swarm.consensus_aggregator import AgentProposal
+        return AgentProposal(
+            agent_id=agent_id,
+            agent_archetype=archetype,
+            asset=asset,
+            timeframe=timeframe,
+            direction="yes",
+            probability=0.55,
+            confidence=0.65,
+            edge_estimate=2.0,
+            size_preference="base",
+            rationale="test",
+            timestamp=datetime.now(timezone.utc),
+            mode=mode,
+        )
+
+    def test_sim_single_proposal_reaches_ready(self):
+        """One SIM proposal is enough when sim_min_agents=1 (default)."""
+        from merid.swarm.consensus_aggregator import (
+            SwarmConsensusAggregator, ConsensusStatus
+        )
+        agg = SwarmConsensusAggregator()
+
+        proposals = [self._make_proposal("news_sentiment", "sentiment", "SIM")]
+        view = agg._aggregate_proposals("BTC", "daily", proposals)
+        assert view.status == ConsensusStatus.READY
+
+    def test_live_single_proposal_stays_forming(self):
+        """One LIVE proposal stays FORMING because live requires min_agents=2."""
+        from merid.swarm.consensus_aggregator import (
+            SwarmConsensusAggregator, ConsensusStatus
+        )
+        agg = SwarmConsensusAggregator()
+
+        proposals = [self._make_proposal("news_sentiment", "sentiment", "LIVE")]
+        view = agg._aggregate_proposals("BTC", "daily", proposals)
+        assert view.status == ConsensusStatus.FORMING
+
+    def test_live_two_archetypes_reaches_ready(self):
+        """Two LIVE proposals from different archetypes graduates to READY."""
+        from merid.swarm.consensus_aggregator import (
+            SwarmConsensusAggregator, ConsensusStatus
+        )
+        agg = SwarmConsensusAggregator()
+
+        proposals = [
+            self._make_proposal("news_sentiment", "sentiment", "LIVE"),
+            self._make_proposal("fg_contrarian", "contrarian", "LIVE"),
+        ]
+        view = agg._aggregate_proposals("BTC", "daily", proposals)
+        assert view.status == ConsensusStatus.READY
+
+    def test_mixed_one_live_one_sim_two_archetypes_reaches_ready(self):
+        """1 SIM + 1 LIVE from different archetypes: LIVE thresholds apply and are met."""
+        from merid.swarm.consensus_aggregator import (
+            SwarmConsensusAggregator, ConsensusStatus
+        )
+        agg = SwarmConsensusAggregator()
+
+        proposals = [
+            self._make_proposal("news_sentiment", "sentiment", "SIM"),
+            self._make_proposal("fg_contrarian", "contrarian", "LIVE"),
+        ]
+        view = agg._aggregate_proposals("BTC", "daily", proposals)
+        assert view.status == ConsensusStatus.READY
+
+    def test_sim_effective_thresholds_are_relaxed(self):
+        """_effective_thresholds returns (1, 1) for all-SIM proposals."""
+        from merid.swarm.consensus_aggregator import SwarmConsensusAggregator
+        agg = SwarmConsensusAggregator()
+
+        sim_proposals = [self._make_proposal("a", "sentiment", "SIM")]
+        eff_agents, eff_arch = agg._effective_thresholds(sim_proposals)
+        assert eff_agents == agg.sim_min_agents
+        assert eff_arch == agg.sim_min_archetypes
+
+    def test_live_effective_thresholds_are_strict(self):
+        """_effective_thresholds returns live thresholds the moment any proposal is LIVE."""
+        from merid.swarm.consensus_aggregator import SwarmConsensusAggregator
+        agg = SwarmConsensusAggregator()
+
+        mixed = [
+            self._make_proposal("sim_agent", "sentiment", "SIM"),
+            self._make_proposal("live_agent", "contrarian", "LIVE"),
+        ]
+        eff_agents, eff_arch = agg._effective_thresholds(mixed)
+        assert eff_agents == agg.min_agents
+        assert eff_arch == agg.min_archetypes
+
+    def test_submit_proposal_sim_single_yields_consensus(self):
+        """Full path: submit_proposal with 1 SIM proposal → get_consensus returns non-None READY view."""
+        from merid.swarm.consensus_aggregator import (
+            SwarmConsensusAggregator, ConsensusStatus
+        )
+        agg = SwarmConsensusAggregator()
+        # Use a unique key to avoid pollution from other tests running on the same singleton
+        p = self._make_proposal("news_sentiment", "sentiment", "SIM", asset="TESTADAPTIVE", timeframe="sim_test")
+        agg.submit_proposal(p)
+        view = agg.get_consensus("TESTADAPTIVE", "sim_test")
+        assert view is not None, "Expected a ConsensusView to be cached after submit"
+        assert view.status == ConsensusStatus.READY
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════════════════
