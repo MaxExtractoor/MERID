@@ -5,9 +5,10 @@ Aggregates all safety checks into one boolean + reasons list:
   2. Reconciliation status (fail-closed on fresh start)
   3. Price feed staleness
   4. PnL consistency
+  5. Event loop lag (HALT-BAND >= 2000ms triggers hard block)
 
 Every backend path that wants to execute a trade should call
-`is_execution_blocked()` and respect the result.
+`check_execution_gate()` and respect the result.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ REMEDIATION_HINTS: dict[str, str] = {
     "reconciliation": "Wait for the next reconciliation cycle or trigger a manual run from System settings.",
     "price_feed": "Check venue connectivity and data source health in Venue Health Grid.",
     "pnl_consistency": "Inspect PnL sources in the Consistency widget; look for missed fills or stale equity data.",
+    "loop_lag": "Check event loop profiling data at /health/event_loop/profiles/summary. Look for blocking operations, CPU-bound code, or WS backpressure.",
 }
 
 
@@ -205,6 +207,45 @@ def check_execution_gate() -> ExecutionGateStatus:
             ))
     except Exception as exc:
         logger.debug("PnL consistency check failed: %s", exc)
+
+    # ── 5. Event loop lag ───────────────────────────────────────────
+    # CRITICAL: Halt-band lag (P95 >= 2000ms) results in HARD BLOCK.
+    # This prevents trading on severely stale data when the event loop
+    # is unable to process ticks/market data in real-time.
+    try:
+        from observability.event_loop_monitor import get_event_loop_monitor
+        monitor = get_event_loop_monitor()
+        stats = monitor.get_stats(window_seconds=60)
+
+        # Halt band: P95 >= 2000ms = CRITICAL block
+        if stats.p95_ms >= 2000.0:
+            reasons.append(BlockReason(
+                source="loop_lag",
+                severity="critical",
+                message=f"Event loop P95 lag {stats.p95_ms:.0f}ms in HALT BAND (>= 2000ms)",
+                details=f"P99={stats.p99_ms:.0f}ms, samples_above_crit={stats.samples_above_crit}",
+                hint="CRITICAL: Event loop severely blocked. Check for synchronous I/O, CPU-bound operations, or excessive WS backpressure. Trading HALTED.",
+            ))
+        # Critical threshold: P95 >= 500ms = CRITICAL block
+        elif stats.p95_ms >= 500.0:
+            reasons.append(BlockReason(
+                source="loop_lag",
+                severity="critical",
+                message=f"Event loop P95 lag {stats.p95_ms:.0f}ms exceeds 500ms",
+                details=f"P99={stats.p99_ms:.0f}ms, samples_above_crit={stats.samples_above_crit}",
+                hint="Event loop degraded. Check for blocking operations or high CPU usage. Reduce workload.",
+            ))
+        # Warning threshold: P95 >= 200ms = WARNING (limited mode)
+        elif stats.p95_ms >= 200.0:
+            reasons.append(BlockReason(
+                source="loop_lag",
+                severity="warning",
+                message=f"Event loop P95 lag {stats.p95_ms:.0f}ms exceeds 200ms",
+                details=f"P99={stats.p99_ms:.0f}ms",
+                hint="Consider reducing workload or optimizing hot paths to prevent further degradation.",
+            ))
+    except Exception as exc:
+        logger.debug("Event loop lag check failed: %s", exc)
 
     has_critical = any(r.severity == "critical" for r in reasons)
     has_warning = any(r.severity == "warning" for r in reasons)
