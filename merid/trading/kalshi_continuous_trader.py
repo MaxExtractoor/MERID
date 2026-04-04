@@ -653,6 +653,15 @@ class KalshiContinuousTrader:
         scan_rejected_spread: int = 0
         scan_rejected_volume: int = 0
         scan_rejected_missing_spot: int = 0
+        scan_rejected_price_band: int = 0  # Post-enrichment strategy price-band gate
+
+        # Lazy-load the strategy config once per scan; fall back to None if unavailable.
+        _strat_cfg = None
+        try:
+            from merid.event_venues.kalshi.crypto_kalshi_risk import CryptoKalshiStrategyConfig
+            _strat_cfg = CryptoKalshiStrategyConfig()
+        except Exception as _sce:
+            logger.debug("CryptoKalshiStrategyConfig unavailable (price-band gate disabled): %s", _sce)
 
         for asset in _CRYPTO_ASSETS:
             asset_spot = spot_prices.get(asset)
@@ -762,6 +771,52 @@ class KalshiContinuousTrader:
                 counts = asset_counts.setdefault(asset, {})
                 counts[tf] = len(filter_result.candidates)
 
+                # ── Post-enrichment strategy price-band gate ──────────────
+                # Apply the per-(asset, timeframe) allowed_price_band from the
+                # strategy profiles to reject contracts whose mid-price sits
+                # outside the tradeable zone.  Candidates without price data
+                # (mid=0) are passed through so they can still be evaluated
+                # by the Kelly model.  This gate runs AFTER the standard
+                # prefilter so its rejection count is tracked separately.
+                if _strat_cfg is not None:
+                    profile = _strat_cfg.get(asset, tf)
+                    if profile is not None and filter_result.total_input > 0:
+                        band_low, band_high = profile.allowed_price_band
+                        # Identify the slice of new_candidates just appended above.
+                        _band_start = len(new_candidates) - len(filter_result.candidates)
+                        _band_kept: List[TradingCandidate] = []
+                        _band_dropped: int = 0
+                        for tc in new_candidates[_band_start:]:
+                            mid = tc.mid_price_cents
+                            if mid > 0:
+                                price_decimal = mid / 100.0
+                                if not (band_low <= price_decimal <= band_high):
+                                    _band_dropped += 1
+                                    logger.debug(
+                                        "ContinuousTrader post-enrichment price_band %s %s: "
+                                        "ticker=%s mid=%d¢ band=%.0f-%.0f¢ REJECTED",
+                                        asset, tf, tc.ticker, mid,
+                                        band_low * 100, band_high * 100,
+                                    )
+                                    continue
+                            _band_kept.append(tc)
+                        if _band_dropped:
+                            # Replace the slice we just appended with the filtered version.
+                            new_candidates[_band_start:] = _band_kept
+                            scan_rejected_price_band += _band_dropped
+                            counts[tf] = len(_band_kept)
+                        logger.info(
+                            "Post-enrichment filters %s %s: "
+                            "dropped %d (distance), %d (edge), %d (max_price), %d (price_band), "
+                            "kept %d",
+                            asset, tf,
+                            filter_result.rejected_distance,
+                            filter_result.rejected_edge_deadzone,
+                            filter_result.rejected_price,
+                            _band_dropped,
+                            counts[tf],
+                        )
+
                 # Log per-asset/timeframe filter drops at DEBUG so individual filter
                 # vetoes are visible in logs without flooding INFO.
                 if filter_result.total_input > 0 and filter_result.passed < filter_result.total_input:
@@ -790,6 +845,7 @@ class KalshiContinuousTrader:
                 scan_rejected_spread += filter_result.rejected_spread
                 scan_rejected_volume += filter_result.rejected_volume
                 scan_rejected_missing_spot += filter_result.rejected_missing_spot
+                # scan_rejected_price_band is accumulated inside the price-band gate above
 
                 # Yield to event loop after processing each asset-timeframe combination
                 await asyncio.sleep(0)
@@ -817,6 +873,7 @@ class KalshiContinuousTrader:
             "scan_rejected_spread": scan_rejected_spread,
             "scan_rejected_volume": scan_rejected_volume,
             "scan_rejected_missing_spot": scan_rejected_missing_spot,
+            "scan_rejected_price_band": scan_rejected_price_band,
             "volume_band_block_rate": round(scan_block_rate, 4),
             "volume_band_block_rate_rolling_avg": round(rolling_avg, 4),
             "rolling_window_scans": len(self._volume_band_rate_history),
@@ -837,6 +894,8 @@ class KalshiContinuousTrader:
             drops.append(f"vol_band={scan_rejected_volume_band}")
         if scan_rejected_missing_spot:
             drops.append(f"missing_spot={scan_rejected_missing_spot}")
+        if scan_rejected_price_band:
+            drops.append(f"price_band={scan_rejected_price_band}")
         drop_summary = " ".join(drops) if drops else "none"
         logger.info(
             "ContinuousTrader filter: total_input=%d volume_band_rejected=%d "
