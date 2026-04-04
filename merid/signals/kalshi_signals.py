@@ -487,15 +487,38 @@ class KalshiSignalGenerator:
         return "UNKNOWN"
     
     def _extract_timeframe(self, ticker: str) -> str:
-        """Extract timeframe from Kalshi ticker."""
-        # Simple heuristic: look for date patterns
-        ticker_lower = ticker.lower()
-        if "24h" in ticker_lower or "daily" in ticker_lower:
-            return "24h"
-        if "weekly" in ticker_lower or "week" in ticker_lower:
-            return "weekly"
-        if "hourly" in ticker_lower or "1h" in ticker_lower:
+        """Extract canonical timeframe from a Kalshi ticker string.
+
+        Recognises both human-readable patterns (daily, hourly, 15min) and
+        structured Kalshi ticker segments (T15M, T1H, D1H, DAILY, MONTHLY).
+
+        Returns one of the canonical MERID timeframe strings:
+          "15m", "1h", "daily", "weekly", "monthly"
+        or "unknown" if no pattern matches.
+        """
+        t = ticker.lower()
+
+        # ── Structured Kalshi ticker segments (e.g. KXBTC-26APR-T15M-...) ──
+        # 15-minute markers
+        if "t15m" in t or "15min" in t or "15m" in t:
+            return "15m"
+
+        # 1-hour markers (T1H, D1H, 1h, hourly, 60min)
+        if "t1h" in t or "d1h" in t or "1h" in t or "hourly" in t or "60min" in t or "60m" in t:
             return "1h"
+
+        # Daily markers (DAILY, 24H, D24H, EOD)
+        if "daily" in t or "24h" in t or "d24h" in t or "eod" in t:
+            return "daily"
+
+        # Weekly markers
+        if "weekly" in t or "week" in t or "eow" in t:
+            return "weekly"
+
+        # Monthly markers
+        if "monthly" in t or "month" in t or "eom" in t:
+            return "monthly"
+
         return "unknown"
     
     def get_last_signals(self) -> List[Any]:

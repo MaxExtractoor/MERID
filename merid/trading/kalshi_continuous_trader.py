@@ -934,6 +934,29 @@ class KalshiContinuousTrader:
         asset = candidate.underlying.upper()
         tf = candidate.timeframe.lower()
 
+        # Normalize non-canonical / legacy timeframe strings to the
+        # canonical forms used as EDGE_THRESHOLDS keys.
+        _TF_ALIASES: Dict[str, str] = {
+            "hourly": "1h",
+            "60min": "1h",
+            "60m": "1h",
+            "1hour": "1h",
+            "24h": "daily",
+            "d24h": "daily",
+            "eod": "daily",
+            "day": "daily",
+            "1d": "daily",
+            "week": "weekly",
+            "eow": "weekly",
+            "month": "monthly",
+            "eom": "monthly",
+            "1m": "monthly",
+            "scalp": "15m",
+            "intraday": "1h",
+            "swing": "daily",
+        }
+        tf = _TF_ALIASES.get(tf, tf)
+
         # AUDIT-09: env-var override takes highest priority
         env_key = f"KALSHI_CT_MIN_EDGE_{asset}_{tf.upper().replace('-', '_')}"
         env_raw = os.getenv(env_key)
@@ -944,7 +967,16 @@ class KalshiContinuousTrader:
                 logger.warning("Invalid %s=%r — using grid value", env_key, env_raw)
 
         key = (asset, tf)
-        return EDGE_THRESHOLDS.get(key, self._min_edge)
+        threshold = EDGE_THRESHOLDS.get(key)
+        if threshold is None:
+            if tf not in ("15m", "1h", "daily", "weekly", "monthly"):
+                logger.debug(
+                    "_get_min_edge: unrecognised timeframe %r for %s — "
+                    "using global fallback %.4f",
+                    candidate.timeframe, asset, self._min_edge,
+                )
+            return self._min_edge
+        return threshold
 
     def signal_to_sizing(
         self,

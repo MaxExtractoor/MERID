@@ -347,7 +347,15 @@ class ExecutionGuard:
 
         Called periodically by the loop or on-demand.  Does NOT regenerate
         the report — it reads whatever is cached.
+
+        Thread-safe: uses ``_promotion_refresh_lock`` to prevent concurrent
+        refreshes from racing against each other.  If the lock is already held
+        (another refresh is in progress) this call returns immediately without
+        blocking, so callers on the hot path are never stalled.
         """
+        if not self._promotion_refresh_lock.acquire(blocking=False):
+            logger.debug("Promotion sync skipped — refresh already in progress")
+            return
         try:
             from merid.promotion_report import get_cached_promotion_report
             report = get_cached_promotion_report(gauntlet_cycles=5)
@@ -360,17 +368,81 @@ class ExecutionGuard:
             )
         except Exception as exc:
             logger.warning(f"Promotion sync failed (enforcement unchanged): {exc}")
+        finally:
+            self._promotion_refresh_lock.release()
+
+    def _promotion_within_grace(self) -> bool:
+        """Return True if the guard is still within its startup grace window.
+
+        During the grace window (``_promotion_report_grace_s`` seconds after
+        ``_init_ts``) a missing or stale promotion report does NOT block
+        execution.  This avoids false-blocks at startup before the first report
+        has had time to load.
+        """
+        elapsed = time.time() - self._init_ts
+        return elapsed < self._promotion_report_grace_s
+
+    def _promotion_report_stale(self, max_age_s: float = 600.0) -> bool:
+        """Return True when the last successful sync was longer ago than *max_age_s*.
+
+        Args:
+            max_age_s: Staleness threshold in seconds.  Defaults to 600 (10 min).
+        """
+        if not self._promotion_report_ts:
+            return True
+        return (time.time() - self._promotion_report_ts) > max_age_s
 
     def is_domain_promoted(self, domain: str) -> bool:
-        """Check if a domain is eligible per the latest promotion report."""
+        """Check if a domain is eligible per the latest promotion report.
+
+        Fail-open rules (return True without checking the report):
+        1. Guard is within the startup grace window — report may not have
+           loaded yet.  We allow execution rather than block on startup.
+        2. No report has ever been loaded (``_promotion_eligible_domains is
+           None``).  Same rationale as (1).
+        3. The last successful report is stale (> 10 min old) AND the guard
+           is still within the grace window — a transient pipeline failure
+           should not hard-block execution immediately.
+        """
+        within_grace = self._promotion_within_grace()
+
+        # No report ever loaded
         if self._promotion_eligible_domains is None:
-            return True  # No report yet — allow (fail-open for paper)
+            if not within_grace:
+                logger.warning(
+                    "Promotion report never loaded after %.0fs — failing open "
+                    "for domain=%s; investigate promotion pipeline",
+                    time.time() - self._init_ts, domain,
+                )
+            return True  # Always fail-open when no report available
+
+        # Report is stale — use grace window to decide
+        if self._promotion_report_stale():
+            if within_grace:
+                logger.debug(
+                    "Promotion report stale but within grace window (%.0fs remaining) — "
+                    "failing open for domain=%s",
+                    self._promotion_report_grace_s - (time.time() - self._init_ts), domain,
+                )
+                return True
+            # Outside grace and stale — still fail open but warn
+            logger.warning(
+                "Promotion report stale (age=%.0fs) outside grace window — "
+                "failing open for domain=%s; stale report may mask real failures",
+                time.time() - self._promotion_report_ts, domain,
+            )
+            return True
+
         return domain in self._promotion_eligible_domains
 
     def is_agent_promoted(self, agent_id: str) -> bool:
-        """Check if an agent is promoted per the latest promotion report."""
-        if self._promotion_blocked_agents is None:
-            return True  # No report yet — allow
+        """Check if an agent is promoted per the latest promotion report.
+
+        Fails open (returns True) when no report is available or when the
+        guard is within the startup grace window.
+        """
+        if self._promotion_blocked_agents is None or self._promotion_within_grace():
+            return True
         return agent_id not in self._promotion_blocked_agents
 
     # ── CQI updates ───────────────────────────────────────────────────
