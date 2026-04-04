@@ -22,5 +22,11 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src"],
-  "exclude": ["src/views/_legacy", "src/views/__tests__/_legacy", "src/hooks/__tests__/_legacy", "src/services/__tests__"]
+  "exclude": [
+    "src/**/_legacy",
+    "src/**/_legacy/**",
+    "src/**/_legacy_charts",
+    "src/**/_legacy_charts/**",
+    "src/services/__tests__"
+  ]
 }

@@ -8,6 +8,7 @@ import {
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, API_BASE_URL, DEFAULTS } from '../config/constants';
 import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiFill, KalshiRiskSummary, SizingMetrics } from '../types/kalshi';
+import type { KalshiOrderGroup, KalshiOrderGroupsResponse } from '../types/api';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiPnlChart from '../components/KalshiPnlChart';
@@ -53,16 +54,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     maintenance_window?: string;
   }>(API_ENDPOINTS.KALSHI_GRID_SESSION, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
   const gridPortfolioResult = useApiData<{ equity_usd: number; daily_pnl_usd: number; open_interest: number; position_count: number; kill_switch_active: boolean; margin_utilization: number }>(API_ENDPOINTS.KALSHI_GRID_PORTFOLIO, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
-  const orderGroupsResult = useApiData<{
-    groups: Array<{
-      order_group_id: string;
-      name: string;
-      status: 'active' | 'triggered' | 'canceled' | 'pending';
-      contracts_limit: number;
-      used_contracts: number;
-      utilization_pct: number;
-    }>;
-  }>(API_ENDPOINTS.KALSHI_ORDER_GROUPS, {
+  const orderGroupsResult = useApiData<KalshiOrderGroupsResponse>(API_ENDPOINTS.KALSHI_ORDER_GROUPS, {
     pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
   });
 
@@ -94,6 +86,31 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     if (!assetFilter) return allFills;
     return allFills.filter(f => f.ticker.toUpperCase().startsWith(assetFilter));
   }, [allFills, assetFilter]);
+  const orderGroups = useMemo<KalshiOrderGroup[]>(
+    () => orderGroupsResult.data?.groups ?? [],
+    [orderGroupsResult.data]
+  );
+  const availableOrderGroups = useMemo(
+    () =>
+      orderGroups.map(group => ({
+        ...group,
+        status: group.status === 'unknown' ? 'pending' : group.status,
+      })),
+    [orderGroups]
+  );
+  const orderGroupHistories = useMemo(
+    () =>
+      orderGroups
+        .filter((group): group is KalshiOrderGroup & Required<Pick<KalshiOrderGroup, 'history'>> => Array.isArray(group.history))
+        .map(group => ({
+          order_group_id: group.order_group_id,
+          name: group.name,
+          status: group.status === 'unknown' ? 'pending' : group.status,
+          history: group.history,
+          trigger_events: group.trigger_events ?? [],
+        })),
+    [orderGroups]
+  );
   const balance = balResult.data;
   const risk = riskResult.data;
   const loading = posResult.loading || ordResult.loading || fillResult.loading || balResult.loading || riskResult.loading;
@@ -922,7 +939,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
               {/* Order Groups Panel */}
               <BatchOrderPanel
                 onOrdersPlaced={() => posResult.refetch()}
-                availableGroups={orderGroupsResult.data?.groups || []}
+                availableGroups={availableOrderGroups}
                 compact={true}
               />
               <OrderGroupPanel
@@ -932,23 +949,9 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                 }}
               />
               {/* Order Group Analytics */}
-              {((orderGroupsResult.data?.groups || []).some(g => Array.isArray((g as { history?: unknown[] }).history))) ? (
+              {orderGroupHistories.length > 0 ? (
                 <OrderGroupAnalytics
-                  histories={((orderGroupsResult.data?.groups || []) as Array<{
-                    order_group_id: string;
-                    name: string;
-                    status: 'active' | 'triggered' | 'canceled' | 'pending';
-                    history?: Array<{ timestamp: string; utilization_pct: number; contracts_used: number; contracts_limit: number }>;
-                    trigger_events?: Array<{ timestamp: string; matched_contracts: number }>;
-                  }>)
-                    .filter(g => Array.isArray(g.history))
-                    .map(g => ({
-                      order_group_id: g.order_group_id,
-                      name: g.name,
-                      status: g.status,
-                      history: g.history || [],
-                      trigger_events: g.trigger_events || [],
-                    }))}
+                  histories={orderGroupHistories}
                   hours={24}
                 />
               ) : (
