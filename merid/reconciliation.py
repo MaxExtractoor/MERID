@@ -538,6 +538,47 @@ def _fire_settlement_hooks(market_id: str) -> None:
     except Exception as exc:
         logger.debug("settlement hook ForecastEvents skipped for %s: %s", market_id, exc)
 
+    # CT bankroll: wire realized PnL into KalshiContinuousTrader at settlement.
+    # This is the authoritative point where a position transitions from "open
+    # exposure" to "settled cash" — exactly where record_trade_result() must fire.
+    # PnL formula per fill (YES buyer):
+    #   pnl = count × (settlement_cents − entry_price_cents)
+    # PnL formula per fill (NO buyer, i.e. side="no", action="buy"):
+    #   pnl = count × ((100 − settlement_cents) − (100 − entry_price_cents))
+    #       = count × (entry_price_cents − settlement_cents)
+    # For sell actions the sign flips (seller receives entry price, pays settlement).
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        from merid.trading.kalshi_continuous_trader import get_continuous_trader
+
+        ct = get_continuous_trader()
+        fills = get_fills_ledger().fills_for_ticker(market_id)
+
+        if fills and settled_yes_api is not None:
+            settlement_cents = 100 if settled_yes_api else 0
+            pnl_cents = 0
+            for f in fills:
+                # win_cents: what this side pays out at settlement per contract
+                win_cents = settlement_cents if f.side == "yes" else (100 - settlement_cents)
+                if f.action == "buy":
+                    pnl_cents += f.count * (win_cents - f.price_cents)
+                else:  # "sell"
+                    pnl_cents += f.count * (f.price_cents - win_cents)
+            ct.record_trade_result(pnl_cents)
+            logger.info(
+                "CT bankroll: settlement hook fired market=%s settled_yes=%s pnl_cents=%d",
+                market_id,
+                settled_yes_api,
+                pnl_cents,
+            )
+        elif settled_yes_api is None:
+            logger.debug(
+                "CT bankroll: settlement hook skipped for %s — settled_yes_api unknown",
+                market_id,
+            )
+    except Exception as exc:
+        logger.debug("CT bankroll settlement hook skipped for %s: %s", market_id, exc)
+
 
 def reconcile_all_venues(venues: Optional[List[str]] = None) -> List[PositionDiscrepancy]:
     """Reconcile across all configured venues (driven by paper_config matrix)."""

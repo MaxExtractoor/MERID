@@ -318,6 +318,18 @@ class KalshiContinuousTrader:
         # Empty dict until the first cycle completes.
         self._last_cycle_stats: Dict[str, Any] = {}
 
+        # ── Bankroll invariant state ─────────────────────────────────────────
+        # Accumulated realized PnL (in cents) across all CT-owned settled markets.
+        # Updated by record_trade_result() at settlement time via reconciliation.
+        # Never updated at fill time — PnL is only realized when a market resolves.
+        self._total_pnl_cents: int = 0
+        # Balance snapshot (cents) captured on the first check_bankroll_invariant()
+        # call each session.  Used as the baseline for measuring actual PnL.
+        self._session_start_balance_cents: Optional[int] = None
+        # Result from the most recent check_bankroll_invariant() call.
+        # Empty dict until the first cycle that supplies balance/portfolio data.
+        self._last_invariant_status: Dict[str, Any] = {}
+
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -993,6 +1005,94 @@ class KalshiContinuousTrader:
 
         return intents
 
+    # ── Bankroll invariant ────────────────────────────────────────────────
+
+    def record_trade_result(self, pnl_cents: int) -> None:
+        """Record realized PnL for a settled CT market.
+
+        Must be called exactly once per resolved market, **after** settlement
+        (not at fill time).  Typically wired from ``merid/reconciliation.py``
+        ``_fire_settlement_hooks()`` so that PnL is only recorded when Kalshi
+        removes the position from the portfolio.
+
+        Args:
+            pnl_cents: Net realized PnL in cents (positive = profit, negative = loss).
+                       Computed as: sum over fills of
+                       ``count × (settlement_cents - entry_price_cents)``  for YES buys, etc.
+        """
+        self._total_pnl_cents += pnl_cents
+        logger.info(
+            "CT bankroll: settled pnl_cents=%+d cumulative_pnl_cents=%d",
+            pnl_cents,
+            self._total_pnl_cents,
+        )
+
+    def check_bankroll_invariant(
+        self,
+        balance_cents: int,
+        portfolio_cents: int,
+        *,
+        epsilon_cents: int = 500,
+    ) -> dict:
+        """Check the CT bankroll invariant and return a status dict.
+
+        Formula::
+
+            actual_pnl   = (balance_cents - session_start_balance_cents) + portfolio_cents
+            expected_pnl = _total_pnl_cents
+            delta        = actual_pnl - expected_pnl
+
+        ``balance_cents`` is the Kalshi cash balance; ``portfolio_cents`` is the
+        current mark-to-market value of open positions.
+
+        The invariant is **WARNING-only** until settlement wiring has been
+        validated in live trading and deltas are consistently within epsilon.
+        Do **not** trigger a kill switch based on this check until the kill-switch
+        graduation criteria in ``docs/BANKROLL_INVARIANT_DESIGN.md`` are met.
+
+        Args:
+            balance_cents:  Kalshi cash balance in cents (from REST balance endpoint).
+            portfolio_cents: Mark-to-market value of open CT positions in cents.
+            epsilon_cents:   Tolerance in cents before escalating to WARN (default 500¢ = $5).
+
+        Returns:
+            dict with keys: ``status`` ("ok" | "warn"), ``delta_cents``,
+            and on WARN: ``actual_pnl_cents``, ``expected_pnl_cents``.
+        """
+        if self._session_start_balance_cents is None:
+            self._session_start_balance_cents = balance_cents
+            logger.info(
+                "CT bankroll: session start balance recorded as %d¢ ($%.2f)",
+                balance_cents,
+                balance_cents / 100.0,
+            )
+
+        actual_pnl = (balance_cents - self._session_start_balance_cents) + portfolio_cents
+        delta = actual_pnl - self._total_pnl_cents
+
+        if abs(delta) <= epsilon_cents:
+            result: Dict[str, Any] = {"status": "ok", "delta_cents": delta}
+        else:
+            logger.warning(
+                "CT bankroll invariant WARN: delta=%d¢ actual_pnl=%d¢ expected_pnl=%d¢ "
+                "(balance=%d¢ start=%d¢ portfolio=%d¢)",
+                delta,
+                actual_pnl,
+                self._total_pnl_cents,
+                balance_cents,
+                self._session_start_balance_cents,
+                portfolio_cents,
+            )
+            result = {
+                "status": "warn",
+                "delta_cents": delta,
+                "actual_pnl_cents": actual_pnl,
+                "expected_pnl_cents": self._total_pnl_cents,
+            }
+
+        self._last_invariant_status = result
+        return result
+
     # ── Daily reset ───────────────────────────────────────────────────────
 
     def reset_daily(self) -> None:
@@ -1067,6 +1167,18 @@ class KalshiContinuousTrader:
             # vetoed_by_reason:      breakdown dict {reason: count}
             # ticker_diagnostics:    per-ticker list with full edge/veto detail
             "last_cycle": dict(self._last_cycle_stats),
+            # ── Bankroll invariant state ──────────────────────────────────────
+            # total_pnl_cents:              accumulated realized PnL since process start
+            # session_start_balance_cents:  Kalshi balance at session open (None until
+            #                               first check_bankroll_invariant() call)
+            # last_invariant_status:        most recent invariant result dict
+            #   {"status": "ok"|"warn", "delta_cents": int, ...}
+            "bankroll": {
+                "total_pnl_cents": self._total_pnl_cents,
+                "total_pnl_usd": round(self._total_pnl_cents / 100.0, 4),
+                "session_start_balance_cents": self._session_start_balance_cents,
+                "last_invariant": dict(self._last_invariant_status),
+            },
         }
 
     @property
