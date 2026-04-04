@@ -46,6 +46,17 @@ _WS_HEALTH_STALE_SECONDS = float(os.getenv("MERID_WS_HEALTH_STALE_SECONDS", "30.
 _LOOP_LAG_WARN_MS = float(os.getenv("MERID_LOOP_LAG_WARN_MS", "100"))
 _LOOP_LAG_CRIT_MS = float(os.getenv("MERID_LOOP_LAG_CRIT_MS", "500"))
 
+# ── BACKPRESSURE-1: Essential tickers for scope reduction ─────────────────
+# When WS queue pressure is critical, non-essential subscriptions are auto-unsubscribed
+# to prevent message drops and maintain critical market data flow.
+_ESSENTIAL_TICKERS_ENV = os.getenv("KALSHI_ESSENTIAL_TICKERS", "")
+_ESSENTIAL_TICKERS: set[str] = set(
+    ticker.strip() for ticker in _ESSENTIAL_TICKERS_ENV.split(",") if ticker.strip()
+) if _ESSENTIAL_TICKERS_ENV else set()
+
+# Overflow count threshold before triggering scope reduction
+_OVERFLOW_THRESHOLD_FOR_REDUCTION = int(os.getenv("MERID_WS_OVERFLOW_THRESHOLD", "50"))
+
 
 class KalshiWebSocket(EventVenueStream):
     """WebSocket client for real-time Kalshi data.
@@ -111,7 +122,13 @@ class KalshiWebSocket(EventVenueStream):
         self._loop_lag_warn_count: int = 0           # warnings (>100ms)
         self._loop_lag_crit_count: int = 0           # critical (>500ms)
         self._loop_lag_alerts: deque = deque(maxlen=50)  # recent alert events
-        
+
+        # ── BACKPRESSURE-1: Scope reduction state ───────────────────────
+        self._essential_tickers: set[str] = set(_ESSENTIAL_TICKERS)  # copy module-level set
+        self._scope_reduced: bool = False            # True when in reduced-scope mode
+        self._scope_reduction_ts: float = 0.0        # timestamp of last reduction
+        self._non_essential_dropped: set[str] = set()  # tickers dropped during reduction
+
     @property
     def venue_name(self) -> str:
         return "kalshi"
@@ -434,6 +451,10 @@ class KalshiWebSocket(EventVenueStream):
                         )
                         # EDGE-1: Attempt adaptive queue growth if under max
                         self._try_grow_queue()
+
+                        # BACKPRESSURE-1: Trigger scope reduction if overflow threshold exceeded
+                        if self._queue_overflow_count >= _OVERFLOW_THRESHOLD_FOR_REDUCTION and not self._scope_reduced:
+                            asyncio.create_task(self._trigger_scope_reduction())
 
             except Exception as e:
                 if self._running:
@@ -768,6 +789,121 @@ class KalshiWebSocket(EventVenueStream):
             f"(drained {drained} messages, overflows: {self._queue_overflow_count})"
         )
 
+    # ── BACKPRESSURE-1: Scope reduction under WS backpressure ─────────────
+
+    async def _trigger_scope_reduction(self) -> None:
+        """Auto-unsubscribe from non-essential tickers to reduce WS load.
+
+        Called when queue overflow count exceeds threshold. Unsubscribes from
+        all tickers NOT in the essential tickers set, allowing the system to
+        maintain critical market data while reducing overall message volume.
+        """
+        if self._scope_reduced:
+            return  # Already in reduced mode
+
+        # Determine which subscriptions are non-essential
+        all_subs = set(self._subscriptions)
+        essential_subs = all_subs & self._essential_tickers
+
+        # Filter out non-ticker subscriptions (orderbook:, event:)
+        non_ticker_subs = {s for s in all_subs if s.startswith(("orderbook:", "event:"))}
+        ticker_subs = all_subs - non_ticker_subs
+
+        # Non-essential = ticker subs NOT in essential set
+        if self._essential_tickers:
+            non_essential_subs = ticker_subs - self._essential_tickers
+        else:
+            # No essential tickers configured - drop bottom 50% by volume or alphabetically
+            logger.warning(
+                "BACKPRESSURE: No essential tickers configured. "
+                "Dropping bottom 50% of subscriptions alphabetically."
+            )
+            sorted_subs = sorted(ticker_subs)
+            drop_count = len(sorted_subs) // 2
+            non_essential_subs = set(sorted_subs[:drop_count])
+
+        if not non_essential_subs:
+            logger.info(
+                "BACKPRESSURE: Cannot reduce scope - all subscriptions are essential "
+                f"({len(ticker_subs)} tickers)"
+            )
+            return
+
+        logger.warning(
+            f"BACKPRESSURE CRITICAL: Queue overflows={self._queue_overflow_count} "
+            f"exceeds threshold={_OVERFLOW_THRESHOLD_FOR_REDUCTION}. "
+            f"Unsubscribing from {len(non_essential_subs)} non-essential tickers "
+            f"(keeping {len(essential_subs)} essential + {len(non_ticker_subs)} non-ticker subs)."
+        )
+
+        # Unsubscribe from non-essential tickers
+        await self._unsubscribe_batch(list(non_essential_subs))
+
+        self._scope_reduced = True
+        self._scope_reduction_ts = time.monotonic()
+        self._non_essential_dropped = non_essential_subs
+
+        logger.info(
+            f"BACKPRESSURE: Scope reduced. Active subscriptions: "
+            f"{len(self._subscriptions)} (was {len(all_subs)})"
+        )
+
+    async def _unsubscribe_batch(self, tickers: List[str]) -> None:
+        """Unsubscribe from a batch of tickers.
+
+        Args:
+            tickers: List of ticker strings to unsubscribe from
+        """
+        if not tickers or not self._ws:
+            return
+
+        try:
+            message = {
+                "id": self._next_sub_id(),
+                "cmd": "unsubscribe",
+                "params": {
+                    "channels": ["ticker"],
+                    "market_tickers": tickers,
+                },
+            }
+            await self._ws.send(json.dumps(message))
+
+            # Remove from local tracking
+            for ticker in tickers:
+                self._subscriptions.discard(ticker)
+                self._orderbook_tickers.discard(ticker)
+                self._trade_tickers.discard(ticker)
+
+            logger.info(f"Unsubscribed from {len(tickers)} tickers")
+
+        except Exception as exc:
+            logger.error(f"Failed to unsubscribe from tickers: {exc}")
+
+    def set_essential_tickers(self, tickers: List[str]) -> None:
+        """Set the essential tickers list for backpressure management.
+
+        Args:
+            tickers: List of ticker symbols that should never be unsubscribed
+        """
+        self._essential_tickers = set(tickers)
+        logger.info(f"Updated essential tickers: {len(self._essential_tickers)} tickers")
+
+    def get_scope_reduction_status(self) -> Dict[str, Any]:
+        """Return current scope reduction status for monitoring.
+
+        Returns:
+            Dict with scope_reduced, essential_count, dropped_count, etc.
+        """
+        return {
+            "scope_reduced": self._scope_reduced,
+            "essential_tickers_count": len(self._essential_tickers),
+            "dropped_tickers_count": len(self._non_essential_dropped),
+            "reduction_timestamp": self._scope_reduction_ts,
+            "overflow_count_at_reduction": self._queue_overflow_count,
+            "current_overflow_count": self._queue_overflow_count,
+            "overflow_threshold": _OVERFLOW_THRESHOLD_FOR_REDUCTION,
+        }
+
     def get_queue_health(self) -> Dict[str, Any]:
         """Return queue health metrics for monitoring dashboards."""
         now = time.monotonic()
@@ -791,6 +927,9 @@ class KalshiWebSocket(EventVenueStream):
                 else "warning" if utilization > _WS_HEALTH_QUEUE_DEPTH_WARN
                 else "normal"
             ),
+            "scope_reduced": self._scope_reduced,
+            "essential_tickers_count": len(self._essential_tickers),
+            "active_subscriptions": len(self._subscriptions),
         }
 
     # ── RES-1: WS health monitoring and auto-failover ─────────────────
