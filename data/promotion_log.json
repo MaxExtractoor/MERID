@@ -2913,5 +2913,170 @@
     "report_timestamp": 1775275193.7370346,
     "runbook_version": "1.0",
     "source": "automation"
+  },
+  {
+    "timestamp": 1775275946.8646474,
+    "entity_type": "domain",
+    "entity_id": "crypto",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing",
+    "report_timestamp": 1775275946.1048172,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275946.8646474,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775275946.1048172,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275946.8646474,
+    "entity_type": "domain",
+    "entity_id": "equity",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing",
+    "report_timestamp": 1775275946.1048172,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275946.8646474,
+    "entity_type": "domain",
+    "entity_id": "betting",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775275946.1048172,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275946.8646474,
+    "entity_type": "domain",
+    "entity_id": "macro",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775275946.1048172,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275974.1932662,
+    "entity_type": "domain",
+    "entity_id": "crypto",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing",
+    "report_timestamp": 1775275973.4241886,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275974.1932662,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775275973.4241886,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275974.1932662,
+    "entity_type": "domain",
+    "entity_id": "equity",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing",
+    "report_timestamp": 1775275973.4241886,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275974.1932662,
+    "entity_type": "domain",
+    "entity_id": "betting",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775275973.4241886,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775275974.1932662,
+    "entity_type": "domain",
+    "entity_id": "macro",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775275973.4241886,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775276187.262729,
+    "entity_type": "domain",
+    "entity_id": "crypto",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing",
+    "report_timestamp": 1775276186.0951443,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775276187.262729,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775276186.0951443,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775276187.262729,
+    "entity_type": "domain",
+    "entity_id": "equity",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing",
+    "report_timestamp": 1775276186.0951443,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775276187.262729,
+    "entity_type": "domain",
+    "entity_id": "betting",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775276186.0951443,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1775276187.262729,
+    "entity_type": "domain",
+    "entity_id": "macro",
+    "previous_status": "unknown",
+    "new_status": "blocked",
+    "reason": "validation rings not all passing; no instruments registered",
+    "report_timestamp": 1775276186.0951443,
+    "runbook_version": "1.0",
+    "source": "automation"
   }
 ]

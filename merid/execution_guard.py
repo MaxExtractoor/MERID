@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -269,6 +270,16 @@ class ExecutionGuard:
         self._promotion_eligible_domains: Optional[set] = None
         self._promotion_blocked_agents: Optional[set] = None
         self._promotion_report_ts: float = 0.0
+
+        # Grace period (seconds) after init during which missing promotion
+        # reports do not block execution.  Gives the first report time to load.
+        self._promotion_report_grace_s: float = 300.0
+
+        # Timestamp of guard initialisation — used with _promotion_report_grace_s.
+        self._init_ts: float = time.time()
+
+        # Lock preventing concurrent promotion-report refreshes.
+        self._promotion_refresh_lock: threading.Lock = threading.Lock()
 
     # ── Kill switch ───────────────────────────────────────────────────
 
