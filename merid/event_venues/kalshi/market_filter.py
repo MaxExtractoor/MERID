@@ -287,6 +287,7 @@ class FilterResult:
     rejected_distance: int = 0       # struck too far from spot
     rejected_edge_deadzone: int = 0  # mid-price too close to 50¢
     rejected_volume_band: int = 0    # outside relative-volume band
+    rejected_missing_spot: int = 0   # spot_price required but missing
     capped_per_asset: int = 0        # dropped by max_candidates_per_asset limit
     candidates: List[MarketCandidate] = field(default_factory=list)
 
@@ -315,6 +316,7 @@ class FilterResult:
             "rejected_distance": self.rejected_distance,
             "rejected_edge_deadzone": self.rejected_edge_deadzone,
             "rejected_volume_band": self.rejected_volume_band,
+            "rejected_missing_spot": self.rejected_missing_spot,
             "volume_band_block_rate": round(self.volume_band_block_rate, 4),
             "capped_per_asset": self.capped_per_asset,
             "candidates": [c.to_dict() for c in self.candidates],
@@ -397,7 +399,12 @@ class MarketFilter:
         spot_band = get_spot_band(market.underlying, market.timeframe, default=cfg.spot_band_pct)
         if spot_band > 0:
             dist = market.distance_from_spot_pct
-            if dist is not None and dist > spot_band:
+            # Reject if spot_price is missing when distance check is enabled
+            if dist is None:
+                return False, (
+                    f"spot_price missing but distance check enabled (±{spot_band:.1f}% band)"
+                )
+            if dist > spot_band:
                 return False, (
                     f"distance {dist:.1f}% from spot exceeds band ±{spot_band:.1f}%"
                 )
@@ -456,7 +463,9 @@ class MarketFilter:
                 result.candidates.append(market)
                 result.passed += 1
             else:
-                if "volume" in reason:
+                if "spot_price missing" in reason:
+                    result.rejected_missing_spot += 1
+                elif "volume" in reason:
                     result.rejected_volume += 1
                 elif "OI" in reason:
                     result.rejected_oi += 1
