@@ -576,6 +576,19 @@ class KalshiContinuousTrader:
         self._task: Optional[asyncio.Task] = None
         self._candidates: List[TradingCandidate] = []
 
+        # ── Strategy config for post-enrichment price-band gate ─────────────
+        # Lazily loaded once at init; if the import fails (e.g., missing dep),
+        # the gate is disabled for the lifetime of this trader instance.
+        self._strat_cfg = None
+        try:
+            from merid.event_venues.kalshi.crypto_kalshi_risk import CryptoKalshiStrategyConfig
+            self._strat_cfg = CryptoKalshiStrategyConfig()
+        except Exception as _sce:
+            logger.debug(
+                "CryptoKalshiStrategyConfig unavailable; post-enrichment "
+                "price-band gate disabled: %s", _sce,
+            )
+
         # ── Filter telemetry ────────────────────────────────────────────────
         # Aggregated filter stats from the most recent _refresh_candidates() call.
         # Empty dict until the first scan completes.
@@ -654,14 +667,6 @@ class KalshiContinuousTrader:
         scan_rejected_volume: int = 0
         scan_rejected_missing_spot: int = 0
         scan_rejected_price_band: int = 0  # Post-enrichment strategy price-band gate
-
-        # Lazy-load the strategy config once per scan; fall back to None if unavailable.
-        _strat_cfg = None
-        try:
-            from merid.event_venues.kalshi.crypto_kalshi_risk import CryptoKalshiStrategyConfig
-            _strat_cfg = CryptoKalshiStrategyConfig()
-        except Exception as _sce:
-            logger.debug("CryptoKalshiStrategyConfig unavailable (price-band gate disabled): %s", _sce)
 
         for asset in _CRYPTO_ASSETS:
             asset_spot = spot_prices.get(asset)
@@ -778,9 +783,9 @@ class KalshiContinuousTrader:
                 # (mid=0) are passed through so they can still be evaluated
                 # by the Kelly model.  This gate runs AFTER the standard
                 # prefilter so its rejection count is tracked separately.
-                if _strat_cfg is not None:
-                    profile = _strat_cfg.get(asset, tf)
-                    if profile is not None and filter_result.total_input > 0:
+                if self._strat_cfg is not None:
+                    profile = self._strat_cfg.get(asset, tf)
+                    if profile is not None and len(filter_result.candidates) > 0:
                         band_low, band_high = profile.allowed_price_band
                         # Identify the slice of new_candidates just appended above.
                         _band_start = len(new_candidates) - len(filter_result.candidates)
@@ -807,7 +812,7 @@ class KalshiContinuousTrader:
                             counts[tf] = len(_band_kept)
                         logger.info(
                             "Post-enrichment filters %s %s: "
-                            "dropped %d (distance), %d (edge), %d (max_price), %d (price_band), "
+                            "dropped %d (distance), %d (edge), %d (prefilter_price), %d (price_band), "
                             "kept %d",
                             asset, tf,
                             filter_result.rejected_distance,
