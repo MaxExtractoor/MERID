@@ -21,6 +21,7 @@ from utils.logger import get_logger
 logger = get_logger("web.api.real_data")
 
 router = APIRouter(tags=["real-data"])
+SECONDS_PER_DAY = 86400
 
 
 # ────────────────────────────────────────────────
@@ -1647,7 +1648,7 @@ async def get_log_stats() -> Dict[str, Any]:
         warn_count = sum(1 for e in entries if str(e.get("level", "")).lower() in ("warn", "warning"))
         info_count = sum(1 for e in entries if str(e.get("level", "")).lower() == "info")
         debug_count = sum(1 for e in entries if str(e.get("level", "")).lower() == "debug")
-        cutoff = time.time() - 86400
+        cutoff = time.time() - SECONDS_PER_DAY
         last24h = sum(1 for e in entries if float(e.get("ts", 0) or 0) >= cutoff)
         component_counts: Dict[str, int] = {}
         for entry in entries:
