@@ -2,9 +2,19 @@
 
 Aggregates all safety checks into one boolean + reasons list:
   1. Kill switch status
-  2. Reconciliation status (fail-closed on fresh start)
+  2. Reconciliation status (with distinct states for never-ran vs genuine discrepancies)
   3. Price feed staleness
   4. PnL consistency
+
+Reconciliation State Semantics:
+  - NEVER_RAN: Reconciliation has never successfully run (fresh start).
+    → Adds WARNING reason (does not block execution).
+    → Allows live trading with explicit logging.
+  - RAN_NO_CRITICAL: Reconciliation ran and found no critical discrepancies.
+    → No reason added (execution fully allowed).
+  - RAN_CRITICAL: Reconciliation ran and found genuine critical discrepancies.
+    → Adds CRITICAL reason (blocks execution).
+    → Logs detailed discrepancy counts.
 
 Every backend path that wants to execute a trade should call
 `is_execution_blocked()` and respect the result.
@@ -159,16 +169,43 @@ def check_execution_gate() -> ExecutionGateStatus:
         logger.debug("Reconciliation check failed: %s", exc)
 
     # ── 2b. Kalshi venue reconciliation ──────────────────────────────
+    # Distinguish three states:
+    #   NEVER_RAN: reconciliation has never successfully run
+    #   RAN_NO_CRITICAL: reconciliation ran and found no genuine critical discrepancies
+    #   RAN_CRITICAL: reconciliation ran and found genuine critical discrepancies
     try:
-        from merid.reconciliation import has_critical_discrepancies as kalshi_has_critical
-        if kalshi_has_critical():
+        from merid.reconciliation import has_ever_run, has_critical_discrepancies as kalshi_has_critical, get_last_discrepancies
+
+        if not has_ever_run():
+            # NEVER_RAN state: reconciliation has never completed
+            # Use WARNING severity (not critical) so live trading is not hard-blocked
+            reasons.append(BlockReason(
+                source="reconciliation",
+                severity="warning",
+                message="Kalshi venue reconciliation has never run (fresh start)",
+                details="Execution allowed with warning — reconciliation will run on first cycle",
+                hint="Wait for first reconciliation cycle to complete for full safety checks",
+            ))
+            logger.warning("Kalshi reconciliation: NEVER_RAN — allowing execution with warning")
+        elif kalshi_has_critical():
+            # RAN_CRITICAL state: reconciliation ran and found genuine critical discrepancies
+            discrepancies = get_last_discrepancies()
+            critical_count = sum(1 for d in discrepancies if d.severity == "critical")
             reasons.append(BlockReason(
                 source="reconciliation",
                 severity="critical",
-                message="Kalshi venue reconciliation found critical discrepancies",
+                message=f"Kalshi venue reconciliation found {critical_count} critical discrepancies",
                 details="Position or order mismatch between MERID and Kalshi venue",
                 hint=REMEDIATION_HINTS["reconciliation"],
             ))
+            logger.error(
+                "Kalshi reconciliation: RAN_CRITICAL — blocking execution due to %d critical discrepancies",
+                critical_count,
+            )
+        else:
+            # RAN_NO_CRITICAL state: reconciliation ran and found no critical issues
+            # No reason to add — execution is allowed
+            logger.debug("Kalshi reconciliation: RAN_NO_CRITICAL — execution allowed")
     except Exception as exc:
         logger.debug("Kalshi venue reconciliation check skipped: %s", exc)
 

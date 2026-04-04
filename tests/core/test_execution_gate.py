@@ -278,3 +278,111 @@ class TestCheckExecutionGate:
         pnl_reasons = [r for r in result.reasons if r.source == "pnl_consistency"]
         assert len(pnl_reasons) == 1
         assert pnl_reasons[0].severity == "warning"
+
+
+# ── Kalshi Reconciliation State Tests ────────────────────────────────
+
+class TestKalshiReconciliationStates:
+    """Test the three distinct reconciliation states: NEVER_RAN, RAN_NO_CRITICAL, RAN_CRITICAL."""
+
+    def setup_method(self):
+        _update_blocked_state(True)  # reset
+
+    @patch("core.execution_gate.check_pnl_consistency", return_value={"consistent": True, "max_divergence_usd": 0, "threshold_usd": 5})
+    @patch("core.execution_gate.check_price_feed_staleness", return_value={"safe_to_trade": True, "stale_symbols": [], "critical_count": 0})
+    def test_never_ran_state_warning_not_blocked(self, mock_stale, mock_pnl):
+        """NEVER_RAN: reconciliation has never run → warning (not critical), execution allowed."""
+        mock_rc = MagicMock()
+        mock_rc._global_kill = False
+
+        # Mock Kalshi reconciliation: never ran
+        mock_kalshi_recon = MagicMock()
+        mock_kalshi_recon.has_ever_run = MagicMock(return_value=False)
+        mock_kalshi_recon.has_critical_discrepancies = MagicMock(return_value=True)  # fail-closed
+        mock_kalshi_recon.get_last_discrepancies = MagicMock(return_value=[])
+
+        with patch.dict("sys.modules", {"merid.risk.kill_switches": MagicMock(risk_controller=mock_rc)}):
+            # Mock crypto reconciliation as OK
+            mock_crypto_recon = MagicMock()
+            mock_crypto_recon.has_critical_discrepancies = MagicMock(return_value=False)
+            mock_crypto_recon._has_ever_completed = True
+            with patch.dict("sys.modules", {"trading.reconciliation": mock_crypto_recon}):
+                with patch.dict("sys.modules", {"merid.reconciliation": mock_kalshi_recon}):
+                    result = check_execution_gate()
+
+        # Should NOT be blocked (warning severity doesn't block)
+        assert result.blocked is False
+        assert result.safe_to_trade is True
+        assert result.gate_state == "limited"  # has warning but not critical
+
+        # Should have exactly one reconciliation warning
+        recon_reasons = [r for r in result.reasons if r.source == "reconciliation"]
+        assert len(recon_reasons) == 1
+        assert recon_reasons[0].severity == "warning"
+        assert "never run" in recon_reasons[0].message.lower()
+        assert "fresh start" in recon_reasons[0].message.lower()
+
+    @patch("core.execution_gate.check_pnl_consistency", return_value={"consistent": True, "max_divergence_usd": 0, "threshold_usd": 5})
+    @patch("core.execution_gate.check_price_feed_staleness", return_value={"safe_to_trade": True, "stale_symbols": [], "critical_count": 0})
+    def test_ran_no_critical_state_fully_allowed(self, mock_stale, mock_pnl):
+        """RAN_NO_CRITICAL: reconciliation ran, no critical discrepancies → fully allowed."""
+        mock_rc = MagicMock()
+        mock_rc._global_kill = False
+
+        # Mock Kalshi reconciliation: ran, no critical discrepancies
+        mock_kalshi_recon = MagicMock()
+        mock_kalshi_recon.has_ever_run = MagicMock(return_value=True)
+        mock_kalshi_recon.has_critical_discrepancies = MagicMock(return_value=False)
+        mock_kalshi_recon.get_last_discrepancies = MagicMock(return_value=[])
+
+        with patch.dict("sys.modules", {"merid.risk.kill_switches": MagicMock(risk_controller=mock_rc)}):
+            mock_crypto_recon = MagicMock()
+            mock_crypto_recon.has_critical_discrepancies = MagicMock(return_value=False)
+            mock_crypto_recon._has_ever_completed = True
+            with patch.dict("sys.modules", {"trading.reconciliation": mock_crypto_recon}):
+                with patch.dict("sys.modules", {"merid.reconciliation": mock_kalshi_recon}):
+                    result = check_execution_gate()
+
+        # Should be fully allowed
+        assert result.blocked is False
+        assert result.safe_to_trade is True
+        assert result.gate_state == "clear"
+        assert len(result.reasons) == 0
+
+    @patch("core.execution_gate.check_pnl_consistency", return_value={"consistent": True, "max_divergence_usd": 0, "threshold_usd": 5})
+    @patch("core.execution_gate.check_price_feed_staleness", return_value={"safe_to_trade": True, "stale_symbols": [], "critical_count": 0})
+    def test_ran_critical_state_blocked(self, mock_stale, mock_pnl):
+        """RAN_CRITICAL: reconciliation ran, found critical discrepancies → blocked."""
+        mock_rc = MagicMock()
+        mock_rc._global_kill = False
+
+        # Mock Kalshi reconciliation: ran, found critical discrepancies
+        mock_discrepancy = MagicMock()
+        mock_discrepancy.severity = "critical"
+        mock_discrepancy.symbol = "BTC-2026"
+        mock_discrepancy.venue = "kalshi"
+
+        mock_kalshi_recon = MagicMock()
+        mock_kalshi_recon.has_ever_run = MagicMock(return_value=True)
+        mock_kalshi_recon.has_critical_discrepancies = MagicMock(return_value=True)
+        mock_kalshi_recon.get_last_discrepancies = MagicMock(return_value=[mock_discrepancy, mock_discrepancy])
+
+        with patch.dict("sys.modules", {"merid.risk.kill_switches": MagicMock(risk_controller=mock_rc)}):
+            mock_crypto_recon = MagicMock()
+            mock_crypto_recon.has_critical_discrepancies = MagicMock(return_value=False)
+            mock_crypto_recon._has_ever_completed = True
+            with patch.dict("sys.modules", {"trading.reconciliation": mock_crypto_recon}):
+                with patch.dict("sys.modules", {"merid.reconciliation": mock_kalshi_recon}):
+                    result = check_execution_gate()
+
+        # Should be blocked
+        assert result.blocked is True
+        assert result.safe_to_trade is False
+        assert result.gate_state == "blocked"
+
+        # Should have critical reconciliation reason with discrepancy count
+        recon_reasons = [r for r in result.reasons if r.source == "reconciliation"]
+        assert len(recon_reasons) == 1
+        assert recon_reasons[0].severity == "critical"
+        assert "2 critical discrepancies" in recon_reasons[0].message
+
