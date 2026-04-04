@@ -616,6 +616,7 @@ class KalshiContinuousTrader:
         """Pull fresh candidates from catalog + filter pipeline."""
         new_candidates: List[TradingCandidate] = []
         asset_counts: Dict[str, Dict[str, int]] = {}
+        spot_prices = await _fetch_spot_prices_with_fallback(_CRYPTO_ASSETS)
 
         # Accumulators for cross-asset/timeframe filter telemetry for this scan run.
         scan_total_input: int = 0
@@ -625,8 +626,16 @@ class KalshiContinuousTrader:
         scan_rejected_price: int = 0
         scan_rejected_spread: int = 0
         scan_rejected_volume: int = 0
+        scan_rejected_missing_spot: int = 0
 
         for asset in _CRYPTO_ASSETS:
+            asset_spot = spot_prices.get(asset)
+            if asset_spot is None:
+                logger.warning(
+                    "ContinuousTrader: no spot price for %s during candidate refresh; "
+                    "distance-based filtering may reject this asset's markets",
+                    asset,
+                )
             for tf in _CRYPTO_TIMEFRAMES:
                 catalog_markets = self._catalog.get_markets_by_asset(asset, timeframe=tf)
                 if not catalog_markets:
@@ -665,8 +674,12 @@ class KalshiContinuousTrader:
                                 best_ask_cents = int(round(ask_float))
                                 if best_bid_cents > 0 and best_ask_cents > 0:
                                     mid_price_cents = (best_bid_cents + best_ask_cents) // 2
-                    except Exception:
-                        pass  # Price enrichment is best-effort; filter still works without it
+                    except Exception as exc:
+                        logger.debug(
+                            "ContinuousTrader price enrichment skipped for %s: %s",
+                            getattr(cm.market, "market_id", "unknown"),
+                            exc,
+                        )
 
                     raw_candidates.append(
                         MarketCandidate(
@@ -678,6 +691,7 @@ class KalshiContinuousTrader:
                             open_interest=int(cm.market.open_interest) if cm.market.open_interest else 0,
                             category=cm.category or "",
                             strike_price=cm.strike_price,
+                            spot_price=asset_spot,
                             best_bid_cents=best_bid_cents,
                             best_ask_cents=best_ask_cents,
                             mid_price_cents=mid_price_cents,
@@ -720,6 +734,7 @@ class KalshiContinuousTrader:
                 scan_rejected_price += filter_result.rejected_price
                 scan_rejected_spread += filter_result.rejected_spread
                 scan_rejected_volume += filter_result.rejected_volume
+                scan_rejected_missing_spot += filter_result.rejected_missing_spot
 
                 # Yield to event loop after processing each asset-timeframe combination
                 await asyncio.sleep(0)
@@ -746,6 +761,7 @@ class KalshiContinuousTrader:
             "scan_rejected_price": scan_rejected_price,
             "scan_rejected_spread": scan_rejected_spread,
             "scan_rejected_volume": scan_rejected_volume,
+            "scan_rejected_missing_spot": scan_rejected_missing_spot,
             "volume_band_block_rate": round(scan_block_rate, 4),
             "volume_band_block_rate_rolling_avg": round(rolling_avg, 4),
             "rolling_window_scans": len(self._volume_band_rate_history),
@@ -764,6 +780,8 @@ class KalshiContinuousTrader:
             drops.append(f"volume={scan_rejected_volume}")
         if scan_rejected_volume_band:
             drops.append(f"vol_band={scan_rejected_volume_band}")
+        if scan_rejected_missing_spot:
+            drops.append(f"missing_spot={scan_rejected_missing_spot}")
         drop_summary = " ".join(drops) if drops else "none"
         logger.info(
             "ContinuousTrader filter: total_input=%d volume_band_rejected=%d "
@@ -1448,8 +1466,8 @@ class KalshiContinuousTrader:
                     streaming_bus.publish(EventChannel.EXECUTION, "execution_rejected", event)
                 )
             )
-        except Exception:
-            pass  # Event emission is best-effort; never block trading logic
+        except Exception as exc:
+            logger.debug("ContinuousTrader execution_rejected event emit skipped: %s", exc)
 
     # ── Status ────────────────────────────────────────────────────────────
 
@@ -1531,4 +1549,3 @@ def get_continuous_trader(
     if _trader is None:
         _trader = KalshiContinuousTrader(catalog=catalog, strategy=strategy)
     return _trader
-

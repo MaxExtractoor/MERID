@@ -10,6 +10,7 @@
 import { useState } from "react";
 import { useApiData } from "../hooks/useApiData";
 import { API_ENDPOINTS, DEFAULTS } from "../config/constants";
+import { sortTimeframes } from "../config/timeframes";
 import ErrorBar from "../components/ErrorBar";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -250,7 +251,7 @@ function ConsensusDetail({ view }: { view: ConsensusView }) {
             Agent Votes ({view.raw_proposals.length})
           </div>
           <div className="space-y-2">
-            {view.raw_proposals.map((p, i) => (
+            {view.raw_proposals.map((p) => (
               <div key={p.agent_id} className="rounded-lg bg-slate-900/50 border border-slate-700/30 p-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -291,8 +292,6 @@ function ConsensusDetail({ view }: { view: ConsensusView }) {
 
 // ── Main view ─────────────────────────────────────────────────────────────
 
-const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"];
-
 export default function SwarmConsensusMatrix() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [filterAsset, setFilterAsset] = useState<string>("ALL");
@@ -323,6 +322,7 @@ export default function SwarmConsensusMatrix() {
   }, {});
 
   const selectedView = selectedKey ? allConsensus?.[selectedKey] ?? null : null;
+  const timeframes = sortTimeframes(Array.from(new Set(filtered.map(v => v.timeframe))));
 
   // Summary stats
   const readyCount = views.filter(v => v.status === "ready").length;
@@ -425,8 +425,8 @@ export default function SwarmConsensusMatrix() {
                 <span className="text-sm font-bold text-white">{asset}</span>
                 <div className="flex-1 h-px bg-slate-700/40" />
               </div>
-              <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${TIMEFRAMES.length}, minmax(0, 1fr))` }}>
-                {TIMEFRAMES.map(tf => {
+              <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${timeframes.length}, minmax(0, 1fr))` }}>
+                {timeframes.map(tf => {
                   const view = tfMap[tf];
                   const key = `${asset}:${tf}`;
                   if (!view) {

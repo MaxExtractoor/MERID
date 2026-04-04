@@ -14,6 +14,8 @@ interface AlertRecord {
   source: string;
   title: string;
   detail: string;
+  type?: string;
+  status?: string;
   acknowledged: boolean;
 }
 
@@ -125,9 +127,21 @@ export default function AlertHistoryPanel() {
                     <span className="text-xs text-gray-500 flex-shrink-0 ml-2">{formatTime(alert.timestamp)}</span>
                   </div>
                   <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-xs text-gray-400">{alert.source}</span>
-                    <span className="text-xs text-gray-500">·</span>
-                    <span className="text-xs text-gray-500">{alert.detail}</span>
+                     <span className="text-xs text-gray-400">{alert.source}</span>
+                     {alert.type && (
+                       <>
+                         <span className="text-xs text-gray-500">·</span>
+                         <span className="text-xs text-gray-500">{alert.type}</span>
+                       </>
+                     )}
+                     {alert.status && (
+                       <>
+                         <span className="text-xs text-gray-500">·</span>
+                         <span className="text-xs text-gray-500">{alert.status}</span>
+                       </>
+                     )}
+                     <span className="text-xs text-gray-500">·</span>
+                     <span className="text-xs text-gray-500">{alert.detail}</span>
                   </div>
                 </div>
               </div>

@@ -135,9 +135,9 @@ def _get_venue_gate():
 async def grid_status() -> Dict[str, Any]:
     """Full grid status including all agents, portfolio risk, and venue health."""
     raw = _get_grid().summary()
-    # Normalize agents list to the shape KalshiVolDashboardView expects
-    raw["agents"] = [_normalize_agent(a) for a in raw.get("agents", [])]
-    # Normalize portfolio_risk to the shape KalshiGridView expects
+    raw_agents = list(raw.get("agents", []))
+    raw["agent_cards"] = [_normalize_agent(a) for a in raw_agents]
+    raw["agents"] = raw_agents
     raw["portfolio_risk"] = _normalize_portfolio_risk(raw.get("portfolio_risk", {}))
     # Surface venue gate mode so the UI can show paper vs live
     gate = _get_venue_gate()
