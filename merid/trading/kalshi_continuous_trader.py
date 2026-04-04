@@ -70,6 +70,23 @@ _DEFAULT_MAX_POSITION_CONTRACTS = int(os.getenv("MERID_CT_MAX_POSITION_CONTRACTS
 _DEFAULT_EXPOSURE_MULTIPLIER = float(os.getenv("MERID_CT_EXPOSURE_MULTIPLIER", "1.0"))
 _DEFAULT_COOLDOWN_SECONDS = float(os.getenv("MERID_CT_COOLDOWN_SECONDS", "0.0"))
 
+# ── Catalog refresh configuration ────────────────────────────────────────
+# Minimum interval between catalog refreshes (seconds).
+# Prevents excessive catalog fetches and allows candidates to stabilize.
+_DEFAULT_MIN_REFRESH_INTERVAL_S = float(os.getenv("MERID_CT_MIN_REFRESH_INTERVAL_S", "300.0"))  # 5 minutes
+
+# Batch size for parallel catalog fetches.
+# With 5 assets × 5 timeframes = 25 combinations, default batch of 10 means 3 batches.
+_DEFAULT_CATALOG_BATCH_SIZE = int(os.getenv("MERID_CT_CATALOG_BATCH_SIZE", "10"))
+
+# WS queue pressure threshold above which to skip catalog refresh.
+# Default 0.90 (90%) means skip refresh when queue is nearly full.
+_DEFAULT_BACKPRESSURE_THRESHOLD = float(os.getenv("MERID_CT_BACKPRESSURE_THRESHOLD", "0.90"))
+
+# Event loop lag P95 threshold (ms) above which to skip catalog refresh.
+# Default 500ms (critical threshold from event loop monitor).
+_DEFAULT_LAG_THRESHOLD_MS = float(os.getenv("MERID_CT_LAG_THRESHOLD_MS", "500.0"))
+
 # Edge profile selection: "initial_live" (permissive) or "production" (conservative).
 #
 # Defaults to "initial_live" (0.5–2% thresholds) so that CT can generate trade
@@ -560,6 +577,13 @@ class KalshiContinuousTrader:
         self._task: Optional[asyncio.Task] = None
         self._candidates: List[TradingCandidate] = []
 
+        # ── Catalog refresh rate limiting ────────────────────────────────────────
+        self._min_refresh_interval_s = _DEFAULT_MIN_REFRESH_INTERVAL_S
+        self._last_refresh_ts: float = 0.0  # Timestamp of last successful refresh
+        self._catalog_batch_size = _DEFAULT_CATALOG_BATCH_SIZE
+        self._backpressure_threshold = _DEFAULT_BACKPRESSURE_THRESHOLD
+        self._lag_threshold_ms = _DEFAULT_LAG_THRESHOLD_MS
+
         # ── Filter telemetry ────────────────────────────────────────────────
         # Aggregated filter stats from the most recent _refresh_candidates() call.
         # Empty dict until the first scan completes.
@@ -616,8 +640,200 @@ class KalshiContinuousTrader:
 
     # ── Candidate discovery ───────────────────────────────────────────────
 
+    async def _fetch_and_filter_one_combo(
+        self, asset: str, tf: str
+    ) -> Tuple[str, str, List[TradingCandidate], Dict[str, Any]]:
+        """Fetch and filter candidates for a single (asset, timeframe) combination.
+
+        Returns:
+            Tuple of (asset, tf, filtered_candidates, filter_result_dict)
+            where filter_result_dict contains rejection counts for telemetry.
+        """
+        catalog_markets = self._catalog.get_markets_by_asset(asset, timeframe=tf)
+        if not catalog_markets:
+            logger.debug("ContinuousTrader: no catalog markets for %s %s", asset, tf)
+            return (asset, tf, [], {})
+
+        # ── SOL DIAGNOSTIC: Log catalog fetch results for SOL ──────
+        if asset == "SOL":
+            sample_market_tickers = [
+                getattr(cm.market, "ticker", "UNKNOWN")
+                for cm in catalog_markets[:3]
+            ]
+            logger.warning(
+                "SOL CATALOG DEBUG: asset=%s tf=%s | "
+                "catalog_market_count=%d | "
+                "sample_tickers=%s",
+                asset, tf,
+                len(catalog_markets),
+                sample_market_tickers,
+            )
+
+        # Convert catalog → base MarketCandidate list for filter.
+        # Try to extract real bid/ask/mid prices from the EventMarket outcomes
+        # so that the spread filter and CT's signal_to_sizing work with real
+        # book data instead of fallback constants.
+        raw_candidates = []
+        for cm in catalog_markets:
+            best_bid_cents: int = 0
+            best_ask_cents: int = 0
+            mid_price_cents: int = 0
+
+            try:
+                outcomes = getattr(cm.market, "outcomes", None) or []
+                yes_outcome = next(
+                    (o for o in outcomes if getattr(o, "outcome_id", "").lower() == "yes"),
+                    None,
+                )
+                if yes_outcome is not None:
+                    raw_bid = getattr(yes_outcome, "best_bid", None)
+                    raw_ask = getattr(yes_outcome, "best_ask", None)
+                    # Kalshi API prices are in cents (1-99 integer range).
+                    # Guard against 0.0-1.0 decimal format by checking magnitude.
+                    if raw_bid is not None and raw_ask is not None:
+                        bid_float = float(raw_bid)
+                        ask_float = float(raw_ask)
+                        # Convert decimal (0-1) to cents if needed
+                        if bid_float <= 1.0 and bid_float > 0.0:
+                            bid_float *= 100
+                            ask_float *= 100
+                        best_bid_cents = int(round(bid_float))
+                        best_ask_cents = int(round(ask_float))
+                        if best_bid_cents > 0 and best_ask_cents > 0:
+                            mid_price_cents = (best_bid_cents + best_ask_cents) // 2
+            except Exception:
+                pass  # Price enrichment is best-effort; filter still works without it
+
+            raw_candidates.append(
+                MarketCandidate(
+                    ticker=cm.market.market_id,
+                    underlying=asset,
+                    timeframe=tf,
+                    expiry_ts=cm.expires_at.timestamp() if cm.expires_at else 0.0,
+                    volume=int(cm.market.volume) if cm.market.volume else 0,
+                    open_interest=int(cm.market.open_interest) if cm.market.open_interest else 0,
+                    category=cm.category or "",
+                    strike_price=cm.strike_price,
+                    best_bid_cents=best_bid_cents,
+                    best_ask_cents=best_ask_cents,
+                    mid_price_cents=mid_price_cents,
+                )
+            )
+
+        filter_result = self._filter.filter_markets(raw_candidates)
+        filtered_candidates = [
+            TradingCandidate.from_candidate(c)
+            for c in filter_result.candidates
+        ]
+
+        # Log per-asset/timeframe filter drops at DEBUG so individual filter
+        # vetoes are visible in logs without flooding INFO.
+        if filter_result.total_input > 0 and filter_result.passed < filter_result.total_input:
+            logger.debug(
+                "ContinuousTrader filter %s %s: "
+                "input=%d passed=%d | "
+                "vol_band=%d spread=%d price=%d distance=%d dead_zone=%d vol=%d oi=%d cap=%d",
+                asset, tf,
+                filter_result.total_input, filter_result.passed,
+                filter_result.rejected_volume_band,
+                filter_result.rejected_spread,
+                filter_result.rejected_price,
+                filter_result.rejected_distance,
+                filter_result.rejected_edge_deadzone,
+                filter_result.rejected_volume,
+                filter_result.rejected_oi,
+                filter_result.capped_per_asset,
+            )
+
+        # ── SOL DIAGNOSTIC: Track why SOL shows zero tradeable candidates ──────
+        # Investigation shows SOL is fully wired (all 5 timeframes configured)
+        # but consistently reports "discovered=True candidates=0 tradeable=0".
+        # Log at WARNING level to diagnose filter pipeline behavior for SOL.
+        if asset == "SOL":
+            # Get sample ticker IDs if any passed filters
+            sample_tickers = [c.ticker for c in filter_result.candidates[:3]]
+            logger.warning(
+                "SOL FILTER DEBUG: asset=%s tf=%s | "
+                "catalog_raw=%d filter_passed=%d | "
+                "rejected: vol_band=%d spread=%d dead_zone=%d price=%d distance=%d vol=%d oi=%d | "
+                "sample_tickers=%s",
+                asset, tf,
+                filter_result.total_input,
+                filter_result.passed,
+                filter_result.rejected_volume_band,
+                filter_result.rejected_spread,
+                filter_result.rejected_edge_deadzone,
+                filter_result.rejected_price,
+                filter_result.rejected_distance,
+                filter_result.rejected_volume,
+                filter_result.rejected_oi,
+                sample_tickers if sample_tickers else "NONE",
+            )
+
+        # Return telemetry for aggregation
+        telemetry = {
+            "total_input": filter_result.total_input,
+            "passed": filter_result.passed,
+            "rejected_volume_band": filter_result.rejected_volume_band,
+            "rejected_spread": filter_result.rejected_spread,
+            "rejected_price": filter_result.rejected_price,
+            "rejected_distance": filter_result.rejected_distance,
+            "rejected_edge_deadzone": filter_result.rejected_edge_deadzone,
+            "rejected_volume": filter_result.rejected_volume,
+            "rejected_oi": filter_result.rejected_oi,
+        }
+
+        return (asset, tf, filtered_candidates, telemetry)
+
     async def _refresh_candidates(self) -> List[TradingCandidate]:
-        """Pull fresh candidates from catalog + filter pipeline."""
+        """Pull fresh candidates from catalog + filter pipeline.
+
+        Implements three optimizations:
+        1. Parallelization: Fetches all (asset, timeframe) combinations in batches using asyncio.gather
+        2. Backpressure awareness: Skips refresh when WS queue or event loop is under pressure
+        3. Rate limiting: Enforces minimum interval between refreshes
+        """
+        # ── Rate limiting ────────────────────────────────────────────────────
+        now = time.time()
+        elapsed = now - self._last_refresh_ts
+        if elapsed < self._min_refresh_interval_s:
+            logger.debug(
+                "Skipping catalog refresh — only %.0fs since last "
+                "(min interval %.0fs)",
+                elapsed, self._min_refresh_interval_s
+            )
+            return self._candidates
+
+        # ── Backpressure awareness ───────────────────────────────────────────
+        # Check WS queue pressure (if WebSocket adapter is available)
+        try:
+            from merid.event_venues.kalshi.ws import get_websocket_adapter
+            ws_adapter = get_websocket_adapter()
+            queue_depth_pct = ws_adapter.get_queue_depth_percent()
+            if queue_depth_pct > self._backpressure_threshold:
+                logger.warning(
+                    "Skipping catalog refresh — WS queue pressure %.1f%% (threshold %.1f%%)",
+                    queue_depth_pct * 100, self._backpressure_threshold * 100
+                )
+                return self._candidates
+        except Exception as exc:
+            logger.debug("Could not check WS queue pressure: %s", exc)
+
+        # Check event loop lag
+        try:
+            from observability.event_loop_monitor import get_event_loop_monitor
+            monitor = get_event_loop_monitor()
+            stats = monitor.get_stats(window_seconds=60)
+            if stats.p95_ms > self._lag_threshold_ms:
+                logger.warning(
+                    "Skipping catalog refresh — event loop P95 lag %.0fms (threshold %.0fms)",
+                    stats.p95_ms, self._lag_threshold_ms
+                )
+                return self._candidates
+        except Exception as exc:
+            logger.debug("Could not check event loop lag: %s", exc)
+
+        # ── Parallel fetch+filter ────────────────────────────────────────────
         new_candidates: List[TradingCandidate] = []
         asset_counts: Dict[str, Dict[str, int]] = {}
 
@@ -630,143 +846,46 @@ class KalshiContinuousTrader:
         scan_rejected_spread: int = 0
         scan_rejected_volume: int = 0
 
+        # Build task list for all (asset, timeframe) combinations
+        fetch_tasks = []
         for asset in _CRYPTO_ASSETS:
             for tf in _CRYPTO_TIMEFRAMES:
-                catalog_markets = self._catalog.get_markets_by_asset(asset, timeframe=tf)
-                if not catalog_markets:
-                    logger.debug("ContinuousTrader: no catalog markets for %s %s", asset, tf)
+                fetch_tasks.append(self._fetch_and_filter_one_combo(asset, tf))
+
+        # Execute in batches to avoid overwhelming the event loop
+        batch_size = self._catalog_batch_size
+        for i in range(0, len(fetch_tasks), batch_size):
+            batch = fetch_tasks[i:i+batch_size]
+            results = await asyncio.gather(*batch, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Catalog fetch failed: {result}")
                     continue
 
-                # ── SOL DIAGNOSTIC: Log catalog fetch results for SOL ──────
-                if asset == "SOL":
-                    sample_market_tickers = [
-                        getattr(cm.market, "ticker", "UNKNOWN")
-                        for cm in catalog_markets[:3]
-                    ]
-                    logger.warning(
-                        "SOL CATALOG DEBUG: asset=%s tf=%s | "
-                        "catalog_market_count=%d | "
-                        "sample_tickers=%s",
-                        asset, tf,
-                        len(catalog_markets),
-                        sample_market_tickers,
-                    )
+                asset, tf, filtered_candidates, telemetry = result
 
-                # Convert catalog → base MarketCandidate list for filter.
-                # Try to extract real bid/ask/mid prices from the EventMarket outcomes
-                # so that the spread filter and CT's signal_to_sizing work with real
-                # book data instead of fallback constants.
-                raw_candidates = []
-                for cm in catalog_markets:
-                    best_bid_cents: int = 0
-                    best_ask_cents: int = 0
-                    mid_price_cents: int = 0
+                # Accumulate candidates
+                new_candidates.extend(filtered_candidates)
 
-                    try:
-                        outcomes = getattr(cm.market, "outcomes", None) or []
-                        yes_outcome = next(
-                            (o for o in outcomes if getattr(o, "outcome_id", "").lower() == "yes"),
-                            None,
-                        )
-                        if yes_outcome is not None:
-                            raw_bid = getattr(yes_outcome, "best_bid", None)
-                            raw_ask = getattr(yes_outcome, "best_ask", None)
-                            # Kalshi API prices are in cents (1-99 integer range).
-                            # Guard against 0.0-1.0 decimal format by checking magnitude.
-                            if raw_bid is not None and raw_ask is not None:
-                                bid_float = float(raw_bid)
-                                ask_float = float(raw_ask)
-                                # Convert decimal (0-1) to cents if needed
-                                if bid_float <= 1.0 and bid_float > 0.0:
-                                    bid_float *= 100
-                                    ask_float *= 100
-                                best_bid_cents = int(round(bid_float))
-                                best_ask_cents = int(round(ask_float))
-                                if best_bid_cents > 0 and best_ask_cents > 0:
-                                    mid_price_cents = (best_bid_cents + best_ask_cents) // 2
-                    except Exception:
-                        pass  # Price enrichment is best-effort; filter still works without it
-
-                    raw_candidates.append(
-                        MarketCandidate(
-                            ticker=cm.market.market_id,
-                            underlying=asset,
-                            timeframe=tf,
-                            expiry_ts=cm.expires_at.timestamp() if cm.expires_at else 0.0,
-                            volume=int(cm.market.volume) if cm.market.volume else 0,
-                            open_interest=int(cm.market.open_interest) if cm.market.open_interest else 0,
-                            category=cm.category or "",
-                            strike_price=cm.strike_price,
-                            best_bid_cents=best_bid_cents,
-                            best_ask_cents=best_ask_cents,
-                            mid_price_cents=mid_price_cents,
-                        )
-                    )
-
-                filter_result = self._filter.filter_markets(raw_candidates)
-                for c in filter_result.candidates:
-                    new_candidates.append(
-                        TradingCandidate.from_candidate(c)
-                    )
-
+                # Track counts per asset/timeframe
                 counts = asset_counts.setdefault(asset, {})
-                counts[tf] = len(filter_result.candidates)
+                counts[tf] = len(filtered_candidates)
 
-                # Log per-asset/timeframe filter drops at DEBUG so individual filter
-                # vetoes are visible in logs without flooding INFO.
-                if filter_result.total_input > 0 and filter_result.passed < filter_result.total_input:
-                    logger.debug(
-                        "ContinuousTrader filter %s %s: "
-                        "input=%d passed=%d | "
-                        "vol_band=%d spread=%d price=%d distance=%d dead_zone=%d vol=%d oi=%d cap=%d",
-                        asset, tf,
-                        filter_result.total_input, filter_result.passed,
-                        filter_result.rejected_volume_band,
-                        filter_result.rejected_spread,
-                        filter_result.rejected_price,
-                        filter_result.rejected_distance,
-                        filter_result.rejected_edge_deadzone,
-                        filter_result.rejected_volume,
-                        filter_result.rejected_oi,
-                        filter_result.capped_per_asset,
-                    )
+                # Accumulate telemetry
+                scan_total_input += telemetry.get("total_input", 0)
+                scan_rejected_volume_band += telemetry.get("rejected_volume_band", 0)
+                scan_rejected_edge_deadzone += telemetry.get("rejected_edge_deadzone", 0)
+                scan_rejected_distance += telemetry.get("rejected_distance", 0)
+                scan_rejected_price += telemetry.get("rejected_price", 0)
+                scan_rejected_spread += telemetry.get("rejected_spread", 0)
+                scan_rejected_volume += telemetry.get("rejected_volume", 0)
 
-                # ── SOL DIAGNOSTIC: Track why SOL shows zero tradeable candidates ──────
-                # Investigation shows SOL is fully wired (all 5 timeframes configured)
-                # but consistently reports "discovered=True candidates=0 tradeable=0".
-                # Log at WARNING level to diagnose filter pipeline behavior for SOL.
-                if asset == "SOL":
-                    # Get sample ticker IDs if any passed filters
-                    sample_tickers = [c.ticker for c in filter_result.candidates[:3]]
-                    logger.warning(
-                        "SOL FILTER DEBUG: asset=%s tf=%s | "
-                        "catalog_raw=%d filter_passed=%d | "
-                        "rejected: vol_band=%d spread=%d dead_zone=%d price=%d distance=%d vol=%d oi=%d | "
-                        "sample_tickers=%s",
-                        asset, tf,
-                        filter_result.total_input,
-                        filter_result.passed,
-                        filter_result.rejected_volume_band,
-                        filter_result.rejected_spread,
-                        filter_result.rejected_edge_deadzone,
-                        filter_result.rejected_price,
-                        filter_result.rejected_distance,
-                        filter_result.rejected_volume,
-                        filter_result.rejected_oi,
-                        sample_tickers if sample_tickers else "NONE",
-                    )
+            # Yield to event loop after processing each batch
+            await asyncio.sleep(0)
 
-                # Accumulate filter telemetry across all (asset, timeframe) loops.
-                scan_total_input += filter_result.total_input
-                scan_rejected_volume_band += filter_result.rejected_volume_band
-                scan_rejected_edge_deadzone += filter_result.rejected_edge_deadzone
-                scan_rejected_distance += filter_result.rejected_distance
-                scan_rejected_price += filter_result.rejected_price
-                scan_rejected_spread += filter_result.rejected_spread
-                scan_rejected_volume += filter_result.rejected_volume
-
-                # Yield to event loop after processing each asset-timeframe combination
-                await asyncio.sleep(0)
+        # Mark refresh as complete
+        self._last_refresh_ts = now
 
         # Compute per-scan volume-band block rate and update rolling history.
         scan_block_rate = (
