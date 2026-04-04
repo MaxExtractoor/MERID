@@ -36,12 +36,17 @@ from merid.formulas import generate_correlation_id
 from merid.prediction.opinion_strategy import OpinionStrategy, OpinionEstimate, OpinionExplanation
 from utils.logger import get_logger
 
+# AUDIT-16: import canonical asset/timeframe universe so CT stays aligned with
+# config.crypto_universe.  Never redefine these lists locally.
+from config.crypto_universe import CRYPTO_ASSETS_ORDERED as _CRYPTO_ASSETS_LIST
+from config.crypto_universe import CRYPTO_TIMEFRAMES_ORDERED as _CRYPTO_TIMEFRAMES_LIST
+
 logger = get_logger("merid.trading.kalshi_continuous_trader")
 
-# ── Configurable defaults (env overrides) ─────────────────────────────────
-
-_CRYPTO_ASSETS = ("BTC", "ETH", "SOL", "XRP", "DOGE")
-_CRYPTO_TIMEFRAMES = ("15m", "1h", "daily", "weekly", "monthly")
+# AUDIT-16: Use canonical universe — these are tuples for backward-compat with existing
+# iteration code that expects a sequence.
+_CRYPTO_ASSETS: tuple = tuple(_CRYPTO_ASSETS_LIST)
+_CRYPTO_TIMEFRAMES: tuple = tuple(_CRYPTO_TIMEFRAMES_LIST)
 
 _DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"))
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
@@ -49,6 +54,15 @@ _DEFAULT_BANKROLL_FRACTION = float(os.getenv("MERID_BANKROLL_FRACTION", "0.01"))
 _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
 _DEFAULT_KELLY_FRACTION = float(os.getenv("MERID_KELLY_FRACTION", "0.25"))
 _DEFAULT_MIN_EDGE = float(os.getenv("MERID_MIN_EDGE", "0.02"))
+
+# ── Configurable defaults (env overrides) ─────────────────────────────────
+# AUDIT-02..08: protect/size hardcodes are env-driven via MERID_CT_* vars.
+_DEFAULT_MAX_CANDIDATES_PER_ASSET = int(os.getenv("MERID_CT_MAX_CANDIDATES", "5"))
+_DEFAULT_MAX_SPREAD_CENTS = int(os.getenv("MERID_CT_MAX_SPREAD_CENTS", "12"))
+_DEFAULT_MIN_VOLUME = int(os.getenv("MERID_CT_MIN_VOLUME", "50"))
+_DEFAULT_MAX_POSITION_CONTRACTS = int(os.getenv("MERID_CT_MAX_POSITION_CONTRACTS", "0"))
+_DEFAULT_EXPOSURE_MULTIPLIER = float(os.getenv("MERID_CT_EXPOSURE_MULTIPLIER", "1.0"))
+_DEFAULT_COOLDOWN_SECONDS = float(os.getenv("MERID_CT_COOLDOWN_SECONDS", "0.0"))
 
 # Edge profile selection: "initial_live" (permissive) or "production" (conservative).
 #
@@ -484,6 +498,13 @@ class KalshiContinuousTrader:
         kelly_fraction: float = _DEFAULT_KELLY_FRACTION,
         min_edge: float = _DEFAULT_MIN_EDGE,
         dry_run: bool = False,
+        # AUDIT-02..08: protect/size caps
+        max_candidates_per_asset: int = _DEFAULT_MAX_CANDIDATES_PER_ASSET,
+        max_spread_cents: int = _DEFAULT_MAX_SPREAD_CENTS,
+        min_volume: int = _DEFAULT_MIN_VOLUME,
+        max_position_contracts: int = _DEFAULT_MAX_POSITION_CONTRACTS,
+        exposure_multiplier: float = _DEFAULT_EXPOSURE_MULTIPLIER,
+        per_asset_cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS,
     ) -> None:
         self._catalog = catalog or get_market_catalog()
         self._strategy = strategy
@@ -493,6 +514,14 @@ class KalshiContinuousTrader:
         self._max_yes_price = max_yes_price
         self._kelly_fraction = kelly_fraction
         self._min_edge = min_edge
+        # AUDIT-02..08: protect/size caps
+        self._max_candidates_per_asset = max_candidates_per_asset
+        self._max_spread_cents = max_spread_cents
+        self._min_volume = min_volume
+        self._max_position_contracts = max_position_contracts
+        self._exposure_multiplier = exposure_multiplier
+        self._per_asset_cooldown_seconds = per_asset_cooldown_seconds
+        self._last_trade_ts: Dict[str, float] = {}  # asset → last trade timestamp
 
         # AUDIT-14: dry_run flag; when False, credentials are verified before
         # any live order submission.
@@ -514,6 +543,10 @@ class KalshiContinuousTrader:
             # CT has its own per-asset/timeframe edge thresholds (EDGE_THRESHOLDS) so
             # the pre-filter version is both redundant and counterproductive here.
             min_edge_dead_zone_pct=0.0,
+            # AUDIT-02..08: wire env-driven filter caps
+            max_candidates_per_asset=self._max_candidates_per_asset,
+            max_spread_cents=self._max_spread_cents,
+            min_volume=self._min_volume,
         )
         self._filter = MarketFilter(self._filter_config)
 
@@ -758,6 +791,18 @@ class KalshiContinuousTrader:
             "ContinuousTrader: %d total candidates across %d asset/timeframe pairs",
             len(new_candidates), sum(len(v) for v in asset_counts.values()),
         )
+
+        # AUDIT-20: When CT resolves zero candidates for all assets, log CRITICAL
+        # and stop the trader rather than silently continuing with no markets.
+        if len(new_candidates) == 0 and scan_total_input == 0:
+            logger.critical(
+                "ContinuousTrader: zero candidates found across ALL assets and timeframes. "
+                "The catalog may be empty, unauthenticated, or all markets are filtered out. "
+                "Halting CT to avoid running a no-op loop.  "
+                "Check catalog connectivity and filter config."
+            )
+            self._running = False
+
         return new_candidates
 
     # ── Sizing / risk ─────────────────────────────────────────────────────
@@ -1143,6 +1188,47 @@ class KalshiContinuousTrader:
             if sizing.notional_usd > 0:
                 notional = min(notional, sizing.notional_usd)
 
+            # AUDIT-07: apply exposure multiplier (scale down/up computed Kelly notional)
+            if self._exposure_multiplier != 1.0:
+                notional *= self._exposure_multiplier
+
+            # AUDIT-06: enforce hard cap on number of contracts
+            if self._max_position_contracts > 0 and sizing.size_contracts > self._max_position_contracts:
+                logger.debug(
+                    "ContinuousTrader: contracts capped %s → %d (MERID_CT_MAX_POSITION_CONTRACTS)",
+                    sizing.size_contracts, self._max_position_contracts,
+                )
+                # Recompute notional proportionally
+                if sizing.size_contracts > 0:
+                    notional = notional * (self._max_position_contracts / sizing.size_contracts)
+
+            # AUDIT-08: per-asset cooldown — skip if traded too recently
+            if self._per_asset_cooldown_seconds > 0:
+                asset_key = candidate.underlying.upper()
+                last_ts = self._last_trade_ts.get(asset_key, 0.0)
+                elapsed = time.time() - last_ts
+                if elapsed < self._per_asset_cooldown_seconds:
+                    remaining = self._per_asset_cooldown_seconds - elapsed
+                    veto_reason = "cooldown"
+                    logger.debug(
+                        "ContinuousTrader: %s on cooldown, %.0fs remaining",
+                        asset_key, remaining,
+                    )
+                    vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                    ticker_diagnostics.append({
+                        "ticker": candidate.ticker,
+                        "asset": candidate.underlying,
+                        "timeframe": candidate.timeframe,
+                        "implied_yes_prob": mid_prob,
+                        "model_win_prob": sizing.win_prob,
+                        "edge_bps": edge_bps,
+                        "side": side,
+                        "kelly_raw": sizing.kelly_raw,
+                        "kelly_frac": sizing.kelly_frac,
+                        "veto_reason": veto_reason,
+                    })
+                    continue
+
             intent = {
                 "ticker": candidate.ticker,
                 "underlying": candidate.underlying,
@@ -1206,6 +1292,9 @@ class KalshiContinuousTrader:
 
             self._risk.add_notional(candidate.group_id, notional)
             self._risk.trade_count += 1
+            # AUDIT-08: record trade timestamp for per-asset cooldown tracking
+            if self._per_asset_cooldown_seconds > 0:
+                self._last_trade_ts[candidate.underlying.upper()] = time.time()
             intents.append(intent)
             ticker_diagnostics.append({
                 "ticker": candidate.ticker,

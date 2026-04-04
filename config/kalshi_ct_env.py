@@ -7,21 +7,25 @@ throughout the codebase.
 
 AUDIT-18 fix: single source of truth for CT env vars.
 AUDIT-01  fix: ``KALSHI_TRADER_BANKROLL`` required; fail-fast with clear error.
+AUDIT-02..08 fix: protect/size hardcodes are env-driven and validated.
+AUDIT-12 fix: minimum viable bankroll floor is env-configurable and enforced.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
 logger = get_logger("config.kalshi_ct_env")
 
 # ── Minimum sane bankroll ─────────────────────────────────────────────────────
-# Below this value CT refuses to start.  100 cents = $1.00.
-BANKROLL_MIN_CENTS: int = 100
+# Below this value CT refuses to start.
+# Default: 100 cents = $1.00.  Override via MERID_CT_BANKROLL_MIN_CENTS.
+# AUDIT-12: floor is now env-configurable so test environments can use lower values.
+BANKROLL_MIN_CENTS: int = int(os.getenv("MERID_CT_BANKROLL_MIN_CENTS", "100"))
 
 
 @dataclass
@@ -78,6 +82,27 @@ class KalshiCTEnvConfig:
     vol_anchor_asset:
         Per-asset volatility anchor override map.
         Source: ``KALSHI_CT_VOL_ANCHOR_{ASSET}`` (default: self-anchor; AUDIT-22).
+    max_candidates_per_asset:
+        Discovery cap: maximum candidates to pass through per (asset, timeframe).
+        Source: ``MERID_CT_MAX_CANDIDATES`` (default 5).  AUDIT-02.
+    max_spread_cents:
+        Filter: reject candidates whose bid/ask spread exceeds this value in cents.
+        Source: ``MERID_CT_MAX_SPREAD_CENTS`` (default 12).  AUDIT-03.
+    min_volume:
+        Filter: reject candidates with volume below this threshold.
+        Source: ``MERID_CT_MIN_VOLUME`` (default 50).  AUDIT-04.
+    max_position_contracts:
+        Hard cap on the number of contracts for a single order.  0 = no cap.
+        Source: ``MERID_CT_MAX_POSITION_CONTRACTS`` (default 0).  AUDIT-06.
+    exposure_multiplier:
+        Multiplier applied to computed Kelly size (use <1 to scale back exposure).
+        Source: ``MERID_CT_EXPOSURE_MULTIPLIER`` (default 1.0).  AUDIT-07.
+    per_asset_cooldown_seconds:
+        Minimum seconds between consecutive trades for the same asset.  0 = off.
+        Source: ``MERID_CT_COOLDOWN_SECONDS`` (default 0).  AUDIT-08.
+    agent_stagger_seconds:
+        Stagger delay (seconds) between agent starts in the agent grid.
+        Source: ``MERID_AGENT_STAGGER_SECONDS`` (default 0.5).  AUDIT-11.
     """
 
     bankroll_cents: int = 0
@@ -95,6 +120,15 @@ class KalshiCTEnvConfig:
     smoke_test: bool = False
     dry_run: bool = False
     vol_anchor_asset: Dict[str, str] = field(default_factory=dict)
+    # AUDIT-02..08: protect/size caps — all env-driven with sane defaults
+    max_candidates_per_asset: int = 5
+    max_spread_cents: int = 12
+    min_volume: int = 50
+    max_position_contracts: int = 0       # 0 = no hard cap
+    exposure_multiplier: float = 1.0
+    per_asset_cooldown_seconds: float = 0.0  # 0 = no cooldown
+    # AUDIT-11: agent-grid stagger
+    agent_stagger_seconds: float = 0.5
 
     # ── Factory ─────────────────────────────────────────────────────────────
 
@@ -103,14 +137,14 @@ class KalshiCTEnvConfig:
         """Read all CT env vars and return a populated config instance.
 
         Raises ``ValueError`` if ``KALSHI_TRADER_BANKROLL`` is absent (AUDIT-01)
-        or below the minimum sane threshold.
+        or below the minimum sane threshold (AUDIT-12).
         """
         bankroll_cents = _read_bankroll_cents()
 
         min_edge_overrides = _read_min_edge_overrides()
         vol_anchor_asset = _read_vol_anchor_overrides()
 
-        return cls(
+        cfg = cls(
             bankroll_cents=bankroll_cents,
             group_notional_cap=float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0")),
             min_confidence=float(os.getenv("MERID_MIN_CONFIDENCE", "0.55")),
@@ -126,9 +160,85 @@ class KalshiCTEnvConfig:
             smoke_test=_env_bool("MERID_SMOKE_TEST", False),
             dry_run=_env_bool("MERID_CT_DRY_RUN", False),
             vol_anchor_asset=vol_anchor_asset,
+            # AUDIT-02..08: protect/size caps
+            max_candidates_per_asset=int(os.getenv("MERID_CT_MAX_CANDIDATES", "5")),
+            max_spread_cents=int(os.getenv("MERID_CT_MAX_SPREAD_CENTS", "12")),
+            min_volume=int(os.getenv("MERID_CT_MIN_VOLUME", "50")),
+            max_position_contracts=int(os.getenv("MERID_CT_MAX_POSITION_CONTRACTS", "0")),
+            exposure_multiplier=float(os.getenv("MERID_CT_EXPOSURE_MULTIPLIER", "1.0")),
+            per_asset_cooldown_seconds=float(os.getenv("MERID_CT_COOLDOWN_SECONDS", "0.0")),
+            # AUDIT-11: agent-grid stagger
+            agent_stagger_seconds=float(os.getenv("MERID_AGENT_STAGGER_SECONDS", "0.5")),
         )
+        cfg.validate()
+        return cfg
 
     # ── Helpers ─────────────────────────────────────────────────────────────
+
+    def validate(self) -> None:
+        """Validate config consistency.  Raises ``ValueError`` on invalid combos.
+
+        AUDIT-02..08: Catches problematic configuration such as:
+        - exposure_multiplier outside (0, 2] range
+        - per_asset_cooldown_seconds < 0
+        - bankroll_fraction + exposure_multiplier combination exceeding 100%
+        - max_candidates_per_asset or max_spread_cents unreasonably low
+        """
+        errors: List[str] = []
+        if self.exposure_multiplier <= 0 or self.exposure_multiplier > 2.0:
+            errors.append(
+                f"MERID_CT_EXPOSURE_MULTIPLIER={self.exposure_multiplier} must be in (0, 2.0]"
+            )
+        if self.per_asset_cooldown_seconds < 0:
+            errors.append(
+                f"MERID_CT_COOLDOWN_SECONDS={self.per_asset_cooldown_seconds} must be >= 0"
+            )
+        if self.bankroll_fraction <= 0 or self.bankroll_fraction > 1.0:
+            errors.append(
+                f"MERID_BANKROLL_FRACTION={self.bankroll_fraction} must be in (0, 1.0]"
+            )
+        if self.kelly_fraction <= 0 or self.kelly_fraction > 1.0:
+            errors.append(
+                f"MERID_KELLY_FRACTION={self.kelly_fraction} must be in (0, 1.0]"
+            )
+        effective_max_pct = self.bankroll_fraction * self.kelly_fraction * self.exposure_multiplier
+        if effective_max_pct > 0.10:
+            logger.warning(
+                "CT config: effective max per-trade exposure is %.1f%% of bankroll "
+                "(bankroll_fraction=%.4f × kelly_fraction=%.4f × exposure_multiplier=%.2f). "
+                "Consider reducing exposure_multiplier or bankroll_fraction.",
+                effective_max_pct * 100,
+                self.bankroll_fraction,
+                self.kelly_fraction,
+                self.exposure_multiplier,
+            )
+        if self.max_candidates_per_asset < 1:
+            errors.append(
+                f"MERID_CT_MAX_CANDIDATES={self.max_candidates_per_asset} must be >= 1"
+            )
+        if self.max_spread_cents < 1:
+            errors.append(
+                f"MERID_CT_MAX_SPREAD_CENTS={self.max_spread_cents} must be >= 1"
+            )
+        if self.agent_stagger_seconds < 0:
+            errors.append(
+                f"MERID_AGENT_STAGGER_SECONDS={self.agent_stagger_seconds} must be >= 0"
+            )
+        if errors:
+            raise ValueError(
+                "KalshiCTEnvConfig validation failed:\n  " + "\n  ".join(errors)
+            )
+        logger.debug(
+            "KalshiCTEnvConfig validated: bankroll=$%.2f max_candidates=%d "
+            "max_spread=%d¢ min_volume=%d cooldown=%.0fs exposure_mult=%.2f stagger=%.1fs",
+            self.bankroll_dollars(),
+            self.max_candidates_per_asset,
+            self.max_spread_cents,
+            self.min_volume,
+            self.per_asset_cooldown_seconds,
+            self.exposure_multiplier,
+            self.agent_stagger_seconds,
+        )
 
     def assert_live_safe(self) -> None:
         """Raise RuntimeError if live trading is requested while smoke-test is on.

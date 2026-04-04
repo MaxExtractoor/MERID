@@ -19,6 +19,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -138,6 +139,9 @@ class AgentGrid:
 
         # Start trading agents
         logger.info(f"Starting {len(self._agents)} Kalshi trading agents...")
+        # AUDIT-11: stagger delay is env-driven to avoid thundering herd on Kalshi API.
+        # Default 0.5s; override via MERID_AGENT_STAGGER_SECONDS.
+        _stagger = float(os.getenv("MERID_AGENT_STAGGER_SECONDS", "0.5"))
         for agent in self._agents:
             await agent.start()
             logger.info(
@@ -147,7 +151,8 @@ class AgentGrid:
                 f"archetype={agent.config.archetype}"
             )
             # Small stagger to avoid thundering herd on Kalshi API
-            await asyncio.sleep(0.5)
+            if _stagger > 0:
+                await asyncio.sleep(_stagger)
 
         # Start social broadcaster
         await self._broadcaster.start()
