@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from trading.trade_mode import TradeMode
+from config.trading_mode import TradeMode
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.venue_gate")

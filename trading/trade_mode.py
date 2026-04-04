@@ -12,33 +12,16 @@ from __future__ import annotations
 
 import os
 import threading
-from enum import Enum
 from typing import Optional
 
 from utils.logger import get_logger
 
+# TradeMode is the single canonical definition; importing from config avoids
+# the shadow problem that occurs when tests run from a directory named
+# ``trading/`` (which would intercept ``from trading.trade_mode import …``).
+from config.trading_mode import TradeMode  # noqa: F401  (re-export)
+
 logger = get_logger("trading.trade_mode")
-
-# ------------------------------------------------------------------ #
-# Canonical enum
-# ------------------------------------------------------------------ #
-
-class TradeMode(str, Enum):
-    """Process-wide trading mode.
-
-    * **MOCK** – pure in-memory simulation, no external calls at all.
-    * **PAPER** – real market data, simulated fills, no real money.
-    * **LIVE** – real orders on real-money endpoints.
-    """
-    MOCK = "mock"
-    PAPER = "paper"
-    LIVE = "live"
-
-
-# Backward-compat alias used across older tests/modules.
-# NOTE: SIM and MOCK are the same runtime enum value.
-if not hasattr(TradeMode, "SIM"):
-    TradeMode.SIM = TradeMode.MOCK  # type: ignore[attr-defined]
 
 
 # ------------------------------------------------------------------ #

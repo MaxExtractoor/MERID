@@ -212,6 +212,39 @@ class UserManager:
         
         user = self._users.get(session.user_id)
         return user
+
+    def is_session_near_expiry(
+        self, session_id: str, *, window_seconds: int = 3600
+    ) -> bool:
+        """Return True if the session is valid but expires within *window_seconds*."""
+        session = self._sessions.get(session_id)
+        if not session or not session.is_valid():
+            return False
+        return (session.expires_at - time.time()) < window_seconds
+
+    def refresh_session(
+        self, session_id: str, *, extend_seconds: int = 86400
+    ) -> Optional[Session]:
+        """Extend the expiry of an existing valid session.
+
+        Returns the updated :class:`Session` on success, or ``None`` if the
+        session is not found or has already expired.  A new ``session_id`` is
+        **not** issued; the existing token continues to work so the client
+        does not need to re-authenticate.
+
+        AUDIT-19: prevents silent 401 loops by allowing short-lived token
+        refresh near expiry rather than forcing a full re-login.
+        """
+        session = self._sessions.get(session_id)
+        if not session or not session.is_valid():
+            return None
+
+        session.expires_at = time.time() + extend_seconds
+        logger.info(
+            "Session refreshed for user %s: %s (extends +%ds)",
+            session.user_id, session_id, extend_seconds,
+        )
+        return session
     
     def get_user(self, user_id: str) -> Optional[User]:
         """Get user by ID."""
