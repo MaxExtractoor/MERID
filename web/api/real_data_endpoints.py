@@ -1050,77 +1050,32 @@ async def get_risk_alerts_real() -> List[Dict[str, Any]]:
 
 @router.get("/api/v1/logs")
 async def get_logs_real() -> List[Dict[str, Any]]:
-    """Get recent system logs from the consensus and trading engines."""
-    logs = []
-    now = datetime.now(timezone.utc)
-
+    """Get recent system logs from the structured logger ring buffer."""
     try:
-        # Get consensus activity
-        cc = _get_consensus()
-        metrics = cc.get_metrics()
-        if metrics.get("total_opinions", 0) > 0:
-            logs.append({
-                "id": "log-consensus-1",
-                "timestamp": now.isoformat() + "Z",
-                "level": "info",
-                "component": "consensus",
-                "message": f"Consensus engine active — {metrics['total_opinions']} total opinions, {metrics.get('consensus_cycles', 0)} cycles",
+        from utils.logger import get_log_ring_buffer
+
+        entries = get_log_ring_buffer()
+        if not entries:
+            return []
+
+        result = []
+        for i, entry in enumerate(reversed(entries[-100:])):
+            result.append({
+                "id": entry.get("id", f"log-{i}"),
+                "timestamp": entry.get(
+                    "timestamp",
+                    entry.get("ts_iso", datetime.now(timezone.utc).isoformat() + "Z"),
+                ),
+                "level": str(entry.get("level", "info")).lower(),
+                "component": entry.get("component", entry.get("logger", "system")),
+                "message": entry.get("message", entry.get("msg", "")),
+                "details": entry.get("details", entry.get("extra", {})),
+                "requestId": entry.get("correlation_id"),
             })
-
-        # Get trading engine activity
-        engine = _get_paper_engine()
-        total_trades = sum(p.total_trades for p in engine.portfolios.values())
-        total_positions = sum(len(p.positions) for p in engine.portfolios.values())
-
-        if total_trades > 0:
-            logs.append({
-                "id": "log-trading-1",
-                "timestamp": now.isoformat() + "Z",
-                "level": "info",
-                "component": "paper-trading",
-                "message": f"Paper engine: {total_trades} total trades, {total_positions} open positions",
-            })
-
-        # Get price feed status
-        try:
-            feed = get_live_price_feed()
-            latest = feed.get_latest_prices()
-            if latest:
-                logs.append({
-                    "id": "log-prices-1",
-                    "timestamp": now.isoformat() + "Z",
-                    "level": "info",
-                    "component": "price-feed",
-                    "message": f"Live price feed active — {len(latest)} symbols tracked",
-                })
-        except Exception:
-            logs.append({
-                "id": "log-prices-err",
-                "timestamp": now.isoformat() + "Z",
-                "level": "warning",
-                "component": "price-feed",
-                "message": "Live price feed unavailable",
-            })
-
-        # System startup log
-        logs.append({
-            "id": "log-system-1",
-            "timestamp": (now - timedelta(minutes=5)).isoformat() + "Z",
-            "level": "info",
-            "component": "system",
-            "message": f"MERID system running — {len(engine.portfolios)} portfolios initialized",
-        })
-
-    except Exception as e:
-        logs.append({
-            "id": "log-error-1",
-            "timestamp": now.isoformat() + "Z",
-            "level": "error",
-            "component": "system",
-            "message": f"Error collecting logs: {str(e)}",
-        })
-
-    return logs
+        return result
+    except Exception as exc:
+        logger.warning("real logs endpoint failed, returning empty list: %s", exc)
+        return []
 
 
 # ════════════════════════════════════════════════
@@ -1639,12 +1594,23 @@ async def get_codebase_drift() -> Dict[str, Any]:
 @router.get("/api/v1/user/profile")
 async def get_user_profile() -> Dict[str, Any]:
     """User profile for Settings view."""
+    email = "operator@merid.local"
+    try:
+        from web.api.missing_endpoints import _read_user_settings
+
+        settings_data = _read_user_settings()
+        email = settings_data.get("preferences", {}).get("email", email)
+    except Exception as exc:
+        logger.debug("user profile settings lookup skipped: %s", exc)
+
     return {
         "id": "operator-1",
         "username": "operator",
-        "email": "operator@merid.io",
+        "email": email,
         "role": "admin",
-        "created_at": datetime.now(timezone.utc).isoformat() + "Z",
+        "accountType": "operator",
+        "createdAt": "2024-01-01T00:00:00Z",
+        "created_at": "2024-01-01T00:00:00Z",
         "settings": {
             "theme": "dark",
             "notifications": True,
@@ -1660,16 +1626,53 @@ async def get_user_profile() -> Dict[str, Any]:
 
 @router.get("/api/v1/logs/stats")
 async def get_log_stats() -> Dict[str, Any]:
-    """Log statistics — matches LogStats in Logs.tsx."""
-    return {
-        "totalLogs": 0,
-        "errorCount": 0,
-        "warnCount": 0,
-        "infoCount": 0,
-        "debugCount": 0,
-        "last24hCount": 0,
-        "componentCounts": {},
-    }
+    """Log statistics derived from the structured logger ring buffer."""
+    try:
+        from utils.logger import get_log_ring_buffer
+
+        entries = get_log_ring_buffer()
+        if not entries:
+            return {
+                "totalLogs": 0,
+                "errorCount": 0,
+                "warnCount": 0,
+                "infoCount": 0,
+                "debugCount": 0,
+                "last24hCount": 0,
+                "componentCounts": {},
+            }
+
+        total = len(entries)
+        error_count = sum(1 for e in entries if str(e.get("level", "")).lower() in ("error", "critical"))
+        warn_count = sum(1 for e in entries if str(e.get("level", "")).lower() in ("warn", "warning"))
+        info_count = sum(1 for e in entries if str(e.get("level", "")).lower() == "info")
+        debug_count = sum(1 for e in entries if str(e.get("level", "")).lower() == "debug")
+        cutoff = time.time() - 86400
+        last24h = sum(1 for e in entries if float(e.get("ts", 0) or 0) >= cutoff)
+        component_counts: Dict[str, int] = {}
+        for entry in entries:
+            component = entry.get("component", entry.get("logger", "system"))
+            component_counts[component] = component_counts.get(component, 0) + 1
+        return {
+            "totalLogs": total,
+            "errorCount": error_count,
+            "warnCount": warn_count,
+            "infoCount": info_count,
+            "debugCount": debug_count,
+            "last24hCount": last24h,
+            "componentCounts": component_counts,
+        }
+    except Exception as exc:
+        logger.warning("real log stats endpoint failed, returning zeroes: %s", exc)
+        return {
+            "totalLogs": 0,
+            "errorCount": 0,
+            "warnCount": 0,
+            "infoCount": 0,
+            "debugCount": 0,
+            "last24hCount": 0,
+            "componentCounts": {},
+        }
 
 
 # ════════════════════════════════════════════════

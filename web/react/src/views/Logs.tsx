@@ -43,7 +43,7 @@ export default function Logs() {
   const { data: logs, loading: logsLoading, error: logsError, refetch } = useApiData<LogEntry[]>(
     API_ENDPOINTS.LOGS,
     { 
-      pollingInterval: autoRefresh ? DEFAULTS.POLLING_INTERVALS.LOGS : undefined,
+      pollingInterval: autoRefresh ? refreshInterval : undefined,
       transform: (raw) => {
         const payload = Array.isArray(raw) ? (raw as LogEntry[]) : [];
         // Sort by timestamp descending
@@ -228,7 +228,7 @@ export default function Logs() {
     setClearStatus(null);
     try {
       const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.LOGS_CLEAR}`, {
-        method: "DELETE",
+        method: "POST",
         headers: {
           "Authorization": `Bearer ${localStorage.getItem(AUTH_TOKEN_KEY)}`,
         },
@@ -242,7 +242,7 @@ export default function Logs() {
       setTimeout(() => setClearStatus(null), DEFAULTS.POLLING_INTERVALS.STANDARD);
       refetch();
     } catch (error) {
-      setClearStatus({ type: 'error', message: 'Failed to clear logs. Please try again.' });
+      setClearStatus({ type: 'error', message: error instanceof Error ? error.message : 'Failed to clear logs. Please try again.' });
     }
   };
 
@@ -279,7 +279,7 @@ export default function Logs() {
           
           <div className="flex items-center gap-2">
             <label htmlFor="log-refresh-interval" className="text-sm text-slate-400">Refresh:</label>
-            <select aria-label="Refresh:"
+            <select aria-label="Refresh interval"
               id="log-refresh-interval"
               name="refreshInterval"
               title="Set refresh interval"

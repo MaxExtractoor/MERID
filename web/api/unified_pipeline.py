@@ -102,9 +102,23 @@ async def pipeline_venues():
     """All venue configs and adapter status."""
     mm = get_mode_manager()
     ar = get_adapter_registry()
+    mode_summary = mm.summary()
+    adapter_summary = ar.summary()
+    adapters_by_venue = {entry["venue"]: entry for entry in adapter_summary}
+    venues = []
+    for venue in mode_summary.get("venues", []):
+        adapter = adapters_by_venue.get(venue["venue"], {})
+        venues.append({
+            **venue,
+            "mode": str(venue["mode"]).upper(),
+            "supports_trading": adapter.get("supports_trading", False),
+            "adapter_registered": venue["venue"] in adapters_by_venue,
+            "lastModeChange": None,
+        })
     return {
-        "mode_manager": mm.summary(),
-        "adapters": ar.summary(),
+        "mode_manager": mode_summary,
+        "adapters": adapter_summary,
+        "venues": venues,
     }
 
 

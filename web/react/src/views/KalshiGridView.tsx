@@ -12,6 +12,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { TRADABLE_TIMEFRAMES, TRADABLE_TIMEFRAME_LABELS, sortTimeframes } from '../config/timeframes';
 import PaperLadderCard from '../components/PaperLadderCard';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
@@ -155,14 +156,8 @@ interface FillEntry {
    ═══════════════════════════════════════════════════════ */
 
 const ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
-const TIMEFRAMES = ['15m', '1h', 'daily', 'pre-market'];
-
-const TF_LABELS: Record<string, string> = {
-  '15m': '15 Min',
-  '1h': 'Hourly',
-  'daily': 'Daily',
-  'pre-market': 'Pre-Mkt',
-};
+const TIMEFRAMES = [...TRADABLE_TIMEFRAMES];
+const TF_LABELS = TRADABLE_TIMEFRAME_LABELS;
 
 /* ═══════════════════════════════════════════════════════
    Component
@@ -382,7 +377,7 @@ export default function KalshiGridView() {
   const isLive = venueMode?.is_live ?? false;
 
   const activeAssets = matrixData?.assets || ASSETS;
-  const activeTimeframes = matrixData?.timeframes || TIMEFRAMES;
+  const activeTimeframes = sortTimeframes(matrixData?.timeframes || TIMEFRAMES);
 
   return (
     <div className="space-y-6">

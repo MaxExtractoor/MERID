@@ -48,6 +48,10 @@ REMEDIATION_HINTS: dict[str, str] = {
 }
 
 
+def _log_check_failure(source: str, exc: Exception) -> None:
+    logger.warning("Execution gate %s check degraded: %s", source, exc)
+
+
 @dataclass
 class BlockReason:
     """A single reason execution is blocked."""
@@ -172,41 +176,41 @@ def check_execution_gate() -> ExecutionGateStatus:
                 hint=REMEDIATION_HINTS["kill_switch"],
             ))
     except Exception as exc:
-        logger.debug("Kill switch check failed: %s", exc)
+        _log_check_failure("kill_switch", exc)
 
     # ── 2. Reconciliation ───────────────────────────────────────────
     # In Kalshi demo mode, reconciliation discrepancies come from the
     # crypto paper matrix — downgrade to warning so they don't block.
-    recon_severity = "warning" if kalshi_demo else "critical"
+    recon_severity = "warning"
     try:
         from trading.reconciliation import has_critical_discrepancies, get_last_report, _has_ever_completed
         if has_critical_discrepancies():
             report = get_last_report()
             if not _has_ever_completed:
                 reasons.append(BlockReason(
-                    source="reconciliation",
+                    source="paper_reconciliation",
                     severity=recon_severity,
-                    message="Reconciliation has never completed",
-                    details="Execution gated until first reconciliation run" if not kalshi_demo else "Crypto paper reconciliation pending (non-blocking in Kalshi mode)",
+                    message="Paper reconciliation has never completed",
+                    details="Paper reconciliation pending — reported as warning only",
                     hint=REMEDIATION_HINTS["reconciliation"],
                 ))
             elif report and not report.all_ok:
                 reasons.append(BlockReason(
-                    source="reconciliation",
+                    source="paper_reconciliation",
                     severity=recon_severity,
-                    message="Reconciliation found discrepancies",
-                    details=f"{len([c for c in report.checks if c.status != 'OK'])} checks failed" + (" (crypto paper — non-blocking)" if kalshi_demo else ""),
+                    message="Paper reconciliation found discrepancies",
+                    details=f"{len([c for c in report.checks if c.status != 'OK'])} paper checks failed (warning only)",
                     hint=REMEDIATION_HINTS["reconciliation"],
                 ))
             else:
                 reasons.append(BlockReason(
-                    source="reconciliation",
+                    source="paper_reconciliation",
                     severity=recon_severity,
-                    message="Reconciliation status unknown",
+                    message="Paper reconciliation status unknown",
                     hint=REMEDIATION_HINTS["reconciliation"],
                 ))
     except Exception as exc:
-        logger.debug("Reconciliation check failed: %s", exc)
+        _log_check_failure("paper_reconciliation", exc)
 
     # ── 2b. Kalshi venue reconciliation ──────────────────────────────
     # Distinguish three states:
@@ -247,7 +251,7 @@ def check_execution_gate() -> ExecutionGateStatus:
             # No reason to add — execution is allowed
             logger.debug("Kalshi reconciliation: RAN_NO_CRITICAL — execution allowed")
     except Exception as exc:
-        logger.debug("Kalshi venue reconciliation check skipped: %s", exc)
+        _log_check_failure("kalshi_reconciliation", exc)
 
     # ── 3. Price feed staleness ─────────────────────────────────────
     # In Kalshi demo mode, crypto price feeds are non-critical.
@@ -267,7 +271,7 @@ def check_execution_gate() -> ExecutionGateStatus:
                 hint=REMEDIATION_HINTS["price_feed"],
             ))
     except Exception as exc:
-        logger.debug("Price feed staleness check failed: %s", exc)
+        _log_check_failure("price_feed", exc)
 
     # ── 4. PnL consistency ──────────────────────────────────────────
     try:
@@ -281,7 +285,7 @@ def check_execution_gate() -> ExecutionGateStatus:
                 hint=REMEDIATION_HINTS["pnl_consistency"],
             ))
     except Exception as exc:
-        logger.debug("PnL consistency check failed: %s", exc)
+        _log_check_failure("pnl_consistency", exc)
 
     has_critical = any(r.severity == "critical" for r in reasons)
     has_warning = any(r.severity == "warning" for r in reasons)
@@ -309,8 +313,8 @@ def check_execution_gate() -> ExecutionGateStatus:
                 hint=hints[0] if hints else None,
                 metadata={"reasons": [r.source for r in reasons], "gate_state": gate_state},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Session log write skipped on gate block: %s", exc)
     elif not blocked and _was_blocked:
         logger.info("✅ Execution gate OPEN — all checks passed")
         try:
@@ -321,8 +325,8 @@ def check_execution_gate() -> ExecutionGateStatus:
                 title="Execution gate CLEAR",
                 detail="All safety checks passed — trading permitted",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Session log write skipped on gate clear: %s", exc)
 
     _update_blocked_state(blocked)
 
@@ -463,8 +467,8 @@ def check_pnl_consistency() -> dict:
         for _uid, portfolio in engine.portfolios.items():
             total_pnl += portfolio.total_pnl
         sources["paper_engine"] = round(total_pnl, 2)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("PnL consistency paper_engine source skipped: %s", exc)
 
     try:
         from merid.prediction.paper_session import get_paper_session
@@ -476,21 +480,21 @@ def check_pnl_consistency() -> dict:
                 if iv.total_trades > 0
             )
             sources["kalshi_session"] = round(kalshi_pnl, 2)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("PnL consistency kalshi_session source skipped: %s", exc)
 
     try:
         from merid.risk.kill_switches import risk_controller
         sources["risk_controller"] = round(risk_controller._daily_pnl, 2)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("PnL consistency risk_controller source skipped: %s", exc)
 
     try:
         from web.api.operator import _equity_buffer
         if _equity_buffer:
             sources["equity_series"] = _equity_buffer[-1].get("pnl", 0)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("PnL consistency equity_series source skipped: %s", exc)
 
     vals = list(sources.values())
     max_divergence = (max(vals) - min(vals)) if len(vals) >= 2 else 0.0

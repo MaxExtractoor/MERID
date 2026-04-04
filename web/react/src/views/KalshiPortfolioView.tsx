@@ -569,7 +569,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                   {positions.length === 0 ? (
                     <tr><td colSpan={6} className="text-center py-8 text-gray-500">No positions</td></tr>
                   ) : (
-                    positions.map((p, i) => (
+                    positions.map((p) => (
                       <tr key={p.ticker} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                         <td className="p-3 font-mono text-white">{p.ticker}</td>
                         <td className="p-3">
@@ -932,29 +932,30 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                 }}
               />
               {/* Order Group Analytics */}
-              <OrderGroupAnalytics
-                histories={(orderGroupsResult.data?.groups || []).map(g => ({
-                  order_group_id: g.order_group_id,
-                  name: g.name,
-                  status: g.status,
-                  history: [
-                    {
-                      timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-                      utilization_pct: Math.max(0, g.utilization_pct - 10),
-                      contracts_used: Math.max(0, g.used_contracts - 5),
-                      contracts_limit: g.contracts_limit,
-                    },
-                    {
-                      timestamp: new Date().toISOString(),
-                      utilization_pct: g.utilization_pct,
-                      contracts_used: g.used_contracts,
-                      contracts_limit: g.contracts_limit,
-                    },
-                  ],
-                  trigger_events: g.status === 'triggered' ? [{ timestamp: new Date().toISOString(), matched_contracts: g.used_contracts }] : [],
-                }))}
-                hours={24}
-              />
+              {((orderGroupsResult.data?.groups || []).some(g => Array.isArray((g as { history?: unknown[] }).history))) ? (
+                <OrderGroupAnalytics
+                  histories={((orderGroupsResult.data?.groups || []) as Array<{
+                    order_group_id: string;
+                    name: string;
+                    status: 'active' | 'triggered' | 'canceled' | 'pending';
+                    history?: Array<{ timestamp: string; utilization_pct: number; contracts_used: number; contracts_limit: number }>;
+                    trigger_events?: Array<{ timestamp: string; matched_contracts: number }>;
+                  }>)
+                    .filter(g => Array.isArray(g.history))
+                    .map(g => ({
+                      order_group_id: g.order_group_id,
+                      name: g.name,
+                      status: g.status,
+                      history: g.history || [],
+                      trigger_events: g.trigger_events || [],
+                    }))}
+                  hours={24}
+                />
+              ) : (
+                <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-500">
+                  Order group history is unavailable until the backend exposes real utilization history.
+                </div>
+              )}
             </div>
           )}
         </>
