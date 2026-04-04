@@ -245,15 +245,20 @@ class TestSpotBandFilter:
         assert passed is False
         assert "distance" in reason
 
-    def test_missing_spot_skips_distance_check(self):
-        """If spot_price is absent the distance check is not applied."""
+    def test_missing_spot_rejected_when_distance_check_enabled(self):
+        """Missing spot_price causes rejection when distance check is enabled (AUDIT FIX).
+
+        Previously this test expected the market to pass (silent failure mode).
+        Now we explicitly reject markets with missing spot when spot_band > 0.
+        """
         cfg = MarketFilterConfig(spot_band_pct=12.5)
         filt = MarketFilter(cfg)
         m = _market()
         m.strike_price = 50000.0
         m.spot_price = None  # no spot available
         passed, reason = filt.evaluate(m)
-        assert passed is True
+        assert passed is False
+        assert "spot_price missing" in reason
 
     def test_distance_filter_disabled_when_zero(self):
         """spot_band_pct=0 disables the distance check."""
@@ -542,3 +547,78 @@ class TestVolumeBandFilter:
         filt = MarketFilter()
         result = filt.filter_markets([_market()])
         assert result.volume_band_block_rate == 0.0
+
+
+# ── Missing spot price handling (AUDIT FIX) ──────────────────────────
+
+class TestMissingSpotPriceHandling:
+    """Tests for the audit fix: missing spot price should be rejected when distance check enabled."""
+
+    def test_missing_spot_rejected_when_distance_check_enabled(self):
+        """Missing spot_price causes rejection when spot_band > 0."""
+        cfg = MarketFilterConfig(spot_band_pct=12.5)
+        filt = MarketFilter(cfg)
+        m = _market()
+        m.strike_price = 50000.0
+        m.spot_price = None  # no spot available
+        passed, reason = filt.evaluate(m)
+        assert passed is False
+        assert "spot_price missing" in reason
+        assert "distance check enabled" in reason
+
+    def test_missing_spot_allowed_when_distance_check_disabled(self):
+        """Missing spot_price is OK when spot_band_pct=0 (distance check disabled)."""
+        cfg = MarketFilterConfig(spot_band_pct=0.0)
+        filt = MarketFilter(cfg)
+        m = _market()
+        m.strike_price = 50000.0
+        m.spot_price = None
+        passed, reason = filt.evaluate(m)
+        assert passed is True
+
+    def test_rejected_missing_spot_counter_incremented(self):
+        """FilterResult.rejected_missing_spot is incremented correctly."""
+        cfg = MarketFilterConfig(spot_band_pct=12.5)
+        filt = MarketFilter(cfg)
+        markets = [
+            _market(ticker="m1"),  # no spot_price set
+            _market(ticker="m2"),  # no spot_price set
+        ]
+        # Set strike_price but leave spot_price as None
+        for m in markets:
+            m.strike_price = 50000.0
+        result = filt.filter_markets(markets)
+        assert result.rejected_missing_spot == 2
+        assert result.passed == 0
+
+    def test_missing_spot_counter_in_to_dict(self):
+        """to_dict() includes rejected_missing_spot."""
+        cfg = MarketFilterConfig(spot_band_pct=12.5)
+        filt = MarketFilter(cfg)
+        m = _market()
+        m.strike_price = 50000.0
+        result = filt.filter_markets([m])
+        d = result.to_dict()
+        assert "rejected_missing_spot" in d
+        assert d["rejected_missing_spot"] == 1
+
+    def test_mixed_batch_spot_present_and_missing(self):
+        """Batch with some markets having spot and others missing."""
+        cfg = MarketFilterConfig(spot_band_pct=12.5)
+        filt = MarketFilter(cfg)
+        markets = []
+        # Market with valid spot
+        m1 = _market(ticker="with_spot")
+        m1.strike_price = 100000.0
+        m1.spot_price = 100000.0  # at-the-money
+        markets.append(m1)
+        # Market with missing spot
+        m2 = _market(ticker="no_spot")
+        m2.strike_price = 100000.0
+        m2.spot_price = None
+        markets.append(m2)
+
+        result = filt.filter_markets(markets)
+        assert result.passed == 1
+        assert result.rejected_missing_spot == 1
+        assert result.candidates[0].ticker == "with_spot"
