@@ -656,22 +656,32 @@ class KalshiContinuousTrader:
 
         Checks (in order):
         1. Guardian object (if set) — must approve orders.
-        2. Base URL — demo/paper endpoints are always allowed.
-        3. Trade mode — paper/mock mode never blocks.
+        2. Base URL — demo/paper endpoints are always allowed without PM-live.
+        3. Trade mode — paper/mock mode never blocks execution.
+        4. Live mode — explicit live environment is allowed (that is the point).
+
+        Note: This method is intentionally permissive (fail-open) for all
+        modes *except* when the guardian actively blocks.  Orders that are
+        intended to execute should be allowed unless an explicit blocker fires.
+        Venue adapters and the VenueGate perform the actual live-vs-paper
+        routing at execution time.
         """
         if self._guardian is not None and hasattr(self._guardian, "allows_orders"):
             if not self._guardian.allows_orders():
                 logger.warning("CT: live API orders blocked by guardian")
                 return False
 
+        # Demo / paper endpoints: always allow without requiring PM-live mode.
         if self._base_url and "demo" in self._base_url.lower():
             return True
 
+        # Paper / mock mode: no live API blocking.
         trade_mode = os.getenv("MERID_TRADE_MODE", "paper").lower().strip()
         pm_mode = os.getenv("MERID_PM_TRADING_MODE", "").lower().strip()
         if trade_mode != "live" and pm_mode != "live":
             return True
 
+        # Explicit live mode — orders are intended to reach the live API.
         return True
 
     # ── Portfolio exposure caps ───────────────────────────────────────────

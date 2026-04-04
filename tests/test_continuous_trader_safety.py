@@ -67,10 +67,10 @@ class TestLivePmGate:
         assert t._guardian is None
 
     def test_base_url_defaults_to_demo(self, monkeypatch):
-        """When KALSHI_API_BASE_URL env var is unset, default to the demo endpoint."""
+        """When KALSHI_API_BASE_URL env var is unset, default to the Kalshi demo endpoint."""
         monkeypatch.delenv("KALSHI_API_BASE_URL", raising=False)
         t = _make_ct()
-        assert "demo" in t._base_url.lower() or "kalshi" in t._base_url.lower()
+        assert t._base_url == "https://demo-api.kalshi.co"
 
 
 # ── TestPerAssetConfig ────────────────────────────────────────────────────────
