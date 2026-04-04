@@ -360,15 +360,15 @@ export function OrderGroupPanel({
 
       {/* Summary Stats */}
       <div style={styles.summaryGrid}>
-        <div style={styles.summaryCard}>
+        <div style={styles.summaryCard} data-testid="order-group-summary-total">
           <span style={styles.summaryValue}>{summary.total_groups}</span>
           <span style={styles.summaryLabel}>Total Groups</span>
         </div>
-        <div style={styles.summaryCard}>
+        <div style={styles.summaryCard} data-testid="order-group-summary-active">
           <span style={{ ...styles.summaryValue, color: '#22c55e' }}>{summary.active}</span>
           <span style={styles.summaryLabel}>Active</span>
         </div>
-        <div style={styles.summaryCard}>
+        <div style={styles.summaryCard} data-testid="order-group-summary-triggered">
           <span style={{ ...styles.summaryValue, color: '#ef4444' }}>{summary.triggered}</span>
           <span style={styles.summaryLabel}>Triggered</span>
         </div>

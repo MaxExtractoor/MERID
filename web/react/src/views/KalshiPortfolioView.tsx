@@ -592,23 +592,23 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                   {positions.length === 0 ? (
                     <tr><td colSpan={6} className="text-center py-8 text-gray-500">No positions</td></tr>
                   ) : (
-                    positions.map((p) => (
-                      <tr key={p.ticker} className="border-b border-slate-800/50 hover:bg-slate-800/30">
-                        <td className="p-3 font-mono text-white">{p.ticker}</td>
+                    positions.map((position) => (
+                      <tr key={position.ticker} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                        <td className="p-3 font-mono text-white">{position.ticker}</td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded text-xs ${
-                            p.outcome === 'yes' ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'
+                            position.outcome === 'yes' ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'
                           }`}>
-                            {p.outcome.toUpperCase()}
+                            {position.outcome.toUpperCase()}
                           </span>
                         </td>
-                        <td className="p-3 text-right text-white">{p.size}</td>
-                        <td className="p-3 text-right text-gray-300">{((p.avg_price ?? 0) * 100).toFixed(1)}¢</td>
-                        <td className={`p-3 text-right font-medium ${p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          ${(p.unrealized_pnl ?? 0).toFixed(2)}
+                        <td className="p-3 text-right text-white">{position.size}</td>
+                        <td className="p-3 text-right text-gray-300">{((position.avg_price ?? 0) * 100).toFixed(1)}¢</td>
+                        <td className={`p-3 text-right font-medium ${position.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          ${(position.unrealized_pnl ?? 0).toFixed(2)}
                         </td>
-                        <td className={`p-3 text-right ${p.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          ${(p.realized_pnl ?? 0).toFixed(2)}
+                        <td className={`p-3 text-right ${position.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          ${(position.realized_pnl ?? 0).toFixed(2)}
                         </td>
                       </tr>
                     ))

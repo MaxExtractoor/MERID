@@ -97,9 +97,9 @@ describe('OrderGroupPanel', () => {
 
   it('displays summary stats correctly', () => {
     render(<OrderGroupPanel />);
-    expect(screen.getByText('Total Groups').previousSibling).toHaveTextContent('2');
-    expect(screen.getAllByText('Active').find((element) => element.previousSibling?.textContent === '1')).toBeDefined();
-    expect(screen.getAllByText('Triggered').find((element) => element.previousSibling?.textContent === '1')).toBeDefined();
+    expect(screen.getByTestId('order-group-summary-total')).toHaveTextContent('2');
+    expect(screen.getByTestId('order-group-summary-active')).toHaveTextContent('1');
+    expect(screen.getByTestId('order-group-summary-triggered')).toHaveTextContent('1');
   });
 
   it('shows alerts when present', () => {
