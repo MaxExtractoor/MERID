@@ -225,13 +225,25 @@ class KalshiSettlementPoller:
         """Delegate to the Kalshi client.  Supports duck-typed clients for tests."""
         if hasattr(self._client, "get_settlements"):
             return await self._client.get_settlements(cursor=cursor) or {}
-        # Fallback: plain REST via list_markets_result pattern
+        # Fallback: plain REST via _request (older client shapes)
         if hasattr(self._client, "_request"):
             params: Dict[str, Any] = {}
             if cursor:
                 params["cursor"] = cursor
             resp = await self._client._request("GET", "/portfolio/settlements", params=params)
             return resp if isinstance(resp, dict) else {}
+        # Fallback: resilient REST (KalshiVenueClient uses _request_with_resilience)
+        if hasattr(self._client, "_request_with_resilience"):
+            params: Dict[str, Any] = {}  # type: ignore[no-redef]
+            if cursor:
+                params["cursor"] = cursor
+            result = await self._client._request_with_resilience(
+                "GET", "/portfolio/settlements", params=params,
+                operation_name="settlement_poller_fetch",
+            )
+            if hasattr(result, "success") and result.success and isinstance(result.data, dict):
+                return result.data
+            return {}
         return {}
 
     # ── Status ────────────────────────────────────────────────────────────
