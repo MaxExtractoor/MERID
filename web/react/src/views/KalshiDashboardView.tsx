@@ -719,39 +719,55 @@ const KalshiDashboardView: React.FC = () => {
 
       {/* Asset + Timeframe + Sort chips */}
       <div className="flex flex-wrap gap-4">
-        {/* Assets */}
-        {Object.keys(catalog?.assets ?? {}).length > 0 && (
-          <div className="space-y-2 flex-1 min-w-[200px]">
-            <span className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">Asset</span>
-            <div className="flex flex-wrap gap-1.5">
-              <button
-                type="button"
-                onClick={() => setFilterAsset('')}
-                className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-all ${
-                  !filterAsset
-                    ? 'bg-blue-500/20 text-blue-300 ring-1 ring-blue-500'
-                    : 'text-gray-400 bg-slate-800 hover:text-white hover:bg-slate-700'
-                }`}
-              >
-                All Assets
-              </button>
-              {Object.entries(catalog?.assets ?? {}).map(([asset, count]) => (
+        {/* Assets — AUDIT-05: always show canonical BTC/ETH/SOL/XRP/DOGE chips,
+             merging counts from catalog when available. */}
+        {(() => {
+          const CANONICAL_ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
+          const catalogAssets: Record<string, number> = catalog?.assets ?? {};
+          // Build display list: canonical assets first, then any extra from catalog
+          const extraAssets = Object.keys(catalogAssets).filter(
+            a => !CANONICAL_ASSETS.includes(a)
+          );
+          const displayAssets = [...CANONICAL_ASSETS, ...extraAssets];
+          return (
+            <div className="space-y-2 flex-1 min-w-[200px]">
+              <span className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">Asset</span>
+              <div className="flex flex-wrap gap-1.5">
                 <button
                   type="button"
-                  key={asset}
-                  onClick={() => setFilterAsset(filterAsset === asset ? '' : asset)}
+                  onClick={() => setFilterAsset('')}
                   className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-all ${
-                    filterAsset === asset
+                    !filterAsset
                       ? 'bg-blue-500/20 text-blue-300 ring-1 ring-blue-500'
                       : 'text-gray-400 bg-slate-800 hover:text-white hover:bg-slate-700'
                   }`}
                 >
-                  {asset} <span className="opacity-60">({count})</span>
+                  All Assets
                 </button>
-              ))}
+                {displayAssets.map(asset => {
+                  const count = catalogAssets[asset];
+                  return (
+                    <button
+                      type="button"
+                      key={asset}
+                      onClick={() => setFilterAsset(filterAsset === asset ? '' : asset)}
+                      className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-all ${
+                        filterAsset === asset
+                          ? 'bg-blue-500/20 text-blue-300 ring-1 ring-blue-500'
+                          : 'text-gray-400 bg-slate-800 hover:text-white hover:bg-slate-700'
+                      }`}
+                    >
+                      {asset}
+                      {count !== undefined && (
+                        <span className="opacity-60 ml-1">({count})</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Timeframes */}
         {Object.keys(catalog?.timeframes ?? {}).length > 0 && (
