@@ -30,6 +30,12 @@ interface KalshiPortfolioProps {
   initialTab?: Tab;
 }
 
+function hasOrderGroupHistory(
+  group: KalshiOrderGroup
+): group is KalshiOrderGroup & Required<Pick<KalshiOrderGroup, 'history'>> {
+  return Array.isArray(group.history);
+}
+
 const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => {
   const [tab, setTab] = useState<Tab>(initialTab ?? 'positions');
   const [assetFilter, setAssetFilter] = useState<string>('');
@@ -101,7 +107,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
   const orderGroupHistories = useMemo(
     () =>
       orderGroups
-        .filter((group): group is KalshiOrderGroup & Required<Pick<KalshiOrderGroup, 'history'>> => Array.isArray(group.history))
+        .filter(hasOrderGroupHistory)
         .map(group => ({
           order_group_id: group.order_group_id,
           name: group.name,

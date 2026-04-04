@@ -29,4 +29,3 @@ export function sortTimeframes<T extends string>(timeframes: T[]): T[] {
     return left.localeCompare(right);
   });
 }
-
