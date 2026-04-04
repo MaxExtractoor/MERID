@@ -225,8 +225,8 @@ const PromotionStatusView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
-                {promotions.slice(0, 20).map((p, i) => (
-                  <tr key={`${p.agent}-${p.timestamp}-${i}`} className="hover:bg-slate-800/50 transition-colors">
+                {promotions.slice(0, 20).map((p) => (
+                  <tr key={`${p.agent}-${p.timestamp}`} className="hover:bg-slate-800/50 transition-colors">
                     <td className="py-2 pr-4 text-white font-mono text-xs">{p.agent ?? '—'}</td>
                     <td className="py-2 pr-4">
                       <span className="flex items-center gap-1 text-gray-300">
