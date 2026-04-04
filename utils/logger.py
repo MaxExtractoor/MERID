@@ -5,10 +5,11 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from merid_bootstrap import PROJECT_ROOT
 
@@ -36,6 +37,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "full.log"
 
 _LOGGER_CACHE: Dict[str, logging.Logger] = {}
+_LOG_RING_BUFFER: Deque[Dict[str, Any]] = deque(maxlen=2000)
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
@@ -105,6 +107,31 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, default=str)
 
 
+class RingBufferHandler(logging.Handler):
+    """In-memory structured log buffer for UI/debug endpoints."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            entry: Dict[str, Any] = {
+                "id": f"log-{int(time.time() * 1000)}",
+                "ts": time.time(),
+                "ts_iso": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                "level": record.levelname.lower(),
+                "logger": record.name,
+                "component": getattr(record, "component", record.name),
+                "message": record.getMessage(),
+            }
+            cid = correlation_id_var.get()
+            if cid:
+                entry["correlation_id"] = cid
+            if record.exc_info and record.exc_info[1]:
+                entry["exception"] = logging.Formatter().formatException(record.exc_info)
+            _LOG_RING_BUFFER.append(entry)
+        except Exception:
+            return
+
+
 # ── Human-readable console formatter (unchanged) ─────────────────────
 
 _TEXT_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -141,6 +168,13 @@ def get_logger(name: str) -> logging.Logger:
         stream_handler.setFormatter(text_formatter)
         logger.addHandler(stream_handler)
 
+        ring_handler = RingBufferHandler()
+        logger.addHandler(ring_handler)
+
     _LOGGER_CACHE[name] = logger
     return logger
 
+
+def get_log_ring_buffer() -> List[Dict[str, Any]]:
+    """Return a snapshot of the in-memory structured log ring buffer."""
+    return list(_LOG_RING_BUFFER)

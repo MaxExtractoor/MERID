@@ -51,8 +51,10 @@ interface NotificationSettings {
 interface UserProfile {
   id: string;
   email: string;
-  accountType: string;
-  createdAt: string;
+  accountType?: string;
+  role?: string;
+  createdAt?: string;
+  created_at?: string;
 }
 
 export default function Settings() {
@@ -124,6 +126,13 @@ export default function Settings() {
       </div>
     );
   }
+
+  const memberSince = (() => {
+    const raw = userData?.createdAt ?? userData?.created_at;
+    if (!raw) return 'Unknown';
+    const parsed = new Date(raw);
+    return isNaN(parsed.getTime()) ? 'Unknown' : parsed.toLocaleDateString();
+  })();
 
   const handleSave = async () => {
     setSaving(true);
@@ -248,14 +257,14 @@ export default function Settings() {
             />
             <MetricCard
               label="Account Type"
-              value={userData.accountType}
-              status="GOOD"
-            />
-            <MetricCard
-              label="Member Since"
-              value={new Date(userData.createdAt).toLocaleDateString()}
-              status="GOOD"
-            />
+               value={userData.accountType ?? userData.role ?? "operator"}
+               status="GOOD"
+             />
+             <MetricCard
+               label="Member Since"
+               value={memberSince}
+               status="GOOD"
+             />
           </div>
         </div>
       )}

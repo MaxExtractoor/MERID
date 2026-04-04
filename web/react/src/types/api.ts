@@ -14,6 +14,37 @@ export interface RawNotification {
   read?: boolean;
 }
 
+// ── Kalshi order groups ────────────────────────────────────────────────
+
+export interface OrderGroupUtilizationPoint {
+  timestamp: string;
+  utilization_pct: number;
+  contracts_used: number;
+  contracts_limit: number;
+}
+
+export interface OrderGroupTriggerEvent {
+  timestamp: string;
+  matched_contracts: number;
+}
+
+export interface KalshiOrderGroup {
+  order_group_id: string;
+  name: string;
+  status: 'active' | 'triggered' | 'canceled' | 'pending' | 'unknown';
+  contracts_limit: number;
+  used_contracts: number;
+  utilization_pct: number;
+  history?: OrderGroupUtilizationPoint[];
+  trigger_events?: OrderGroupTriggerEvent[];
+}
+
+export interface KalshiOrderGroupsResponse {
+  groups: KalshiOrderGroup[];
+  count?: number;
+  latency_ms?: number;
+}
+
 // ── Continuous Trader (CT) diagnostics ───────────────────────────────
 
 /** Per-ticker result from the most recent CT cycle. */
@@ -101,4 +132,3 @@ export interface CTStatusResponse {
   status: 'ok' | 'unavailable';
   data: CTStatus;
 }
-

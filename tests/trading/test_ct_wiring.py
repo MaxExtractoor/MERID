@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -205,6 +206,100 @@ class TestRefreshCandidatesHaltOnZero:
         await ct._refresh_candidates()
         # CT should stay running — it has candidates from BTC/15m
         assert ct._running is True
+
+    @pytest.mark.asyncio
+    async def test_refresh_candidates_wires_spot_prices_into_filter_candidates(self):
+        from merid.event_venues.kalshi.market_catalog import CatalogMarket
+
+        mock_event_market = MagicMock()
+        mock_event_market.outcomes = []
+        mock_event_market.volume = 100
+        mock_event_market.open_interest = 10
+        mock_catalog_market = MagicMock(spec=CatalogMarket)
+        mock_catalog_market.market = mock_event_market
+        mock_catalog_market.category = "crypto"
+        mock_catalog_market.expires_at = None
+        mock_catalog_market.strike_price = 100000.0
+
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.side_effect = lambda asset, timeframe=None: [mock_catalog_market] if asset == "BTC" and timeframe == "15m" else []
+
+        ct = _make_ct(catalog=catalog)
+        captured_candidates: List[Any] = []
+
+        def _capture(candidates):
+            captured_candidates.extend(candidates)
+            return SimpleNamespace(
+                candidates=[],
+                total_input=len(candidates),
+                passed=0,
+                rejected_oi=0,
+                rejected_volume_band=0,
+                rejected_edge_deadzone=0,
+                rejected_distance=0,
+                rejected_price=0,
+                rejected_spread=0,
+                rejected_volume=0,
+                rejected_missing_spot=0,
+                capped_per_asset=0,
+            )
+
+        with patch("merid.trading.kalshi_continuous_trader._fetch_spot_prices_with_fallback", AsyncMock(return_value={"BTC": 99500.0})):
+            ct._filter.filter_markets = _capture
+            await ct._refresh_candidates()
+
+        assert captured_candidates
+        assert captured_candidates[0].spot_price == 99500.0
+
+    @pytest.mark.asyncio
+    async def test_refresh_candidates_logs_when_spot_prices_missing(self):
+        from merid.event_venues.kalshi.market_catalog import CatalogMarket
+
+        mock_event_market = MagicMock()
+        mock_event_market.outcomes = []
+        mock_event_market.volume = 100
+        mock_event_market.open_interest = 10
+        mock_catalog_market = MagicMock(spec=CatalogMarket)
+        mock_catalog_market.market = mock_event_market
+        mock_catalog_market.category = "crypto"
+        mock_catalog_market.expires_at = None
+        mock_catalog_market.strike_price = 100000.0
+
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.side_effect = lambda asset, timeframe=None: [mock_catalog_market] if asset == "BTC" and timeframe == "15m" else []
+
+        ct = _make_ct(catalog=catalog)
+        captured_candidates: List[Any] = []
+
+        def _capture(candidates):
+            captured_candidates.extend(candidates)
+            return SimpleNamespace(
+                candidates=[],
+                total_input=len(candidates),
+                passed=0,
+                rejected_oi=0,
+                rejected_volume_band=0,
+                rejected_edge_deadzone=0,
+                rejected_distance=0,
+                rejected_price=0,
+                rejected_spread=0,
+                rejected_volume=0,
+                rejected_missing_spot=len(candidates),
+                capped_per_asset=0,
+            )
+
+        with patch("merid.trading.kalshi_continuous_trader._fetch_spot_prices_with_fallback", AsyncMock(return_value={})):
+            ct._filter.filter_markets = _capture
+            with patch("merid.trading.kalshi_continuous_trader.logger") as mock_logger:
+                await ct._refresh_candidates()
+
+        assert captured_candidates
+        assert captured_candidates[0].spot_price is None
+        mock_logger.warning.assert_any_call(
+            "ContinuousTrader: no spot price for %s during candidate refresh; "
+            "distance-based filtering may reject this asset's markets",
+            "BTC",
+        )
 
 
 # ── AUDIT-11: agent_stagger_seconds in agent_grid ─────────────────────────────

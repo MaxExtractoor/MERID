@@ -54,6 +54,7 @@ interface GridAgent {
 interface GridStatus {
   agent_count: number;
   agents: GridAgent[];
+  agent_cards?: GridAgent[];
 }
 
 interface LiquidityAlertData {
@@ -145,6 +146,7 @@ const KalshiVolDashboardView: React.FC = () => {
   const sizing        = sizingRes.data;
   const risk          = riskRes.data;
   const grid          = gridRes.data;
+  const gridAgents    = grid?.agent_cards ?? grid?.agents ?? [];
   const alerts        = alertsRes.data?.alerts ?? [];
   const liqAlerts     = liqAlertsRes.data?.alerts ?? [];
   const pnlPoints     = pnlRes.data?.points ?? [];
@@ -512,12 +514,12 @@ const KalshiVolDashboardView: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {(!grid?.agents || grid.agents.length === 0) ? (
+                {(gridAgents.length === 0) ? (
                   <tr><td colSpan={6} className="text-center py-6 text-gray-500">
                     No agents running — start the grid from Overview
                   </td></tr>
                 ) : (
-                  grid.agents.map(a => (
+                  gridAgents.map(a => (
                     <tr key={a.name} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                       <td className="p-2 pl-4">
                         <div className="flex items-center gap-1.5">

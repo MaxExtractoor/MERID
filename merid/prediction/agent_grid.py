@@ -33,6 +33,7 @@ from merid.prediction.session_guard import SessionGuard, get_session_guard
 from merid.prediction.trading_agent import KalshiTradingAgent
 from merid.prediction.social_broadcaster import KalshiSocialBroadcaster, get_social_broadcaster
 from merid.prediction.paper_session import PaperSession, get_paper_session
+from config.crypto_universe import CRYPTO_ASSETS_ORDERED, CRYPTO_TIMEFRAMES_ORDERED
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.agent_grid")
@@ -698,8 +699,8 @@ class AgentGrid:
         matrix: Dict[str, Dict[str, Any]] = {}
         
         # Determine relevant assets and timeframes
-        assets = self._catalog.assets() if self._catalog else ["BTC", "ETH", "SOL", "XRP", "DOGE"]
-        timeframes = ["15m", "1h", "daily", "weekly", "pre-market"]
+        assets = self._catalog.assets() if self._catalog else list(CRYPTO_ASSETS_ORDERED)
+        timeframes = list(CRYPTO_TIMEFRAMES_ORDERED)
         
         for asset in assets:
             matrix[asset] = {}

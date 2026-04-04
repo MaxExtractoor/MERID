@@ -2,11 +2,30 @@
  * @jest-environment jsdom
  */
 
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import OrderGroupPanel, { OrderGroup } from '../OrderGroupPanel';
+import OrderGroupPanel from '../OrderGroupPanel';
 import { useOrderGroupStream } from '../../hooks/useOrderGroupStream';
+import type { OrderGroupAlert, OrderGroupUpdate, UseOrderGroupStreamReturn } from '../../hooks/useOrderGroupStream';
+
+const makeGroupUpdate = (overrides: Partial<OrderGroupUpdate>): OrderGroupUpdate => ({
+  order_group_id: overrides.order_group_id ?? 'og-default',
+  status: overrides.status ?? 'active',
+  contracts_limit: overrides.contracts_limit ?? 1000,
+  matched_contracts: overrides.matched_contracts ?? 0,
+  used_contracts: overrides.used_contracts ?? 0,
+  filled_cost: overrides.filled_cost ?? 0,
+  remaining_cost: overrides.remaining_cost ?? 0,
+  update_type: overrides.update_type ?? 'snapshot',
+  ts: overrides.ts ?? '2026-04-04T18:00:00Z',
+});
+
+const makeAlert = (overrides: Partial<OrderGroupAlert>): OrderGroupAlert => ({
+  level: overrides.level ?? 'warning',
+  type: overrides.type ?? 'group_triggered',
+  order_group_id: overrides.order_group_id ?? 'og-default',
+  message: overrides.message ?? 'alert',
+});
 
 // Mock the useOrderGroupStream hook
 jest.mock('../../hooks/useOrderGroupStream', () => ({
@@ -16,32 +35,29 @@ jest.mock('../../hooks/useOrderGroupStream', () => ({
 describe('OrderGroupPanel', () => {
   const mockUseOrderGroupStream = useOrderGroupStream as jest.MockedFunction<typeof useOrderGroupStream>;
 
-  const defaultStreamData = {
+  const defaultStreamData: UseOrderGroupStreamReturn = {
     groups: {
-      'og-1': {
+      'og-1': makeGroupUpdate({
         order_group_id: 'og-1',
         status: 'active',
         contracts_limit: 1000,
         matched_contracts: 100,
         used_contracts: 300,
-        remaining_contracts: 700,
-        utilization_pct: 30,
         filled_cost: 15000,
         remaining_cost: 35000,
-      },
-      'og-2': {
+      }),
+      'og-2': makeGroupUpdate({
         order_group_id: 'og-2',
         status: 'triggered',
         contracts_limit: 500,
         matched_contracts: 500,
         used_contracts: 0,
-        utilization_pct: 100,
         filled_cost: 25000,
         remaining_cost: 0,
-      },
+      }),
     },
     alerts: [
-      { level: 'warning', message: 'Group og-2 has been triggered' },
+      makeAlert({ order_group_id: 'og-2', message: 'Group og-2 has been triggered' }),
     ],
     isConnected: true,
     error: null,
@@ -81,9 +97,9 @@ describe('OrderGroupPanel', () => {
 
   it('displays summary stats correctly', () => {
     render(<OrderGroupPanel />);
-    expect(screen.getByText('2')).toBeInTheDocument(); // Total groups
-    expect(screen.getByText('1')).toBeInTheDocument(); // Active
-    expect(screen.getByText('1')).toBeInTheDocument(); // Triggered
+    expect(screen.getByTestId('order-group-summary-total')).toHaveTextContent('2');
+    expect(screen.getByTestId('order-group-summary-active')).toHaveTextContent('1');
+    expect(screen.getByTestId('order-group-summary-triggered')).toHaveTextContent('1');
   });
 
   it('shows alerts when present', () => {
@@ -268,14 +284,13 @@ describe('OrderGroupPanel - API interactions', () => {
   it('calls API to reset triggered group', async () => {
     mockUseOrderGroupStream.mockReturnValue({
       groups: {
-        'og-triggered': {
+        'og-triggered': makeGroupUpdate({
           order_group_id: 'og-triggered',
           status: 'triggered',
           contracts_limit: 1000,
           matched_contracts: 1000,
           used_contracts: 0,
-          utilization_pct: 100,
-        },
+        }),
       },
       alerts: [],
       isConnected: true,
@@ -303,13 +318,12 @@ describe('OrderGroupPanel - API interactions', () => {
   it('calls API to delete group', async () => {
     mockUseOrderGroupStream.mockReturnValue({
       groups: {
-        'og-delete': {
+        'og-delete': makeGroupUpdate({
           order_group_id: 'og-delete',
           status: 'active',
           contracts_limit: 1000,
           used_contracts: 100,
-          utilization_pct: 10,
-        },
+        }),
       },
       alerts: [],
       isConnected: true,

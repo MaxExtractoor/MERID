@@ -8,6 +8,7 @@ import {
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, API_BASE_URL, DEFAULTS } from '../config/constants';
 import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiFill, KalshiRiskSummary, SizingMetrics } from '../types/kalshi';
+import type { KalshiOrderGroup, KalshiOrderGroupsResponse } from '../types/api';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiPnlChart from '../components/KalshiPnlChart';
@@ -27,6 +28,12 @@ type Tab = 'positions' | 'orders' | 'fills' | 'risk';
 
 interface KalshiPortfolioProps {
   initialTab?: Tab;
+}
+
+function hasOrderGroupHistory(
+  group: KalshiOrderGroup
+): group is KalshiOrderGroup & Required<Pick<KalshiOrderGroup, 'history'>> {
+  return Array.isArray(group.history);
 }
 
 const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => {
@@ -53,16 +60,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     maintenance_window?: string;
   }>(API_ENDPOINTS.KALSHI_GRID_SESSION, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
   const gridPortfolioResult = useApiData<{ equity_usd: number; daily_pnl_usd: number; open_interest: number; position_count: number; kill_switch_active: boolean; margin_utilization: number }>(API_ENDPOINTS.KALSHI_GRID_PORTFOLIO, { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD });
-  const orderGroupsResult = useApiData<{
-    groups: Array<{
-      order_group_id: string;
-      name: string;
-      status: 'active' | 'triggered' | 'canceled' | 'pending';
-      contracts_limit: number;
-      used_contracts: number;
-      utilization_pct: number;
-    }>;
-  }>(API_ENDPOINTS.KALSHI_ORDER_GROUPS, {
+  const orderGroupsResult = useApiData<KalshiOrderGroupsResponse>(API_ENDPOINTS.KALSHI_ORDER_GROUPS, {
     pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
   });
 
@@ -94,6 +92,31 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
     if (!assetFilter) return allFills;
     return allFills.filter(f => f.ticker.toUpperCase().startsWith(assetFilter));
   }, [allFills, assetFilter]);
+  const orderGroups = useMemo<KalshiOrderGroup[]>(
+    () => orderGroupsResult.data?.groups ?? [],
+    [orderGroupsResult.data]
+  );
+  const availableOrderGroups = useMemo(
+    () =>
+      orderGroups.map(group => ({
+        ...group,
+        status: group.status === 'unknown' ? 'pending' : group.status,
+      })),
+    [orderGroups]
+  );
+  const orderGroupHistories = useMemo(
+    () =>
+      orderGroups
+        .filter(hasOrderGroupHistory)
+        .map(group => ({
+          order_group_id: group.order_group_id,
+          name: group.name,
+          status: group.status === 'unknown' ? 'pending' : group.status,
+          history: group.history,
+          trigger_events: group.trigger_events ?? [],
+        })),
+    [orderGroups]
+  );
   const balance = balResult.data;
   const risk = riskResult.data;
   const loading = posResult.loading || ordResult.loading || fillResult.loading || balResult.loading || riskResult.loading;
@@ -569,23 +592,23 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                   {positions.length === 0 ? (
                     <tr><td colSpan={6} className="text-center py-8 text-gray-500">No positions</td></tr>
                   ) : (
-                    positions.map((p, i) => (
-                      <tr key={p.ticker} className="border-b border-slate-800/50 hover:bg-slate-800/30">
-                        <td className="p-3 font-mono text-white">{p.ticker}</td>
+                    positions.map((position) => (
+                      <tr key={position.ticker} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                        <td className="p-3 font-mono text-white">{position.ticker}</td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded text-xs ${
-                            p.outcome === 'yes' ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'
+                            position.outcome === 'yes' ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'
                           }`}>
-                            {p.outcome.toUpperCase()}
+                            {position.outcome.toUpperCase()}
                           </span>
                         </td>
-                        <td className="p-3 text-right text-white">{p.size}</td>
-                        <td className="p-3 text-right text-gray-300">{((p.avg_price ?? 0) * 100).toFixed(1)}¢</td>
-                        <td className={`p-3 text-right font-medium ${p.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          ${(p.unrealized_pnl ?? 0).toFixed(2)}
+                        <td className="p-3 text-right text-white">{position.size}</td>
+                        <td className="p-3 text-right text-gray-300">{((position.avg_price ?? 0) * 100).toFixed(1)}¢</td>
+                        <td className={`p-3 text-right font-medium ${position.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          ${(position.unrealized_pnl ?? 0).toFixed(2)}
                         </td>
-                        <td className={`p-3 text-right ${p.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          ${(p.realized_pnl ?? 0).toFixed(2)}
+                        <td className={`p-3 text-right ${position.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          ${(position.realized_pnl ?? 0).toFixed(2)}
                         </td>
                       </tr>
                     ))
@@ -922,7 +945,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
               {/* Order Groups Panel */}
               <BatchOrderPanel
                 onOrdersPlaced={() => posResult.refetch()}
-                availableGroups={orderGroupsResult.data?.groups || []}
+                availableGroups={availableOrderGroups}
                 compact={true}
               />
               <OrderGroupPanel
@@ -932,29 +955,16 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                 }}
               />
               {/* Order Group Analytics */}
-              <OrderGroupAnalytics
-                histories={(orderGroupsResult.data?.groups || []).map(g => ({
-                  order_group_id: g.order_group_id,
-                  name: g.name,
-                  status: g.status,
-                  history: [
-                    {
-                      timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-                      utilization_pct: Math.max(0, g.utilization_pct - 10),
-                      contracts_used: Math.max(0, g.used_contracts - 5),
-                      contracts_limit: g.contracts_limit,
-                    },
-                    {
-                      timestamp: new Date().toISOString(),
-                      utilization_pct: g.utilization_pct,
-                      contracts_used: g.used_contracts,
-                      contracts_limit: g.contracts_limit,
-                    },
-                  ],
-                  trigger_events: g.status === 'triggered' ? [{ timestamp: new Date().toISOString(), matched_contracts: g.used_contracts }] : [],
-                }))}
-                hours={24}
-              />
+              {orderGroupHistories.length > 0 ? (
+                <OrderGroupAnalytics
+                  histories={orderGroupHistories}
+                  hours={24}
+                />
+              ) : (
+                <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-500">
+                  Order group history is unavailable until the backend exposes real utilization history.
+                </div>
+              )}
             </div>
           )}
         </>

@@ -19,16 +19,17 @@ interface AutoPromoterStatus {
   eval_count: number;
 }
 
-interface Promotion {
-  id?: string;
-  ticker: string;
-  direction: string;  // e.g. "PAPER→SHADOW" | "SHADOW→LIVE"
-  verdict: string;    // e.g. "promote" | "hold" | "demote"
+interface PromotionEvaluation {
+  agent: string;
+  from_phase: string;
+  to_phase: string;
+  promoted: boolean;
+  blocked_by: string | null;
   timestamp: string;
 }
 
 interface AutoPromoterPromotions {
-  promotions: Promotion[];
+  evaluations: PromotionEvaluation[];
 }
 
 interface Transition {
@@ -88,7 +89,7 @@ const PromotionStatusView: React.FC = () => {
   const transitionsRes = useApiData<DeploymentTransitions>(API_ENDPOINTS.KALSHI_DEPLOYMENT_TRANSITIONS, opts);
 
   const status      = statusRes.data;
-  const promotions  = promotionsRes.data?.promotions ?? [];
+  const promotions  = promotionsRes.data?.evaluations ?? [];
   const transitions = transitionsRes.data?.transitions ?? [];
 
   const anyError = statusRes.error ?? promotionsRes.error ?? transitionsRes.error;
@@ -162,7 +163,7 @@ const PromotionStatusView: React.FC = () => {
           </div>
           <div className="space-y-1.5 text-sm">
             {(['promote', 'hold', 'demote'] as const).map(v => {
-              const count = promotions.filter(p => p.verdict?.toLowerCase() === v).length;
+              const count = promotions.filter(p => (p.promoted ? 'promote' : 'hold') === v).length;
               return (
                 <div key={v} className="flex justify-between">
                   <span className="text-gray-400 capitalize">{v}</span>
@@ -224,25 +225,25 @@ const PromotionStatusView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
-                {promotions.slice(0, 20).map((p, i) => (
-                  <tr key={p.id ?? i} className="hover:bg-slate-800/50 transition-colors">
-                    <td className="py-2 pr-4 text-white font-mono text-xs">{p.ticker ?? '—'}</td>
+                {promotions.slice(0, 20).map((p) => (
+                  <tr key={`${p.agent}-${p.timestamp}`} className="hover:bg-slate-800/50 transition-colors">
+                    <td className="py-2 pr-4 text-white font-mono text-xs">{p.agent ?? '—'}</td>
                     <td className="py-2 pr-4">
                       <span className="flex items-center gap-1 text-gray-300">
-                        {p.direction?.replace('→', '') !== p.direction
+                        {`${p.from_phase}→${p.to_phase}`.replace('→', '') !== `${p.from_phase}→${p.to_phase}`
                           ? <>
-                              <span className="text-gray-400">{p.direction?.split('→')[0]}</span>
+                              <span className="text-gray-400">{p.from_phase}</span>
                               <ArrowRight className="w-3 h-3 text-gray-500" />
-                              <span className="text-blue-300">{p.direction?.split('→')[1]}</span>
+                              <span className="text-blue-300">{p.to_phase}</span>
                             </>
-                          : p.direction ?? '—'
+                          : '—'
                         }
                       </span>
                     </td>
                     <td className="py-2 pr-4">
-                      <span className={`flex items-center gap-1 font-semibold ${verdictStyle(p.verdict)}`}>
-                        <VerdictIcon verdict={p.verdict} />
-                        {p.verdict ?? '—'}
+                      <span className={`flex items-center gap-1 font-semibold ${verdictStyle(p.promoted ? 'promote' : 'hold')}`}>
+                        <VerdictIcon verdict={p.promoted ? 'promote' : 'hold'} />
+                        {p.promoted ? 'promote' : `hold${p.blocked_by ? ` (${p.blocked_by})` : ''}`}
                       </span>
                     </td>
                     <td className="py-2 text-right text-gray-500 text-xs">{relTime(p.timestamp)}</td>

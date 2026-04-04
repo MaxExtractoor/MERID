@@ -31,7 +31,7 @@ def ct() -> KalshiContinuousTrader:
         "merid.trading.kalshi_continuous_trader.get_market_catalog",
         return_value=mock_catalog,
     ):
-        trader = KalshiContinuousTrader(dry_run=True, catalog=mock_catalog, dry_run=True)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=mock_catalog)
     return trader
 
 
@@ -71,11 +71,18 @@ class TestBankrollInvariant:
         assert ct._session_start_balance_cents is None
         ct.check_bankroll_invariant(balance_cents=57_400, portfolio_cents=0)
         assert ct._session_start_balance_cents == 57_400
+        assert ct._session_start_bankroll_cents == 57_400
 
     def test_second_call_does_not_overwrite_session_start(self, ct: KalshiContinuousTrader) -> None:
         ct.check_bankroll_invariant(balance_cents=57_400, portfolio_cents=0)
         ct.check_bankroll_invariant(balance_cents=58_000, portfolio_cents=0)
         assert ct._session_start_balance_cents == 57_400
+        assert ct._session_start_bankroll_cents == 57_400
+
+    def test_first_call_uses_mark_to_market_bankroll_baseline(self, ct: KalshiContinuousTrader) -> None:
+        ct.check_bankroll_invariant(balance_cents=2_109, portfolio_cents=184, fee_cents=2)
+        assert ct._session_start_balance_cents == 2_109
+        assert ct._session_start_bankroll_cents == 2_291
 
     def test_ok_when_no_activity(self, ct: KalshiContinuousTrader) -> None:
         result = ct.check_bankroll_invariant(balance_cents=10_000, portfolio_cents=0)
@@ -98,8 +105,8 @@ class TestBankrollInvariant:
         result = ct.check_bankroll_invariant(balance_cents=10_600, portfolio_cents=0)
         assert result["status"] == "warn"
         assert result["delta_cents"] == 600
-        assert "actual_pnl_cents" in result
-        assert "expected_pnl_cents" in result
+        assert "actual_bankroll_cents" in result
+        assert "expected_bankroll_cents" in result
 
     def test_custom_epsilon(self, ct: KalshiContinuousTrader) -> None:
         ct.check_bankroll_invariant(balance_cents=10_000, portfolio_cents=0)
@@ -118,6 +125,14 @@ class TestBankrollInvariant:
         assert ct._last_invariant_status == {}
         ct.check_bankroll_invariant(balance_cents=5_000, portfolio_cents=0)
         assert ct._last_invariant_status["status"] == "ok"
+
+    def test_fee_adjustment_uses_same_bankroll_definition_on_both_sides(self, ct: KalshiContinuousTrader) -> None:
+        ct.check_bankroll_invariant(balance_cents=2_109, portfolio_cents=184, fee_cents=2)
+        result = ct.check_bankroll_invariant(balance_cents=2_109, portfolio_cents=184, fee_cents=2)
+        assert result["status"] == "ok"
+        assert result["actual_bankroll_cents"] == 2_291
+        assert result["expected_bankroll_cents"] == 2_291
+        assert result["delta_cents"] == 0
 
 
 # ── Scenario: simple YES buy → settle YES ────────────────────────────────
@@ -289,6 +304,7 @@ class TestStatusExposure:
         assert b["total_pnl_cents"] == 0
         assert b["total_pnl_usd"] == 0.0
         assert b["session_start_balance_cents"] is None
+        assert b["session_start_bankroll_cents"] is None
         assert b["last_invariant"] == {}
 
     def test_bankroll_after_settlement(self, ct: KalshiContinuousTrader) -> None:
@@ -298,4 +314,5 @@ class TestStatusExposure:
         assert b["total_pnl_cents"] == 1_234
         assert b["total_pnl_usd"] == pytest.approx(12.34, abs=0.001)
         assert b["session_start_balance_cents"] == 50_000
+        assert b["session_start_bankroll_cents"] == 50_000
         assert b["last_invariant"]["status"] in ("ok", "warn")

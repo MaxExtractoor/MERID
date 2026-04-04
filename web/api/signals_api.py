@@ -185,9 +185,14 @@ async def get_alert_history(limit: int = Query(default=100)):
                 "id": alert.get("id", ""),
                 "timestamp": alert.get("timestamp", ""),
                 "severity": alert.get("severity", "info"),
+                "source": alert.get("source", alert.get("channel", "log")),
                 "channel": alert.get("channel", "log"),
                 "title": alert.get("title", ""),
+                "detail": alert.get("detail", alert.get("message", "")),
                 "message": alert.get("message", ""),
+                "type": alert.get("type", alert.get("category", "signal")),
+                "status": alert.get("status", "active"),
+                "actions": alert.get("actions", []),
                 "acknowledged": alert.get("acknowledged", False),
             })
         return {"alerts": alerts, "status": "ok"}

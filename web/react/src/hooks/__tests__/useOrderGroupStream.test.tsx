@@ -6,29 +6,65 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 import { useOrderGroupStream } from '../useOrderGroupStream';
 
 // Mock global EventSource
-class MockEventSource implements EventSource {
+class MockEventSource {
   static CONNECTING = 0 as const;
   static OPEN = 1 as const;
   static CLOSED = 2 as const;
 
+  readonly CONNECTING = MockEventSource.CONNECTING;
+  readonly OPEN = MockEventSource.OPEN;
+  readonly CLOSED = MockEventSource.CLOSED;
   url: string;
   readyState = 0;
   withCredentials = false;
-  onopen: ((this: EventSource, ev: Event) => any) | null = null;
-  onmessage: ((this: EventSource, ev: MessageEvent) => any) | null = null;
-  onerror: ((this: EventSource, ev: Event) => any) | null = null;
+  onopen: ((ev: Event) => any) | null = null;
+  onmessage: ((ev: MessageEvent) => any) | null = null;
+  onerror: ((ev: Event) => any) | null = null;
+  private listeners: Record<string, Array<(ev: Event | MessageEvent) => any>> = {};
 
-  constructor(url: string | URL, _eventSourceInitDict?: EventSourceInit) {
+  constructor(url: string | URL, eventSourceInitDict?: EventSourceInit) {
     this.url = url.toString();
+    void eventSourceInitDict;
   }
 
   close() {
     this.readyState = 2;
   }
 
-  addEventListener(_type: string, _listener: EventListenerOrEventListenerObject, _options?: boolean | AddEventListenerOptions): void {}
-  removeEventListener(_type: string, _listener: EventListenerOrEventListenerObject, _options?: boolean | EventListenerOptions): void {}
-  dispatchEvent(_event: Event): boolean { return true; }
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    _options?: boolean | AddEventListenerOptions,
+  ): void;
+  addEventListener(type?: string, listener?: EventListenerOrEventListenerObject): void {
+    if (!type || !listener) {
+      return;
+    }
+    const normalizedListener =
+      typeof listener === 'function'
+        ? listener
+        : (event: Event | MessageEvent) => listener.handleEvent(event);
+    this.listeners[type] = [...(this.listeners[type] ?? []), normalizedListener];
+  }
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    _options?: boolean | EventListenerOptions,
+  ): void;
+  removeEventListener(type?: string, listener?: EventListenerOrEventListenerObject): void {
+    if (!type || !listener) {
+      return;
+    }
+    const normalizedListener =
+      typeof listener === 'function'
+        ? listener
+        : (event: Event | MessageEvent) => listener.handleEvent(event);
+    this.listeners[type] = (this.listeners[type] ?? []).filter((registered) => registered !== normalizedListener);
+  }
+  dispatchEvent(event: Event): boolean {
+    void event;
+    return true;
+  }
 
   // Helper to simulate events
   simulateOpen() {
@@ -38,13 +74,14 @@ class MockEventSource implements EventSource {
     }
   }
 
-  simulateMessage(data: unknown) {
-    if (this.onmessage) {
-      const event = new MessageEvent('message', {
+  simulateEvent(type: string, data: unknown) {
+    const event = new MessageEvent(type, {
         data: JSON.stringify(data),
-      });
-      this.onmessage(event);
-    }
+    });
+    const listeners = this.listeners[type] ?? [];
+    listeners.forEach((listener) => {
+      listener(event);
+    });
   }
 
   simulateError() {
@@ -52,11 +89,15 @@ class MockEventSource implements EventSource {
     if (this.onerror) {
       this.onerror(new Event('error'));
     }
+    const listeners = this.listeners.error ?? [];
+    listeners.forEach((listener) => {
+      listener(new Event('error'));
+    });
   }
 }
 
 // Replace global EventSource
-(global as any).EventSource = MockEventSource;
+(global as any).EventSource = MockEventSource as unknown as typeof EventSource;
 
 describe('useOrderGroupStream', () => {
   let mockEventSourceInstances: MockEventSource[] = [];
@@ -112,30 +153,22 @@ describe('useOrderGroupStream', () => {
     });
 
     const snapshotData = {
-      type: 'snapshot',
-      groups: {
-        'og-1': {
-          order_group_id: 'og-1',
-          status: 'active',
-          contracts_limit: 1000,
-          matched_contracts: 100,
-          used_contracts: 300,
-          remaining_contracts: 700,
-          utilization_pct: 30,
-        },
-      },
-      timestamp: Date.now(),
+      order_group_id: 'og-1',
+      status: 'active',
+      contracts_limit: 1000,
+      matched_contracts: 100,
+      used_contracts: 300,
+      update_type: 'snapshot',
+      ts: '2026-04-04T18:00:00Z',
     };
 
     act(() => {
       mockEventSourceInstances[0].simulateOpen();
-      mockEventSourceInstances[0].simulateMessage(snapshotData);
+      mockEventSourceInstances[0].simulateEvent('snapshot', snapshotData);
     });
 
-    await waitFor(() => {
-      expect(result.current.groups['og-1']).toBeDefined();
-      expect(result.current.groups['og-1'].status).toBe('active');
-    });
+    await waitFor(() => expect(result.current.groups['og-1']).toBeDefined());
+    expect(result.current.groups['og-1'].status).toBe('active');
   });
 
   it('processes delta update messages', async () => {
@@ -150,39 +183,32 @@ describe('useOrderGroupStream', () => {
     // First send snapshot
     act(() => {
       mockEventSourceInstances[0].simulateOpen();
-      mockEventSourceInstances[0].simulateMessage({
-        type: 'snapshot',
-        groups: {
-          'og-1': {
-            order_group_id: 'og-1',
-            status: 'active',
-            contracts_limit: 1000,
-            used_contracts: 300,
-          },
-        },
+      mockEventSourceInstances[0].simulateEvent('snapshot', {
+        order_group_id: 'og-1',
+        status: 'active',
+        contracts_limit: 1000,
+        used_contracts: 300,
+        update_type: 'snapshot',
+        ts: '2026-04-04T18:00:00Z',
       });
     });
 
     // Then send delta update
     act(() => {
-      mockEventSourceInstances[0].simulateMessage({
-        type: 'delta',
-        group: {
-          order_group_id: 'og-1',
-          used_contracts: 500,
-          utilization_pct: 50,
-        },
+      mockEventSourceInstances[0].simulateEvent('delta', {
+        order_group_id: 'og-1',
+        used_contracts: 500,
+        update_type: 'delta',
+        ts: '2026-04-04T18:01:00Z',
       });
     });
 
-    await waitFor(() => {
-      expect(result.current.groups['og-1'].used_contracts).toBe(500);
-    });
+    await waitFor(() => expect(result.current.groups['og-1'].used_contracts).toBe(500));
   });
 
   it('handles triggered events with callback', async () => {
     const onTriggered = jest.fn();
-    const { result } = renderHook(() =>
+    renderHook(() =>
       useOrderGroupStream({ autoConnect: true, onTriggered })
     );
 
@@ -192,23 +218,21 @@ describe('useOrderGroupStream', () => {
 
     act(() => {
       mockEventSourceInstances[0].simulateOpen();
-      mockEventSourceInstances[0].simulateMessage({
-        type: 'triggered',
+      mockEventSourceInstances[0].simulateEvent('triggered', {
         order_group_id: 'og-1',
-        trigger_data: {
-          matched_contracts: 1000,
-          contracts_limit: 1000,
-        },
+        status: 'triggered',
+        matched_contracts: 1000,
+        contracts_limit: 1000,
+        update_type: 'delta',
+        ts: '2026-04-04T18:02:00Z',
       });
     });
 
-    await waitFor(() => {
-      expect(onTriggered).toHaveBeenCalledWith('og-1', expect.any(Object));
-    });
+    await waitFor(() => expect(onTriggered).toHaveBeenCalledWith('og-1', expect.any(Object)));
   });
 
   it('filters groups by groupIds option', async () => {
-    const { result } = renderHook(() =>
+    renderHook(() =>
       useOrderGroupStream({
         autoConnect: true,
         groupIds: ['og-1', 'og-3'],
@@ -240,10 +264,8 @@ describe('useOrderGroupStream', () => {
       mockEventSourceInstances[0].simulateError();
     });
 
-    await waitFor(() => {
-      expect(result.current.isConnected).toBe(false);
-      expect(result.current.reconnectAttempts).toBeGreaterThan(0);
-    });
+    await waitFor(() => expect(result.current.isConnected).toBe(false));
+    await waitFor(() => expect(result.current.reconnectAttempts).toBeGreaterThan(0));
 
     // Fast-forward to trigger reconnect
     act(() => {
@@ -314,24 +336,19 @@ describe('useOrderGroupStream', () => {
 
     act(() => {
       mockEventSourceInstances[0].simulateOpen();
-      mockEventSourceInstances[0].simulateMessage({
-        type: 'snapshot',
-        groups: {
-          'og-high': {
-            order_group_id: 'og-high',
-            status: 'active',
-            contracts_limit: 1000,
-            used_contracts: 900,
-            utilization_pct: 90,
-          },
-        },
+      mockEventSourceInstances[0].simulateEvent('triggered', {
+        order_group_id: 'og-high',
+        status: 'triggered',
+        contracts_limit: 1000,
+        used_contracts: 900,
+        matched_contracts: 900,
+        update_type: 'delta',
+        ts: '2026-04-04T18:03:00Z',
       });
     });
 
-    await waitFor(() => {
-      expect(result.current.alerts.length).toBeGreaterThan(0);
-      expect(result.current.alerts[0].level).toBe('critical');
-    });
+    await waitFor(() => expect(result.current.alerts.length).toBeGreaterThan(0));
+    expect(result.current.alerts[0].level).toBe('critical');
   });
 
   it('generates alerts for triggered groups', async () => {
@@ -345,17 +362,14 @@ describe('useOrderGroupStream', () => {
 
     act(() => {
       mockEventSourceInstances[0].simulateOpen();
-      mockEventSourceInstances[0].simulateMessage({
-        type: 'snapshot',
-        groups: {
-          'og-triggered': {
-            order_group_id: 'og-triggered',
-            status: 'triggered',
-            contracts_limit: 1000,
-            used_contracts: 0,
-            utilization_pct: 100,
-          },
-        },
+      mockEventSourceInstances[0].simulateEvent('triggered', {
+        order_group_id: 'og-triggered',
+        status: 'triggered',
+        contracts_limit: 1000,
+        used_contracts: 0,
+        matched_contracts: 1000,
+        update_type: 'delta',
+        ts: '2026-04-04T18:04:00Z',
       });
     });
 
@@ -379,16 +393,14 @@ describe('useOrderGroupStream', () => {
     // First make it triggered
     act(() => {
       mockEventSourceInstances[0].simulateOpen();
-      mockEventSourceInstances[0].simulateMessage({
-        type: 'snapshot',
-        groups: {
-          'og-test': {
-            order_group_id: 'og-test',
-            status: 'triggered',
-            contracts_limit: 1000,
-            used_contracts: 0,
-          },
-        },
+      mockEventSourceInstances[0].simulateEvent('triggered', {
+        order_group_id: 'og-test',
+        status: 'triggered',
+        contracts_limit: 1000,
+        used_contracts: 0,
+        matched_contracts: 1000,
+        update_type: 'delta',
+        ts: '2026-04-04T18:05:00Z',
       });
     });
 
@@ -398,12 +410,13 @@ describe('useOrderGroupStream', () => {
 
     // Then update to active
     act(() => {
-      mockEventSourceInstances[0].simulateMessage({
-        type: 'delta',
-        group: {
-          order_group_id: 'og-test',
-          status: 'active',
-        },
+      mockEventSourceInstances[0].simulateEvent('snapshot', {
+        order_group_id: 'og-test',
+        status: 'active',
+        contracts_limit: 1000,
+        used_contracts: 0,
+        update_type: 'snapshot',
+        ts: '2026-04-04T18:06:00Z',
       });
     });
 
