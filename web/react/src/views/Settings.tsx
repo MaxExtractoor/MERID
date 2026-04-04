@@ -131,7 +131,7 @@ export default function Settings() {
     const raw = userData?.createdAt ?? userData?.created_at;
     if (!raw) return 'Unknown';
     const parsed = new Date(raw);
-    return Number.isNaN(parsed.getTime()) ? 'Unknown' : parsed.toLocaleDateString();
+    return isNaN(parsed.getTime()) ? 'Unknown' : parsed.toLocaleDateString();
   })();
 
   const handleSave = async () => {
