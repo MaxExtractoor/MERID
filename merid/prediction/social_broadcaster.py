@@ -9,20 +9,42 @@ Event types consumed:
   - kalshi:market_resolved — market settlement
 
 Posts are sent to both Twitter and Telegram (if configured).
+
+AUDIT-17: Per-asset posting cooldown (default 5 minutes) and signal
+consolidation.  Multiple signals for the same (asset, timeframe) within
+the cooldown window are batched into a single post.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Optional
+import os
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.social_broadcaster")
 
+# ── Throttle configuration (AUDIT-17) ────────────────────────────────────────
+# Minimum seconds between posts for the same (asset, timeframe) pair.
+# Override via MERID_BROADCASTER_COOLDOWN_SECONDS (int).
+_DEFAULT_COOLDOWN_SECONDS: float = 300.0  # 5 minutes
+_COOLDOWN_SECONDS: float = float(
+    os.getenv("MERID_BROADCASTER_COOLDOWN_SECONDS", str(_DEFAULT_COOLDOWN_SECONDS))
+)
+
 
 class KalshiSocialBroadcaster:
-    """Consumes Kalshi events from the event bus and logs social-ready messages."""
+    """Consumes Kalshi events from the event bus and logs social-ready messages.
+
+    Per-asset throttle (AUDIT-17)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Each (asset, timeframe) key has a cooldown timestamp.  If a fill/order
+    event arrives before the cooldown expires the payload is queued in a
+    *pending batch*.  When the cooldown expires the batch is flushed as a
+    single consolidated post.
+    """
 
     # Event types this broadcaster cares about
     WATCHED_EVENTS = frozenset({
@@ -31,11 +53,20 @@ class KalshiSocialBroadcaster:
         "kalshi:market_resolved",
     })
 
-    def __init__(self) -> None:
+    def __init__(self, cooldown_seconds: float = _COOLDOWN_SECONDS) -> None:
         self._task: Optional[asyncio.Task] = None
         self._shutdown = asyncio.Event()
         self._queue: Optional[asyncio.Queue] = None
         self._messages_logged: int = 0
+        self._cooldown_seconds: float = cooldown_seconds
+
+        # ── Throttle state (AUDIT-17) ────────────────────────────────────────
+        # last_post_at[(asset, timeframe)] = monotonic timestamp of last post.
+        self._last_post_at: Dict[Tuple[str, str], float] = {}
+        # pending_batch[(asset, timeframe)] = list of pending payload dicts.
+        self._pending_batch: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        # Flush task handle (one per broadcaster lifecycle).
+        self._flush_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         """Subscribe to event bus and start consuming."""
@@ -47,7 +78,12 @@ class KalshiSocialBroadcaster:
         self._queue = await event_stream.subscribe()
         self._shutdown.clear()
         self._task = asyncio.create_task(self._consume_loop(), name="kalshi-social-broadcaster")
-        logger.info("KalshiSocialBroadcaster started — listening for trade events")
+        self._flush_task = asyncio.create_task(
+            self._batch_flush_loop(), name="kalshi-social-broadcaster-flush"
+        )
+        logger.info(
+            "KalshiSocialBroadcaster started — cooldown=%.0fs", self._cooldown_seconds
+        )
 
     async def stop(self) -> None:
         """Unsubscribe and stop consuming."""
@@ -56,12 +92,13 @@ class KalshiSocialBroadcaster:
             from core.event_bus import event_stream
             await event_stream.unsubscribe(self._queue)
             self._queue = None
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._task, self._flush_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         logger.info(f"KalshiSocialBroadcaster stopped — {self._messages_logged} messages logged")
 
     async def _consume_loop(self) -> None:
@@ -84,14 +121,102 @@ class KalshiSocialBroadcaster:
             except Exception as exc:
                 logger.warning(f"Social broadcaster error: {exc}")
 
+    async def _batch_flush_loop(self) -> None:
+        """Periodically flush pending batches whose cooldown has expired (AUDIT-17)."""
+        while not self._shutdown.is_set():
+            try:
+                await asyncio.sleep(10.0)
+                await self._flush_expired_batches()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("Social broadcaster flush error: %s", exc)
+
+    async def _flush_expired_batches(self) -> None:
+        """Post consolidated messages for all (asset, tf) keys past their cooldown."""
+        now = time.monotonic()
+        expired_keys = [
+            key
+            for key, ts in self._last_post_at.items()
+            if (now - ts) >= self._cooldown_seconds and key in self._pending_batch
+        ]
+        # Also flush keys that have been waiting but never had a post yet
+        unposted_keys = [
+            key for key in self._pending_batch if key not in self._last_post_at
+        ]
+        for key in set(expired_keys + unposted_keys):
+            batch = self._pending_batch.pop(key, [])
+            if batch:
+                await self._post_consolidated_batch(key, batch)
+
     async def _dispatch(self, event_type: str, payload: Dict[str, Any]) -> None:
-        """Route event to the appropriate handler."""
+        """Route event to the appropriate handler, respecting per-asset throttle."""
         if event_type == "kalshi:order_filled":
-            await self._publish_fill(payload)
+            await self._throttled_fill(payload)
         elif event_type == "kalshi:order_placed":
             await self._publish_order(payload)
         elif event_type == "kalshi:market_resolved":
             await self._publish_resolution(payload)
+
+    # ── Throttle helpers (AUDIT-17) ───────────────────────────────────────────
+
+    def _extract_asset_tf_key(self, p: Dict[str, Any]) -> Tuple[str, str]:
+        """Derive (asset, timeframe) key from a payload for throttle tracking."""
+        asset = p.get("asset") or p.get("underlying") or "UNKNOWN"
+        timeframe = p.get("timeframe") or "UNKNOWN"
+        return (str(asset).upper(), str(timeframe).lower())
+
+    async def _throttled_fill(self, p: Dict[str, Any]) -> None:
+        """Either post immediately (if cooldown elapsed) or enqueue for batching."""
+        key = self._extract_asset_tf_key(p)
+        now = time.monotonic()
+        last = self._last_post_at.get(key, 0.0)
+        if (now - last) >= self._cooldown_seconds:
+            # Drain any pending batch first, then post this event
+            batch = self._pending_batch.pop(key, [])
+            if batch:
+                await self._post_consolidated_batch(key, batch)
+            await self._publish_fill(p)
+            self._last_post_at[key] = time.monotonic()
+        else:
+            # Still in cooldown — enqueue for later consolidation
+            self._pending_batch.setdefault(key, []).append(p)
+            logger.debug(
+                "Social broadcaster: throttling %s/%s — cooldown %.0fs remaining",
+                key[0], key[1],
+                self._cooldown_seconds - (now - last),
+            )
+
+    async def _post_consolidated_batch(
+        self, key: Tuple[str, str], batch: List[Dict[str, Any]]
+    ) -> None:
+        """Post a single consolidated message for *batch* (same asset/timeframe)."""
+        if not batch:
+            return
+        asset, timeframe = key
+        count = len(batch)
+        total_qty = sum(p.get("contracts", 0) for p in batch)
+        # Use the most recent payload for details
+        p = batch[-1]
+        question = p.get("question", p.get("market_id", "?"))
+        q = question if len(question) <= 60 else question[:57] + "…"
+        sim = p.get("simulated", True)
+        mode = "SIM" if sim else "LIVE"
+        tweet = (
+            f"🔔 [{mode}] {count}× Kalshi {asset}/{timeframe} fills "
+            f"({total_qty} contracts total)\n{q}\n#Kalshi #PredictionMarkets"
+        )
+        if len(tweet) > 280:
+            tweet = tweet[:277] + "…"
+        tg_msg = (
+            f"📊 <b>Kalshi Batch Fills</b> [{mode}]\n"
+            f"<b>{count} fills</b> on {asset}/{timeframe} "
+            f"({total_qty} contracts)\n<code>{q}</code>"
+        )
+        await self._post_to_twitter(tweet)
+        await self._post_to_telegram(tg_msg, parse_mode="HTML")
+        self._messages_logged += 1
+        self._last_post_at[key] = time.monotonic()
 
     # ── Real Social Media Publishers ──────────────────────────────────
 
@@ -230,10 +355,23 @@ class KalshiSocialBroadcaster:
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serialisable status."""
+        now = time.monotonic()
+        throttle_state = {
+            f"{k[0]}/{k[1]}": round(
+                max(0.0, self._cooldown_seconds - (now - ts)), 1
+            )
+            for k, ts in self._last_post_at.items()
+        }
         return {
             "running": self._task is not None and not self._task.done(),
             "messages_logged": self._messages_logged,
             "watched_events": list(self.WATCHED_EVENTS),
+            "cooldown_seconds": self._cooldown_seconds,
+            "throttle_cooldown_remaining": throttle_state,
+            "pending_batches": {
+                f"{k[0]}/{k[1]}": len(v)
+                for k, v in self._pending_batch.items()
+            },
         }
 
 
