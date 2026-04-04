@@ -48,7 +48,13 @@ logger = get_logger("merid.trading.kalshi_continuous_trader")
 _CRYPTO_ASSETS: tuple = tuple(_CRYPTO_ASSETS_LIST)
 _CRYPTO_TIMEFRAMES: tuple = tuple(_CRYPTO_TIMEFRAMES_LIST)
 
-_DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"))
+# ── Configuration defaults ───────────────────────────────────────────────
+# Default group notional cap per (asset, timeframe) group.
+# With 25 groups (5 assets × 5 timeframes), total capacity = cap × 25.
+# Old default: $50 → $1,250 total (too restrictive, causing zero fills)
+# New default: $500 → $12,500 total (allows meaningful trading across all groups)
+# Override via MERID_GROUP_NOTIONAL_CAP env var.
+_DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "500.0"))
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
 _DEFAULT_BANKROLL_FRACTION = float(os.getenv("MERID_BANKROLL_FRACTION", "0.01"))
 _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
