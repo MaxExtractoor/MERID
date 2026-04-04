@@ -198,17 +198,11 @@ export function useOrderGroupStream(
       }
     });
 
-    es.addEventListener('heartbeat', (event) => {
-      // Heartbeat received - connection is alive
-      try {
-        const data = JSON.parse(event.data);
-        // Could track last heartbeat time here if needed
-      } catch {
-        // Heartbeat doesn't have JSON payload, just an event
-      }
+    es.addEventListener('heartbeat', () => {
+      // Heartbeat received - connection is alive.
     });
 
-    es.addEventListener('error', (event) => {
+    es.addEventListener('error', () => {
       const err = new Error('SSE connection error');
       setError(err);
       setIsConnected(false);

@@ -825,7 +825,7 @@ export default function KalshiGridView() {
               <th className="text-left text-xs text-gray-400 uppercase tracking-wider p-3 w-20">Asset</th>
               {activeTimeframes.map(tf => (
                 <th key={tf} className="text-center text-xs text-gray-400 uppercase tracking-wider p-3">
-                  {TF_LABELS[tf] || tf}
+                  {TF_LABELS[tf as keyof typeof TF_LABELS] || tf}
                 </th>
               ))}
             </tr>

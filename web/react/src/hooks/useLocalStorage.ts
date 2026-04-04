@@ -47,7 +47,10 @@ export function useLocalStorage<T>(
     (value: T | ((prev: T) => T) | null) => {
       try {
         // Allow value to be a function so we have the same API as useState
-        const valueToStore = typeof value === 'function' ? value(storedValue) : value;
+        const valueToStore =
+          typeof value === 'function'
+            ? (value as (prev: T) => T)(storedValue)
+            : value;
         
         // Handle null - remove from localStorage
         if (valueToStore === null) {

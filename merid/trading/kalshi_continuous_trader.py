@@ -680,7 +680,8 @@ class KalshiContinuousTrader:
                                     mid_price_cents = (best_bid_cents + best_ask_cents) // 2
                     except Exception as exc:
                         logger.debug(
-                            "ContinuousTrader price enrichment skipped for %s: %s",
+                            "ContinuousTrader price enrichment best-effort skip for %s; "
+                            "candidate will continue without mid-price context: %s",
                             getattr(cm.market, "market_id", "unknown"),
                             exc,
                         )

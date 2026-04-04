@@ -112,7 +112,7 @@ function SectionHeader({ label, collapsed }: { label: string; collapsed: boolean
 }
 
 function Sidebar({ current, onChange, className, collapsed = false, onToggleCollapse }: SidebarProps) {
-  const { data: modeData, isLive } = useKalshiMode();
+  const { data: modeData } = useKalshiMode();
 
   const primarySections = [
     { label: 'Trading', items: tradingCore },
