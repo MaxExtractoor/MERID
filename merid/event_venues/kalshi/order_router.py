@@ -33,7 +33,6 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from merid.prediction.venue_gate import TradingMode, get_venue_gate
-from trading.trade_mode import get_trade_mode
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.order_router")
@@ -211,6 +210,7 @@ def _resolve_mode(override: Optional[TradingMode]) -> TradingMode:
     if override is not None:
         return override
     try:
+        from trading.trade_mode import get_trade_mode  # lazy: avoids shadow in tests
         return TradingMode(get_trade_mode().value)
     except Exception as _e:
         logger.debug("_resolve_mode: get_trade_mode failed, falling back to venue_gate: %s", _e)
