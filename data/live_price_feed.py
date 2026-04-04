@@ -303,18 +303,20 @@ class LivePriceFeed:
                     
                 except Exception as exc:
                     self.exchange_failures[exchange_name] = self.exchange_failures.get(exchange_name, 0) + 1
-                    
+
                     # 401/403 = auth or permission error — don't retry, skip exchange
                     exc_str = str(exc)
                     if "401" in exc_str or "403" in exc_str:
                         logger.debug(f"Auth error for {symbol} on {exchange_name}, skipping: {exc}")
                         break
-                    
+
                     if attempt < self.max_retries - 1:
                         logger.debug(f"Failed to fetch {symbol} from {exchange_name} (attempt {attempt + 1}/{self.max_retries}): {exc}")
                         await asyncio.sleep(self.retry_delay)
                     else:
-                        logger.debug(f"Failed to fetch {symbol} from {exchange_name} after {self.max_retries} attempts: {exc}")
+                        # Elevate final failure to WARNING for first exchange in priority list
+                        log_level = logger.warning if exchange_name == self.exchange_priority[0] else logger.debug
+                        log_level(f"Failed to fetch {symbol} from {exchange_name} after {self.max_retries} attempts: {exc}")
             
             if fetched:
                 break

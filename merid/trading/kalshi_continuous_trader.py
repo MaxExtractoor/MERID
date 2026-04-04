@@ -356,14 +356,16 @@ async def _fetch_spot_prices_with_fallback(
                 )
                 prices[sym] = _last_known_spot[sym]
             else:
-                logger.warning(
+                logger.error(
                     "Dropping %s from spot prices — all feeds failed and "
-                    "last-known spot is too stale (age=%.0fs > %.0fs)",
+                    "last-known spot is too stale (age=%.0fs > %.0fs). "
+                    "Markets for this asset will be filtered out.",
                     sym, age, _LAST_KNOWN_SPOT_MAX_AGE_SECONDS,
                 )
         else:
-            logger.warning(
-                "No spot price available for %s — all feeds failed, no last-known value",
+            logger.error(
+                "No spot price available for %s — all feeds failed, no last-known value. "
+                "Markets for this asset will be filtered out.",
                 sym,
             )
 
