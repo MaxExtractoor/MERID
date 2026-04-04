@@ -52,11 +52,26 @@ async def get_recent_promotions(
         promoter = _get_promoter()
         status = promoter.status()
         evaluations = status.get("recent_evaluations", [])
+        promotions = []
+        for evaluation in evaluations[:limit]:
+            from_phase = evaluation.get("from_phase", "?")
+            to_phase = evaluation.get("to_phase", "?")
+            promotions.append({
+                "id": evaluation.get("timestamp"),
+                "agent": evaluation.get("agent"),
+                "ticker": evaluation.get("agent"),
+                "direction": f"{from_phase}→{to_phase}",
+                "verdict": "promote" if evaluation.get("promoted") else "hold",
+                "timestamp": evaluation.get("timestamp"),
+                "blocked_by": evaluation.get("blocked_by"),
+                "gates": evaluation.get("gates", []),
+            })
         return {
             "count": len(evaluations[:limit]),
             "evaluations": evaluations[:limit],
+            "promotions": promotions,
             "total_promotions": status.get("total_promotions", 0),
         }
     except Exception as exc:
         logger.error("Auto-promoter promotions failed: %s", exc)
-        return {"count": 0, "evaluations": [], "error": str(exc)}
+        return {"count": 0, "evaluations": [], "promotions": [], "error": str(exc)}

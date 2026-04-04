@@ -279,6 +279,30 @@ class TestCheckExecutionGate:
         assert len(pnl_reasons) == 1
         assert pnl_reasons[0].severity == "warning"
 
+    @patch("core.execution_gate.check_pnl_consistency", return_value={"consistent": True, "max_divergence_usd": 0, "threshold_usd": 5})
+    @patch("core.execution_gate.check_price_feed_staleness", return_value={"safe_to_trade": True, "stale_symbols": [], "critical_count": 0})
+    def test_paper_reconciliation_delta_is_warning_only(self, mock_stale, mock_pnl):
+        mock_rc = MagicMock()
+        mock_rc._global_kill = False
+        mock_paper_recon = MagicMock()
+        mock_paper_recon.has_critical_discrepancies = MagicMock(return_value=True)
+        mock_paper_recon._has_ever_completed = True
+        mock_paper_recon.get_last_report = MagicMock(return_value=MagicMock(all_ok=False, checks=[MagicMock(status="DELTA")]))
+        mock_kalshi_recon = MagicMock()
+        mock_kalshi_recon.has_ever_run = MagicMock(return_value=True)
+        mock_kalshi_recon.has_critical_discrepancies = MagicMock(return_value=False)
+        mock_kalshi_recon.get_last_discrepancies = MagicMock(return_value=[])
+
+        with patch.dict("sys.modules", {"merid.risk.kill_switches": MagicMock(risk_controller=mock_rc)}):
+            with patch.dict("sys.modules", {"trading.reconciliation": mock_paper_recon}):
+                with patch.dict("sys.modules", {"merid.reconciliation": mock_kalshi_recon}):
+                    result = check_execution_gate()
+
+        assert result.blocked is False
+        paper_reasons = [r for r in result.reasons if r.source == "paper_reconciliation"]
+        assert len(paper_reasons) == 1
+        assert paper_reasons[0].severity == "warning"
+
 
 # ── Kalshi Reconciliation State Tests ────────────────────────────────
 
@@ -385,4 +409,3 @@ class TestKalshiReconciliationStates:
         assert len(recon_reasons) == 1
         assert recon_reasons[0].severity == "critical"
         assert "2 critical discrepancies" in recon_reasons[0].message
-

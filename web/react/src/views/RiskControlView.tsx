@@ -20,9 +20,13 @@ interface KillSwitchStatus {
 }
 
 interface RiskState {
-  daily_pnl_usd: number;
-  drawdown_pct: number;
-  position_utilization: number;
+  pnl: {
+    daily_pnl: number;
+    utilization_pct: number;
+  };
+  position: {
+    utilization_pct: number;
+  };
 }
 
 interface HaltStatus {
@@ -189,24 +193,24 @@ const RiskControlView: React.FC = () => {
             <div className="flex justify-between">
               <span className="text-gray-400">Daily P&amp;L</span>
               <span className={
-                (risk?.daily_pnl_usd ?? 0) >= 0 ? 'text-green-400 font-semibold' : 'text-red-400 font-semibold'
+                (risk?.pnl.daily_pnl ?? 0) >= 0 ? 'text-green-400 font-semibold' : 'text-red-400 font-semibold'
               }>
-                {fmt(risk?.daily_pnl_usd, 2, '$')}
+                {fmt(risk?.pnl.daily_pnl, 2, '$')}
               </span>
             </div>
             <div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Drawdown</span>
-                <span className="text-white">{fmt(risk?.drawdown_pct != null ? risk.drawdown_pct * 100 : null, 2)}%</span>
+                <span className="text-gray-400">Loss Utilization</span>
+                <span className="text-white">{fmt(risk?.pnl.utilization_pct, 2)}%</span>
               </div>
-              {pctBar(risk?.drawdown_pct ?? 0, 'bg-orange-500')}
+              {pctBar((risk?.pnl.utilization_pct ?? 0) / 100, 'bg-orange-500')}
             </div>
             <div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Position Utilization</span>
-                <span className="text-white">{fmt(risk?.position_utilization != null ? risk.position_utilization * 100 : null, 1)}%</span>
+                <span className="text-white">{fmt(risk?.position.utilization_pct, 1)}%</span>
               </div>
-              {pctBar(risk?.position_utilization ?? 0, 'bg-blue-500')}
+              {pctBar((risk?.position.utilization_pct ?? 0) / 100, 'bg-blue-500')}
             </div>
           </div>
         </div>

@@ -213,7 +213,7 @@ function RebootControlPanel({
 }
 
 /* ── Kalshi Balance Hero ──────────────────────────── */
-function KalshiBalanceHero({ balance, pnl }: { balance: KalshiBalance | null; pnl: KalshiPnL | null }) {
+function KalshiBalanceHero({ balance, pnl, mode }: { balance: KalshiBalance | null; pnl: KalshiPnL | null; mode: 'paper' | 'live' }) {
   if (!balance) {
     return (
       <div className="bg-gradient-to-br from-slate-900 via-orange-950/20 to-slate-900 rounded-2xl border border-orange-500/20 p-6">
@@ -234,8 +234,8 @@ function KalshiBalanceHero({ balance, pnl }: { balance: KalshiBalance | null; pn
         <div className="flex items-center gap-2 mb-1">
           <div className="p-1.5 bg-orange-500/20 rounded-lg"><Wallet className="w-4 h-4 text-orange-400" /></div>
           <span className="text-sm text-slate-400 font-medium">Kalshi Balance</span>
-          <span className="flex items-center gap-1 text-xs text-emerald-400">
-            <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" /> Live
+          <span className={`flex items-center gap-1 text-xs ${mode === 'live' ? 'text-emerald-400' : 'text-amber-400'}`}>
+            <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${mode === 'live' ? 'bg-emerald-400' : 'bg-amber-400'}`} /> {mode === 'live' ? 'Live' : 'Paper'}
           </span>
         </div>
         <div className="text-4xl font-bold text-white tracking-tight mb-3">
@@ -393,7 +393,9 @@ export default function Overview() {
       if (serverMode !== gridStartMode) setGridStartMode(serverMode);
       setModeSynced(true);
     }
-  }, [venueModeData?.mode, modeSynced]);
+  }, [gridStartMode, venueModeData?.mode, modeSynced]);
+  const currentMode: 'paper' | 'live' =
+    venueModeData?.mode?.toLowerCase().includes('live') ? 'live' : gridStartMode;
 
   const callRebootAction = useCallback(async (action: 'catalog' | 'grid-start' | 'grid-stop', endpoint: string, body?: object) => {
     setBusyAction(action);
@@ -472,7 +474,7 @@ export default function Overview() {
       {/* Row 2: Kalshi Balance + Positions */}
       <section className="grid grid-cols-1 lg:grid-cols-5 gap-5">
         <div className="lg:col-span-3">
-          <KalshiBalanceHero balance={balance} pnl={pnl} />
+          <KalshiBalanceHero balance={balance} pnl={pnl} mode={currentMode} />
         </div>
         <div className="lg:col-span-2">
           <KalshiPositionsCard positions={posData?.positions ?? []} />

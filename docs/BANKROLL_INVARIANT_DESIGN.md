@@ -29,6 +29,7 @@ Three new fields added to `KalshiContinuousTrader.__init__`:
 ```python
 self._total_pnl_cents: int = 0
 self._session_start_balance_cents: Optional[int] = None
+self._session_start_bankroll_cents: Optional[int] = None
 self._last_invariant_status: Dict[str, Any] = {}
 ```
 
@@ -37,7 +38,7 @@ Two new methods:
 - **`record_trade_result(pnl_cents: int)`** — called once per settled CT market to
   accumulate realized PnL. Never called at fill time.
 
-- **`check_bankroll_invariant(balance_cents, portfolio_cents, *, epsilon_cents=500)`** —
+- **`check_bankroll_invariant(balance_cents, portfolio_cents, *, fee_cents=0, epsilon_cents=500)`** —
   runs the invariant check and returns a status dict.
 
 Both are exposed in `status()["bankroll"]` for UI and log visibility.
@@ -58,22 +59,23 @@ point because:
 ## 3. Invariant Formula
 
 ```
-actual_pnl   = (balance_cents − session_start_balance_cents) + portfolio_cents
-expected_pnl = _total_pnl_cents
-delta        = actual_pnl − expected_pnl
+actual_bankroll   = balance_cents + portfolio_cents - fee_cents
+expected_bankroll = session_start_bankroll_cents + _total_pnl_cents
+delta             = actual_bankroll - expected_bankroll
 ```
 
 **Why this formula:**
 
 - `balance_cents` is Kalshi's reported cash balance.
-- `session_start_balance_cents` is the baseline captured on the first invariant call
-  so we measure PnL *delta* rather than absolute balance.
+- `session_start_bankroll_cents` is the bankroll baseline captured on the first
+  invariant call, using the same bankroll definition as the live snapshot.
 - `portfolio_cents` is the mark-to-market value of still-open positions.
   When a market settles, Kalshi moves the payout into `balance_cents` and removes the
-  position, so `portfolio_cents` drops while `balance_cents` rises.
+  position, so `portfolio_cents` drops while `balance_cents` rises — but both the
+  actual and expected sides still use the same bankroll definition.
 - `_total_pnl_cents` is CT's internal sum of all settled trade results.
-- A near-zero `delta` means CT's internal PnL accounting matches Kalshi's reported
-  account movement. A large delta indicates a wiring problem.
+- A near-zero `delta` means CT's internally-accounted realized PnL matches the
+  change in mark-to-market bankroll. A large delta indicates a wiring problem.
 
 **Known noise sources (why epsilon = 500¢ = $5):**
 
@@ -122,9 +124,12 @@ Do **not** set this env var in production until all graduation criteria are met.
 
 CT tracks notional exposure via `DailyRiskState.group_notional`, which accumulates
 per `trade_cycle()` call and is only cleared by `reset_daily()`. This is cost-basis
-exposure (what CT paid), **not** mark-to-market. The invariant uses Kalshi's
-`portfolio_cents` (mark-to-market) for the "actual" side, which is intentionally
-different — the delta between them is what the invariant bounds.
+exposure (what CT paid), **not** mark-to-market.
+
+The bankroll invariant must **not** compare `cash + exposure` to `cash + portfolio`.
+Exposure is a risk-limit input; bankroll uses mark-to-market `portfolio_cents`.
+Using the same bankroll definition on both sides prevents false warnings where the
+delta is merely `(exposure - portfolio_mark)`.
 
 Settled positions are automatically removed from `portfolio_cents` by Kalshi but are
 **not** automatically removed from `group_notional`. `reset_daily()` handles this at

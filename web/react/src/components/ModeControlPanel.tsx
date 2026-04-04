@@ -21,7 +21,7 @@ interface VenueMode {
   domain: string;
   mode: 'SIM' | 'PAPER' | 'LIVE';
   enabled: boolean;
-  lastModeChange: string;
+  lastModeChange: string | null;
 }
 
 const MODE_COLORS: Record<string, { bg: string; text: string; ring: string }> = {
@@ -98,7 +98,9 @@ export default function ModeControlPanel() {
   };
 
   const formatTimeAgo = (ts: string) => {
+    if (!ts) return 'unknown';
     const ms = Date.now() - new Date(ts).getTime();
+    if (isNaN(ms) || ms < 0) return 'unknown';
     if (ms < 3600000) return `${Math.floor(ms / 60000)}m ago`;
     if (ms < 86400000) return `${Math.floor(ms / 3600000)}h ago`;
     return `${Math.floor(ms / 86400000)}d ago`;
@@ -171,7 +173,7 @@ export default function ModeControlPanel() {
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">{formatTimeAgo(v.lastModeChange)}</span>
+                   <span className="text-xs text-gray-500">{formatTimeAgo(v.lastModeChange ?? '')}</span>
                   <button type="button"
                     onClick={() => toggleEnabled(v.venue, !v.enabled)}
                     disabled={actionLoading}

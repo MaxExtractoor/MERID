@@ -579,6 +579,10 @@ class KalshiContinuousTrader:
         # Balance snapshot (cents) captured on the first check_bankroll_invariant()
         # call each session.  Used as the baseline for measuring actual PnL.
         self._session_start_balance_cents: Optional[int] = None
+        # Canonical bankroll snapshot (cash + portfolio mark - fees) captured on the
+        # first invariant check. This is the authoritative baseline for comparing
+        # snapshot bankroll vs internally-accounted realized PnL.
+        self._session_start_bankroll_cents: Optional[int] = None
         # Result from the most recent check_bankroll_invariant() call.
         # Empty dict until the first cycle that supplies balance/portfolio data.
         self._last_invariant_status: Dict[str, Any] = {}
@@ -616,6 +620,7 @@ class KalshiContinuousTrader:
         """Pull fresh candidates from catalog + filter pipeline."""
         new_candidates: List[TradingCandidate] = []
         asset_counts: Dict[str, Dict[str, int]] = {}
+        spot_prices = await _fetch_spot_prices_with_fallback(_CRYPTO_ASSETS)
 
         # Accumulators for cross-asset/timeframe filter telemetry for this scan run.
         scan_total_input: int = 0
@@ -625,8 +630,16 @@ class KalshiContinuousTrader:
         scan_rejected_price: int = 0
         scan_rejected_spread: int = 0
         scan_rejected_volume: int = 0
+        scan_rejected_missing_spot: int = 0
 
         for asset in _CRYPTO_ASSETS:
+            asset_spot = spot_prices.get(asset)
+            if asset_spot is None:
+                logger.warning(
+                    "ContinuousTrader: no spot price for %s during candidate refresh; "
+                    "distance-based filtering may reject this asset's markets",
+                    asset,
+                )
             for tf in _CRYPTO_TIMEFRAMES:
                 catalog_markets = self._catalog.get_markets_by_asset(asset, timeframe=tf)
                 if not catalog_markets:
@@ -665,8 +678,13 @@ class KalshiContinuousTrader:
                                 best_ask_cents = int(round(ask_float))
                                 if best_bid_cents > 0 and best_ask_cents > 0:
                                     mid_price_cents = (best_bid_cents + best_ask_cents) // 2
-                    except Exception:
-                        pass  # Price enrichment is best-effort; filter still works without it
+                    except Exception as exc:
+                        logger.debug(
+                            "ContinuousTrader price enrichment best-effort skip for %s; "
+                            "candidate will continue without mid-price context: %s",
+                            getattr(cm.market, "market_id", "unknown"),
+                            exc,
+                        )
 
                     raw_candidates.append(
                         MarketCandidate(
@@ -678,6 +696,7 @@ class KalshiContinuousTrader:
                             open_interest=int(cm.market.open_interest) if cm.market.open_interest else 0,
                             category=cm.category or "",
                             strike_price=cm.strike_price,
+                            spot_price=asset_spot,
                             best_bid_cents=best_bid_cents,
                             best_ask_cents=best_ask_cents,
                             mid_price_cents=mid_price_cents,
@@ -720,6 +739,7 @@ class KalshiContinuousTrader:
                 scan_rejected_price += filter_result.rejected_price
                 scan_rejected_spread += filter_result.rejected_spread
                 scan_rejected_volume += filter_result.rejected_volume
+                scan_rejected_missing_spot += filter_result.rejected_missing_spot
 
                 # Yield to event loop after processing each asset-timeframe combination
                 await asyncio.sleep(0)
@@ -746,6 +766,7 @@ class KalshiContinuousTrader:
             "scan_rejected_price": scan_rejected_price,
             "scan_rejected_spread": scan_rejected_spread,
             "scan_rejected_volume": scan_rejected_volume,
+            "scan_rejected_missing_spot": scan_rejected_missing_spot,
             "volume_band_block_rate": round(scan_block_rate, 4),
             "volume_band_block_rate_rolling_avg": round(rolling_avg, 4),
             "rolling_window_scans": len(self._volume_band_rate_history),
@@ -764,6 +785,8 @@ class KalshiContinuousTrader:
             drops.append(f"volume={scan_rejected_volume}")
         if scan_rejected_volume_band:
             drops.append(f"vol_band={scan_rejected_volume_band}")
+        if scan_rejected_missing_spot:
+            drops.append(f"missing_spot={scan_rejected_missing_spot}")
         drop_summary = " ".join(drops) if drops else "none"
         logger.info(
             "ContinuousTrader filter: total_input=%d volume_band_rejected=%d "
@@ -1359,18 +1382,22 @@ class KalshiContinuousTrader:
         balance_cents: int,
         portfolio_cents: int,
         *,
+        fee_cents: int = 0,
         epsilon_cents: int = 500,
     ) -> dict:
         """Check the CT bankroll invariant and return a status dict.
 
         Formula::
 
-            actual_pnl   = (balance_cents - session_start_balance_cents) + portfolio_cents
-            expected_pnl = _total_pnl_cents
-            delta        = actual_pnl - expected_pnl
+            actual_bankroll   = balance_cents + portfolio_cents - fee_cents
+            expected_bankroll = session_start_bankroll_cents + _total_pnl_cents
+            delta             = actual_bankroll - expected_bankroll
 
         ``balance_cents`` is the Kalshi cash balance; ``portfolio_cents`` is the
-        current mark-to-market value of open positions.
+        current mark-to-market value of open positions.  Both the actual and
+        expected sides use the **same bankroll definition** (cash + portfolio
+        mark, net of fees) to avoid comparing incompatible notions such as
+        ``cash + exposure`` vs ``cash + portfolio``.
 
         The invariant is **WARNING-only** until settlement wiring has been
         validated in live trading and deltas are consistently within epsilon.
@@ -1380,41 +1407,55 @@ class KalshiContinuousTrader:
         Args:
             balance_cents:  Kalshi cash balance in cents (from REST balance endpoint).
             portfolio_cents: Mark-to-market value of open CT positions in cents.
+            fee_cents:       Fees already paid/charged against the snapshot bankroll.
             epsilon_cents:   Tolerance in cents before escalating to WARN (default 500¢ = $5).
 
         Returns:
             dict with keys: ``status`` ("ok" | "warn"), ``delta_cents``,
-            and on WARN: ``actual_pnl_cents``, ``expected_pnl_cents``.
+            and on WARN: ``actual_bankroll_cents``, ``expected_bankroll_cents``.
         """
+        snapshot_bankroll_cents = balance_cents + portfolio_cents - fee_cents
         if self._session_start_balance_cents is None:
             self._session_start_balance_cents = balance_cents
+        if self._session_start_bankroll_cents is None:
+            self._session_start_bankroll_cents = snapshot_bankroll_cents
             logger.info(
-                "CT bankroll: session start balance recorded as %d¢ ($%.2f)",
+                "CT bankroll: session start recorded balance=%d¢ portfolio=%d¢ fees=%d¢ bankroll=%d¢ ($%.2f)",
                 balance_cents,
-                balance_cents / 100.0,
+                portfolio_cents,
+                fee_cents,
+                snapshot_bankroll_cents,
+                snapshot_bankroll_cents / 100.0,
             )
 
-        actual_pnl = (balance_cents - self._session_start_balance_cents) + portfolio_cents
-        delta = actual_pnl - self._total_pnl_cents
+        expected_bankroll_cents = self._session_start_bankroll_cents + self._total_pnl_cents
+        delta = snapshot_bankroll_cents - expected_bankroll_cents
 
         if abs(delta) <= epsilon_cents:
-            result: Dict[str, Any] = {"status": "ok", "delta_cents": delta}
+            result: Dict[str, Any] = {
+                "status": "ok",
+                "delta_cents": delta,
+                "actual_bankroll_cents": snapshot_bankroll_cents,
+                "expected_bankroll_cents": expected_bankroll_cents,
+            }
         else:
             logger.warning(
-                "CT bankroll invariant WARN: delta=%d¢ actual_pnl=%d¢ expected_pnl=%d¢ "
-                "(balance=%d¢ start=%d¢ portfolio=%d¢)",
+                "CT bankroll invariant WARN: delta=%d¢ actual_bankroll=%d¢ expected_bankroll=%d¢ "
+                "(balance=%d¢ portfolio=%d¢ fees=%d¢ start_bankroll=%d¢ realized_pnl=%d¢)",
                 delta,
-                actual_pnl,
-                self._total_pnl_cents,
+                snapshot_bankroll_cents,
+                expected_bankroll_cents,
                 balance_cents,
-                self._session_start_balance_cents,
                 portfolio_cents,
+                fee_cents,
+                self._session_start_bankroll_cents,
+                self._total_pnl_cents,
             )
             result = {
                 "status": "warn",
                 "delta_cents": delta,
-                "actual_pnl_cents": actual_pnl,
-                "expected_pnl_cents": self._total_pnl_cents,
+                "actual_bankroll_cents": snapshot_bankroll_cents,
+                "expected_bankroll_cents": expected_bankroll_cents,
             }
 
         self._last_invariant_status = result
@@ -1448,8 +1489,8 @@ class KalshiContinuousTrader:
                     streaming_bus.publish(EventChannel.EXECUTION, "execution_rejected", event)
                 )
             )
-        except Exception:
-            pass  # Event emission is best-effort; never block trading logic
+        except Exception as exc:
+            logger.debug("ContinuousTrader execution_rejected event emit skipped: %s", exc)
 
     # ── Status ────────────────────────────────────────────────────────────
 
@@ -1504,6 +1545,7 @@ class KalshiContinuousTrader:
                 "total_pnl_cents": self._total_pnl_cents,
                 "total_pnl_usd": round(self._total_pnl_cents / 100.0, 4),
                 "session_start_balance_cents": self._session_start_balance_cents,
+                "session_start_bankroll_cents": self._session_start_bankroll_cents,
                 "last_invariant": dict(self._last_invariant_status),
             },
         }
@@ -1531,4 +1573,3 @@ def get_continuous_trader(
     if _trader is None:
         _trader = KalshiContinuousTrader(catalog=catalog, strategy=strategy)
     return _trader
-
