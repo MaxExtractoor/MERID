@@ -214,9 +214,10 @@ def _build_default_profiles() -> Dict[Tuple[str, str], StrategyProfile]:
     """
     # (asset, timeframe): (bankroll_share, max_trades/day, price_band, min_edge_bp, max_open)
     #
-    # allowed_price_band is expressed in decimal (0–1, i.e. 0.05 = 5¢, 0.95 = 95¢).
+    # allowed_price_band is expressed in decimal probability (0.0–1.0).
+    # E.g. 0.05 means a contract trading at 5¢ (i.e. 5% implied probability for YES).
     # Bands must be wide enough to include real Kalshi near-spot crypto prices:
-    #   - Short-term (15m/1h) near-spot strikes can trade anywhere from ~10¢ to ~90¢
+    #   - Short-term (15m/1h) near-spot strikes can trade anywhere from ~0.10 to ~0.90
     #     depending on how close the strike is to spot at expiry.
     #   - Longer-term (daily–monthly) markets span a similar range.
     # The old tight bands (e.g. 0.35–0.75 for BTC 15m, 0.65–0.85 for BTC daily)
