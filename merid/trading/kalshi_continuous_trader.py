@@ -153,6 +153,213 @@ _FALLBACK_YES_PRICE_CENTS = 50
 # At the default ~60s candidate refresh interval this covers roughly 20 minutes.
 _VOLUME_BAND_RATE_HISTORY_MAXLEN = 20
 
+# CoinGecko IDs for each Kalshi crypto asset (AUDIT-21)
+_COINGECKO_IDS: Dict[str, str] = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "SOL": "solana",
+    "XRP": "ripple",
+    "DOGE": "dogecoin",
+}
+
+# Last-known spot prices: updated by _fetch_spot_prices_with_fallback().
+# Used as final fallback when all live feeds fail (AUDIT-21).
+_last_known_spot: Dict[str, float] = {}
+_last_known_spot_ts: Dict[str, float] = {}
+_LAST_KNOWN_SPOT_MAX_AGE_SECONDS = float(
+    os.getenv("MERID_SPOT_MAX_STALENESS_SECONDS", "600")
+)  # default: 10 minutes
+
+
+# ── Module-level safety guards ─────────────────────────────────────────────
+
+
+def _check_smoke_test_live_mode_conflict() -> None:
+    """AUDIT-15: Raise RuntimeError if smoke-test mode is active alongside live flags.
+
+    Checks ``MERID_SMOKE_TEST``, ``MERID_TRADE_MODE``, ``MERID_PM_TRADING_MODE``,
+    and ``MERID_ALLOW_LIVE_TRADES``.
+    """
+    smoke = os.getenv("MERID_SMOKE_TEST", "").lower().strip() in ("1", "true", "yes")
+    if not smoke:
+        return
+    live_flags: list[str] = []
+    trade_mode = os.getenv("MERID_TRADE_MODE", "paper").lower().strip()
+    pm_trading_mode = os.getenv("MERID_PM_TRADING_MODE", "").lower().strip()
+    allow_live = os.getenv("MERID_ALLOW_LIVE_TRADES", "false").lower().strip()
+    if trade_mode == "live":
+        live_flags.append("MERID_TRADE_MODE=live")
+    if pm_trading_mode == "live":
+        live_flags.append("MERID_PM_TRADING_MODE=live")
+    if allow_live in ("1", "true", "yes"):
+        live_flags.append("MERID_ALLOW_LIVE_TRADES=true")
+    if live_flags:
+        raise RuntimeError(
+            "KalshiContinuousTrader: MERID_SMOKE_TEST=true is incompatible with "
+            f"live trading flags: {', '.join(live_flags)}.  "
+            "Either disable smoke-test (MERID_SMOKE_TEST=false) or remove the live "
+            "flags before starting CT in live mode."
+        )
+
+
+def _assert_kalshi_credentials_present() -> None:
+    """AUDIT-14: Fail fast if Kalshi credentials are not configured.
+
+    In live (non-dry-run) mode, at least one of the following must be set:
+    - ``KALSHI_PRIVATE_KEY_PATH`` (path to RSA PEM file)
+    - ``KALSHI_PRIVATE_KEY_PEM`` (raw RSA PEM string)
+    - ``KALSHI_EMAIL`` + ``KALSHI_PASSWORD`` (email/password fallback)
+
+    Raises ``RuntimeError`` with a clear diagnostic if credentials are absent.
+    """
+    has_rsa = bool(
+        os.getenv("KALSHI_PRIVATE_KEY_PATH") or os.getenv("KALSHI_PRIVATE_KEY_PEM")
+    )
+    has_email = bool(os.getenv("KALSHI_EMAIL") and os.getenv("KALSHI_PASSWORD"))
+    if not has_rsa and not has_email:
+        raise RuntimeError(
+            "KalshiContinuousTrader: No Kalshi credentials found.  "
+            "Set KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY_PEM) for RSA auth, "
+            "or KALSHI_EMAIL + KALSHI_PASSWORD for email/password auth.  "
+            "If this is a dry-run or test, set MERID_CT_DRY_RUN=true to bypass "
+            "this check."
+        )
+
+
+def can_trade(*, dry_run: bool = False) -> bool:
+    """AUDIT-14: Return True only if credentials are present (or dry_run is True).
+
+    Convenience guard for callers that want a bool check rather than an exception.
+    """
+    if dry_run:
+        return True
+    try:
+        _assert_kalshi_credentials_present()
+        return True
+    except RuntimeError:
+        return False
+
+
+async def _fetch_spot_prices_with_fallback(
+    assets: tuple,
+    *,
+    http_session: Optional[Any] = None,
+) -> Dict[str, float]:
+    """AUDIT-21: Fetch spot prices with CoinGecko → Coinbase → Binance → last-known fallback.
+
+    Returns a dict mapping asset symbols to USD prices.
+    Assets whose price cannot be fetched (and have no recent last-known value)
+    are omitted from the result.
+
+    Parameters
+    ----------
+    assets:
+        Tuple of asset symbols to fetch (e.g. ``("BTC", "ETH", "SOL")``).
+    http_session:
+        Optional ``aiohttp.ClientSession``; a new one is created if not provided.
+    """
+    import aiohttp
+
+    prices: Dict[str, float] = {}
+    remaining = list(assets)
+
+    async def _fetch(session: aiohttp.ClientSession) -> None:
+        nonlocal remaining
+
+        # ── CoinGecko ──────────────────────────────────────────────────────
+        ids = [_COINGECKO_IDS[a] for a in remaining if a in _COINGECKO_IDS]
+        if ids:
+            try:
+                url = (
+                    "https://api.coingecko.com/api/v3/simple/price"
+                    f"?ids={','.join(ids)}&vs_currencies=usd"
+                )
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        id_to_symbol = {v: k for k, v in _COINGECKO_IDS.items()}
+                        for coin_id, vals in data.items():
+                            sym = id_to_symbol.get(coin_id)
+                            if sym and "usd" in vals:
+                                prices[sym] = float(vals["usd"])
+                        remaining = [a for a in remaining if a not in prices]
+                    else:
+                        logger.warning("CoinGecko returned HTTP %d", resp.status)
+            except Exception as exc:
+                logger.warning("CoinGecko spot fetch failed: %s", exc)
+
+        if not remaining:
+            return
+
+        # ── Coinbase ───────────────────────────────────────────────────────
+        cb_remaining = list(remaining)
+        for sym in list(cb_remaining):
+            try:
+                url = f"https://api.coinbase.com/v2/prices/{sym}-USD/spot"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        amount = data.get("data", {}).get("amount")
+                        if amount:
+                            prices[sym] = float(amount)
+                            remaining = [a for a in remaining if a != sym]
+            except Exception as exc:
+                logger.warning("Coinbase spot fetch failed for %s: %s", sym, exc)
+
+        if not remaining:
+            return
+
+        # ── Binance ────────────────────────────────────────────────────────
+        for sym in list(remaining):
+            try:
+                pair = f"{sym}USDT"
+                url = f"https://api.binance.com/api/v3/ticker/price?symbol={pair}"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        price_str = data.get("price")
+                        if price_str:
+                            prices[sym] = float(price_str)
+                            remaining = [a for a in remaining if a != sym]
+            except Exception as exc:
+                logger.warning("Binance spot fetch failed for %s: %s", sym, exc)
+
+    if http_session is not None:
+        await _fetch(http_session)
+    else:
+        async with aiohttp.ClientSession() as session:
+            await _fetch(session)
+
+    # ── Last-known spot fallback ───────────────────────────────────────────
+    now = time.monotonic()
+    for sym in remaining:
+        if sym in _last_known_spot:
+            age = now - _last_known_spot_ts.get(sym, 0)
+            if age <= _LAST_KNOWN_SPOT_MAX_AGE_SECONDS:
+                logger.warning(
+                    "Using last-known spot for %s (age=%.0fs) — all live feeds failed",
+                    sym, age,
+                )
+                prices[sym] = _last_known_spot[sym]
+            else:
+                logger.warning(
+                    "Dropping %s from spot prices — all feeds failed and "
+                    "last-known spot is too stale (age=%.0fs > %.0fs)",
+                    sym, age, _LAST_KNOWN_SPOT_MAX_AGE_SECONDS,
+                )
+        else:
+            logger.warning(
+                "No spot price available for %s — all feeds failed, no last-known value",
+                sym,
+            )
+
+    # Update last-known cache for successful fetches
+    for sym, price in prices.items():
+        _last_known_spot[sym] = price
+        _last_known_spot_ts[sym] = time.monotonic()
+
+    return prices
+
 
 # ── TradingCandidate (thin subclass of canonical MarketCandidate) ──────────
 
@@ -276,6 +483,7 @@ class KalshiContinuousTrader:
         max_yes_price: float = _DEFAULT_MAX_YES_PRICE,
         kelly_fraction: float = _DEFAULT_KELLY_FRACTION,
         min_edge: float = _DEFAULT_MIN_EDGE,
+        dry_run: bool = False,
     ) -> None:
         self._catalog = catalog or get_market_catalog()
         self._strategy = strategy
@@ -285,6 +493,16 @@ class KalshiContinuousTrader:
         self._max_yes_price = max_yes_price
         self._kelly_fraction = kelly_fraction
         self._min_edge = min_edge
+
+        # AUDIT-14: dry_run flag; when False, credentials are verified before
+        # any live order submission.
+        self._dry_run: bool = dry_run or (
+            os.getenv("MERID_CT_DRY_RUN", "false").lower().strip() in ("1", "true", "yes")
+        )
+
+        # AUDIT-14: Fail fast if live Kalshi credentials are absent and not dry-run.
+        if not self._dry_run:
+            _assert_kalshi_credentials_present()
 
         self._risk = DailyRiskState()
         self._filter_config = MarketFilterConfig(
@@ -333,6 +551,11 @@ class KalshiContinuousTrader:
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        # ── AUDIT-15: smoke-test mode guard ──────────────────────────────────
+        # Reject startup if MERID_SMOKE_TEST=true is set alongside any live-mode
+        # flag.  This prevents accidental live trading during smoke tests.
+        _check_smoke_test_live_mode_conflict()
+
         self._running = True
         logger.info(
             "KalshiContinuousTrader starting — assets=%s timeframes=%s "
@@ -542,8 +765,10 @@ class KalshiContinuousTrader:
     def _get_min_edge(self, candidate: TradingCandidate) -> float:
         """Get the minimum edge threshold for a candidate based on asset and timeframe.
 
-        Looks up the threshold in EDGE_THRESHOLDS using (asset, timeframe) key.
-        Falls back to self._min_edge if no specific threshold is configured.
+        Priority:
+          1. ``KALSHI_CT_MIN_EDGE_{ASSET}_{TF}`` env var override (AUDIT-09).
+          2. Active EDGE_THRESHOLDS grid (profile-selected).
+          3. ``self._min_edge`` global fallback.
 
         Args:
             candidate: The trading candidate to evaluate.
@@ -551,9 +776,20 @@ class KalshiContinuousTrader:
         Returns:
             Minimum edge threshold as a decimal (e.g., 0.03 for 3%).
         """
-        key = (candidate.underlying.upper(), candidate.timeframe.lower())
-        threshold = EDGE_THRESHOLDS.get(key, self._min_edge)
-        return threshold
+        asset = candidate.underlying.upper()
+        tf = candidate.timeframe.lower()
+
+        # AUDIT-09: env-var override takes highest priority
+        env_key = f"KALSHI_CT_MIN_EDGE_{asset}_{tf.upper().replace('-', '_')}"
+        env_raw = os.getenv(env_key)
+        if env_raw is not None:
+            try:
+                return float(env_raw)
+            except ValueError:
+                logger.warning("Invalid %s=%r — using grid value", env_key, env_raw)
+
+        key = (asset, tf)
+        return EDGE_THRESHOLDS.get(key, self._min_edge)
 
     def signal_to_sizing(
         self,

@@ -153,8 +153,7 @@ class TestGroupNotionalCap:
     def _make_trader(self, max_group_notional: float = 50.0) -> KalshiContinuousTrader:
         catalog = MagicMock()
         catalog.get_markets_by_asset.return_value = []
-        return KalshiContinuousTrader(
-            catalog=catalog,
+        return KalshiContinuousTrader(dry_run=True, catalog=catalog,
             max_group_notional=max_group_notional,
         )
 
@@ -253,7 +252,7 @@ class TestConfidenceClamp:
 
         catalog = MagicMock()
         catalog.get_markets_by_asset.return_value = []
-        trader = KalshiContinuousTrader(catalog=catalog, strategy=strategy)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=strategy)
 
         candidate = TradingCandidate.from_candidate(_make_candidate())
         estimate = trader.evaluate_candidate(candidate, market_prob=0.55)
@@ -268,7 +267,7 @@ class TestConfidenceClamp:
 
         catalog = MagicMock()
         catalog.get_markets_by_asset.return_value = []
-        trader = KalshiContinuousTrader(catalog=catalog, strategy=strategy)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=strategy)
 
         candidate = TradingCandidate.from_candidate(_make_candidate())
         estimate = trader.evaluate_candidate(candidate, market_prob=0.55)
@@ -279,7 +278,7 @@ class TestConfidenceClamp:
     def test_no_strategy_returns_none(self) -> None:
         catalog = MagicMock()
         catalog.get_markets_by_asset.return_value = []
-        trader = KalshiContinuousTrader(catalog=catalog, strategy=None)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=None)
 
         candidate = TradingCandidate.from_candidate(_make_candidate())
         assert trader.evaluate_candidate(candidate, market_prob=0.55) is None
@@ -290,7 +289,7 @@ class TestConfidenceClamp:
 class TestTraderStatus:
     def test_status_structure(self) -> None:
         catalog = MagicMock()
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
         s = trader.status()
         assert "running" in s
         assert "candidate_count" in s
@@ -299,8 +298,7 @@ class TestTraderStatus:
 
     def test_status_reflects_config(self) -> None:
         catalog = MagicMock()
-        trader = KalshiContinuousTrader(
-            catalog=catalog,
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog,
             max_group_notional=25.0,
             min_confidence=0.6,
             bankroll_fraction=0.02,
@@ -313,7 +311,7 @@ class TestTraderStatus:
     def test_status_includes_max_yes_price(self) -> None:
         """status() must expose max_yes_price so operators can audit it."""
         catalog = MagicMock()
-        trader = KalshiContinuousTrader(catalog=catalog, max_yes_price=0.40)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, max_yes_price=0.40)
         s = trader.status()
         assert "max_yes_price" in s["config"]
         assert s["config"]["max_yes_price"] == 0.40
@@ -321,14 +319,14 @@ class TestTraderStatus:
     def test_status_includes_filter_key(self) -> None:
         """status() must include a 'filter' key for volume-band telemetry."""
         catalog = MagicMock()
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
         s = trader.status()
         assert "filter" in s
 
     def test_filter_empty_before_first_scan(self) -> None:
         """Before _refresh_candidates() runs, filter telemetry is an empty dict."""
         catalog = MagicMock()
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
         assert trader.status()["filter"] == {}
 
 
@@ -373,7 +371,7 @@ class TestFilterTelemetry:
     def test_filter_key_populated_after_scan(self) -> None:
         """After a scan, status()['filter'] contains the telemetry keys."""
         catalog = _make_catalog_with_volumes([100, 500, 1000])
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
         self._run(trader)
         f = trader.status()["filter"]
         assert "scan_total_input" in f
@@ -385,7 +383,7 @@ class TestFilterTelemetry:
     def test_no_band_rejects_when_filter_disabled(self) -> None:
         """Default filter (band disabled: 0.0/1.0) → zero volume-band rejections."""
         catalog = _make_catalog_with_volumes([10, 500, 1000])
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
         self._run(trader)
         f = trader.status()["filter"]
         assert f["scan_rejected_volume_band"] == 0
@@ -399,7 +397,7 @@ class TestFilterTelemetry:
             [10, 600, 1000],   # rel: 0.01, 0.6, 1.0 → only 0.6 is in [0.4, 0.8]
             asset="BTC", timeframe="15m",
         )
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
         trader._filter_config = MarketFilterConfig(
             allowed_underlyings=["BTC"],
             allowed_timeframes=["15m"],
@@ -418,7 +416,7 @@ class TestFilterTelemetry:
         """volume_band_block_rate_rolling_avg is the mean over past N scans."""
         # Default band (disabled) → block rate always 0.0, so rolling_avg stays 0.0
         catalog = _make_catalog_with_volumes([100, 500, 1000])
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
 
         for _ in range(3):
             self._run(trader)
@@ -432,7 +430,7 @@ class TestFilterTelemetry:
         from merid.trading.kalshi_continuous_trader import _VOLUME_BAND_RATE_HISTORY_MAXLEN
 
         catalog = _make_catalog_with_volumes([100, 500])
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
 
         for _ in range(_VOLUME_BAND_RATE_HISTORY_MAXLEN + 5):
             self._run(trader)
@@ -444,7 +442,7 @@ class TestFilterTelemetry:
         """A scan over a completely empty catalog yields all-zero filter stats."""
         catalog = MagicMock()
         catalog.get_markets_by_asset.return_value = []
-        trader = KalshiContinuousTrader(catalog=catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
 
         self._run(trader)
         f = trader.status()["filter"]
@@ -469,7 +467,7 @@ class TestMaxYesPriceCap:
     def _make_trader(self, max_yes_price: float = 0.50) -> KalshiContinuousTrader:
         catalog = MagicMock()
         catalog.get_markets_by_asset.return_value = []
-        return KalshiContinuousTrader(catalog=catalog, max_yes_price=max_yes_price)
+        return KalshiContinuousTrader(dry_run=True, catalog=catalog, max_yes_price=max_yes_price)
 
     def _strategy_with_yes_signal(self, agent_prob: float = 0.75) -> _FixedStrategy:
         """Return a strategy that signals a YES trade (agent_prob > market prob)."""
