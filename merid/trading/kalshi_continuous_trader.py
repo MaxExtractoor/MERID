@@ -579,6 +579,10 @@ class KalshiContinuousTrader:
         # Balance snapshot (cents) captured on the first check_bankroll_invariant()
         # call each session.  Used as the baseline for measuring actual PnL.
         self._session_start_balance_cents: Optional[int] = None
+        # Canonical bankroll snapshot (cash + portfolio mark - fees) captured on the
+        # first invariant check. This is the authoritative baseline for comparing
+        # snapshot bankroll vs internally-accounted realized PnL.
+        self._session_start_bankroll_cents: Optional[int] = None
         # Result from the most recent check_bankroll_invariant() call.
         # Empty dict until the first cycle that supplies balance/portfolio data.
         self._last_invariant_status: Dict[str, Any] = {}
@@ -1377,18 +1381,22 @@ class KalshiContinuousTrader:
         balance_cents: int,
         portfolio_cents: int,
         *,
+        fee_cents: int = 0,
         epsilon_cents: int = 500,
     ) -> dict:
         """Check the CT bankroll invariant and return a status dict.
 
         Formula::
 
-            actual_pnl   = (balance_cents - session_start_balance_cents) + portfolio_cents
-            expected_pnl = _total_pnl_cents
-            delta        = actual_pnl - expected_pnl
+            actual_bankroll   = balance_cents + portfolio_cents - fee_cents
+            expected_bankroll = session_start_bankroll_cents + _total_pnl_cents
+            delta             = actual_bankroll - expected_bankroll
 
         ``balance_cents`` is the Kalshi cash balance; ``portfolio_cents`` is the
-        current mark-to-market value of open positions.
+        current mark-to-market value of open positions.  Both the actual and
+        expected sides use the **same bankroll definition** (cash + portfolio
+        mark, net of fees) to avoid comparing incompatible notions such as
+        ``cash + exposure`` vs ``cash + portfolio``.
 
         The invariant is **WARNING-only** until settlement wiring has been
         validated in live trading and deltas are consistently within epsilon.
@@ -1398,41 +1406,55 @@ class KalshiContinuousTrader:
         Args:
             balance_cents:  Kalshi cash balance in cents (from REST balance endpoint).
             portfolio_cents: Mark-to-market value of open CT positions in cents.
+            fee_cents:       Fees already paid/charged against the snapshot bankroll.
             epsilon_cents:   Tolerance in cents before escalating to WARN (default 500¢ = $5).
 
         Returns:
             dict with keys: ``status`` ("ok" | "warn"), ``delta_cents``,
-            and on WARN: ``actual_pnl_cents``, ``expected_pnl_cents``.
+            and on WARN: ``actual_bankroll_cents``, ``expected_bankroll_cents``.
         """
+        snapshot_bankroll_cents = balance_cents + portfolio_cents - fee_cents
         if self._session_start_balance_cents is None:
             self._session_start_balance_cents = balance_cents
+        if self._session_start_bankroll_cents is None:
+            self._session_start_bankroll_cents = snapshot_bankroll_cents
             logger.info(
-                "CT bankroll: session start balance recorded as %d¢ ($%.2f)",
+                "CT bankroll: session start recorded balance=%d¢ portfolio=%d¢ fees=%d¢ bankroll=%d¢ ($%.2f)",
                 balance_cents,
-                balance_cents / 100.0,
+                portfolio_cents,
+                fee_cents,
+                snapshot_bankroll_cents,
+                snapshot_bankroll_cents / 100.0,
             )
 
-        actual_pnl = (balance_cents - self._session_start_balance_cents) + portfolio_cents
-        delta = actual_pnl - self._total_pnl_cents
+        expected_bankroll_cents = self._session_start_bankroll_cents + self._total_pnl_cents
+        delta = snapshot_bankroll_cents - expected_bankroll_cents
 
         if abs(delta) <= epsilon_cents:
-            result: Dict[str, Any] = {"status": "ok", "delta_cents": delta}
+            result: Dict[str, Any] = {
+                "status": "ok",
+                "delta_cents": delta,
+                "actual_bankroll_cents": snapshot_bankroll_cents,
+                "expected_bankroll_cents": expected_bankroll_cents,
+            }
         else:
             logger.warning(
-                "CT bankroll invariant WARN: delta=%d¢ actual_pnl=%d¢ expected_pnl=%d¢ "
-                "(balance=%d¢ start=%d¢ portfolio=%d¢)",
+                "CT bankroll invariant WARN: delta=%d¢ actual_bankroll=%d¢ expected_bankroll=%d¢ "
+                "(balance=%d¢ portfolio=%d¢ fees=%d¢ start_bankroll=%d¢ realized_pnl=%d¢)",
                 delta,
-                actual_pnl,
-                self._total_pnl_cents,
+                snapshot_bankroll_cents,
+                expected_bankroll_cents,
                 balance_cents,
-                self._session_start_balance_cents,
                 portfolio_cents,
+                fee_cents,
+                self._session_start_bankroll_cents,
+                self._total_pnl_cents,
             )
             result = {
                 "status": "warn",
                 "delta_cents": delta,
-                "actual_pnl_cents": actual_pnl,
-                "expected_pnl_cents": self._total_pnl_cents,
+                "actual_bankroll_cents": snapshot_bankroll_cents,
+                "expected_bankroll_cents": expected_bankroll_cents,
             }
 
         self._last_invariant_status = result
@@ -1522,6 +1544,7 @@ class KalshiContinuousTrader:
                 "total_pnl_cents": self._total_pnl_cents,
                 "total_pnl_usd": round(self._total_pnl_cents / 100.0, 4),
                 "session_start_balance_cents": self._session_start_balance_cents,
+                "session_start_bankroll_cents": self._session_start_bankroll_cents,
                 "last_invariant": dict(self._last_invariant_status),
             },
         }
