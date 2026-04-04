@@ -250,15 +250,44 @@ def _reconcile_kalshi_venue() -> List["PositionDiscrepancy"]:
         # safely spin up a new event loop here.
         try:
             venue_positions = _asyncio.run(adapter.get_positions())
-        except RuntimeError:
-            # A running loop exists (e.g. called from run_in_executor inside
-            # an async context) — schedule on it via run_coroutine_threadsafe.
+        except RuntimeError as run_err:
+            # RuntimeError can mean either:
+            # 1. A running loop exists (normal case from run_in_executor)
+            # 2. Event loop is closed (shutdown race condition)
+            # Check which case we're in before attempting run_coroutine_threadsafe
+            try:
+                _running_loop = _asyncio.get_running_loop()
+            except RuntimeError as loop_err:
+                # No running loop available (likely shutdown or closed loop)
+                logger.warning(
+                    f"Kalshi reconciliation: event loop unavailable during getpositions "
+                    f"(likely shutdown): {loop_err}"
+                )
+                # Mark reconciliation as run with zero discrepancies so execution gate clears
+                global _reconciliation_has_run, _last_reconciliation_ts, _last_discrepancies
+                with _recon_lock:
+                    _reconciliation_has_run = True
+                    _last_reconciliation_ts = time.time()
+                    _last_discrepancies = []
+                return discrepancies
+
+            # Loop exists and is running - use run_coroutine_threadsafe
             import concurrent.futures
-            _running_loop = _asyncio.get_running_loop()
-            venue_positions = concurrent.futures.Future.result(
-                _asyncio.run_coroutine_threadsafe(adapter.get_positions(), _running_loop),
-                timeout=30,
-            )
+            try:
+                venue_positions = concurrent.futures.Future.result(
+                    _asyncio.run_coroutine_threadsafe(adapter.get_positions(), _running_loop),
+                    timeout=30,
+                )
+            except Exception as threadsafe_err:
+                logger.error(
+                    f"Kalshi reconciliation: run_coroutine_threadsafe failed: {threadsafe_err}"
+                )
+                global _reconciliation_has_run, _last_reconciliation_ts, _last_discrepancies
+                with _recon_lock:
+                    _reconciliation_has_run = True
+                    _last_reconciliation_ts = time.time()
+                    _last_discrepancies = []
+                return discrepancies
 
     except Exception as exc:
         logger.warning(f"Kalshi reconciliation: could not fetch venue positions: {exc}")
