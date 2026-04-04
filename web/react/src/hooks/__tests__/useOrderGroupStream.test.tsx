@@ -37,10 +37,14 @@ class MockEventSource {
     _options?: boolean | AddEventListenerOptions,
   ): void;
   addEventListener(type?: string, listener?: EventListenerOrEventListenerObject): void {
-    if (!type || !listener || typeof listener !== 'function') {
+    if (!type || !listener) {
       return;
     }
-    this.listeners[type] = [...(this.listeners[type] ?? []), listener];
+    const normalizedListener =
+      typeof listener === 'function'
+        ? listener
+        : (event: Event | MessageEvent) => listener.handleEvent(event);
+    this.listeners[type] = [...(this.listeners[type] ?? []), normalizedListener];
   }
   removeEventListener(
     type: string,
@@ -48,10 +52,14 @@ class MockEventSource {
     _options?: boolean | EventListenerOptions,
   ): void;
   removeEventListener(type?: string, listener?: EventListenerOrEventListenerObject): void {
-    if (!type || !listener || typeof listener !== 'function') {
+    if (!type || !listener) {
       return;
     }
-    this.listeners[type] = (this.listeners[type] ?? []).filter((registered) => registered !== listener);
+    const normalizedListener =
+      typeof listener === 'function'
+        ? listener
+        : (event: Event | MessageEvent) => listener.handleEvent(event);
+    this.listeners[type] = (this.listeners[type] ?? []).filter((registered) => registered !== normalizedListener);
   }
   dispatchEvent(event: Event): boolean {
     void event;
