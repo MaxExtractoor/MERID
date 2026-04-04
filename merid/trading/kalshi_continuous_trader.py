@@ -577,16 +577,16 @@ class KalshiContinuousTrader:
         self._candidates: List[TradingCandidate] = []
 
         # ── Strategy config for post-enrichment price-band gate ─────────────
-        # Lazily loaded once at init; if the import fails (e.g., missing dep),
+        # Loaded once at init; if the import fails (e.g., missing dep),
         # the gate is disabled for the lifetime of this trader instance.
         self._strat_cfg = None
         try:
             from merid.event_venues.kalshi.crypto_kalshi_risk import CryptoKalshiStrategyConfig
             self._strat_cfg = CryptoKalshiStrategyConfig()
-        except Exception as _sce:
-            logger.debug(
-                "CryptoKalshiStrategyConfig unavailable; post-enrichment "
-                "price-band gate disabled: %s", _sce,
+        except ImportError as _sce:
+            logger.warning(
+                "CryptoKalshiStrategyConfig could not be imported; post-enrichment "
+                "price-band gate will be disabled: %s", _sce,
             )
 
         # ── Filter telemetry ────────────────────────────────────────────────
