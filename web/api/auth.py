@@ -2,10 +2,17 @@
 Authentication API Endpoints.
 
 Provides user registration, login, and session management.
+
+AUDIT-19: 401 responses include an ``expired`` boolean so the frontend
+can distinguish an expired session (→ "Session expired, please log in
+again") from a missing / malformed token (→ generic auth error).
+A ``POST /api/v1/auth/session/refresh`` endpoint allows the frontend to
+extend a valid session near its expiry without forcing a full re-login.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Header, Response
@@ -20,6 +27,10 @@ logger = get_logger("web.api.auth")
 
 # Ensure email validation stack is available early so API fails fast if missing.
 require_dependency("email_validator", feature="Email authentication")
+
+# AUDIT-19: Window in which a session is considered "near expiry" and the
+# client is advised to refresh (default: 1 hour before expiry).
+_SESSION_REFRESH_WINDOW_SECONDS = 3600
 
 
 class WalletAuthRequest(BaseModel):
@@ -151,20 +162,74 @@ async def login_email(request: EmailAuthRequest):
 async def validate_session(session_id: Optional[str] = Header(None, alias="X-Session-ID")):
     """
     Validate current session.
-    
+
     Returns user information if session is valid.
+
+    AUDIT-19: When the session exists but has expired the response includes
+    ``"expired": true`` so the frontend can show a targeted "Session expired,
+    please log in again" message instead of a generic error.  The ``near_expiry``
+    flag hints that the client should call ``POST /session/refresh`` soon.
     """
     if not session_id:
-        raise HTTPException(status_code=401, detail="No session ID provided")
-    
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "No session ID provided", "expired": False},
+        )
+
+    # Check expiry explicitly so we can set the `expired` flag.
+    raw_session = user_manager._sessions.get(session_id)  # noqa: SLF001
+    if raw_session is not None and not raw_session.is_valid():
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "Session expired. Please log in again.", "expired": True},
+        )
+
     user = user_manager.validate_session(session_id)
-    
+
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
-    
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "Invalid or expired session", "expired": False},
+        )
+
+    near_expiry = user_manager.is_session_near_expiry(
+        session_id, window_seconds=_SESSION_REFRESH_WINDOW_SECONDS
+    )
+
     return {
         "status": "valid",
-        "user": user.to_dict()
+        "user": user.to_dict(),
+        "near_expiry": near_expiry,
+    }
+
+
+@router.post("/session/refresh")
+async def refresh_session(session_id: Optional[str] = Header(None, alias="X-Session-ID")):
+    """Extend the lifetime of an existing valid session.
+
+    AUDIT-19: Prevents silent 401 loops by allowing a short-lived token
+    extension near expiry.  The same ``session_id`` token is reused — no
+    re-login is required.
+
+    Returns ``{"status": "refreshed", "expires_at": <unix timestamp>}``.
+    Returns 401 with ``"expired": true`` if the session has already lapsed.
+    """
+    if not session_id:
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "No session ID provided", "expired": False},
+        )
+
+    session = user_manager.refresh_session(session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "Session expired. Please log in again.", "expired": True},
+        )
+
+    return {
+        "status": "refreshed",
+        "expires_at": session.expires_at,
     }
 
 
