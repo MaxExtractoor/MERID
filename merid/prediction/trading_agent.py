@@ -32,10 +32,29 @@ from merid.prediction.strategy import KalshiStrategy, StrategySignal, SignalActi
 from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig, PreTradeCheck
 from merid.event_venues.base import EventMarket
 from merid.event_venues.kalshi.stop_loss import StopLossRules, TrackedPosition
+import os
+
 from utils.logger import get_logger
 
 
 _MAX_LOG_ENTRIES = 200
+
+# ── Swarm degraded-mode limits (AUDIT-10) ────────────────────────────────────
+# When the swarm consensus has been unavailable for longer than _MAX_SOLO_SECONDS
+# the agent is allowed to trade on its own signal without waiting for quorum.
+# _MAX_SOLO_TRADES_DEGRADED caps how many such degraded-mode trades are allowed
+# before the agent pauses and waits for the swarm to recover.
+#
+# Both values are env-overridable so operators can tune per deployment without
+# a code change.
+#   MERID_AGENT_MAX_SOLO_SECONDS   — seconds of swarm silence before solo trading
+#   MERID_AGENT_MAX_SOLO_TRADES    — max consecutive solo trades while degraded
+_MAX_SOLO_SECONDS: float = float(
+    os.getenv("MERID_AGENT_MAX_SOLO_SECONDS", "300")
+)  # default: 5 minutes
+_MAX_SOLO_TRADES_DEGRADED: int = int(
+    os.getenv("MERID_AGENT_MAX_SOLO_TRADES", "3")
+)
 
 
 @dataclass
@@ -119,6 +138,12 @@ class KalshiTradingAgent:
         self._stop_loss = StopLossRules()
         # position_id -> TrackedPosition for open fills awaiting settlement
         self._tracked_positions: Dict[str, TrackedPosition] = {}
+
+        # ── Swarm degraded-mode tracking (AUDIT-10) ──────────────────────────
+        # Timestamp of the last time consensus was successfully obtained.
+        self._last_consensus_at: Optional[float] = None
+        # Count of consecutive solo trades taken while swarm was degraded.
+        self._solo_trades_taken: int = 0
 
     @property
     def agent_id(self) -> str:
@@ -296,10 +321,14 @@ class KalshiTradingAgent:
                 # Only actionable signals go to consensus
                 if signal.action not in (SignalAction.NO_ACTION, SignalAction.HOLD):
                     self._submit_to_consensus(market, signal, snapshot, mood_context)
-                    
+
                     # Check if we have consensus before acting
                     consensus = self._get_consensus(asset, timeframe)
                     if consensus and consensus.status.value == "ready":
+                        # Record last successful consensus time for degraded-mode tracking
+                        self._last_consensus_at = time.monotonic()
+                        self._solo_trades_taken = 0  # reset solo counter on swarm recovery
+
                         # Check if consensus direction matches our signal
                         signal_dir = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
                         if consensus.consensus_direction != signal_dir:
@@ -308,11 +337,11 @@ class KalshiTradingAgent:
                                 f"(conf={consensus.consensus_confidence:.2f})"
                             )
                             continue
-                        
+
                         # Use consensus confidence for sizing
                         if signal.edge and hasattr(signal.edge, 'confidence'):
                             signal.edge.confidence = consensus.consensus_confidence
-                        
+
                         self.logger.info(
                             f"Consensus aligned: {consensus.consensus_direction} @ "
                             f"{consensus.consensus_probability:.1%} "
@@ -324,11 +353,42 @@ class KalshiTradingAgent:
                         )
                         continue
                     elif not consensus:
-                        self.logger.info(
-                            "CONSENSUS_STATUS=FORMING market=%s — signal held pending more proposals",
-                            market.market_id,
+                        # ── AUDIT-10: Swarm degraded-mode check ─────────────────
+                        # If the swarm has been silent for longer than _MAX_SOLO_SECONDS
+                        # allow the agent to trade on its own signal, up to
+                        # _MAX_SOLO_TRADES_DEGRADED trades, then pause.
+                        now_mono = time.monotonic()
+                        swarm_silence = (
+                            now_mono - self._last_consensus_at
+                            if self._last_consensus_at is not None
+                            else float("inf")
                         )
-                        continue
+                        if swarm_silence >= _MAX_SOLO_SECONDS:
+                            if self._solo_trades_taken < _MAX_SOLO_TRADES_DEGRADED:
+                                self.logger.warning(
+                                    "DEGRADED_MODE market=%s swarm_silence=%.0fs "
+                                    "solo_trade=%d/%d — proceeding without consensus",
+                                    market.market_id,
+                                    swarm_silence,
+                                    self._solo_trades_taken + 1,
+                                    _MAX_SOLO_TRADES_DEGRADED,
+                                )
+                                # Allow the signal through; increment solo counter
+                                # after a successful order attempt (below)
+                            else:
+                                self.logger.warning(
+                                    "DEGRADED_MODE_PAUSED market=%s — solo trade "
+                                    "limit (%d) reached; waiting for swarm recovery",
+                                    market.market_id,
+                                    _MAX_SOLO_TRADES_DEGRADED,
+                                )
+                                continue
+                        else:
+                            self.logger.info(
+                                "CONSENSUS_STATUS=FORMING market=%s — signal held pending more proposals",
+                                market.market_id,
+                            )
+                            continue
             except Exception as exc:
                 self.logger.warning(f"Error evaluating {market.market_id}: {exc}")
                 continue
@@ -1065,6 +1125,13 @@ class KalshiTradingAgent:
         if result_success:
             self.state.orders_placed += 1
             self.state.orders_this_window += 1
+
+            # Track solo-mode trades (AUDIT-10): increment degraded counter only
+            # when the last consensus was absent (swarm was unavailable).
+            if self._last_consensus_at is None or (
+                time.monotonic() - self._last_consensus_at >= _MAX_SOLO_SECONDS
+            ):
+                self._solo_trades_taken += 1
 
             # Record fill (assume immediate for now in MM/Arb)
             fill_entry = {

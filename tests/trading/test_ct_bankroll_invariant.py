@@ -31,7 +31,7 @@ def ct() -> KalshiContinuousTrader:
         "merid.trading.kalshi_continuous_trader.get_market_catalog",
         return_value=mock_catalog,
     ):
-        trader = KalshiContinuousTrader(catalog=mock_catalog)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=mock_catalog, dry_run=True)
     return trader
 
 

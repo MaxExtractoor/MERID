@@ -70,6 +70,12 @@ class AssetRiskProfile:
     # Max aggregate portfolio risk (of the asset slice) across all open positions.
     max_risk_pct_portfolio: float
 
+    # AUDIT-22: Vol anchor for this asset.
+    # ``None`` means use the asset's own volatility (self-anchor — the preferred default).
+    # Set to ``"BTC"`` only as an explicit fallback if this asset's own vol is unavailable.
+    # Override per-asset via ``KALSHI_CT_VOL_ANCHOR_{ASSET}`` env var.
+    vol_anchor_asset: Optional[str] = None
+
 
 # ── Global risk configuration ─────────────────────────────────────────────
 
@@ -296,6 +302,29 @@ class KalshiCryptoRiskEngine:
     def asset_bankroll(self, total_bankroll: float, asset: str) -> float:
         """Return the bankroll slice allocated to *asset*."""
         return self._risk_cfg.asset_bankroll(total_bankroll, asset)
+
+    # ── Vol anchor helper (AUDIT-22) ──────────────────────────────────────
+
+    def get_vol_anchor(self, asset: str) -> str:
+        """Return the volatility anchor asset for *asset*.
+
+        AUDIT-22: Each asset defaults to its own vol (self-anchor), unless the
+        operator has explicitly set ``KALSHI_CT_VOL_ANCHOR_{ASSET}`` or the
+        asset's ``AssetRiskProfile.vol_anchor_asset`` field.
+
+        Fallback order:
+          1. ``KALSHI_CT_VOL_ANCHOR_{ASSET}`` env var.
+          2. ``AssetRiskProfile.vol_anchor_asset`` (if non-None).
+          3. ``asset`` itself (self-anchor default).
+        """
+        import os
+        env_val = os.getenv(f"KALSHI_CT_VOL_ANCHOR_{asset.upper()}", "").strip().upper()
+        if env_val and env_val in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            return env_val
+        profile = self._risk_cfg.asset_profiles.get(asset.upper())
+        if profile and profile.vol_anchor_asset:
+            return profile.vol_anchor_asset.upper()
+        return asset.upper()
 
     # ── Core sizing ───────────────────────────────────────────────────────
 
