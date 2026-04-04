@@ -111,6 +111,43 @@ def _is_kalshi_demo_mode() -> bool:
         return os.environ.get("KALSHI_USE_DEMO", "false").lower() in ("true", "1", "yes")
 
 
+def _trace_reconciliation_state() -> None:
+    """Log current reconciliation state for debugging.
+
+    Enable with: export MERID_TRACE_RECONCILIATION=1
+    Logs the current reconciliation state (NEVER_RAN, RAN_NO_CRITICAL, RAN_CRITICAL)
+    and whether execution would be blocked.
+    """
+    import os
+    if os.environ.get("MERID_TRACE_RECONCILIATION", "").lower() not in ("1", "true", "yes"):
+        return
+
+    try:
+        from merid.reconciliation import has_ever_run, has_critical_discrepancies, get_last_discrepancies
+
+        if not has_ever_run():
+            state = "NEVER_RAN"
+            blocked = False  # warning only, not critical
+            discrepancy_count = 0
+        elif has_critical_discrepancies():
+            state = "RAN_CRITICAL"
+            blocked = True
+            discrepancies = get_last_discrepancies()
+            discrepancy_count = sum(1 for d in discrepancies if d.severity == "critical")
+        else:
+            state = "RAN_NO_CRITICAL"
+            blocked = False
+            discrepancy_count = 0
+
+        logger.info(
+            "TRACE: Reconciliation state=%s blocked=%s critical_discrepancies=%d",
+            state, blocked, discrepancy_count
+        )
+    except Exception as exc:
+        logger.debug("Reconciliation state trace failed: %s", exc)
+
+
+
 def check_execution_gate() -> ExecutionGateStatus:
     """Run all safety checks and return unified gate status.
 
@@ -119,6 +156,9 @@ def check_execution_gate() -> ExecutionGateStatus:
     """
     reasons: List[BlockReason] = []
     kalshi_demo = _is_kalshi_demo_mode()
+
+    # ── Reconciliation state trace (for debugging) ──────────────────
+    _trace_reconciliation_state()
 
     # ── 1. Kill switch ──────────────────────────────────────────────
     try:

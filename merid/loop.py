@@ -1004,15 +1004,29 @@ class MeridLoop:
             return
 
         # Hard reconciliation gate — refuse to execute if positions are out of sync
+        # Only block on genuine critical discrepancies, not on fresh start (NEVER_RAN)
         try:
-            from merid.reconciliation import has_critical_discrepancies
-            if has_critical_discrepancies():
+            from merid.reconciliation import has_ever_run, has_critical_discrepancies, get_last_discrepancies
+
+            if not has_ever_run():
+                # NEVER_RAN state: reconciliation has never run
+                # Allow execution with warning (don't hard-block on fresh start)
                 logger.warning(
-                    "Execution BLOCKED: critical reconciliation discrepancies detected. "
-                    "Resolve with force_align_from_venue() or fix positions manually."
+                    "Reconciliation has never run (fresh start) — allowing execution. "
+                    "First reconciliation cycle will run shortly."
+                )
+            elif has_critical_discrepancies():
+                # RAN_CRITICAL state: genuine critical discrepancies found
+                discrepancies = get_last_discrepancies()
+                critical_count = sum(1 for d in discrepancies if d.severity == "critical")
+                logger.error(
+                    "Execution BLOCKED: %d critical reconciliation discrepancies detected. "
+                    "Resolve with force_align_from_venue() or fix positions manually.",
+                    critical_count,
                 )
                 summary["actions"].append("execution:blocked_by_reconciliation")
                 return
+            # RAN_NO_CRITICAL state: reconciliation ran clean, execution allowed (no action needed)
         except ImportError:
             pass
 
@@ -1243,25 +1257,30 @@ class MeridLoop:
         try:
             # Run Kalshi reconciliation if prediction domain is active
             if "prediction" in self.config.active_domains:
-                from merid.reconciliation import reconcile_venue, has_critical_discrepancies
-                
+                from merid.reconciliation import reconcile_venue, has_ever_run, has_critical_discrepancies
+
                 # Reconcile Kalshi positions
                 discrepancies = reconcile_venue("kalshi")
-                
+
                 critical_count = sum(1 for d in discrepancies if d.severity == "critical")
                 warning_count = sum(1 for d in discrepancies if d.severity == "warning")
-                
+
                 logger.info(
                     f"Kalshi reconciliation complete: "
                     f"{len(discrepancies)} discrepancies ({critical_count} critical, {warning_count} warnings)"
                 )
-                
+
                 summary["actions"].append(
                     f"kalshi_reconciliation:{len(discrepancies)}total,{critical_count}critical"
                 )
-                
+
                 # Gate execution if critical issues detected
-                if has_critical_discrepancies():
+                # Only block on genuine critical discrepancies, not on fresh start
+                if not has_ever_run():
+                    # NEVER_RAN state: first reconciliation just completed
+                    logger.info("First Kalshi reconciliation complete — execution enabled")
+                elif has_critical_discrepancies():
+                    # RAN_CRITICAL state: genuine critical discrepancies found
                     logger.error(
                         f"CRITICAL reconciliation issues detected for Kalshi. "
                         f"Blocking new executions until resolved."
@@ -1277,6 +1296,7 @@ class MeridLoop:
 
                     summary["actions"].append(f"reconciliation:CRITICAL:blocked_prediction_domain")
                 elif warning_count > 0:
+                    # RAN_NO_CRITICAL with warnings: allow execution but log warnings
                     logger.warning(f"Reconciliation warnings for Kalshi: {warning_count} issues")
                     summary["actions"].append(f"reconciliation:WARNING:{warning_count}issues")
                 else:
