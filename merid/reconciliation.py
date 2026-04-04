@@ -602,16 +602,39 @@ def reconcile_all_venues(venues: Optional[List[str]] = None) -> List[PositionDis
     return all_discrepancies
 
 
+def has_ever_run() -> bool:
+    """Check if reconciliation has ever completed at least once.
+
+    Returns:
+        True if reconciliation has run at least once, False otherwise.
+    """
+    with _recon_lock:
+        return _reconciliation_has_run
+
+
 def has_critical_discrepancies() -> bool:
     """Check if the last reconciliation found any critical discrepancies.
 
     Used as a hard gate before enabling execution.
     Returns True (fail-closed) if no reconciliation has ever completed.
+
+    If reconciliation has never run, logs an explicit WARNING to distinguish
+    from genuine critical discrepancies.
     """
     with _recon_lock:
         if not _reconciliation_has_run:
+            logger.warning(
+                "Reconciliation has NEVER run — blocking execution (fail-closed). "
+                "This is a fresh start or reconciliation disabled. "
+                "Run reconcile_all_venues() to unblock."
+            )
             return True
-        return any(d.severity == "critical" for d in _last_discrepancies)
+        critical_count = sum(1 for d in _last_discrepancies if d.severity == "critical")
+        if critical_count > 0:
+            logger.error(
+                f"Reconciliation found {critical_count} CRITICAL discrepancies — blocking execution"
+            )
+        return critical_count > 0
 
 
 def get_last_reconciliation_ts() -> float:
