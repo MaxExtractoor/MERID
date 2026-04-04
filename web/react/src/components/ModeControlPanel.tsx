@@ -100,7 +100,7 @@ export default function ModeControlPanel() {
   const formatTimeAgo = (ts: string) => {
     if (!ts) return 'unknown';
     const ms = Date.now() - new Date(ts).getTime();
-    if (Number.isNaN(ms) || ms < 0) return 'unknown';
+    if (isNaN(ms) || ms < 0) return 'unknown';
     if (ms < 3600000) return `${Math.floor(ms / 60000)}m ago`;
     if (ms < 86400000) return `${Math.floor(ms / 3600000)}h ago`;
     return `${Math.floor(ms / 86400000)}d ago`;
