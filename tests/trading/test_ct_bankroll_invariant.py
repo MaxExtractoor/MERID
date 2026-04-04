@@ -91,8 +91,8 @@ class TestBankrollInvariant:
 
     def test_ok_within_epsilon(self, ct: KalshiContinuousTrader) -> None:
         # Start balance 10000¢. No settlements. Portfolio has 300¢ open MtM.
-        # actual_pnl = (10000 - 10000) + 300 = 300
-        # expected_pnl = 0
+        # actual_bankroll = 10000 + 300 = 10300
+        # expected_bankroll = 10000 + 0 = 10000
         # delta = 300 → within default epsilon 500¢
         ct.check_bankroll_invariant(balance_cents=10_000, portfolio_cents=0)  # sets start
         result = ct.check_bankroll_invariant(balance_cents=10_000, portfolio_cents=300)
@@ -166,8 +166,8 @@ class TestSettlementScenario:
             balance_cents=start_balance - cost_cents + payout_cents,
             portfolio_cents=0,
         )
-        # actual_pnl = (start - cost + payout) - start + 0 = payout - cost = 500
-        # expected_pnl = 500
+        # actual_bankroll = (start - cost + payout) + 0 = 57900
+        # expected_bankroll = start + 500 = 57900
         # delta = 0 → OK
         assert result["status"] == "ok"
         assert result["delta_cents"] == 0
@@ -188,8 +188,8 @@ class TestSettlementScenario:
             balance_cents=start_balance - cost_cents,
             portfolio_cents=0,
         )
-        # actual_pnl = (start_balance - cost - start_balance) + 0 = -500
-        # expected_pnl = -500
+        # actual_bankroll = (start_balance - cost) + 0 = 56900
+        # expected_bankroll = start_balance + (-500) = 56900
         # delta = 0
         assert result["status"] == "ok"
         assert result["delta_cents"] == 0
@@ -268,8 +268,8 @@ class TestAgentDScenario:
 
         # Race window: Kalshi updated balance (payout arrived) but portfolio
         # entry not yet removed — both balance_cents and portfolio_cents are non-zero
-        # actual_pnl = (10300 - 10000) + 300 = 600
-        # expected_pnl = 300
+        # actual_bankroll = 10300 + 300 = 10600
+        # expected_bankroll = 10000 + 300 = 10300
         # delta = 300 — within epsilon 500¢
         race_result = ct.check_bankroll_invariant(
             balance_cents=start_balance + 300,  # payout arrived
