@@ -1055,6 +1055,31 @@ class KalshiVenueClient(EventVenueClient):
             retries=total_retries,
         )
     
+    async def get_settlements(self, cursor: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+        """Fetch one page of portfolio settlements from Kalshi.
+
+        Used by :class:`~merid.event_venues.kalshi.settlement_poller.KalshiSettlementPoller`
+        to iterate through settled markets with cursor-based pagination.
+
+        Args:
+            cursor: Opaque pagination cursor returned by the previous call.
+            limit:  Maximum number of settlements to return per page.
+
+        Returns:
+            Dict with ``"settlements"`` list and optional ``"cursor"`` key,
+            or an empty dict on failure.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        result = await self._request_with_resilience(
+            "GET", "/portfolio/settlements", params=params, operation_name="get_settlements"
+        )
+        if not result.success or result.data is None:
+            logger.debug("get_settlements: request failed — %s", result.error)
+            return {}
+        return result.data if isinstance(result.data, dict) else {}
+
     async def place_order(self, order: VenueOrder) -> Optional[PlacedOrder]:
         """Place order on Kalshi.
         
