@@ -637,6 +637,21 @@ class KalshiContinuousTrader:
                     logger.debug("ContinuousTrader: no catalog markets for %s %s", asset, tf)
                     continue
 
+                # ── SOL DIAGNOSTIC: Log catalog fetch results for SOL ──────
+                if asset == "SOL":
+                    sample_market_tickers = [
+                        getattr(cm.market, "ticker", "UNKNOWN")
+                        for cm in catalog_markets[:3]
+                    ]
+                    logger.warning(
+                        "SOL CATALOG DEBUG: asset=%s tf=%s | "
+                        "catalog_market_count=%d | "
+                        "sample_tickers=%s",
+                        asset, tf,
+                        len(catalog_markets),
+                        sample_market_tickers,
+                    )
+
                 # Convert catalog → base MarketCandidate list for filter.
                 # Try to extract real bid/ask/mid prices from the EventMarket outcomes
                 # so that the spread filter and CT's signal_to_sizing work with real
@@ -714,6 +729,31 @@ class KalshiContinuousTrader:
                         filter_result.rejected_volume,
                         filter_result.rejected_oi,
                         filter_result.capped_per_asset,
+                    )
+
+                # ── SOL DIAGNOSTIC: Track why SOL shows zero tradeable candidates ──────
+                # Investigation shows SOL is fully wired (all 5 timeframes configured)
+                # but consistently reports "discovered=True candidates=0 tradeable=0".
+                # Log at WARNING level to diagnose filter pipeline behavior for SOL.
+                if asset == "SOL":
+                    # Get sample ticker IDs if any passed filters
+                    sample_tickers = [c.ticker for c in filter_result.candidates[:3]]
+                    logger.warning(
+                        "SOL FILTER DEBUG: asset=%s tf=%s | "
+                        "catalog_raw=%d filter_passed=%d | "
+                        "rejected: vol_band=%d spread=%d dead_zone=%d price=%d distance=%d vol=%d oi=%d | "
+                        "sample_tickers=%s",
+                        asset, tf,
+                        filter_result.total_input,
+                        filter_result.passed,
+                        filter_result.rejected_volume_band,
+                        filter_result.rejected_spread,
+                        filter_result.rejected_edge_deadzone,
+                        filter_result.rejected_price,
+                        filter_result.rejected_distance,
+                        filter_result.rejected_volume,
+                        filter_result.rejected_oi,
+                        sample_tickers if sample_tickers else "NONE",
                     )
 
                 # Accumulate filter telemetry across all (asset, timeframe) loops.
