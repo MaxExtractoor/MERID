@@ -1149,6 +1149,11 @@ class KalshiContinuousTrader:
     ) -> List[Dict[str, Any]]:
         """Run one trade evaluation cycle across all current candidates.
 
+        Cycle skeleton:
+          1. Refresh universe — pull fresh candidates from catalog + filter.
+          2. Evaluate each candidate: edge, Kelly sizing, risk checks, price cap.
+          3. Return approved intent dicts (caller submits orders).
+
         For each candidate:
           1. Enrich with spot price (if available).
           2. Compute edge and Kelly sizing via ``signal_to_sizing``.
@@ -1158,6 +1163,11 @@ class KalshiContinuousTrader:
 
         Returns list of approved intent dicts (does NOT submit orders).
         """
+        # Step 1: refresh universe — build candidates via catalog + filter pipeline.
+        # This must run every cycle so that newly-listed markets are discovered and
+        # expired / illiquid markets are dropped without restarting the trader.
+        await self._refresh_candidates()
+
         intents = []
         candidates_seen = 0
         markets_with_any_edge = 0
