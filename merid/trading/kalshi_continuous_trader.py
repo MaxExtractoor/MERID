@@ -22,6 +22,7 @@ Key invariants:
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import time
@@ -1184,6 +1185,27 @@ class KalshiContinuousTrader:
                 candidate.spot_price = spot_prices.get(candidate.underlying)
 
             mid_prob = candidate.mid_price_cents / 100.0 if candidate.mid_price_cents else 0.5
+
+            # Per-candidate diagnostic logging for BTC to trace price_band filter issues
+            # Logs key metrics before evaluation so we can see what's being filtered out
+            if candidate.underlying == "BTC" and logger.isEnabledFor(logging.DEBUG):
+                # Compute distance from spot if possible
+                dist_pct = None
+                if candidate.strike_price and candidate.spot_price and candidate.spot_price > 0:
+                    dist_pct = abs(candidate.strike_price - candidate.spot_price) / candidate.spot_price * 100.0
+
+                logger.debug(
+                    "[CT-PRE-EVAL] ticker=%s asset=%s tf=%s strike=%s spot=%s dist_pct=%s "
+                    "mid=%dc (%.3f prob) bid=%dc ask=%dc vol=%d oi=%d",
+                    candidate.ticker, candidate.underlying, candidate.timeframe,
+                    f"{candidate.strike_price:.2f}" if candidate.strike_price else "n/a",
+                    f"{candidate.spot_price:.2f}" if candidate.spot_price else "n/a",
+                    f"{dist_pct:.2f}%" if dist_pct is not None else "n/a",
+                    candidate.mid_price_cents, mid_prob,
+                    candidate.best_bid_cents, candidate.best_ask_cents,
+                    candidate.volume, candidate.open_interest,
+                )
+
             estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
 
             veto_reason = None
