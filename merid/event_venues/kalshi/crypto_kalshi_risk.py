@@ -520,11 +520,19 @@ class KalshiCryptoRiskEngine:
         # Price band filter
         low, high = profile.allowed_price_band
         if not (low <= price <= high):
+            logger.info(
+                "[STRAT-FILTER] %s %s: price=%.3f band=(%.2f, %.2f) result=REJECT_PRICE_BAND",
+                asset, timeframe, price, low, high,
+            )
             return False, "price_band_violation"
 
         # Edge filter (basis points) — must strictly exceed the minimum.
         edge_bp = (model_probability - market_probability) * 10_000
         if edge_bp <= profile.min_expected_edge_bp:
+            logger.info(
+                "[STRAT-FILTER] %s %s: edge_bp=%.1f min_edge_bp=%.1f result=REJECT_INSUFFICIENT_EDGE",
+                asset, timeframe, edge_bp, profile.min_expected_edge_bp,
+            )
             return False, "insufficient_edge"
 
         # Daily trade limit
@@ -535,6 +543,10 @@ class KalshiCryptoRiskEngine:
         if current_open_positions >= profile.max_open_positions:
             return False, "max_open_positions_reached"
 
+        logger.info(
+            "[STRAT-FILTER] %s %s: price=%.3f band=(%.2f,%.2f) edge_bp=%.1f result=PASS",
+            asset, timeframe, price, low, high, edge_bp,
+        )
         return True, "OK"
 
     # ── Helpers ───────────────────────────────────────────────────────────
