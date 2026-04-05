@@ -504,6 +504,8 @@ class KalshiContinuousTrader:
         max_candidates_per_asset: int = _DEFAULT_MAX_CANDIDATES_PER_ASSET,
         max_spread_cents: int = _DEFAULT_MAX_SPREAD_CENTS,
         min_volume: int = _DEFAULT_MIN_VOLUME,
+        min_price_cents: Optional[int] = None,
+        max_price_cents: Optional[int] = None,
         max_position_contracts: int = _DEFAULT_MAX_POSITION_CONTRACTS,
         exposure_multiplier: float = _DEFAULT_EXPOSURE_MULTIPLIER,
         per_asset_cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS,
@@ -520,10 +522,25 @@ class KalshiContinuousTrader:
         self._max_candidates_per_asset = max_candidates_per_asset
         self._max_spread_cents = max_spread_cents
         self._min_volume = min_volume
+        self._min_price_cents = (
+            int(os.getenv("MERID_CT_MIN_PRICE_CENTS", "2"))
+            if min_price_cents is None
+            else int(min_price_cents)
+        )
+        self._max_price_cents = (
+            int(os.getenv("MERID_CT_MAX_PRICE_CENTS", "98"))
+            if max_price_cents is None
+            else int(max_price_cents)
+        )
         self._max_position_contracts = max_position_contracts
         self._exposure_multiplier = exposure_multiplier
         self._per_asset_cooldown_seconds = per_asset_cooldown_seconds
         self._last_trade_ts: Dict[str, float] = {}  # asset → last trade timestamp
+
+        if not 0 <= self._min_price_cents < self._max_price_cents <= 99:
+            raise ValueError(
+                "CT price band must satisfy 0 <= min_price_cents < max_price_cents <= 99"
+            )
 
         # AUDIT-14: dry_run flag; when False, credentials are verified before
         # any live order submission.
@@ -549,6 +566,9 @@ class KalshiContinuousTrader:
             max_candidates_per_asset=self._max_candidates_per_asset,
             max_spread_cents=self._max_spread_cents,
             min_volume=self._min_volume,
+            # Keep the prefilter broad and let max_yes_price enforce execution-side caps.
+            min_price_cents=self._min_price_cents,
+            max_price_cents=self._max_price_cents,
         )
         self._filter = MarketFilter(self._filter_config)
 
@@ -598,9 +618,11 @@ class KalshiContinuousTrader:
         self._running = True
         logger.info(
             "KalshiContinuousTrader starting — assets=%s timeframes=%s "
-            "max_yes_price=%.2f min_confidence=%.2f bankroll_fraction=%.4f",
+            "max_yes_price=%.2f min_confidence=%.2f bankroll_fraction=%.4f "
+            "prefilter_price_band=%d-%d¢",
             _CRYPTO_ASSETS, _CRYPTO_TIMEFRAMES,
             self._max_yes_price, self._min_confidence, self._bankroll_fraction,
+            self._min_price_cents, self._max_price_cents,
         )
         await self._refresh_candidates()
 
@@ -704,6 +726,34 @@ class KalshiContinuousTrader:
                     )
 
                 filter_result = self._filter.filter_markets(raw_candidates)
+                if filter_result.rejected_price > 0:
+                    priced_candidates = [c for c in raw_candidates if c.mid_price_cents > 0]
+                    price_reject_samples: List[str] = []
+                    for candidate in priced_candidates:
+                        passed, reason = self._filter.evaluate(candidate)
+                        if passed or not reason.startswith("price "):
+                            continue
+                        price_reject_samples.append(
+                            f"{candidate.ticker}(bid={candidate.best_bid_cents}¢ "
+                            f"ask={candidate.best_ask_cents}¢ mid={candidate.mid_price_cents}¢)"
+                        )
+                        if len(price_reject_samples) >= 5:
+                            break
+                    if priced_candidates:
+                        mid_prices = [c.mid_price_cents for c in priced_candidates]
+                        logger.warning(
+                            "ContinuousTrader price-band rejects %s %s: band=%d-%d¢ "
+                            "priced=%d rejected=%d mid_range=%d-%d¢ samples=%s",
+                            asset,
+                            tf,
+                            self._min_price_cents,
+                            self._max_price_cents,
+                            len(priced_candidates),
+                            filter_result.rejected_price,
+                            min(mid_prices),
+                            max(mid_prices),
+                            price_reject_samples or ["none"],
+                        )
                 for c in filter_result.candidates:
                     new_candidates.append(
                         TradingCandidate.from_candidate(c)

@@ -399,12 +399,20 @@ class MarketFilter:
         spot_band = get_spot_band(market.underlying, market.timeframe, default=cfg.spot_band_pct)
         if spot_band > 0:
             dist = market.distance_from_spot_pct
-            # Reject if spot_price is missing when distance check is enabled
+            # dist is None when strike_price or spot_price is missing.
+            # If strike_price is missing we cannot compute distance, so pass the
+            # candidate through (the Kelly/edge layer will handle it later).
+            # Only hard-reject when we have a strike but no spot price, because
+            # that means our spot feed is broken and we shouldn't trade.
             if dist is None:
-                return False, (
-                    f"spot_price missing but distance check enabled (±{spot_band:.1f}% band)"
-                )
-            if dist > spot_band:
+                if market.strike_price is not None and (
+                    market.spot_price is None or market.spot_price <= 0
+                ):
+                    return False, (
+                        f"spot_price missing but distance check enabled (±{spot_band:.1f}% band)"
+                    )
+                # strike_price is None — skip distance check, let candidate through
+            elif dist > spot_band:
                 return False, (
                     f"distance {dist:.1f}% from spot exceeds band ±{spot_band:.1f}%"
                 )
