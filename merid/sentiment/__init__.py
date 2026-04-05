@@ -14,14 +14,18 @@ Main exports:
 
 Usage:
     from merid.sentiment import combine_sentiment, quick_signal
-    
+
     # Get unified SentimentBundle
     bundle = combine_sentiment("BTC")
     print(f"BTC: {bundle.combined:+.2f} ({bundle.vader_signal})")
-    
+
     # Quick VADER signal
     signal = quick_signal(0.35)  # Returns "bullish"
 """
+
+from utils.logger import get_logger
+
+logger = get_logger("merid.sentiment")
 
 from merid.sentiment.twitter_fetcher import (
     TwitterSentimentService,

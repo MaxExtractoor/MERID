@@ -105,6 +105,33 @@ class TestMinVolumeWiring:
         assert ct._filter_config.min_volume == 50
 
 
+# ── Price-band wiring ───────────────────────────────────────────────────────────
+
+class TestPriceBandWiring:
+    def test_filter_config_inherits_explicit_price_band(self):
+        ct = _make_ct(min_price_cents=4, max_price_cents=88)
+        assert ct._filter_config.min_price_cents == 4
+        assert ct._filter_config.max_price_cents == 88
+
+    def test_default_price_band_is_relaxed_for_ct(self, monkeypatch):
+        monkeypatch.delenv("MERID_CT_MIN_PRICE_CENTS", raising=False)
+        monkeypatch.delenv("MERID_CT_MAX_PRICE_CENTS", raising=False)
+        ct = _make_ct()
+        assert ct._filter_config.min_price_cents == 2
+        assert ct._filter_config.max_price_cents == 98
+
+    def test_env_price_band_overrides_are_respected(self, monkeypatch):
+        monkeypatch.setenv("MERID_CT_MIN_PRICE_CENTS", "6")
+        monkeypatch.setenv("MERID_CT_MAX_PRICE_CENTS", "72")
+        ct = _make_ct()
+        assert ct._filter_config.min_price_cents == 6
+        assert ct._filter_config.max_price_cents == 72
+
+    def test_invalid_price_band_raises(self):
+        with pytest.raises(ValueError, match="CT price band"):
+            _make_ct(min_price_cents=80, max_price_cents=70)
+
+
 # ── AUDIT-06 / 07: contracts cap + exposure multiplier ───────────────────────
 
 class TestContractsCap:
