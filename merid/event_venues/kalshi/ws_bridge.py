@@ -436,6 +436,15 @@ class KalshiWebSocketBridge:
                 except Exception as _exc:
                     logger.debug(f"WS trade → record_close error (ignored): {_exc}")
 
+                # Record fee in ContinuousTrader for bankroll invariant tracking
+                try:
+                    from merid.trading.kalshi_continuous_trader import get_continuous_trader
+                    ct = get_continuous_trader()
+                    if ct:
+                        ct.record_fee(fee_cents)
+                except Exception as _exc:
+                    logger.debug(f"WS trade → CT fee recording error (ignored): {_exc}")
+
             elif isinstance(event, dict) and event.get("type") in (
                 "orderbook_snapshot", "orderbook_delta",
             ):
