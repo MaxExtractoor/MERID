@@ -527,3 +527,69 @@ async def get_event_loop_profiles_summary() -> dict:
             "timestamp": time.time(),
         }
 
+
+@router.get("/health/settlement_poller")
+async def get_settlement_poller_health() -> dict:
+    """KalshiSettlementPoller health check and status.
+
+    Returns:
+        - status: running, stopped, or not_configured
+        - running: boolean indicating if the poll loop is active
+        - poll_count: number of polls executed since start
+        - settlement_count: number of settlements processed
+        - last_cursor: most recent cursor value
+        - seen_ids_count: number of settlement IDs in deduplication cache
+        - cursor_history_len: number of cursor checkpoints saved
+        - timestamp: current server time
+    """
+    try:
+        from merid.event_venues.kalshi.settlement_poller import get_settlement_poller
+
+        # Try to get the singleton poller instance
+        try:
+            poller = get_settlement_poller(client=None)
+        except Exception as e:
+            # If getting the poller fails, it's likely not configured
+            return {
+                "status": "not_configured",
+                "error": str(e),
+                "timestamp": time.time(),
+            }
+
+        # Get status from the poller
+        poller_status = poller.status()
+
+        # Determine overall health status
+        is_running = poller_status.get("running", False)
+        poll_count = poller_status.get("poll_count", 0)
+        settlement_count = poller_status.get("settlement_count", 0)
+
+        # Interpret status
+        if is_running:
+            status = "running"
+            health = "healthy"
+        else:
+            status = "stopped"
+            health = "inactive"
+
+        return {
+            "status": status,
+            "health": health,
+            "running": is_running,
+            "poll_count": poll_count,
+            "settlement_count": settlement_count,
+            "last_cursor": poller_status.get("last_cursor"),
+            "seen_ids_count": poller_status.get("seen_ids_count", 0),
+            "cursor_history_len": poller_status.get("cursor_history_len", 0),
+            "timestamp": time.time(),
+        }
+    except Exception as exc:
+        logger.error(f"Failed to check settlement poller health: {exc}")
+        return {
+            "status": "error",
+            "health": "unknown",
+            "error": str(exc),
+            "timestamp": time.time(),
+        }
+
+
