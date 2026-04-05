@@ -48,6 +48,24 @@ async def get_global_health(request: Request) -> dict:
         logger.debug(f"Event loop monitor check failed: {exc}")
         event_loop_status = "unknown"
 
+    # Check settlement poller
+    settlement_poller_status = "unknown"
+    settlement_poller_running = False
+    settlement_poller_info = {}
+    try:
+        from merid.event_venues.kalshi.settlement_poller import get_settlement_poller
+        poller = get_settlement_poller(client=None)
+        poller_status = poller.status()
+        settlement_poller_running = poller_status.get("running", False)
+        settlement_poller_status = "running" if settlement_poller_running else "stopped"
+        settlement_poller_info = {
+            "poll_count": poller_status.get("poll_count", 0),
+            "settlement_count": poller_status.get("settlement_count", 0),
+        }
+    except Exception as exc:
+        logger.debug(f"Settlement poller check failed: {exc}")
+        settlement_poller_status = "not_configured"
+
     return {
         "status": "degraded" if event_loop_degraded else "healthy",
         "timestamp": int(time.time()),
@@ -62,6 +80,11 @@ async def get_global_health(request: Request) -> dict:
                 "max_lag_ms": event_loop_metrics.get("max_ms", 0.0),
                 "samples_above_warn": event_loop_metrics.get("samples_above_warn", 0),
                 "samples_above_crit": event_loop_metrics.get("samples_above_crit", 0),
+            },
+            "settlement_poller": {
+                "status": settlement_poller_status,
+                "running": settlement_poller_running,
+                **settlement_poller_info,
             },
             "price_feed": {
                 "status": "healthy",
