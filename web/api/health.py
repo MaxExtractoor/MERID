@@ -48,6 +48,24 @@ async def get_global_health(request: Request) -> dict:
         logger.debug(f"Event loop monitor check failed: {exc}")
         event_loop_status = "unknown"
 
+    # Check settlement poller
+    settlement_poller_status = "unknown"
+    settlement_poller_running = False
+    settlement_poller_info = {}
+    try:
+        from merid.event_venues.kalshi.settlement_poller import get_settlement_poller
+        poller = get_settlement_poller(client=None)
+        poller_status = poller.status()
+        settlement_poller_running = poller_status.get("running", False)
+        settlement_poller_status = "running" if settlement_poller_running else "stopped"
+        settlement_poller_info = {
+            "poll_count": poller_status.get("poll_count", 0),
+            "settlement_count": poller_status.get("settlement_count", 0),
+        }
+    except Exception as exc:
+        logger.debug(f"Settlement poller check failed: {exc}")
+        settlement_poller_status = "not_configured"
+
     return {
         "status": "degraded" if event_loop_degraded else "healthy",
         "timestamp": int(time.time()),
@@ -62,6 +80,11 @@ async def get_global_health(request: Request) -> dict:
                 "max_lag_ms": event_loop_metrics.get("max_ms", 0.0),
                 "samples_above_warn": event_loop_metrics.get("samples_above_warn", 0),
                 "samples_above_crit": event_loop_metrics.get("samples_above_crit", 0),
+            },
+            "settlement_poller": {
+                "status": settlement_poller_status,
+                "running": settlement_poller_running,
+                **settlement_poller_info,
             },
             "price_feed": {
                 "status": "healthy",
@@ -526,4 +549,70 @@ async def get_event_loop_profiles_summary() -> dict:
             "error": str(exc),
             "timestamp": time.time(),
         }
+
+
+@router.get("/health/settlement_poller")
+async def get_settlement_poller_health() -> dict:
+    """KalshiSettlementPoller health check and status.
+
+    Returns:
+        - status: running, stopped, or not_configured
+        - running: boolean indicating if the poll loop is active
+        - poll_count: number of polls executed since start
+        - settlement_count: number of settlements processed
+        - last_cursor: most recent cursor value
+        - seen_ids_count: number of settlement IDs in deduplication cache
+        - cursor_history_len: number of cursor checkpoints saved
+        - timestamp: current server time
+    """
+    try:
+        from merid.event_venues.kalshi.settlement_poller import get_settlement_poller
+
+        # Try to get the singleton poller instance
+        try:
+            poller = get_settlement_poller(client=None)
+        except Exception as e:
+            # If getting the poller fails, it's likely not configured
+            return {
+                "status": "not_configured",
+                "error": str(e),
+                "timestamp": time.time(),
+            }
+
+        # Get status from the poller
+        poller_status = poller.status()
+
+        # Determine overall health status
+        is_running = poller_status.get("running", False)
+        poll_count = poller_status.get("poll_count", 0)
+        settlement_count = poller_status.get("settlement_count", 0)
+
+        # Interpret status
+        if is_running:
+            status = "running"
+            health = "healthy"
+        else:
+            status = "stopped"
+            health = "inactive"
+
+        return {
+            "status": status,
+            "health": health,
+            "running": is_running,
+            "poll_count": poll_count,
+            "settlement_count": settlement_count,
+            "last_cursor": poller_status.get("last_cursor"),
+            "seen_ids_count": poller_status.get("seen_ids_count", 0),
+            "cursor_history_len": poller_status.get("cursor_history_len", 0),
+            "timestamp": time.time(),
+        }
+    except Exception as exc:
+        logger.error(f"Failed to check settlement poller health: {exc}")
+        return {
+            "status": "error",
+            "health": "unknown",
+            "error": str(exc),
+            "timestamp": time.time(),
+        }
+
 
