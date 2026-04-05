@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
-from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig
+from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig, get_spot_band
 from merid.formulas import generate_correlation_id
 from merid.prediction.opinion_strategy import OpinionStrategy, OpinionEstimate, OpinionExplanation
 from utils.logger import get_logger
@@ -852,6 +852,25 @@ class KalshiContinuousTrader:
                 "Consider lowering min_edge_dead_zone_pct or enriching book prices.",
                 scan_rejected_edge_deadzone,
                 self._filter_config.min_edge_dead_zone_pct,
+            )
+
+        if scan_rejected_distance > 0:
+            # Build a per-(asset, timeframe) spot-band map so operators can see
+            # which specific band thresholds are dropping candidates.
+            band_info = {
+                f"{a}/{tf}": get_spot_band(a, tf, default=self._filter_config.spot_band_pct)
+                for a in _CRYPTO_ASSETS
+                for tf in _CRYPTO_TIMEFRAMES
+            }
+            logger.warning(
+                "ContinuousTrader: %d candidates dropped by distance/edge filters "
+                "(strike too far from spot). "
+                "Default spot_band_pct=%.1f%%. "
+                "Per-(asset/tf) effective bands: %s. "
+                "Consider widening SPOT_BANDS or checking spot-price feed.",
+                scan_rejected_distance,
+                self._filter_config.spot_band_pct,
+                ", ".join(f"{k}=±{v:.1f}%" for k, v in sorted(band_info.items())),
             )
 
         # Log per-asset/timeframe counts at INFO level
