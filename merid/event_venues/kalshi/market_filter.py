@@ -27,6 +27,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -492,26 +493,32 @@ class MarketFilter:
                 # Per-candidate drop-reason diagnostics at DEBUG so each veto is
                 # visible without flooding INFO.  Includes the key metrics that
                 # determine distance/edge eligibility so operators can tell at a
-                # glance whether the thresholds are too tight.
-                dist = market.distance_from_spot_pct
-                spread = market.best_ask_cents - market.best_bid_cents if market.has_book else None
-                logger.debug(
-                    "market_filter drop: ticker=%s underlying=%s tf=%s "
-                    "mid=%dc vol=%d oi=%d spread=%s "
-                    "dist_pct=%s spot=%s strike=%s "
-                    "reason=%r",
-                    market.ticker, market.underlying, market.timeframe,
-                    market.mid_price_cents, market.volume, market.open_interest,
-                    f"{spread}c" if spread is not None else "n/a",
-                    f"{dist:.2f}%" if dist is not None else "n/a",
-                    f"{market.spot_price:.2f}" if market.spot_price else "n/a",
-                    f"{market.strike_price:.2f}" if market.strike_price else "n/a",
-                    reason,
-                )
+                # glance whether the thresholds are too tight.  Guard the
+                # computation behind isEnabledFor to avoid property evaluation
+                # overhead (distance_from_spot_pct, has_book) on every rejection
+                # when DEBUG logging is inactive.
+                if logger.isEnabledFor(logging.DEBUG):
+                    dist = market.distance_from_spot_pct
+                    spread = market.best_ask_cents - market.best_bid_cents if market.has_book else None
+                    logger.debug(
+                        "market_filter drop: ticker=%s underlying=%s tf=%s "
+                        "mid=%dc vol=%d oi=%d spread=%s "
+                        "dist_pct=%s spot=%s strike=%s "
+                        "reason=%r",
+                        market.ticker, market.underlying, market.timeframe,
+                        market.mid_price_cents, market.volume, market.open_interest,
+                        f"{spread}c" if spread is not None else "n/a",
+                        f"{dist:.2f}%" if dist is not None else "n/a",
+                        f"{market.spot_price:.2f}" if market.spot_price else "n/a",
+                        f"{market.strike_price:.2f}" if market.strike_price else "n/a",
+                        reason,
+                    )
 
         # When every input candidate was rejected, emit a WARNING with the active
         # thresholds so operators can diagnose whether distance/edge limits are
         # too tight without having to dig through per-candidate DEBUG lines.
+        # total_input > 0 guards against an empty batch (which is normal and not
+        # worth a warning); passed == 0 means none survived the filter.
         if result.total_input > 0 and result.passed == 0:
             # Build a concise per-asset spot-band map for the warning.
             assets_seen = {m.underlying for m in markets}
