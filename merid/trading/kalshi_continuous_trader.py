@@ -596,6 +596,9 @@ class KalshiContinuousTrader:
         # Updated by record_trade_result() at settlement time via reconciliation.
         # Never updated at fill time — PnL is only realized when a market resolves.
         self._total_pnl_cents: int = 0
+        # Accumulated fees (in cents) charged across all CT orders.
+        # Updated at fill time via record_fee().  Used in bankroll invariant check.
+        self._total_fees_cents: int = 0
         # Balance snapshot (cents) captured on the first check_bankroll_invariant()
         # call each session.  Used as the baseline for measuring actual PnL.
         self._session_start_balance_cents: Optional[int] = None
@@ -1004,6 +1007,26 @@ class KalshiContinuousTrader:
         # Get the appropriate minimum edge threshold for this candidate
         min_edge_threshold = self._get_min_edge(candidate)
 
+        # Fee profitability gate: reject if edge doesn't cover fee impact
+        # Import fee calculation from order router
+        from merid.event_venues.kalshi.order_router import _kalshi_fee_cents
+
+        fee_cents = _kalshi_fee_cents(price_cents, 1)  # Fee for 1 contract
+        fee_impact = fee_cents / payout_cents if payout_cents > 0 else 1.0
+
+        if edge < fee_impact:
+            result = SizingResult(
+                edge=edge, win_prob=win_prob, payout_cents=float(payout_cents),
+                kelly_raw=kelly_raw, source=source,
+            )
+            logger.info(
+                "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f fee=%d¢ fee_impact=%.4f | "
+                "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) source=%s REJECTED (edge < fee_impact)",
+                candidate.ticker, edge, win_prob, float(payout_cents), fee_cents, fee_impact,
+                kelly_raw, 0.0, self._kelly_fraction * 100, source,
+            )
+            return result
+
         # Clamp negative Kelly → no trade; negative edge always skips regardless of magnitude
         if kelly_raw <= 0 or edge < min_edge_threshold:
             result = SizingResult(
@@ -1023,6 +1046,31 @@ class KalshiContinuousTrader:
         notional = bankroll * kelly_frac
         price_dollars = price_cents / 100.0
         size_contracts = int(math.floor(notional / price_dollars))
+
+        # Minimum viable notional check: reject if trade is too small to be profitable
+        # Given typical fees of 2¢ per contract at 50¢ prices, we need at least
+        # ~$1.00 notional (2 contracts) to have any chance of profitability.
+        MIN_VIABLE_NOTIONAL_USD = 1.00
+        if notional < MIN_VIABLE_NOTIONAL_USD or size_contracts == 0:
+            result = SizingResult(
+                edge=edge,
+                win_prob=win_prob,
+                payout_cents=float(payout_cents),
+                kelly_raw=kelly_raw,
+                kelly_frac=kelly_frac,
+                size_contracts=0,  # Force to 0 to signal rejection
+                notional_usd=notional,
+                source=source,
+            )
+            logger.info(
+                "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
+                "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) notional=$%.4f size=%d source=%s "
+                "REJECTED (notional < $%.2f minimum or size=0)",
+                candidate.ticker, edge, win_prob, float(payout_cents),
+                kelly_raw, kelly_frac, self._kelly_fraction * 100,
+                notional, size_contracts, source, MIN_VIABLE_NOTIONAL_USD,
+            )
+            return result
 
         result = SizingResult(
             edge=edge,
@@ -1456,6 +1504,22 @@ class KalshiContinuousTrader:
             self._total_pnl_cents,
         )
 
+    def record_fee(self, fee_cents: int) -> None:
+        """Record fee charged for a CT order fill.
+
+        Must be called at fill time (not settlement time).  This accumulates
+        total fees for the bankroll invariant check.
+
+        Args:
+            fee_cents: Fee amount in cents charged for this fill.
+        """
+        self._total_fees_cents += fee_cents
+        logger.debug(
+            "CT bankroll: fee charged fee_cents=%d cumulative_fees_cents=%d",
+            fee_cents,
+            self._total_fees_cents,
+        )
+
     def check_bankroll_invariant(
         self,
         balance_cents: int,
@@ -1616,6 +1680,7 @@ class KalshiContinuousTrader:
             "last_cycle": dict(self._last_cycle_stats),
             # ── Bankroll invariant state ──────────────────────────────────────
             # total_pnl_cents:              accumulated realized PnL since process start
+            # total_fees_cents:             accumulated fees charged since process start
             # session_start_balance_cents:  Kalshi balance at session open (None until
             #                               first check_bankroll_invariant() call)
             # last_invariant_status:        most recent invariant result dict
@@ -1623,6 +1688,8 @@ class KalshiContinuousTrader:
             "bankroll": {
                 "total_pnl_cents": self._total_pnl_cents,
                 "total_pnl_usd": round(self._total_pnl_cents / 100.0, 4),
+                "total_fees_cents": self._total_fees_cents,
+                "total_fees_usd": round(self._total_fees_cents / 100.0, 4),
                 "session_start_balance_cents": self._session_start_balance_cents,
                 "session_start_bankroll_cents": self._session_start_bankroll_cents,
                 "last_invariant": dict(self._last_invariant_status),

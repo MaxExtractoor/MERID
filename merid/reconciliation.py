@@ -579,6 +579,48 @@ def _fire_settlement_hooks(market_id: str) -> None:
     except Exception as exc:
         logger.debug("CT bankroll settlement hook skipped for %s: %s", market_id, exc)
 
+    # CT bankroll invariant check: verify that our internal accounting matches
+    # the actual Kalshi balance + portfolio after settlement processing.
+    # This runs after settlement hooks to incorporate any just-settled PnL.
+    try:
+        from merid.trading.kalshi_continuous_trader import get_continuous_trader
+        from merid.event_venues.kalshi.client import get_kalshi_client
+
+        ct = get_continuous_trader()
+        if ct is None:
+            return
+
+        client = get_kalshi_client()
+        if client is None:
+            return
+
+        # Fetch current balance and portfolio from Kalshi
+        balance = client.get_balance()
+        portfolio_summary = client.get_portfolio_summary()
+
+        if balance and portfolio_summary:
+            balance_cents = int(balance.get("balance", 0) * 100)
+            # Portfolio market value is mark-to-market valuation of open positions
+            portfolio_cents = int(portfolio_summary.get("market_value", 0) * 100)
+
+            # Run the invariant check with centralized fee accumulator
+            invariant_result = ct.check_bankroll_invariant(
+                balance_cents=balance_cents,
+                portfolio_cents=portfolio_cents,
+                fee_cents=ct._total_fees_cents,  # Use centralized accumulator
+            )
+
+            if invariant_result.get("status") == "warn":
+                logger.warning(
+                    "CT bankroll invariant WARNING after settlement: delta=%d¢ "
+                    "actual=%d¢ expected=%d¢",
+                    invariant_result.get("delta_cents", 0),
+                    invariant_result.get("actual_bankroll_cents", 0),
+                    invariant_result.get("expected_bankroll_cents", 0),
+                )
+    except Exception as exc:
+        logger.debug("CT bankroll invariant check skipped in reconciliation: %s", exc)
+
 
 def reconcile_all_venues(venues: Optional[List[str]] = None) -> List[PositionDiscrepancy]:
     """Reconcile across all configured venues (driven by paper_config matrix)."""
