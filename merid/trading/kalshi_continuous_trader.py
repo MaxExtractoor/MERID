@@ -1351,8 +1351,11 @@ class KalshiContinuousTrader:
                 notional *= self._exposure_multiplier
 
             # AUDIT-06: enforce hard cap on number of contracts.
-            # Use the pre-multiplier sizing.size_contracts as the reference count
-            # for the proportional reduction (the cap is on raw contracts, not scaled).
+            # sizing.size_contracts is the pre-multiplier Kelly count; we use it
+            # only as a reference denominator for the proportional notional reduction.
+            # The cap is applied to the already-multiplied notional (not the raw
+            # Kelly contracts), so the resulting notional stays proportional to
+            # max_position_contracts / kelly_contracts.
             if self._max_position_contracts > 0 and sizing.size_contracts > self._max_position_contracts:
                 logger.debug(
                     "ContinuousTrader: contracts capped %s → %d (MERID_CT_MAX_POSITION_CONTRACTS)",
@@ -1720,7 +1723,12 @@ def get_continuous_trader(
 
     If no strategy is provided, creates a default HashBiasStrategy with
     min_edge=0.005 (0.5%) to align with CT's initial_live edge thresholds.
-    The fee profitability gate will reject trades below breakeven regardless.
+    Note: there is no explicit fee-profitability gate in this module; fee
+    drag is managed entirely through the EDGE_THRESHOLDS grid (0.5–8%
+    depending on profile and asset).  At typical 45–55¢ YES prices, Kalshi
+    fees are ~4–5% of notional, so the ``production`` thresholds (≥2%) are
+    needed for consistent fee profitability.  The ``initial_live`` thresholds
+    (0.5–1.5%) allow intents through for initial validation at micro sizes.
     """
     global _trader
     if _trader is None:

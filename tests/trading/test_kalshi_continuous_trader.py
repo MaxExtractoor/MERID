@@ -981,11 +981,15 @@ class TestExposureMultiplierSizeContracts:
 
         assert len(intents_full) >= 1 and len(intents_half) >= 1
 
-        # size_contracts with 0.5 multiplier should be roughly half of 1.0
-        # (may differ by ±1 due to floor), but must be strictly less than full
-        assert intents_half[0]["size_contracts"] < intents_full[0]["size_contracts"] or (
-            intents_half[0]["notional"] < intents_full[0]["notional"]
-        ), "Halved multiplier must produce smaller size_contracts or smaller notional"
+        # Both notional and size_contracts should be smaller with 0.5 multiplier.
+        # size_contracts may equal (floor) in edge cases with tiny bankrolls, so
+        # check notional strictly and contracts loosely (≤).
+        assert intents_half[0]["notional"] < intents_full[0]["notional"], (
+            "Halved multiplier must produce smaller notional"
+        )
+        assert intents_half[0]["size_contracts"] <= intents_full[0]["size_contracts"], (
+            "Halved multiplier must produce equal or fewer size_contracts"
+        )
 
     async def test_zero_multiplier_gives_zero_size_contracts(self) -> None:
         """exposure_multiplier=0.0 collapses all sizes to zero (no trade)."""
@@ -1011,10 +1015,10 @@ class TestExposureMultiplierSizeContracts:
 
         notional_1x = intents_1x[0]["notional"]
         notional_2x = intents_2x[0]["notional"]
-        # 2× multiplier should produce roughly 2× the notional
-        assert abs(notional_2x / notional_1x - 2.0) < 0.1, (
+        # 2× multiplier should produce roughly 2× the notional (within 5% tolerance)
+        assert abs(notional_2x / notional_1x - 2.0) < 0.05, (
             f"2× multiplier produced notional ratio of {notional_2x / notional_1x:.3f}, "
-            "expected ≈ 2.0"
+            "expected ≈ 2.0 (±5%)"
         )
 
 
