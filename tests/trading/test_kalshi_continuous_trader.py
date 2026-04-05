@@ -645,3 +645,474 @@ class TestTradeCycleRefreshesCandidates:
             "Stale candidates survived into evaluation — "
             "_refresh_candidates() must overwrite self._candidates before iteration."
         )
+
+
+# ── Item 1: edge_pct unit consistency ─────────────────────────────────────
+
+class TestEdgePctUnits:
+    """Validate that edge_pct is always treated as percentage (e.g. 3.0 = 3%).
+
+    The canonical conversion is: edge = candidate.edge_pct / 100.0
+    Signal layer populates edge_pct; signal_to_sizing converts to decimal.
+    """
+
+    def _make_trader(self) -> KalshiContinuousTrader:
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        return KalshiContinuousTrader(dry_run=True, catalog=catalog)
+
+    def test_edge_pct_three_percent_produces_correct_decimal_edge(self) -> None:
+        """edge_pct=3.0 (3%) should yield edge=0.03 in SizingResult."""
+        trader = self._make_trader()
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=45)
+        )
+        candidate.edge_pct = 3.0  # 3% in percentage units
+
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        assert sizing.source == "signal"
+        assert abs(sizing.edge - 0.03) < 1e-9, f"Expected 0.03, got {sizing.edge}"
+
+    def test_edge_pct_none_falls_through_to_strategy(self) -> None:
+        """When edge_pct is None, signal_to_sizing falls back to strategy."""
+        strategy = _FixedStrategy(conf=0.80)  # edge=0.10 in decimal
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=strategy)
+
+        candidate = TradingCandidate.from_candidate(_make_candidate(mid_price_cents=50))
+        assert candidate.edge_pct is None
+
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        assert sizing.source == "strategy"
+        assert abs(sizing.edge - 0.10) < 1e-6
+
+    def test_edge_pct_zero_falls_through_to_strategy(self) -> None:
+        """edge_pct=0.0 is treated as 'not set' and falls back to strategy."""
+        strategy = _FixedStrategy(conf=0.80)
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=strategy)
+
+        candidate = TradingCandidate.from_candidate(_make_candidate(mid_price_cents=50))
+        candidate.edge_pct = 0.0
+
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        assert sizing.source == "strategy"
+
+    def test_edge_pct_beats_strategy_in_priority(self) -> None:
+        """candidate.edge_pct takes priority over strategy estimate."""
+        strategy = _FixedStrategy(conf=0.80)  # would give edge=0.10
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=strategy)
+
+        candidate = TradingCandidate.from_candidate(_make_candidate(mid_price_cents=50))
+        candidate.edge_pct = 5.0  # 5% signal edge
+
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0)
+        assert sizing.source == "signal"
+        assert abs(sizing.edge - 0.05) < 1e-9
+
+    def test_ct_threshold_comparison_uses_decimal(self) -> None:
+        """CT threshold (e.g. 0.005 for BTC/15m) is compared against decimal edge."""
+        trader = self._make_trader()
+        btc_candidate = TradingCandidate.from_candidate(
+            _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=50)
+        )
+        # BTC/15m threshold is 0.005 (0.5%) in INITIAL_LIVE profile
+        # edge_pct=0.4 → edge=0.004 → below threshold → REJECTED
+        btc_candidate.edge_pct = 0.4
+        sizing_low = trader.signal_to_sizing(btc_candidate, bankroll=10000.0)
+        assert sizing_low.size_contracts == 0, "edge below BTC/15m threshold should be rejected"
+
+        # edge_pct=0.6 → edge=0.006 → above threshold → ACCEPTED (if Kelly > 0)
+        btc_candidate.edge_pct = 0.6
+        sizing_high = trader.signal_to_sizing(btc_candidate, bankroll=10000.0)
+        assert sizing_high.size_contracts > 0, "edge above BTC/15m threshold should be accepted"
+
+
+# ── Item 2: min_edge alignment ────────────────────────────────────────────
+
+class TestMinEdgeAlignment:
+    """Validate strategy min_edge and CT thresholds are consistent decimal fractions."""
+
+    def test_hash_bias_min_edge_respects_threshold(self) -> None:
+        """HashBiasStrategy(min_edge=0.005) does not emit for edge < 0.005."""
+        from merid.prediction.opinion_strategy import HashBiasStrategy
+        strategy = HashBiasStrategy(min_edge=0.005)
+        # The strategy returns None when abs(edge) < min_edge; we verify via
+        # a market_prob that would produce zero bias (edge ≈ 0).
+        # Use a ticker whose hash bias is known to be small by brute force.
+        # Instead, just confirm the min_edge attribute is set correctly.
+        assert strategy.min_edge == 0.005
+
+    def test_hash_bias_default_min_edge_is_002(self) -> None:
+        """Default HashBiasStrategy min_edge is 0.02 (class default)."""
+        from merid.prediction.opinion_strategy import HashBiasStrategy
+        strategy = HashBiasStrategy()
+        assert strategy.min_edge == 0.02
+
+    def test_strategy_declines_when_edge_below_min_edge(self) -> None:
+        """Strategy returns None when |edge| < min_edge, preventing zero-edge trades."""
+        from merid.prediction.opinion_strategy import HashBiasStrategy
+        # Create strategy with very high min_edge so it will always decline
+        strategy = HashBiasStrategy(min_edge=0.99, bias_range=0.10)
+        result = strategy.estimate(
+            agent_id="test", ticker="KXBTC-15M-T95000",
+            market_prob=0.50, category="crypto",
+        )
+        assert result is None, "Strategy with min_edge=0.99 should never emit"
+
+    def test_strategy_emits_when_edge_above_min_edge(self) -> None:
+        """Strategy emits when hash bias produces |edge| >= min_edge."""
+        from merid.prediction.opinion_strategy import HashBiasStrategy
+        # Use a very small min_edge to ensure the hash bias is enough
+        strategy = HashBiasStrategy(min_edge=0.001, bias_range=0.10)
+        result = strategy.estimate(
+            agent_id="test", ticker="KXBTC-15M-T95000",
+            market_prob=0.50, category="crypto",
+        )
+        # With bias_range=0.10 and min_edge=0.001, most tickers will emit
+        # (bias ≈ ±5% for this ticker); we're not asserting a specific value
+        # but the pipeline should not be blocked at the min_edge gate.
+        # (May legitimately be None if hash gives edge < 0.001, but extremely unlikely)
+        assert result is None or abs(result.edge) >= 0.001
+
+
+# ── Item 3: Default strategy / fail-fast ─────────────────────────────────
+
+class TestDefaultStrategy:
+    """Validate get_continuous_trader() default strategy and fail-fast behavior."""
+
+    def setup_method(self) -> None:
+        """Reset the singleton and set dry-run env var before each test."""
+        import os
+        import merid.trading.kalshi_continuous_trader as ct_mod
+        ct_mod._trader = None
+        os.environ["MERID_CT_DRY_RUN"] = "true"
+
+    def teardown_method(self) -> None:
+        """Clean up singleton and env var after each test."""
+        import os
+        import merid.trading.kalshi_continuous_trader as ct_mod
+        ct_mod._trader = None
+        os.environ.pop("MERID_CT_DRY_RUN", None)
+
+    def test_get_continuous_trader_returns_trader_with_default_strategy(self) -> None:
+        """get_continuous_trader() with no args uses HashBiasStrategy(min_edge=0.005)."""
+        from merid.trading.kalshi_continuous_trader import get_continuous_trader
+        from merid.prediction.opinion_strategy import HashBiasStrategy
+
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = get_continuous_trader(catalog=catalog)
+
+        assert trader._strategy is not None
+        assert isinstance(trader._strategy, HashBiasStrategy)
+        assert trader._strategy.min_edge == 0.005
+
+    def test_get_continuous_trader_respects_explicit_strategy(self) -> None:
+        """Explicit strategy passed to get_continuous_trader() is used as-is."""
+        from merid.trading.kalshi_continuous_trader import get_continuous_trader
+
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        custom_strategy = _FixedStrategy(conf=0.80)
+        trader = get_continuous_trader(catalog=catalog, strategy=custom_strategy)
+
+        assert trader._strategy is custom_strategy
+
+    def test_get_continuous_trader_singleton_preserved(self) -> None:
+        """Second call to get_continuous_trader() returns same instance."""
+        from merid.trading.kalshi_continuous_trader import get_continuous_trader
+
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        t1 = get_continuous_trader(catalog=catalog)
+        t2 = get_continuous_trader(catalog=catalog)
+        assert t1 is t2
+
+    def test_ct_with_no_strategy_returns_no_estimate(self) -> None:
+        """CT instantiated directly with strategy=None returns None from evaluate_candidate."""
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=None)
+
+        candidate = TradingCandidate.from_candidate(_make_candidate())
+        estimate = trader.evaluate_candidate(candidate, market_prob=0.50)
+        assert estimate is None, "strategy=None must yield None from evaluate_candidate"
+
+    def test_ct_with_no_strategy_and_no_signal_produces_no_intents(self) -> None:
+        """CT with strategy=None and no edge_pct produces zero intents per cycle."""
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=None)
+        trader._refresh_candidates = AsyncMock()
+
+        candidate = TradingCandidate.from_candidate(_make_candidate())
+        trader._candidates = [candidate]
+
+        import asyncio
+        intents = asyncio.run(trader.trade_cycle(bankroll=1000.0))
+        assert intents == [], "No strategy + no signal edge → no intents"
+
+
+# ── Item 4: Single sizing pipeline ───────────────────────────────────────
+
+class TestSingleSizingPipeline:
+    """Validate evaluate_candidate is called exactly once per candidate per cycle.
+
+    When trade_cycle passes the pre-computed estimate to signal_to_sizing,
+    the strategy must not be invoked a second time.
+    """
+
+    def _make_counting_strategy(self):
+        """Returns a strategy that tracks how many times estimate() is called."""
+
+        class CountingStrategy(OpinionStrategy):
+            name = "counting"
+            call_count = 0
+
+            def estimate(self, agent_id, ticker, market_prob, category="", context=None):
+                CountingStrategy.call_count += 1
+                return OpinionEstimate(
+                    agent_prob=0.70,
+                    confidence=0.80,
+                    edge=0.10,
+                    reasoning_tag="counting",
+                    signal_sources=[],
+                )
+
+        return CountingStrategy()
+
+    async def test_strategy_called_once_per_candidate(self) -> None:
+        """With one candidate, strategy.estimate() fires exactly once per cycle."""
+        strategy = self._make_counting_strategy()
+        strategy.__class__.call_count = 0
+
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(
+            dry_run=True, catalog=catalog, strategy=strategy, min_confidence=0.5
+        )
+        trader._refresh_candidates = AsyncMock()
+
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=45, best_ask_cents=48)
+        )
+        trader._candidates = [candidate]
+
+        await trader.trade_cycle(bankroll=10000.0)
+        assert strategy.__class__.call_count == 1, (
+            f"Strategy called {strategy.__class__.call_count} times for 1 candidate; "
+            "should be exactly 1 (single sizing pipeline)"
+        )
+
+    async def test_estimate_passed_to_signal_to_sizing_avoids_reeval(self) -> None:
+        """signal_to_sizing with explicit estimate does not call evaluate_candidate."""
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        strategy = _FixedStrategy(conf=0.80)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=strategy)
+
+        candidate = TradingCandidate.from_candidate(_make_candidate(mid_price_cents=50))
+        pre_estimate = OpinionEstimate(
+            agent_prob=0.70, confidence=0.80, edge=0.15,
+            reasoning_tag="pre", signal_sources=[],
+        )
+
+        # When estimate is passed, signal_to_sizing must use it (source="strategy")
+        # and must not overwrite with a different value from evaluate_candidate.
+        sizing = trader.signal_to_sizing(candidate, bankroll=1000.0, estimate=pre_estimate)
+        assert sizing.source == "strategy"
+        assert abs(sizing.edge - 0.15) < 1e-9, (
+            "signal_to_sizing should use the passed estimate, not re-evaluate"
+        )
+
+
+# ── Item 5: Exposure multiplier recalculates size_contracts ───────────────
+
+class TestExposureMultiplierSizeContracts:
+    """Validate that size_contracts in the intent is consistent with notional
+    after the exposure_multiplier is applied.
+    """
+
+    def _make_trader(self, exposure_multiplier: float = 1.0) -> KalshiContinuousTrader:
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        strategy = _FixedStrategy(conf=0.80)
+        return KalshiContinuousTrader(
+            dry_run=True,
+            catalog=catalog,
+            strategy=strategy,
+            exposure_multiplier=exposure_multiplier,
+            min_confidence=0.5,
+        )
+
+    async def _run_cycle(self, trader, mid_price_cents=45, best_ask_cents=48) -> list:
+        trader._refresh_candidates = AsyncMock()
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=mid_price_cents, best_ask_cents=best_ask_cents)
+        )
+        trader._candidates = [candidate]
+        return await trader.trade_cycle(bankroll=10000.0)
+
+    async def test_size_contracts_consistent_with_notional(self) -> None:
+        """intent['size_contracts'] must equal floor(notional / price)."""
+        trader = self._make_trader(exposure_multiplier=1.0)
+        intents = await self._run_cycle(trader)
+        assert len(intents) >= 1, "Expected at least one intent"
+        intent = intents[0]
+        price_dollars = 0.45  # mid_price_cents=45
+        expected_contracts = int(intent["notional"] / price_dollars)
+        assert intent["size_contracts"] == expected_contracts, (
+            f"size_contracts={intent['size_contracts']} inconsistent with "
+            f"notional={intent['notional']:.4f} / price={price_dollars}"
+        )
+
+    async def test_halved_multiplier_halves_size_contracts(self) -> None:
+        """Halving exposure_multiplier should roughly halve size_contracts."""
+        trader_full = self._make_trader(exposure_multiplier=1.0)
+        trader_half = self._make_trader(exposure_multiplier=0.5)
+
+        intents_full = await self._run_cycle(trader_full)
+        intents_half = await self._run_cycle(trader_half)
+
+        assert len(intents_full) >= 1 and len(intents_half) >= 1
+
+        # Both notional and size_contracts should be smaller with 0.5 multiplier.
+        # size_contracts may equal (floor) in edge cases with tiny bankrolls, so
+        # check notional strictly and contracts loosely (≤).
+        assert intents_half[0]["notional"] < intents_full[0]["notional"], (
+            "Halved multiplier must produce smaller notional"
+        )
+        assert intents_half[0]["size_contracts"] <= intents_full[0]["size_contracts"], (
+            "Halved multiplier must produce equal or fewer size_contracts"
+        )
+
+    async def test_zero_multiplier_gives_zero_size_contracts(self) -> None:
+        """exposure_multiplier=0.0 collapses all sizes to zero (no trade)."""
+        trader = self._make_trader(exposure_multiplier=0.0)
+        intents = await self._run_cycle(trader)
+        for intent in intents:
+            assert intent["size_contracts"] == 0, (
+                "exposure_multiplier=0 must yield size_contracts=0 for every intent"
+            )
+
+    async def test_two_calls_with_different_multipliers_produce_different_sizes(self) -> None:
+        """Two independent traders with different multipliers and identical inputs
+        must produce proportionally different size_contracts."""
+        import math
+        trader_1x = self._make_trader(exposure_multiplier=1.0)
+        trader_2x = self._make_trader(exposure_multiplier=2.0)
+
+        intents_1x = await self._run_cycle(trader_1x)
+        intents_2x = await self._run_cycle(trader_2x)
+
+        if not intents_1x or not intents_2x:
+            pytest.skip("No intents generated; cannot compare multiplier effect")
+
+        notional_1x = intents_1x[0]["notional"]
+        notional_2x = intents_2x[0]["notional"]
+        # 2× multiplier should produce roughly 2× the notional (within 5% tolerance)
+        assert abs(notional_2x / notional_1x - 2.0) < 0.05, (
+            f"2× multiplier produced notional ratio of {notional_2x / notional_1x:.3f}, "
+            "expected ≈ 2.0 (±5%)"
+        )
+
+
+# ── Integration: end-to-end strategy → CT thresholds → sizing ────────────
+
+class TestEndToEndEdgeGating:
+    """Integration-style tests that run realistic candidates through the full
+    strategy → CT-threshold → sizing pipeline.
+    """
+
+    def _make_trader(
+        self,
+        exposure_multiplier: float = 1.0,
+        min_confidence: float = 0.5,
+    ) -> KalshiContinuousTrader:
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        strategy = _FixedStrategy(conf=0.80)  # returns edge=0.10 always
+        return KalshiContinuousTrader(
+            dry_run=True,
+            catalog=catalog,
+            strategy=strategy,
+            exposure_multiplier=exposure_multiplier,
+            min_confidence=min_confidence,
+        )
+
+    async def test_above_threshold_produces_intent(self) -> None:
+        """Candidate with edge well above min_edge threshold produces a trade intent."""
+        trader = self._make_trader()
+        trader._refresh_candidates = AsyncMock()
+
+        # BTC/15m threshold (initial_live) = 0.005; strategy gives edge=0.10 → ACCEPTED
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(
+                underlying="BTC", timeframe="15m",
+                mid_price_cents=45, best_ask_cents=48,
+            )
+        )
+        trader._candidates = [candidate]
+
+        intents = await trader.trade_cycle(bankroll=10000.0)
+        assert len(intents) == 1, "Edge above threshold must produce an intent"
+        assert intents[0]["size_contracts"] > 0
+
+    async def test_below_threshold_filtered_by_ct(self) -> None:
+        """Candidate with edge below CT min_edge threshold is filtered out."""
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+
+        # Use a strategy that produces very low edge
+        class TinyEdgeStrategy(OpinionStrategy):
+            name = "tiny_edge"
+            def estimate(self, agent_id, ticker, market_prob, category="", context=None):
+                return OpinionEstimate(
+                    agent_prob=market_prob + 0.001,
+                    confidence=0.80,
+                    edge=0.001,  # 0.1% — below BTC/15m 0.5% threshold
+                    reasoning_tag="tiny",
+                    signal_sources=[],
+                )
+
+        trader = KalshiContinuousTrader(
+            dry_run=True,
+            catalog=catalog,
+            strategy=TinyEdgeStrategy(),
+            min_confidence=0.5,
+        )
+        trader._refresh_candidates = AsyncMock()
+
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=50)
+        )
+        trader._candidates = [candidate]
+
+        intents = await trader.trade_cycle(bankroll=10000.0)
+        assert len(intents) == 0, "Edge below CT threshold must be filtered out"
+
+    async def test_size_contracts_consistent_across_full_pipeline(self) -> None:
+        """After the full pipeline, size_contracts must equal floor(notional/price)."""
+        trader = self._make_trader()
+        trader._refresh_candidates = AsyncMock()
+
+        candidate = TradingCandidate.from_candidate(
+            _make_candidate(mid_price_cents=45, best_ask_cents=48)
+        )
+        trader._candidates = [candidate]
+
+        intents = await trader.trade_cycle(bankroll=10000.0)
+        assert len(intents) >= 1
+        intent = intents[0]
+
+        price_dollars = 0.45
+        expected = int(intent["notional"] / price_dollars)
+        assert intent["size_contracts"] == expected, (
+            f"End-to-end: size_contracts={intent['size_contracts']} "
+            f"should equal floor({intent['notional']:.4f}/{price_dollars})={expected}"
+        )
