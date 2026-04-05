@@ -17,6 +17,44 @@ Key invariants:
   - Group-notional cap is enforced and fully reset on ``reset_daily()``.
   - All execution rejections emit an ``execution_rejected`` event with
     symbol, reason, intent_id, and timestamp.
+
+Edge / edge_pct units
+---------------------
+Throughout this module, *edge* is represented in two forms:
+
+  ``edge_pct`` (on ``MarketCandidate`` / ``TradingCandidate``)
+      A **signed percentage** value, e.g. ``3.0`` means 3% edge.
+      Populated by the signal/model layer before CT evaluates the candidate.
+      Converted to a decimal fraction inside ``signal_to_sizing`` via
+      ``edge = edge_pct / 100.0``.
+
+  ``edge`` (on ``OpinionEstimate``, ``SizingResult``, intent dicts)
+      A **decimal fraction**, e.g. ``0.03`` means 3% edge.
+
+Strategy ``min_edge`` and CT ``EDGE_THRESHOLDS`` are both **decimal fractions**.
+Kalshi binary-contract fees run ~4–5% of notional at typical 45–55¢ prices, so
+the fee break-even edge is roughly 0.04 (4%).  ``EDGE_THRESHOLDS_INITIAL_LIVE``
+uses 0.005–0.020 (0.5–2%) to allow intents through for initial live validation;
+``EDGE_THRESHOLDS_PRODUCTION`` uses 0.02–0.08 (2–8%) for fee-profitable trading.
+
+Sizing pipeline (single authoritative path)
+-------------------------------------------
+1. ``signal_to_sizing(candidate, bankroll, estimate=...)`` resolves edge from
+   (in priority): ``edge_override`` → ``candidate.edge_pct`` → ``estimate.edge``
+   (passed in from ``trade_cycle``) → 0.  Computes Kelly fraction and returns
+   a ``SizingResult`` with ``size_contracts`` based on Kelly notional.
+2. ``trade_cycle`` calls ``evaluate_candidate`` once per candidate, then passes
+   the result into ``signal_to_sizing`` so the strategy is invoked exactly once.
+3. After ``_apply_risk_checks`` and applying ``exposure_multiplier``, the final
+   ``notional`` is recomputed into ``size_contracts`` so the two values stay
+   consistent regardless of what scaling factors are applied.
+
+Exposure multiplier
+-------------------
+``_exposure_multiplier`` (env: ``MERID_CT_EXPOSURE_MULTIPLIER``, default 1.0)
+scales the Kelly-computed ``notional`` in every ``trade_cycle`` call.  After
+scaling, ``size_contracts`` is recomputed from the final ``notional``, so the
+intent's ``size_contracts`` always reflects the post-multiplier position size.
 """
 
 from __future__ import annotations
@@ -940,13 +978,18 @@ class KalshiContinuousTrader:
         *,
         edge_override: Optional[float] = None,
         win_prob_override: Optional[float] = None,
+        estimate: Optional[OpinionEstimate] = None,
     ) -> SizingResult:
         """Compute Kelly-based sizing from candidate edge and market data.
 
         Sources edge from (in priority order):
           1. ``edge_override`` parameter (for testing / manual injection).
-          2. ``candidate.edge_pct`` (enriched from Kalshi signals).
-          3. ``estimate.edge`` from the wired ``OpinionStrategy``.
+          2. ``candidate.edge_pct`` (enriched from signal layer; percentage units,
+             e.g. 3.0 → 3% edge; converted to decimal via ``/ 100.0``).
+          3. ``estimate.edge`` — pass the ``OpinionEstimate`` from the caller to
+             reuse a pre-computed strategy result and avoid a second evaluation.
+             If ``estimate`` is not provided, falls back to calling
+             ``evaluate_candidate`` internally.
           4. Fallback to 0 (no edge → no trade).
 
         Uses the binary Kelly formula::
@@ -957,6 +1000,11 @@ class KalshiContinuousTrader:
             b             = payout / price_cents
             kelly_raw     = (p * b - q) / b
             kelly_frac    = kelly_raw * kelly_fraction
+
+        Note: ``size_contracts`` returned here is based purely on Kelly notional.
+        The caller (``trade_cycle``) must recompute ``size_contracts`` from the
+        final ``notional`` after applying ``exposure_multiplier`` and any other
+        caps, to keep the two values consistent.
 
         Returns a ``SizingResult`` with all intermediate values for audit.
         """
@@ -971,12 +1019,16 @@ class KalshiContinuousTrader:
             edge = edge_override
             source = "override"
         elif candidate.edge_pct is not None and candidate.edge_pct != 0.0:
-            edge = candidate.edge_pct / 100.0  # edge_pct is in percentage
+            # edge_pct is in percentage units (e.g. 3.0 = 3% edge); convert to fraction
+            edge = candidate.edge_pct / 100.0
             source = "signal"
         else:
-            # Try strategy-based edge
-            mid_prob = implied_prob if implied_prob > 0 else 0.5
-            estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
+            # Try strategy-based edge.  Reuse caller-provided estimate to avoid
+            # invoking evaluate_candidate a second time per candidate (single
+            # sizing pipeline — see module docstring).
+            if estimate is None:
+                mid_prob = implied_prob if implied_prob > 0 else 0.5
+                estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
             if estimate is not None and estimate.edge != 0.0:
                 edge = estimate.edge
                 source = "strategy"
@@ -1258,8 +1310,10 @@ class KalshiContinuousTrader:
                 })
                 continue
 
-            # Use signal_to_sizing for Kelly-based notional
-            sizing = self.signal_to_sizing(candidate, bankroll)
+            # Use signal_to_sizing for Kelly-based notional.
+            # Pass the pre-computed estimate so the strategy is invoked exactly
+            # once per candidate (single sizing pipeline — see module docstring).
+            sizing = self.signal_to_sizing(candidate, bankroll, estimate=estimate)
 
             # Determine side based on estimate vs market probability
             side = "YES" if estimate.agent_prob > mid_prob else "NO"
@@ -1344,7 +1398,12 @@ class KalshiContinuousTrader:
             if self._exposure_multiplier != 1.0:
                 notional *= self._exposure_multiplier
 
-            # AUDIT-06: enforce hard cap on number of contracts
+            # AUDIT-06: enforce hard cap on number of contracts.
+            # sizing.size_contracts is the pre-multiplier Kelly count; we use it
+            # only as a reference denominator for the proportional notional reduction.
+            # The cap is applied to the already-multiplied notional (not the raw
+            # Kelly contracts), so the resulting notional stays proportional to
+            # max_position_contracts / kelly_contracts.
             if self._max_position_contracts > 0 and sizing.size_contracts > self._max_position_contracts:
                 logger.debug(
                     "ContinuousTrader: contracts capped %s → %d (MERID_CT_MAX_POSITION_CONTRACTS)",
@@ -1353,6 +1412,17 @@ class KalshiContinuousTrader:
                 # Recompute notional proportionally
                 if sizing.size_contracts > 0:
                     notional = notional * (self._max_position_contracts / sizing.size_contracts)
+
+            # Recompute size_contracts from the final adjusted notional so that
+            # exposure_multiplier and position-cap changes are reflected in the intent.
+            # (AUDIT-07/05: size_contracts must be consistent with notional.)
+            _final_price_cents = candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
+            _final_price_dollars = _final_price_cents / 100.0
+            final_size_contracts = (
+                int(math.floor(notional / _final_price_dollars))
+                if _final_price_dollars > 0
+                else 0
+            )
 
             # AUDIT-08: per-asset cooldown — skip if traded too recently
             if self._per_asset_cooldown_seconds > 0:
@@ -1392,7 +1462,9 @@ class KalshiContinuousTrader:
                 "edge": sizing.edge,
                 "kelly_raw": sizing.kelly_raw,
                 "kelly_frac": sizing.kelly_frac,
-                "size_contracts": sizing.size_contracts,
+                # Use size_contracts recomputed from final notional (post exposure_multiplier
+                # and position cap) so this value is always consistent with "notional".
+                "size_contracts": final_size_contracts,
                 "sizing_source": sizing.source,
                 "intent_id": generate_correlation_id(datetime.now(timezone.utc), prefix="kalshi-trader"),
                 "ts": time.time(),
@@ -1439,7 +1511,7 @@ class KalshiContinuousTrader:
                 "kelly_raw=%.4f kelly_frac=%.4f size=%s veto=%s",
                 candidate.ticker, candidate.underlying, side, sizing.win_prob,
                 sizing.payout_cents, edge_bps, sizing.kelly_raw, sizing.kelly_frac,
-                sizing.size_contracts, "none",
+                final_size_contracts, "none",
             )
 
             self._risk.add_notional(candidate.group_id, notional)
@@ -1466,7 +1538,7 @@ class KalshiContinuousTrader:
                 intent["direction"], candidate.ticker, notional,
                 estimate.confidence, intent["edge"],
                 sizing.kelly_raw, sizing.kelly_frac,
-                sizing.size_contracts, sizing.source,
+                final_size_contracts, sizing.source,
             )
 
         # Persist cycle summary for status() / API consumers
@@ -1719,6 +1791,12 @@ def get_continuous_trader(
     If no strategy is provided, creates a default HashBiasStrategy with
     min_edge=0.005 (0.5%) to align with CT's initial_live edge thresholds.
     The fee profitability gate will reject trades below breakeven regardless.
+    Note: there is no explicit fee-profitability gate in this module; fee
+    drag is managed entirely through the EDGE_THRESHOLDS grid (0.5–8%
+    depending on profile and asset).  At typical 45–55¢ YES prices, Kalshi
+    fees are ~4–5% of notional, so the ``production`` thresholds (≥2%) are
+    needed for consistent fee profitability.  The ``initial_live`` thresholds
+    (0.5–1.5%) allow intents through for initial validation at micro sizes.
     """
     global _trader
     if _trader is None:
