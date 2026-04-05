@@ -2160,6 +2160,20 @@ async def _app_lifespan(application: FastAPI):
         logger.warning(f"⚠️  KalshiInsightPipeline failed to start: {e}")
         _startup_state["services"]["kalshi_insight_pipeline"] = {"status": "failed", "error": str(e)}
 
+    # KalshiSettlementPoller — polls GET /portfolio/settlements for newly settled markets
+    # Fires settlement hooks in merid/reconciliation.py which wire realized PnL into CT bankroll
+    try:
+        from merid.event_venues.kalshi.settlement_poller import start_settlement_polling_auto
+        _settlement_poller = await start_settlement_polling_auto()
+        if _settlement_poller is not None:
+            _startup_state["services"]["kalshi_settlement_poller"] = {"status": "running", "started_at": time.time()}
+        else:
+            logger.info("⚠️  KalshiSettlementPoller skipped (credentials not configured)")
+            _startup_state["services"]["kalshi_settlement_poller"] = {"status": "skipped", "reason": "no_credentials"}
+    except Exception as e:
+        logger.warning(f"⚠️  KalshiSettlementPoller failed to start: {e}")
+        _startup_state["services"]["kalshi_settlement_poller"] = {"status": "failed", "error": str(e)}
+
     # EnhancedConsensusCoordinator opinion subscriber — listens for strategy_opinion events
     # on core.event_bus and triggers consensus rounds when quorum is reached
     try:
@@ -2611,6 +2625,13 @@ async def _app_lifespan(application: FastAPI):
         logger.info("✅ KalshiInsightPipeline stopped")
     except Exception as exc:
         logger.warning("KalshiInsightPipeline stop failed: %s", exc)
+
+    # Stop KalshiSettlementPoller
+    try:
+        from merid.event_venues.kalshi.settlement_poller import stop_settlement_polling
+        await stop_settlement_polling()
+    except Exception as exc:
+        logger.warning("KalshiSettlementPoller stop failed: %s", exc)
 
     # Stop MarketMoodBus aggregation loop
     try:
