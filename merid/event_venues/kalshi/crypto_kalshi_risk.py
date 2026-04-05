@@ -215,46 +215,43 @@ def _build_default_profiles() -> Dict[Tuple[str, str], StrategyProfile]:
     # (asset, timeframe): (bankroll_share, max_trades/day, price_band, min_edge_bp, max_open)
     #
     # allowed_price_band is expressed in decimal probability (0.0–1.0).
-    # E.g. 0.05 means a contract trading at 5¢ (i.e. 5% implied probability for YES).
-    # Bands must be wide enough to include real Kalshi near-spot crypto prices:
-    #   - Short-term (15m/1h) near-spot strikes can trade anywhere from ~0.10 to ~0.90
-    #     depending on how close the strike is to spot at expiry.
-    #   - Longer-term (daily–monthly) markets span a similar range.
-    # The old tight bands (e.g. 0.35–0.75 for BTC 15m, 0.65–0.85 for BTC daily)
-    # rejected ALL enriched candidates in live runs.  Use a broad 0.05–0.95 window
-    # to pass any market where the outcome is not near-certain, and rely on the
-    # edge/Kelly filter to select actually attractive opportunities.
+    # E.g. 0.35 means a contract trading at 35¢ (i.e. 35% implied probability for YES).
+    # These tight bands filter contracts at trade execution time based on market
+    # price, ensuring we only trade contracts with reasonable implied probabilities
+    # that reflect near-spot strikes. Tighter bands for short-term markets (15m/1h)
+    # focus on higher-probability near-the-money contracts, while longer-term markets
+    # use wider bands to capture a broader range of strikes.
     spec: Dict[Tuple[str, str], tuple] = {
         # ── BTC ──────────────────────────────────────────────────────────
-        ("BTC", "15m"):      (0.20, 5,  (0.05, 0.95), 50.0, 3),
-        ("BTC", "1h"):       (0.25, 10, (0.05, 0.95), 40.0, 5),
-        ("BTC", "daily"):    (0.25, 3,  (0.05, 0.95), 30.0, 2),
-        ("BTC", "weekly"):   (0.15, 2,  (0.05, 0.95), 25.0, 2),
-        ("BTC", "monthly"):  (0.15, 1,  (0.05, 0.95), 20.0, 1),
+        ("BTC", "15m"):      (0.20, 5,  (0.35, 0.75), 50.0, 3),
+        ("BTC", "1h"):       (0.25, 10, (0.35, 0.75), 40.0, 5),
+        ("BTC", "daily"):    (0.25, 3,  (0.65, 0.85), 30.0, 2),
+        ("BTC", "weekly"):   (0.15, 2,  (0.65, 0.85), 25.0, 2),
+        ("BTC", "monthly"):  (0.15, 1,  (0.70, 0.85), 20.0, 1),
         # ── ETH ──────────────────────────────────────────────────────────
-        ("ETH", "15m"):      (0.20, 5,  (0.05, 0.95), 50.0, 3),
-        ("ETH", "1h"):       (0.25, 10, (0.05, 0.95), 40.0, 5),
-        ("ETH", "daily"):    (0.25, 3,  (0.05, 0.95), 30.0, 2),
-        ("ETH", "weekly"):   (0.15, 2,  (0.05, 0.95), 25.0, 2),
-        ("ETH", "monthly"):  (0.15, 1,  (0.05, 0.95), 20.0, 1),
+        ("ETH", "15m"):      (0.20, 5,  (0.35, 0.75), 50.0, 3),
+        ("ETH", "1h"):       (0.25, 10, (0.35, 0.75), 40.0, 5),
+        ("ETH", "daily"):    (0.25, 3,  (0.65, 0.85), 30.0, 2),
+        ("ETH", "weekly"):   (0.15, 2,  (0.65, 0.85), 25.0, 2),
+        ("ETH", "monthly"):  (0.15, 1,  (0.70, 0.85), 20.0, 1),
         # ── SOL ──────────────────────────────────────────────────────────
-        ("SOL", "15m"):      (0.20, 4,  (0.05, 0.95), 60.0, 2),
-        ("SOL", "1h"):       (0.25, 8,  (0.05, 0.95), 50.0, 4),
-        ("SOL", "daily"):    (0.25, 2,  (0.05, 0.95), 40.0, 2),
-        ("SOL", "weekly"):   (0.15, 1,  (0.05, 0.95), 35.0, 1),
-        ("SOL", "monthly"):  (0.15, 1,  (0.05, 0.95), 30.0, 1),
+        ("SOL", "15m"):      (0.20, 4,  (0.25, 0.75), 60.0, 2),
+        ("SOL", "1h"):       (0.25, 8,  (0.25, 0.75), 50.0, 4),
+        ("SOL", "daily"):    (0.25, 2,  (0.55, 0.80), 40.0, 2),
+        ("SOL", "weekly"):   (0.15, 1,  (0.60, 0.80), 35.0, 1),
+        ("SOL", "monthly"):  (0.15, 1,  (0.65, 0.80), 30.0, 1),
         # ── XRP ──────────────────────────────────────────────────────────
-        ("XRP", "15m"):      (0.20, 4,  (0.05, 0.95), 60.0, 2),
-        ("XRP", "1h"):       (0.25, 8,  (0.05, 0.95), 50.0, 4),
-        ("XRP", "daily"):    (0.25, 2,  (0.05, 0.95), 40.0, 2),
-        ("XRP", "weekly"):   (0.15, 1,  (0.05, 0.95), 35.0, 1),
-        ("XRP", "monthly"):  (0.15, 1,  (0.05, 0.95), 30.0, 1),
+        ("XRP", "15m"):      (0.20, 4,  (0.25, 0.75), 60.0, 2),
+        ("XRP", "1h"):       (0.25, 8,  (0.25, 0.75), 50.0, 4),
+        ("XRP", "daily"):    (0.25, 2,  (0.55, 0.80), 40.0, 2),
+        ("XRP", "weekly"):   (0.15, 1,  (0.60, 0.80), 35.0, 1),
+        ("XRP", "monthly"):  (0.15, 1,  (0.65, 0.80), 30.0, 1),
         # ── DOGE ─────────────────────────────────────────────────────────
-        ("DOGE", "15m"):     (0.20, 3,  (0.05, 0.95), 75.0, 2),
-        ("DOGE", "1h"):      (0.25, 6,  (0.05, 0.95), 60.0, 3),
-        ("DOGE", "daily"):   (0.25, 2,  (0.05, 0.95), 50.0, 2),
-        ("DOGE", "weekly"):  (0.15, 1,  (0.05, 0.95), 45.0, 1),
-        ("DOGE", "monthly"): (0.15, 1,  (0.05, 0.95), 40.0, 1),
+        ("DOGE", "15m"):     (0.20, 3,  (0.25, 0.70), 75.0, 2),
+        ("DOGE", "1h"):      (0.25, 6,  (0.25, 0.70), 60.0, 3),
+        ("DOGE", "daily"):   (0.25, 2,  (0.50, 0.75), 50.0, 2),
+        ("DOGE", "weekly"):  (0.15, 1,  (0.55, 0.75), 45.0, 1),
+        ("DOGE", "monthly"): (0.15, 1,  (0.60, 0.75), 40.0, 1),
     }
     profiles: Dict[Tuple[str, str], StrategyProfile] = {}
     for (asset, tf), (bshare, max_td, band, edge_bp, max_open) in spec.items():
