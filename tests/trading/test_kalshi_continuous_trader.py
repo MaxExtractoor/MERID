@@ -467,7 +467,12 @@ class TestMaxYesPriceCap:
     def _make_trader(self, max_yes_price: float = 0.50) -> KalshiContinuousTrader:
         catalog = MagicMock()
         catalog.get_markets_by_asset.return_value = []
-        return KalshiContinuousTrader(dry_run=True, catalog=catalog, max_yes_price=max_yes_price)
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog, max_yes_price=max_yes_price)
+        # These tests control self._candidates directly to isolate the YES price cap
+        # logic.  Mock out _refresh_candidates so it does not overwrite the injected
+        # candidates when trade_cycle() runs.
+        trader._refresh_candidates = AsyncMock()
+        return trader
 
     def _strategy_with_yes_signal(self, agent_prob: float = 0.75) -> _FixedStrategy:
         """Return a strategy that signals a YES trade (agent_prob > market prob)."""
@@ -556,3 +561,87 @@ class TestMaxYesPriceCap:
         yes_intents = [i for i in intents if i["direction"] == "yes"]
         assert len(yes_intents) == 0
 
+
+# ── Regression: trade_cycle must always refresh candidates ────────────────
+#
+# Guard against any future edit that silently removes the _refresh_candidates()
+# call from inside trade_cycle().  Without that call the universe is built
+# exactly once at startup and never updated, so CT operates on a stale (and
+# potentially empty) candidate list.
+#
+class TestTradeCycleRefreshesCandidates:
+    """trade_cycle() must invoke the catalog on every call.
+
+    The catalog.get_markets_by_asset mock is the observable proxy for
+    '_refresh_candidates()' having run: every refresh issues one call per
+    (asset, timeframe) pair, so the cumulative call count must grow with the
+    number of trade_cycle() invocations.
+    """
+
+    def _make_trader(self) -> KalshiContinuousTrader:
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        return KalshiContinuousTrader(dry_run=True, catalog=catalog)
+
+    async def test_catalog_queried_on_single_cycle(self) -> None:
+        """One call to trade_cycle() must query the catalog at least once."""
+        trader = self._make_trader()
+        await trader.trade_cycle(bankroll=500.0)
+        assert trader._catalog.get_markets_by_asset.call_count > 0
+
+    async def test_catalog_queried_on_every_cycle(self) -> None:
+        """Catalog query count must scale linearly with trade_cycle() invocations."""
+        trader = self._make_trader()
+        await trader.trade_cycle(bankroll=500.0)
+        after_one = trader._catalog.get_markets_by_asset.call_count
+        assert after_one > 0, "catalog not queried at all after first cycle"
+
+        await trader.trade_cycle(bankroll=500.0)
+        after_two = trader._catalog.get_markets_by_asset.call_count
+        assert after_two == 2 * after_one, (
+            f"Expected catalog call count to double after second cycle "
+            f"(got {after_two}; was {after_one}). "
+            "_refresh_candidates() may not be called on every trade_cycle()."
+        )
+
+        await trader.trade_cycle(bankroll=500.0)
+        after_three = trader._catalog.get_markets_by_asset.call_count
+        assert after_three == 3 * after_one, (
+            f"Expected 3× catalog calls after three cycles "
+            f"(got {after_three}; was {after_one} per cycle). "
+            "_refresh_candidates() may not be called on every trade_cycle()."
+        )
+
+    async def test_stale_candidates_not_carried_across_cycles(self) -> None:
+        """Candidates injected before a cycle must be replaced by _refresh_candidates().
+
+        If trade_cycle() refreshes the universe correctly, manually pre-loaded
+        candidates are wiped before evaluation starts, so no intents are generated
+        from the stale list when the catalog returns nothing.
+        """
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
+
+        # Pre-load a stale candidate directly (simulating a startup-only refresh
+        # that would linger without per-cycle refresh).
+        from merid.event_venues.kalshi.market_filter import MarketCandidate
+        stale = TradingCandidate.from_candidate(
+            MarketCandidate(
+                ticker="KXBTC-STALE",
+                underlying="BTC",
+                timeframe="15m",
+                best_bid_cents=45,
+                best_ask_cents=55,
+                mid_price_cents=50,
+            )
+        )
+        trader._candidates = [stale]
+
+        # After trade_cycle() refreshes from the (empty) catalog, _candidates is
+        # reset to [] and the loop produces no intents.
+        intents = await trader.trade_cycle(bankroll=500.0)
+        assert intents == [], (
+            "Stale candidates survived into evaluation — "
+            "_refresh_candidates() must overwrite self._candidates before iteration."
+        )
