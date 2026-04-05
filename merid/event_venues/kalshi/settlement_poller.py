@@ -278,3 +278,62 @@ def get_settlement_poller(
         _poller = KalshiSettlementPoller(client=client, redis_client=redis_client)
     return _poller
 
+
+def _make_kalshi_client_from_settings() -> Optional[Any]:
+    """Create KalshiVenueClient from settings for settlement poller.
+
+    Returns None if credentials are not configured.
+    """
+    try:
+        from merid.event_venues.kalshi.client import KalshiVenueClient
+        from merid.settings import settings
+        from merid.event_venues.kalshi.models import KalshiConfig
+
+        # Check if credentials are configured
+        key_path = settings.KALSHI_PRIVATE_KEY_PATH
+        if key_path == "change_me":
+            key_path = None
+
+        if not settings.KALSHI_API_KEY_ID or (not key_path and not settings.KALSHI_PRIVATE_KEY_PEM):
+            logger.warning("Settlement poller: Kalshi credentials not configured, skipping")
+            return None
+
+        config = KalshiConfig(
+            api_key_id=settings.KALSHI_API_KEY_ID,
+            private_key_path=key_path,
+            private_key_pem=settings.KALSHI_PRIVATE_KEY_PEM,
+            use_demo=settings.KALSHI_USE_DEMO,
+        )
+        return KalshiVenueClient(config)
+    except Exception as exc:
+        logger.warning("Settlement poller: failed to create Kalshi client: %s", exc)
+        return None
+
+
+async def start_settlement_polling_auto() -> Optional[KalshiSettlementPoller]:
+    """Start settlement polling with auto-configured Kalshi client.
+
+    Creates a KalshiVenueClient from settings, initializes the singleton
+    settlement poller, and starts it. Returns None if credentials are not
+    configured.
+
+    Returns:
+        KalshiSettlementPoller instance if started successfully, None otherwise.
+    """
+    client = _make_kalshi_client_from_settings()
+    if client is None:
+        return None
+
+    poller = get_settlement_poller(client)
+    await poller.start()
+    logger.info("✅ KalshiSettlementPoller started")
+    return poller
+
+
+async def stop_settlement_polling() -> None:
+    """Stop the settlement poller if it's running."""
+    global _poller
+    if _poller is not None:
+        await _poller.stop()
+        logger.info("✅ KalshiSettlementPoller stopped")
+
