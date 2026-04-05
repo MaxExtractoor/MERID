@@ -175,11 +175,12 @@ class TestAgentStaggerSeconds:
 # ── AUDIT-12: BANKROLL_MIN_CENTS ─────────────────────────────────────────────
 
 class TestBankrollMinCents:
-    def test_default_minimum_is_100(self, monkeypatch):
+    def test_default_minimum_is_50000(self, monkeypatch):
+        """Default minimum is $500 (50000 cents) for viable trading."""
         monkeypatch.delenv("MERID_CT_BANKROLL_MIN_CENTS", raising=False)
         from config.kalshi_ct_env import BANKROLL_MIN_CENTS
-        # Default should be <= 100 (may already be overridden in env).
-        # If the env var is absent, the module default is 100.
+        # Default changed from 100 to 50000 to prevent fee drag at low bankroll
+        # Tests should override with MERID_CT_BANKROLL_MIN_CENTS=100 if needed
         assert isinstance(BANKROLL_MIN_CENTS, int)
 
     def test_env_overrides_minimum(self, monkeypatch):
@@ -194,9 +195,9 @@ class TestBankrollMinCents:
             importlib.reload(m)
 
     def test_below_minimum_raises(self, monkeypatch):
-        # Use the default 100-cent minimum.
+        # Use the new default 50000-cent ($500) minimum.
         monkeypatch.delenv("MERID_CT_BANKROLL_MIN_CENTS", raising=False)
-        monkeypatch.setenv("KALSHI_TRADER_BANKROLL", "50")
+        monkeypatch.setenv("KALSHI_TRADER_BANKROLL", "10000")  # $100 < $500 minimum
         import importlib
         import config.kalshi_ct_env as m
         importlib.reload(m)

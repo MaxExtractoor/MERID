@@ -584,6 +584,15 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             except Exception as _rr:
                 logger.debug("record_order after live fill failed (non-fatal): %s", _rr)
 
+            # Record fee in ContinuousTrader for bankroll invariant tracking
+            try:
+                from merid.trading.kalshi_continuous_trader import get_continuous_trader
+                ct = get_continuous_trader()
+                if ct:
+                    ct.record_fee(fee_cents)
+            except Exception as _fe:
+                logger.debug("CT fee recording failed (non-fatal): %s", _fe)
+
         return OrderResult(
             status=status,
             mode=mode,

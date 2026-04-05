@@ -23,9 +23,14 @@ logger = get_logger("config.kalshi_ct_env")
 
 # ── Minimum sane bankroll ─────────────────────────────────────────────────────
 # Below this value CT refuses to start.
-# Default: 100 cents = $1.00.  Override via MERID_CT_BANKROLL_MIN_CENTS.
+# Default: 50000 cents = $500.00.  Override via MERID_CT_BANKROLL_MIN_CENTS.
 # AUDIT-12: floor is now env-configurable so test environments can use lower values.
-BANKROLL_MIN_CENTS: int = int(os.getenv("MERID_CT_BANKROLL_MIN_CENTS", "100"))
+# NOTE: $500 minimum is required for viable trading given:
+#   - Per-trade fees of ~2¢ at 50¢ prices require ~4% edge to break even
+#   - Multi-asset diversification (5 assets) fragments small bankrolls
+#   - Kelly sizing with 1% per-trade risk needs meaningful capital base
+# For testing/development, set MERID_CT_BANKROLL_MIN_CENTS=100 to allow $1.00 minimum.
+BANKROLL_MIN_CENTS: int = int(os.getenv("MERID_CT_BANKROLL_MIN_CENTS", "50000"))
 
 
 @dataclass
