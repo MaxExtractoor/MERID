@@ -495,6 +495,8 @@ class KalshiCryptoRiskEngine:
         market_probability: float,
         trades_today: int,
         current_open_positions: int,
+        *,
+        diagnostic_bypass_price_band: bool = False,
     ) -> Tuple[bool, str]:
         """Check that a potential trade satisfies all strategy-profile constraints.
 
@@ -506,6 +508,7 @@ class KalshiCryptoRiskEngine:
             market_probability:    Kalshi implied probability (0-1).
             trades_today:          Number of trades already placed today for this lane.
             current_open_positions: Number of currently open positions in this lane.
+            diagnostic_bypass_price_band: When True, skip price_band filter for diagnostics.
 
         Returns:
             ``(True, "OK")`` or ``(False, reason_string)``.
@@ -516,7 +519,21 @@ class KalshiCryptoRiskEngine:
 
         # Price band filter
         low, high = profile.allowed_price_band
-        if not (low <= price <= high):
+
+        # Diagnostic bypass: allow operators to temporarily disable price_band checks
+        # to verify that the rest of the trading loop is functional when all candidates
+        # are being dropped by price_band logic. Set via env var MERID_CT_DIAGNOSTIC_BYPASS_PRICE_BAND=1
+        import os
+        env_bypass = os.getenv("MERID_CT_DIAGNOSTIC_BYPASS_PRICE_BAND", "").strip() == "1"
+        bypass_active = diagnostic_bypass_price_band or env_bypass
+
+        if bypass_active:
+            logger.warning(
+                "[STRAT-FILTER-DIAGNOSTIC] %s %s: price=%.3f band=(%.2f, %.2f) "
+                "BYPASS_ACTIVE=True result=PASS_DIAGNOSTIC_MODE",
+                asset, timeframe, price, low, high,
+            )
+        elif not (low <= price <= high):
             logger.info(
                 "[STRAT-FILTER] %s %s: price=%.3f band=(%.2f, %.2f) result=REJECT_PRICE_BAND",
                 asset, timeframe, price, low, high,
