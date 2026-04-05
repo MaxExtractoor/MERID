@@ -569,6 +569,61 @@ class TestEdgeAndPriceBandFilters:
             assert profile is not None
             assert profile.min_expected_edge_bp > 0
 
+    def test_price_bands_are_not_overly_wide(self, default_engine):
+        """Regression test: ensure price_band filters are tight, not wide.
+
+        This test locks in the known-good tight price bands that were restored
+        after commit 3d7bc4a accidentally widened them to (0.05, 0.95), causing
+        all CT universe candidates to be dropped.
+
+        The tight bands ensure we only trade contracts with reasonable implied
+        probabilities that reflect near-spot strikes:
+        - Short-term (15m/1h): tighter bands (0.25-0.75 or 0.35-0.75)
+        - Longer-term (daily+): wider but still selective (0.50-0.85)
+
+        If this test fails, someone has widened the price bands again, which
+        will likely cause the same "41 dropped, 0 kept" regression.
+        """
+        # Known-good tight bands from before commit 249d2de
+        EXPECTED_TIGHT_BANDS = {
+            ("BTC", "15m"): (0.35, 0.75),
+            ("BTC", "1h"): (0.35, 0.75),
+            ("BTC", "daily"): (0.65, 0.85),
+            ("BTC", "weekly"): (0.65, 0.85),
+            ("BTC", "monthly"): (0.70, 0.85),
+            ("ETH", "15m"): (0.35, 0.75),
+            ("ETH", "1h"): (0.35, 0.75),
+            ("ETH", "daily"): (0.65, 0.85),
+            ("ETH", "weekly"): (0.65, 0.85),
+            ("ETH", "monthly"): (0.70, 0.85),
+            ("SOL", "15m"): (0.25, 0.75),
+            ("SOL", "1h"): (0.25, 0.75),
+            ("SOL", "daily"): (0.55, 0.80),
+            ("SOL", "weekly"): (0.60, 0.80),
+            ("SOL", "monthly"): (0.65, 0.80),
+            ("XRP", "15m"): (0.25, 0.75),
+            ("XRP", "1h"): (0.25, 0.75),
+            ("XRP", "daily"): (0.55, 0.80),
+            ("XRP", "weekly"): (0.60, 0.80),
+            ("XRP", "monthly"): (0.65, 0.80),
+            ("DOGE", "15m"): (0.25, 0.70),
+            ("DOGE", "1h"): (0.25, 0.70),
+            ("DOGE", "daily"): (0.50, 0.75),
+            ("DOGE", "weekly"): (0.55, 0.75),
+            ("DOGE", "monthly"): (0.60, 0.75),
+        }
+
+        for (asset, timeframe), expected_band in EXPECTED_TIGHT_BANDS.items():
+            profile = default_engine.strategy_config.get(asset, timeframe)
+            assert profile is not None, f"Missing profile for {asset} {timeframe}"
+
+            actual_band = profile.allowed_price_band
+            assert actual_band == expected_band, (
+                f"{asset} {timeframe}: price_band changed from {expected_band} to {actual_band}. "
+                f"Wide bands like (0.05, 0.95) will starve the CT universe. "
+                f"See commit 4d68a78 and the price_band filter restoration for context."
+            )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. No hardcoded risk amounts (static analysis)
