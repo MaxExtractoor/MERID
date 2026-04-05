@@ -1714,8 +1714,23 @@ def get_continuous_trader(
     catalog: Optional[KalshiMarketCatalog] = None,
     strategy: Optional[OpinionStrategy] = None,
 ) -> KalshiContinuousTrader:
-    """Return the process-singleton KalshiContinuousTrader."""
+    """Return the process-singleton KalshiContinuousTrader.
+
+    If no strategy is provided, creates a default HashBiasStrategy with
+    min_edge=0.005 (0.5%) to align with CT's initial_live edge thresholds.
+    The fee profitability gate will reject trades below breakeven regardless.
+    """
     global _trader
     if _trader is None:
+        # FEE_DRAG_FIX: Provide default strategy with 0.5% min_edge to align
+        # with CT's initial_live profile. Fee profitability gate will handle
+        # rejection of trades below breakeven (~4% at typical prices).
+        if strategy is None:
+            from merid.prediction.opinion_strategy import HashBiasStrategy
+            strategy = HashBiasStrategy(min_edge=0.005)
+            logger.info(
+                "KalshiContinuousTrader: No strategy provided, using default "
+                "HashBiasStrategy(min_edge=0.005)"
+            )
         _trader = KalshiContinuousTrader(catalog=catalog, strategy=strategy)
     return _trader
