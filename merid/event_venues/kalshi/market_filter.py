@@ -27,6 +27,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -489,6 +490,64 @@ class MarketFilter:
                     result.rejected_distance += 1
                 elif "dead zone" in reason:
                     result.rejected_edge_deadzone += 1
+                # Per-candidate drop-reason diagnostics at DEBUG so each veto is
+                # visible without flooding INFO.  Includes the key metrics that
+                # determine distance/edge eligibility so operators can tell at a
+                # glance whether the thresholds are too tight.  Guard the
+                # computation behind isEnabledFor to avoid property evaluation
+                # overhead (distance_from_spot_pct, has_book) on every rejection
+                # when DEBUG logging is inactive.
+                if logger.isEnabledFor(logging.DEBUG):
+                    dist = market.distance_from_spot_pct
+                    spread = market.best_ask_cents - market.best_bid_cents if market.has_book else None
+                    logger.debug(
+                        "market_filter drop: ticker=%s underlying=%s tf=%s "
+                        "mid=%dc vol=%d oi=%d spread=%s "
+                        "dist_pct=%s spot=%s strike=%s "
+                        "reason=%r",
+                        market.ticker, market.underlying, market.timeframe,
+                        market.mid_price_cents, market.volume, market.open_interest,
+                        f"{spread}c" if spread is not None else "n/a",
+                        f"{dist:.2f}%" if dist is not None else "n/a",
+                        f"{market.spot_price:.2f}" if market.spot_price else "n/a",
+                        f"{market.strike_price:.2f}" if market.strike_price else "n/a",
+                        reason,
+                    )
+
+        # When every input candidate was rejected, emit a WARNING with the active
+        # thresholds so operators can diagnose whether distance/edge limits are
+        # too tight without having to dig through per-candidate DEBUG lines.
+        # total_input > 0 guards against an empty batch (which is normal and not
+        # worth a warning); passed == 0 means none survived the filter.
+        if result.total_input > 0 and result.passed == 0:
+            # Build a concise per-asset spot-band map for the warning.
+            assets_seen = {m.underlying for m in markets}
+            tfs_seen = {m.timeframe for m in markets}
+            band_info = {
+                f"{a}/{t}": get_spot_band(a, t, default=cfg.spot_band_pct)
+                for a in sorted(assets_seen)
+                for t in sorted(tfs_seen)
+            }
+            logger.warning(
+                "market_filter: ALL %d candidates dropped. "
+                "Thresholds — min_vol=%d min_oi=%d max_spread=%dc "
+                "price=%d-%dc spot_band_pct=%.1f%% dead_zone_pct=%.1f%% "
+                "vol_band=[%.2f,%.2f]. "
+                "Rejection counts — distance=%d dead_zone=%d price=%d "
+                "spread=%d vol=%d oi=%d missing_spot=%d vol_band=%d underlying=%d timeframe=%d. "
+                "Per-(asset/tf) spot bands: %s",
+                result.total_input,
+                cfg.min_volume, cfg.min_open_interest, cfg.max_spread_cents,
+                cfg.min_price_cents, cfg.max_price_cents,
+                cfg.spot_band_pct, cfg.min_edge_dead_zone_pct,
+                cfg.volume_band_min, cfg.volume_band_max,
+                result.rejected_distance, result.rejected_edge_deadzone,
+                result.rejected_price, result.rejected_spread,
+                result.rejected_volume, result.rejected_oi,
+                result.rejected_missing_spot, result.rejected_volume_band,
+                result.rejected_underlying, result.rejected_timeframe,
+                ", ".join(f"{k}=±{v:.1f}%" for k, v in sorted(band_info.items())),
+            )
 
         # Per-asset candidate cap: keep the top N closest to spot
         if cfg.max_candidates_per_asset > 0:
