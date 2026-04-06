@@ -1529,12 +1529,26 @@ class KalshiContinuousTrader:
         # Snapshot execution gate once per tick — all entry decisions in this
         # cycle read from this snapshot. Components only READ from the gate;
         # they never set gate state.
+        # Lazy import: core.execution_gate lives outside the merid package and
+        # pulling it at module level creates a circular-import risk across the
+        # broader monorepo. Importing inside the method is intentional and safe
+        # because Python caches the module after the first import.
+        # Fail-open (gate_view=None → assume clear): if the gate module itself
+        # is broken the CT should continue with its own layered risk guards
+        # (kill switch, risk caps, daily-loss limit) rather than silently halt
+        # all trading. The gate snapshot failure is logged as a WARNING so
+        # operators are alerted immediately.
+        gate_view = None
         try:
             from core.execution_gate import check_execution_gate as _check_gate
             gate_view = _check_gate()
         except Exception as _gate_exc:
-            logger.warning("[CT-GATE] Execution gate snapshot failed: %s — assuming clear", _gate_exc)
-            gate_view = None
+            logger.warning(
+                "[CT-GATE] Execution gate snapshot failed: %s — "
+                "entries are NOT blocked by gate this cycle (fail-open fallback). "
+                "Investigate gate module health.",
+                _gate_exc,
+            )
 
         intents = []
         candidates_seen = 0

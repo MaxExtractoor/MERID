@@ -22,6 +22,7 @@ Every backend path that wants to execute a trade should call
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -321,8 +322,7 @@ def check_execution_gate() -> ExecutionGateStatus:
     # gate moves to blocked (fail-closed). Never sets limited — it is either
     # fine or broken; half-measures for connectivity are explicitly avoided.
     # Override with env MERID_EXEC_GATE_REQUIRE_KALSHI_WS=0 to run without WS.
-    import os as _os
-    _require_ws = _os.environ.get("MERID_EXEC_GATE_REQUIRE_KALSHI_WS", "1").lower() not in ("0", "false", "no")
+    _require_ws = os.environ.get("MERID_EXEC_GATE_REQUIRE_KALSHI_WS", "1").lower() not in ("0", "false", "no")
     if _require_ws:
         try:
             from merid.event_venues.kalshi.ws import get_kalshi_ws
