@@ -585,32 +585,38 @@ class TestEdgeAndPriceBandFilters:
         will likely cause the same "41 dropped, 0 kept" regression.
         """
         # Known-good tight bands from before commit 249d2de
+        # Now includes annual timeframe for all 5 assets (30-cell matrix)
         EXPECTED_TIGHT_BANDS = {
             ("BTC", "15m"): (0.35, 0.75),
             ("BTC", "1h"): (0.35, 0.75),
             ("BTC", "daily"): (0.65, 0.85),
             ("BTC", "weekly"): (0.65, 0.85),
             ("BTC", "monthly"): (0.70, 0.85),
+            ("BTC", "annual"): (0.55, 0.90),
             ("ETH", "15m"): (0.35, 0.75),
             ("ETH", "1h"): (0.35, 0.75),
             ("ETH", "daily"): (0.65, 0.85),
             ("ETH", "weekly"): (0.65, 0.85),
             ("ETH", "monthly"): (0.70, 0.85),
+            ("ETH", "annual"): (0.55, 0.90),
             ("SOL", "15m"): (0.25, 0.75),
             ("SOL", "1h"): (0.25, 0.75),
             ("SOL", "daily"): (0.55, 0.80),
             ("SOL", "weekly"): (0.60, 0.80),
             ("SOL", "monthly"): (0.65, 0.80),
+            ("SOL", "annual"): (0.50, 0.90),
             ("XRP", "15m"): (0.25, 0.75),
             ("XRP", "1h"): (0.25, 0.75),
             ("XRP", "daily"): (0.55, 0.80),
             ("XRP", "weekly"): (0.60, 0.80),
             ("XRP", "monthly"): (0.65, 0.80),
+            ("XRP", "annual"): (0.50, 0.90),
             ("DOGE", "15m"): (0.25, 0.70),
             ("DOGE", "1h"): (0.25, 0.70),
             ("DOGE", "daily"): (0.50, 0.75),
             ("DOGE", "weekly"): (0.55, 0.75),
             ("DOGE", "monthly"): (0.60, 0.75),
+            ("DOGE", "annual"): (0.50, 0.90),
         }
 
         for (asset, timeframe), expected_band in EXPECTED_TIGHT_BANDS.items():

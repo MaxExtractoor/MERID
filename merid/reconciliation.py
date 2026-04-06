@@ -550,6 +550,7 @@ def _fire_settlement_hooks(market_id: str) -> None:
     try:
         from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
         from merid.trading.kalshi_continuous_trader import get_continuous_trader
+        from merid.prediction.edge_calibration_tracker import get_edge_calibration_tracker
 
         ct = get_continuous_trader()
         fills = get_fills_ledger().fills_for_ticker(market_id)
@@ -571,6 +572,30 @@ def _fire_settlement_hooks(market_id: str) -> None:
                 settled_yes_api,
                 pnl_cents,
             )
+
+            # Record outcome for edge calibration tracking
+            try:
+                tracker = get_edge_calibration_tracker()
+                # For each fill, record the outcome with its realized PnL
+                for f in fills:
+                    win_cents = settlement_cents if f.side == "yes" else (100 - settlement_cents)
+                    if f.action == "buy":
+                        fill_pnl = f.count * (win_cents - f.price_cents)
+                    else:
+                        fill_pnl = f.count * (f.price_cents - win_cents)
+
+                    tracker.record_outcome(
+                        ticker=market_id,
+                        realized_pnl_cents=fill_pnl,
+                        fill_price_cents=f.price_cents,
+                        settled_outcome="yes" if settled_yes_api else "no",
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "EdgeCalibration: record_outcome failed for %s: %s",
+                    market_id, exc,
+                )
+
         elif settled_yes_api is None:
             logger.debug(
                 "CT bankroll: settlement hook skipped for %s — settled_yes_api unknown",
