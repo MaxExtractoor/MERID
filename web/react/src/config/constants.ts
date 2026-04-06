@@ -328,7 +328,7 @@ export const DEFAULTS = {
     BACKTESTS: 30000, // 30 seconds
     STALENESS: 15000,      // 15 seconds
     SIMULATION: 30000,     // 30 seconds
-    FAST_REFRESH: 15000,   // 15 seconds
+    FAST_REFRESH: 5000,    // 5 seconds  — safety/kill-switch/gate signals
     STANDARD: 10000,       // 10 seconds
     MEDIUM: 15000,         // 15 seconds
     SLOW: 30000,           // 30 seconds
