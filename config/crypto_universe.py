@@ -6,7 +6,7 @@ from here.  Never re-define asset lists or timeframe lists in downstream code.
 
 Supported universe:
   Assets    : BTC, ETH, SOL, XRP, DOGE
-  Timeframes: 15m, 1h, daily, weekly, monthly
+  Timeframes: 15m, 1h, daily, weekly, monthly, annual
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ CRYPTO_ASSETS_ORDERED: List[str] = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 # ── Canonical timeframe identifiers ─────────────────────────────────────────
 
-CRYPTO_TIMEFRAMES: FrozenSet[str] = frozenset({"15m", "1h", "daily", "weekly", "monthly"})
+CRYPTO_TIMEFRAMES: FrozenSet[str] = frozenset({"15m", "1h", "daily", "weekly", "monthly", "annual"})
 
 # Ordered list — short to long, used for reports and aggregation ordering.
-CRYPTO_TIMEFRAMES_ORDERED: List[str] = ["15m", "1h", "daily", "weekly", "monthly"]
+CRYPTO_TIMEFRAMES_ORDERED: List[str] = ["15m", "1h", "daily", "weekly", "monthly", "annual"]
 
 # Human-readable display labels.
 TIMEFRAME_LABELS: Dict[str, str] = {
@@ -34,6 +34,7 @@ TIMEFRAME_LABELS: Dict[str, str] = {
     "daily": "Daily",
     "weekly": "Weekly",
     "monthly": "Monthly",
+    "annual": "Annual",
 }
 
 # ── Full grid (25-cell matrix) ──────────────────────────────────────────────
@@ -43,23 +44,23 @@ TIMEFRAME_LABELS: Dict[str, str] = {
 # MUST derive their coverage from this matrix, not from local re-enumerations.
 CRYPTO_TIMEFRAME_MATRIX: List[Tuple[str, str]] = [
     # BTC (Bitcoin)
-    ("BTC", "15m"), ("BTC", "1h"), ("BTC", "daily"), ("BTC", "weekly"), ("BTC", "monthly"),
+    ("BTC", "15m"), ("BTC", "1h"), ("BTC", "daily"), ("BTC", "weekly"), ("BTC", "monthly"), ("BTC", "annual"),
     # ETH (Ethereum)
-    ("ETH", "15m"), ("ETH", "1h"), ("ETH", "daily"), ("ETH", "weekly"), ("ETH", "monthly"),
+    ("ETH", "15m"), ("ETH", "1h"), ("ETH", "daily"), ("ETH", "weekly"), ("ETH", "monthly"), ("ETH", "annual"),
     # SOL (Solana)
-    ("SOL", "15m"), ("SOL", "1h"), ("SOL", "daily"), ("SOL", "weekly"), ("SOL", "monthly"),
+    ("SOL", "15m"), ("SOL", "1h"), ("SOL", "daily"), ("SOL", "weekly"), ("SOL", "monthly"), ("SOL", "annual"),
     # XRP (Ripple)
-    ("XRP", "15m"), ("XRP", "1h"), ("XRP", "daily"), ("XRP", "weekly"), ("XRP", "monthly"),
+    ("XRP", "15m"), ("XRP", "1h"), ("XRP", "daily"), ("XRP", "weekly"), ("XRP", "monthly"), ("XRP", "annual"),
     # DOGE (Dogecoin)
-    ("DOGE", "15m"), ("DOGE", "1h"), ("DOGE", "daily"), ("DOGE", "weekly"), ("DOGE", "monthly"),
+    ("DOGE", "15m"), ("DOGE", "1h"), ("DOGE", "daily"), ("DOGE", "weekly"), ("DOGE", "monthly"), ("DOGE", "annual"),
 ]
 
 
 def get_full_grid() -> List[Tuple[str, str]]:
     """Return every (asset, timeframe) pair in the universe.
 
-    Returns ordered list: BTC/ETH/SOL/XRP/DOGE × 15m/1h/daily/weekly/monthly
-    (25 pairs total).
+    Returns ordered list: BTC/ETH/SOL/XRP/DOGE × 15m/1h/daily/weekly/monthly/annual
+    (30 pairs total).
 
     Note: This function returns the canonical CRYPTO_TIMEFRAME_MATRIX.
     All code should use this function or the matrix constant directly.
@@ -97,26 +98,36 @@ LEGACY_SYMBOL_MAP: Dict[str, Tuple[str, str]] = {
     "BTC_DAILY": ("BTC", "daily"),
     "BTC_WEEKLY": ("BTC", "weekly"),
     "BTC_MONTHLY": ("BTC", "monthly"),
+    "BTC_ANNUAL": ("BTC", "annual"),
+    "BTC_YEARLY": ("BTC", "annual"),
     "ETH_15M": ("ETH", "15m"),
     "ETH_1H": ("ETH", "1h"),
     "ETH_DAILY": ("ETH", "daily"),
     "ETH_WEEKLY": ("ETH", "weekly"),
     "ETH_MONTHLY": ("ETH", "monthly"),
+    "ETH_ANNUAL": ("ETH", "annual"),
+    "ETH_YEARLY": ("ETH", "annual"),
     "SOL_15M": ("SOL", "15m"),
     "SOL_1H": ("SOL", "1h"),
     "SOL_DAILY": ("SOL", "daily"),
     "SOL_WEEKLY": ("SOL", "weekly"),
     "SOL_MONTHLY": ("SOL", "monthly"),
+    "SOL_ANNUAL": ("SOL", "annual"),
+    "SOL_YEARLY": ("SOL", "annual"),
     "XRP_15M": ("XRP", "15m"),
     "XRP_1H": ("XRP", "1h"),
     "XRP_DAILY": ("XRP", "daily"),
     "XRP_WEEKLY": ("XRP", "weekly"),
     "XRP_MONTHLY": ("XRP", "monthly"),
+    "XRP_ANNUAL": ("XRP", "annual"),
+    "XRP_YEARLY": ("XRP", "annual"),
     "DOGE_15M": ("DOGE", "15m"),
     "DOGE_1H": ("DOGE", "1h"),
     "DOGE_DAILY": ("DOGE", "daily"),
     "DOGE_WEEKLY": ("DOGE", "weekly"),
     "DOGE_MONTHLY": ("DOGE", "monthly"),
+    "DOGE_ANNUAL": ("DOGE", "annual"),
+    "DOGE_YEARLY": ("DOGE", "annual"),
     # scalp/intraday/swing alias tier
     "BTC_SCALP": ("BTC", "15m"),
     "BTC_INTRADAY": ("BTC", "1h"),

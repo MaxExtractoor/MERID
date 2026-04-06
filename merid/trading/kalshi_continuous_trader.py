@@ -102,6 +102,16 @@ _DEFAULT_MAX_POSITION_CONTRACTS = int(os.getenv("MERID_CT_MAX_POSITION_CONTRACTS
 _DEFAULT_EXPOSURE_MULTIPLIER = float(os.getenv("MERID_CT_EXPOSURE_MULTIPLIER", "1.0"))
 _DEFAULT_COOLDOWN_SECONDS = float(os.getenv("MERID_CT_COOLDOWN_SECONDS", "0.0"))
 
+# Canary diagnostic mode — when enabled, CT must emit ≥1 tiny intent per asset
+# per day to prove end-to-end execution is wired for all 5 assets.
+# Set MERID_CT_CANARY_MODE=true to enable.
+# Set MERID_CT_CANARY_NOTIONAL to override the canary notional (default 1.0 USD).
+# Set MERID_CT_CANARY_INTERVAL_SECS to override the per-asset canary interval
+# (default 86400 = once per day).
+_CANARY_MODE: bool = os.getenv("MERID_CT_CANARY_MODE", "false").lower().strip() in ("1", "true", "yes")
+_CANARY_NOTIONAL: float = float(os.getenv("MERID_CT_CANARY_NOTIONAL", "1.0"))
+_CANARY_INTERVAL_SECS: float = float(os.getenv("MERID_CT_CANARY_INTERVAL_SECS", str(86400.0)))
+
 # Edge profile selection: "initial_live" (permissive) or "production" (conservative).
 #
 # Defaults to "initial_live" (0.5–2% thresholds) so that CT can generate trade
@@ -133,28 +143,34 @@ EDGE_THRESHOLDS_INITIAL_LIVE: Dict[Tuple[str, str], float] = {
     ("BTC", "daily"): 0.012,  # 1.2%
     ("BTC", "weekly"): 0.015, # 1.5%
     ("BTC", "monthly"): 0.015,
+    # Annual — regime bets only; require meaningful edge vs terminal distribution
+    ("BTC", "annual"): 0.020,
     # ETH - second most liquid
     ("ETH", "15m"): 0.008,
     ("ETH", "1h"): 0.010,
     ("ETH", "daily"): 0.015,
     ("ETH", "weekly"): 0.018,
     ("ETH", "monthly"): 0.018,
+    ("ETH", "annual"): 0.025,
     # SOL/XRP/DOGE - wider spreads, more volatile
     ("SOL", "15m"): 0.010,
     ("SOL", "1h"): 0.012,
     ("SOL", "daily"): 0.015,
     ("SOL", "weekly"): 0.020,
     ("SOL", "monthly"): 0.020,
+    ("SOL", "annual"): 0.030,
     ("XRP", "15m"): 0.010,
     ("XRP", "1h"): 0.012,
     ("XRP", "daily"): 0.015,
     ("XRP", "weekly"): 0.020,
     ("XRP", "monthly"): 0.020,
+    ("XRP", "annual"): 0.030,
     ("DOGE", "15m"): 0.010,
     ("DOGE", "1h"): 0.012,
     ("DOGE", "daily"): 0.015,
     ("DOGE", "weekly"): 0.020,
     ("DOGE", "monthly"): 0.020,
+    ("DOGE", "annual"): 0.030,
 }
 
 # PRODUCTION profile: Conservative thresholds (original values)
@@ -165,30 +181,35 @@ EDGE_THRESHOLDS_PRODUCTION: Dict[Tuple[str, str], float] = {
     ("BTC", "daily"): 0.04,
     ("BTC", "weekly"): 0.05,
     ("BTC", "monthly"): 0.05,
+    ("BTC", "annual"): 0.08,
     # ETH
     ("ETH", "15m"): 0.03,
     ("ETH", "1h"): 0.04,
     ("ETH", "daily"): 0.05,
     ("ETH", "weekly"): 0.06,
     ("ETH", "monthly"): 0.06,
+    ("ETH", "annual"): 0.10,
     # SOL
     ("SOL", "15m"): 0.04,
     ("SOL", "1h"): 0.06,
     ("SOL", "daily"): 0.06,
     ("SOL", "weekly"): 0.08,
     ("SOL", "monthly"): 0.08,
+    ("SOL", "annual"): 0.12,
     # XRP
     ("XRP", "15m"): 0.04,
     ("XRP", "1h"): 0.06,
     ("XRP", "daily"): 0.06,
     ("XRP", "weekly"): 0.08,
     ("XRP", "monthly"): 0.08,
+    ("XRP", "annual"): 0.12,
     # DOGE
     ("DOGE", "15m"): 0.04,
     ("DOGE", "1h"): 0.06,
     ("DOGE", "daily"): 0.06,
     ("DOGE", "weekly"): 0.08,
     ("DOGE", "monthly"): 0.08,
+    ("DOGE", "annual"): 0.12,
 }
 
 # Select active thresholds based on profile
@@ -574,6 +595,15 @@ class KalshiContinuousTrader:
         self._exposure_multiplier = exposure_multiplier
         self._per_asset_cooldown_seconds = per_asset_cooldown_seconds
         self._last_trade_ts: Dict[str, float] = {}  # asset → last trade timestamp
+
+        # ── Canary mode state ────────────────────────────────────────────────
+        # When MERID_CT_CANARY_MODE=true, CT emits a tiny ($1) diagnostic intent
+        # once per interval per asset to prove end-to-end execution is wired.
+        # Tracks the timestamp of the last canary intent emitted per asset.
+        self._canary_last_ts: Dict[str, float] = {a: 0.0 for a in _CRYPTO_ASSETS}
+        self._canary_mode: bool = _CANARY_MODE
+        self._canary_notional: float = _CANARY_NOTIONAL
+        self._canary_interval_secs: float = _CANARY_INTERVAL_SECS
 
         if not 0 <= self._min_price_cents < self._max_price_cents <= 99:
             raise ValueError(
@@ -1242,6 +1272,86 @@ class KalshiContinuousTrader:
 
     # ── Trade cycle ───────────────────────────────────────────────────────
 
+    def _inject_canary_intents(
+        self,
+        intents: List[Dict[str, Any]],
+        bankroll: float,
+        per_asset_stats: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Inject tiny canary intents for assets that have been silent too long.
+
+        When canary mode is enabled (``MERID_CT_CANARY_MODE=true``), CT must emit
+        at least one intent per asset every ``_canary_interval_secs``.  When an
+        asset has no real intents and its canary timer has elapsed, a synthetic
+        $1 diagnostic intent is added to the output list.
+
+        The canary intent is flagged with ``"canary": True`` so the caller can
+        submit it to Kalshi REST (proving the execution path is wired) and report
+        it separately from normal intents.
+
+        If no candidate for the asset is available in ``_candidates``, the canary
+        is skipped for this cycle (the signal would be meaningless without a real
+        market to target).
+        """
+        now = time.time()
+        assets_with_intents: set = {i["underlying"] for i in intents}
+
+        for asset in _CRYPTO_ASSETS:
+            if asset in assets_with_intents:
+                # Already have a real intent — reset canary timer and skip.
+                self._canary_last_ts[asset] = now
+                continue
+
+            elapsed = now - self._canary_last_ts.get(asset, 0.0)
+            if elapsed < self._canary_interval_secs:
+                continue  # Still within interval — no canary needed yet.
+
+            # Find the first available candidate for this asset.
+            candidate = next(
+                (c for c in self._candidates if c.underlying == asset),
+                None,
+            )
+            if candidate is None:
+                logger.warning(
+                    "[CANARY] asset=%s: no candidate available for canary intent — skip.",
+                    asset,
+                )
+                continue
+
+            mid_price_cents = candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
+            mid_price_dollars = mid_price_cents / 100.0
+            canary_contracts = max(1, int(math.floor(self._canary_notional / mid_price_dollars)))
+
+            canary_intent = {
+                "ticker": candidate.ticker,
+                "underlying": candidate.underlying,
+                "timeframe": candidate.timeframe,
+                "group_id": candidate.group_id,
+                "direction": "yes",
+                "notional": self._canary_notional,
+                "confidence": 0.0,
+                "edge": 0.0,
+                "kelly_raw": 0.0,
+                "kelly_frac": 0.0,
+                "size_contracts": canary_contracts,
+                "sizing_source": "canary",
+                "canary": True,
+                "intent_id": generate_correlation_id(
+                    datetime.now(timezone.utc), prefix="kalshi-canary"
+                ),
+                "ts": now,
+            }
+            intents.append(canary_intent)
+            self._canary_last_ts[asset] = now
+
+            logger.info(
+                "[CANARY] asset=%s ticker=%s notional=%.2f contracts=%d — "
+                "canary intent injected (%.0fs since last intent for this asset)",
+                asset, candidate.ticker, self._canary_notional, canary_contracts, elapsed,
+            )
+
+        return intents
+
     async def trade_cycle(
         self,
         bankroll: float,
@@ -1274,11 +1384,35 @@ class KalshiContinuousTrader:
         vetoed_by_reason: Dict[str, int] = {}
         ticker_diagnostics: List[Dict[str, Any]] = []
 
+        # Per-asset tracking for pipeline audit and per-asset cycle summary.
+        # {asset: {candidates_seen, evaluated, approved, vetoed, kelly_zero_count,
+        #          veto_reasons, approved_orders_intent, orders_blocked_by_risk,
+        #          orders_blocked_by_kill_switch}}
+        per_asset_stats: Dict[str, Dict[str, Any]] = {
+            a: {
+                "candidates_seen": 0,
+                "evaluated": 0,
+                "approved": 0,
+                "vetoed": 0,
+                "kelly_zero_count": 0,
+                "veto_reasons": {},
+                "approved_orders_intent": 0,
+                "orders_submitted": 0,
+                "orders_blocked_by_risk": 0,
+                "orders_blocked_by_kill_switch": 0,
+            }
+            for a in _CRYPTO_ASSETS
+        }
+
         for candidate in self._candidates:
             # Yield to event loop periodically during candidate processing
             await asyncio.sleep(0)
 
             candidates_seen += 1
+            _asset = candidate.underlying
+            _pas = per_asset_stats.get(_asset)
+            if _pas is not None:
+                _pas["candidates_seen"] += 1
 
             if spot_prices:
                 candidate.spot_price = spot_prices.get(candidate.underlying)
@@ -1296,6 +1430,9 @@ class KalshiContinuousTrader:
                     0.0, 0.0, 0, veto_reason,
                 )
                 vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                if _pas is not None:
+                    _pas["vetoed"] += 1
+                    _pas["veto_reasons"][veto_reason] = _pas["veto_reasons"].get(veto_reason, 0) + 1
                 ticker_diagnostics.append({
                     "ticker": candidate.ticker,
                     "asset": candidate.underlying,
@@ -1309,6 +1446,9 @@ class KalshiContinuousTrader:
                     "veto_reason": veto_reason,
                 })
                 continue
+
+            if _pas is not None:
+                _pas["evaluated"] += 1
 
             # Use signal_to_sizing for Kelly-based notional.
             # Pass the pre-computed estimate so the strategy is invoked exactly
@@ -1343,6 +1483,11 @@ class KalshiContinuousTrader:
                     sizing.size_contracts, veto_reason,
                 )
                 vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                if _pas is not None:
+                    _pas["vetoed"] += 1
+                    _pas["veto_reasons"][veto_reason] = _pas["veto_reasons"].get(veto_reason, 0) + 1
+                    if sizing.kelly_raw <= 0 or sizing.size_contracts == 0:
+                        _pas["kelly_zero_count"] += 1
                 ticker_diagnostics.append({
                     "ticker": candidate.ticker,
                     "asset": candidate.underlying,
@@ -1376,6 +1521,10 @@ class KalshiContinuousTrader:
                     sizing.size_contracts, veto_reason,
                 )
                 vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                if _pas is not None:
+                    _pas["vetoed"] += 1
+                    _pas["veto_reasons"][veto_reason] = _pas["veto_reasons"].get(veto_reason, 0) + 1
+                    _pas["orders_blocked_by_risk"] += 1
                 ticker_diagnostics.append({
                     "ticker": candidate.ticker,
                     "asset": candidate.underlying,
@@ -1491,6 +1640,9 @@ class KalshiContinuousTrader:
                     self._risk.execution_rejections += 1
                     self._emit_rejection(candidate.ticker, "max_yes_price_cap", intent["intent_id"])
                     vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                    if _pas is not None:
+                        _pas["vetoed"] += 1
+                        _pas["veto_reasons"][veto_reason] = _pas["veto_reasons"].get(veto_reason, 0) + 1
                     ticker_diagnostics.append({
                         "ticker": candidate.ticker,
                         "asset": candidate.underlying,
@@ -1519,6 +1671,9 @@ class KalshiContinuousTrader:
             # AUDIT-08: record trade timestamp for per-asset cooldown tracking
             if self._per_asset_cooldown_seconds > 0:
                 self._last_trade_ts[candidate.underlying.upper()] = time.time()
+            if _pas is not None:
+                _pas["approved"] += 1
+                _pas["approved_orders_intent"] += 1
             intents.append(intent)
             ticker_diagnostics.append({
                 "ticker": candidate.ticker,
@@ -1541,6 +1696,29 @@ class KalshiContinuousTrader:
                 final_size_contracts, sizing.source,
             )
 
+        # ── Canary diagnostic mode ────────────────────────────────────────────
+        # When enabled, emit a tiny intent for each asset that has not had a live
+        # intent in the past canary_interval_secs, to prove end-to-end execution.
+        if self._canary_mode:
+            intents = self._inject_canary_intents(intents, bankroll, per_asset_stats)
+
+        # ── Per-asset summary log ─────────────────────────────────────────────
+        for asset in _CRYPTO_ASSETS:
+            s = per_asset_stats.get(asset, {})
+            logger.info(
+                "[CT-ASSET-SUMMARY] asset=%s candidates=%d evaluated=%d approved=%d "
+                "vetoed=%d veto_reasons=%s approved_intent=%d blocked_risk=%d blocked_kill=%d",
+                asset,
+                s.get("candidates_seen", 0),
+                s.get("evaluated", 0),
+                s.get("approved", 0),
+                s.get("vetoed", 0),
+                s.get("veto_reasons", {}),
+                s.get("approved_orders_intent", 0),
+                s.get("orders_blocked_by_risk", 0),
+                s.get("orders_blocked_by_kill_switch", 0),
+            )
+
         # Persist cycle summary for status() / API consumers
         self._last_cycle_stats = {
             "candidates_seen": candidates_seen,
@@ -1550,6 +1728,8 @@ class KalshiContinuousTrader:
             "vetoed_by_reason": vetoed_by_reason,
             "ticker_diagnostics": ticker_diagnostics,
             "cycle_ts": time.time(),
+            # Per-asset breakdown for pipeline audit and diagnostics.
+            "per_asset_stats": dict(per_asset_stats),
         }
 
         return intents

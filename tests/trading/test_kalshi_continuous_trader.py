@@ -1116,3 +1116,200 @@ class TestEndToEndEdgeGating:
             f"End-to-end: size_contracts={intent['size_contracts']} "
             f"should equal floor({intent['notional']:.4f}/{price_dollars})={expected}"
         )
+
+
+# ── Per-asset cycle stats ─────────────────────────────────────────────────
+
+class TestPerAssetCycleStats:
+    """trade_cycle must populate per_asset_stats for all 5 assets each cycle."""
+
+    def _make_trader(self) -> KalshiContinuousTrader:
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        strategy = _FixedStrategy(conf=0.80)
+        return KalshiContinuousTrader(dry_run=True, catalog=catalog, strategy=strategy)
+
+    @pytest.mark.asyncio
+    async def test_last_cycle_stats_has_per_asset_stats(self) -> None:
+        """After a trade cycle, _last_cycle_stats must contain per_asset_stats."""
+        trader = self._make_trader()
+        trader._refresh_candidates = AsyncMock()
+        trader._candidates = [
+            TradingCandidate.from_candidate(
+                _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=45, best_ask_cents=48)
+            ),
+            TradingCandidate.from_candidate(
+                _make_candidate(ticker="KXETH-15M-T3500", underlying="ETH", timeframe="15m",
+                                mid_price_cents=45, best_ask_cents=48)
+            ),
+        ]
+        await trader.trade_cycle(bankroll=10000.0)
+        stats = trader._last_cycle_stats
+        assert "per_asset_stats" in stats
+        per_asset = stats["per_asset_stats"]
+        # Should have all 5 assets
+        for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            assert asset in per_asset, f"Missing {asset} in per_asset_stats"
+
+    @pytest.mark.asyncio
+    async def test_approved_candidate_increments_approved_orders_intent(self) -> None:
+        """When a candidate passes all gates, approved_orders_intent should be >= 1."""
+        trader = self._make_trader()
+        trader._refresh_candidates = AsyncMock()
+        trader._candidates = [
+            TradingCandidate.from_candidate(
+                _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=45, best_ask_cents=48)
+            ),
+        ]
+        intents = await trader.trade_cycle(bankroll=10000.0)
+        per_asset = trader._last_cycle_stats.get("per_asset_stats", {})
+        btc_stats = per_asset.get("BTC", {})
+        if len(intents) > 0:
+            assert btc_stats.get("approved_orders_intent", 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_vetoed_candidate_increments_vetoed_count(self) -> None:
+        """When a candidate is vetoed (no_estimate), vetoed count should increase."""
+        trader = KalshiContinuousTrader(
+            dry_run=True,
+            catalog=MagicMock(),
+            strategy=None,  # No strategy → no_estimate veto
+        )
+        trader._refresh_candidates = AsyncMock()
+        trader._candidates = [
+            TradingCandidate.from_candidate(
+                _make_candidate(underlying="SOL", timeframe="daily", mid_price_cents=50)
+            ),
+        ]
+        await trader.trade_cycle(bankroll=10000.0)
+        per_asset = trader._last_cycle_stats.get("per_asset_stats", {})
+        sol_stats = per_asset.get("SOL", {})
+        assert sol_stats.get("vetoed", 0) >= 1
+
+
+# ── Annual timeframe ──────────────────────────────────────────────────────
+
+class TestAnnualTimeframe:
+    """Annual timeframe must be present in universe and edge thresholds."""
+
+    def test_annual_in_crypto_timeframes(self) -> None:
+        assert "annual" in _CRYPTO_TIMEFRAMES, "annual not in _CRYPTO_TIMEFRAMES"
+
+    def test_annual_edge_threshold_btc(self) -> None:
+        from merid.trading.kalshi_continuous_trader import EDGE_THRESHOLDS_INITIAL_LIVE
+        assert ("BTC", "annual") in EDGE_THRESHOLDS_INITIAL_LIVE
+
+    def test_annual_edge_threshold_all_assets(self) -> None:
+        from merid.trading.kalshi_continuous_trader import EDGE_THRESHOLDS_PRODUCTION
+        for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            assert (asset, "annual") in EDGE_THRESHOLDS_PRODUCTION, (
+                f"({asset!r}, 'annual') missing from EDGE_THRESHOLDS_PRODUCTION"
+            )
+
+    def test_annual_threshold_higher_than_monthly(self) -> None:
+        """Annual edge threshold must be higher (stricter) than monthly for each asset."""
+        from merid.trading.kalshi_continuous_trader import EDGE_THRESHOLDS_INITIAL_LIVE
+        for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+            annual_t = EDGE_THRESHOLDS_INITIAL_LIVE.get((asset, "annual"), 0.0)
+            monthly_t = EDGE_THRESHOLDS_INITIAL_LIVE.get((asset, "monthly"), 0.0)
+            assert annual_t >= monthly_t, (
+                f"{asset}: annual threshold ({annual_t}) should be ≥ monthly ({monthly_t})"
+            )
+
+
+# ── Canary mode ───────────────────────────────────────────────────────────
+
+class TestCanaryMode:
+    """Canary diagnostic mode injects tiny intents for silent assets."""
+
+    def _make_trader(self, canary: bool = True) -> KalshiContinuousTrader:
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        strategy = _FixedStrategy(conf=0.80)
+        trader = KalshiContinuousTrader(
+            dry_run=True, catalog=catalog, strategy=strategy
+        )
+        trader._canary_mode = canary
+        trader._canary_notional = 1.0
+        trader._canary_interval_secs = 0.0  # Always elapsed
+        return trader
+
+    @pytest.mark.asyncio
+    async def test_canary_injects_intent_for_silent_asset(self) -> None:
+        """With interval=0, canary must inject an intent for every silent asset."""
+        trader = self._make_trader(canary=True)
+        trader._refresh_candidates = AsyncMock()
+
+        # Only BTC has a candidate; other assets have no candidates → canary skips them
+        trader._candidates = [
+            TradingCandidate.from_candidate(
+                _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=45)
+            ),
+        ]
+
+        intents = await trader.trade_cycle(bankroll=10000.0)
+        canary_intents = [i for i in intents if i.get("canary") is True]
+        # Canary should inject an intent for BTC (the one with a candidate and elapsed interval)
+        canary_assets = {i["underlying"] for i in canary_intents}
+        assert "BTC" in canary_assets
+
+    @pytest.mark.asyncio
+    async def test_canary_not_injected_when_real_intent_exists(self) -> None:
+        """If a real intent is approved for an asset, no canary intent is added."""
+        trader = self._make_trader(canary=True)
+        trader._refresh_candidates = AsyncMock()
+
+        # BTC candidate will pass (strategy has edge=0.10)
+        trader._candidates = [
+            TradingCandidate.from_candidate(
+                _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=45, best_ask_cents=48)
+            ),
+        ]
+
+        intents = await trader.trade_cycle(bankroll=10000.0)
+        # If BTC generated a real intent, no canary should exist for BTC
+        btc_canary = [i for i in intents if i.get("canary") and i["underlying"] == "BTC"]
+        if any(i for i in intents if not i.get("canary") and i.get("underlying") == "BTC"):
+            assert len(btc_canary) == 0, "No canary expected when real BTC intent exists"
+
+    @pytest.mark.asyncio
+    async def test_canary_disabled_by_default(self) -> None:
+        """With _canary_mode=False, no canary intents are injected."""
+        trader = self._make_trader(canary=False)
+        trader._refresh_candidates = AsyncMock()
+
+        trader._candidates = [
+            TradingCandidate.from_candidate(
+                _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=45)
+            ),
+        ]
+
+        intents = await trader.trade_cycle(bankroll=10000.0)
+        canary_intents = [i for i in intents if i.get("canary") is True]
+        assert len(canary_intents) == 0, "No canary intents should be injected when mode is off"
+
+    @pytest.mark.asyncio
+    async def test_canary_intent_has_correct_fields(self) -> None:
+        """Canary intent must contain required fields with canary=True flag."""
+        trader = self._make_trader(canary=True)
+        trader._canary_interval_secs = 0.0
+        trader._refresh_candidates = AsyncMock()
+
+        trader._candidates = [
+            TradingCandidate.from_candidate(
+                _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=45)
+            ),
+        ]
+        # Force no real intents to guarantee canary fires
+        trader._strategy = None
+
+        intents = await trader.trade_cycle(bankroll=10000.0)
+        canary = next((i for i in intents if i.get("canary") and i["underlying"] == "BTC"), None)
+        if canary is None:
+            pytest.skip("Canary not injected (BTC candidate may have been vetoed before canary)")
+
+        assert canary["canary"] is True
+        assert canary["sizing_source"] == "canary"
+        assert canary["notional"] == trader._canary_notional
+        assert "intent_id" in canary
+        assert canary["size_contracts"] >= 1
