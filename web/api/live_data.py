@@ -35,6 +35,12 @@ _KALSHI_CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
 _COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/{sym}-USD/spot"
 
 
+# Multipliers for synthetic 24-hour high/low estimates (absent from the CoinGecko endpoint
+# we use).  ±2% is a rough placeholder; replace with real OHLCV data if precision matters.
+_HIGH_24H_MULTIPLIER = 1.02
+_LOW_24H_MULTIPLIER = 0.98
+
+
 def _fetch_coinbase_spot_prices() -> Dict[str, float]:
     """Fetch spot prices for the 5 Kalshi crypto assets from Coinbase (synchronous).
 
@@ -43,7 +49,7 @@ def _fetch_coinbase_spot_prices() -> Dict[str, float]:
     CoinGecko for any missing symbols.
     """
     prices: Dict[str, float] = {}
-    with httpx.Client(timeout=5.0, verify=False) as client:
+    with httpx.Client(timeout=5.0) as client:
         for sym in _KALSHI_CRYPTO_SYMBOLS:
             try:
                 resp = client.get(_COINBASE_SPOT_URL.format(sym=sym))
@@ -97,7 +103,7 @@ async def fetch_live_prices():
         coingecko_ids = get_all_coingecko_ids()
         
         def sync_coingecko():
-            with httpx.Client(timeout=30.0, verify=False) as client:
+            with httpx.Client(timeout=30.0) as client:
                 ids_param = ','.join(coingecko_ids)
                 url = (
                     f"https://api.coingecko.com/api/v3/simple/price"
@@ -139,8 +145,8 @@ async def fetch_live_prices():
                     'change_24h': coin_data.get('usd_24h_change', 0),
                     'volume_24h': coin_data.get('usd_24h_vol', 0),
                     'market_cap': coin_data.get('usd_market_cap', 0),
-                    'high_24h': display_price * 1.02,
-                    'low_24h': display_price * 0.98,
+                    'high_24h': display_price * _HIGH_24H_MULTIPLIER,
+                    'low_24h': display_price * _LOW_24H_MULTIPLIER,
                     'price_source': (
                         'coinbase' if asset.symbol in coinbase_prices else 'coingecko'
                     ),
