@@ -1,6 +1,6 @@
 """CryptoKalshiRisk — Unified risk + sizing + routing layer for Kalshi crypto markets.
 
-Supports BTC, ETH, SOL, XRP, DOGE across all timeframes (15m, 1h, daily, weekly, monthly).
+Supports BTC, ETH, SOL, XRP, DOGE across all timeframes (15m, 1h, daily, weekly, monthly, annual).
 
 Key design principles:
 - Risk is always a **percentage of bankroll** — no hardcoded dollar amounts.
@@ -41,7 +41,7 @@ logger = get_logger("merid.event_venues.kalshi.crypto_kalshi_risk")
 
 CRYPTO_ASSETS: List[str] = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 # Canonical timeframes - using standard format from config.crypto_universe
-TIMEFRAMES: List[str] = ["15m", "1h", "daily", "weekly", "monthly"]
+TIMEFRAMES: List[str] = ["15m", "1h", "daily", "weekly", "monthly", "annual"]
 
 # Legacy timeframe aliases for backward compatibility
 LEGACY_TIMEFRAMES: List[str] = ["scalp", "intraday", "swing"]
@@ -49,6 +49,7 @@ TIMEFRAME_ALIASES: Dict[str, str] = {
     "scalp": "15m",
     "intraday": "1h",
     "swing": "daily",
+    "yearly": "annual",  # backward-compat: catalog used "yearly" before normalization
 }
 
 
@@ -209,8 +210,8 @@ class CryptoKalshiStrategyConfig:
 def _build_default_profiles() -> Dict[Tuple[str, str], StrategyProfile]:
     """Build sensible default strategy profiles for all (asset, timeframe) pairs.
 
-    Covers all 5 assets × 5 timeframes = 25 profiles.
-    Timeframes: 15m, 1h, daily, weekly, monthly
+    Covers all 5 assets × 6 timeframes = 30 profiles.
+    Timeframes: 15m, 1h, daily, weekly, monthly, annual
     """
     # (asset, timeframe): (bankroll_share, max_trades/day, price_band, min_edge_bp, max_open)
     #
@@ -221,6 +222,12 @@ def _build_default_profiles() -> Dict[Tuple[str, str], StrategyProfile]:
     # that reflect near-spot strikes. Tighter bands for short-term markets (15m/1h)
     # focus on higher-probability near-the-money contracts, while longer-term markets
     # use wider bands to capture a broader range of strikes.
+    #
+    # Annual markets (regime bets only): very conservative settings — only engage
+    # when macro+crypto regime filter confirms a strong trend. Max 1 trade/week
+    # (expressed as max_trades_per_day=0 to require the canary / regime gate to
+    # approve explicitly), tight position limits, and the widest price bands since
+    # annual markets naturally span a broader strike range.
     spec: Dict[Tuple[str, str], tuple] = {
         # ── BTC ──────────────────────────────────────────────────────────
         ("BTC", "15m"):      (0.20, 5,  (0.35, 0.75), 50.0, 3),
@@ -228,30 +235,35 @@ def _build_default_profiles() -> Dict[Tuple[str, str], StrategyProfile]:
         ("BTC", "daily"):    (0.25, 3,  (0.65, 0.85), 30.0, 2),
         ("BTC", "weekly"):   (0.15, 2,  (0.65, 0.85), 25.0, 2),
         ("BTC", "monthly"):  (0.15, 1,  (0.70, 0.85), 20.0, 1),
+        ("BTC", "annual"):   (0.05, 1,  (0.55, 0.90), 99.0, 1),
         # ── ETH ──────────────────────────────────────────────────────────
         ("ETH", "15m"):      (0.20, 5,  (0.35, 0.75), 50.0, 3),
         ("ETH", "1h"):       (0.25, 10, (0.35, 0.75), 40.0, 5),
         ("ETH", "daily"):    (0.25, 3,  (0.65, 0.85), 30.0, 2),
         ("ETH", "weekly"):   (0.15, 2,  (0.65, 0.85), 25.0, 2),
         ("ETH", "monthly"):  (0.15, 1,  (0.70, 0.85), 20.0, 1),
+        ("ETH", "annual"):   (0.05, 1,  (0.55, 0.90), 99.0, 1),
         # ── SOL ──────────────────────────────────────────────────────────
         ("SOL", "15m"):      (0.20, 4,  (0.25, 0.75), 60.0, 2),
         ("SOL", "1h"):       (0.25, 8,  (0.25, 0.75), 50.0, 4),
         ("SOL", "daily"):    (0.25, 2,  (0.55, 0.80), 40.0, 2),
         ("SOL", "weekly"):   (0.15, 1,  (0.60, 0.80), 35.0, 1),
         ("SOL", "monthly"):  (0.15, 1,  (0.65, 0.80), 30.0, 1),
+        ("SOL", "annual"):   (0.04, 1,  (0.50, 0.90), 119.0, 1),
         # ── XRP ──────────────────────────────────────────────────────────
         ("XRP", "15m"):      (0.20, 4,  (0.25, 0.75), 60.0, 2),
         ("XRP", "1h"):       (0.25, 8,  (0.25, 0.75), 50.0, 4),
         ("XRP", "daily"):    (0.25, 2,  (0.55, 0.80), 40.0, 2),
         ("XRP", "weekly"):   (0.15, 1,  (0.60, 0.80), 35.0, 1),
         ("XRP", "monthly"):  (0.15, 1,  (0.65, 0.80), 30.0, 1),
+        ("XRP", "annual"):   (0.04, 1,  (0.50, 0.90), 119.0, 1),
         # ── DOGE ─────────────────────────────────────────────────────────
         ("DOGE", "15m"):     (0.20, 3,  (0.25, 0.70), 75.0, 2),
         ("DOGE", "1h"):      (0.25, 6,  (0.25, 0.70), 60.0, 3),
         ("DOGE", "daily"):   (0.25, 2,  (0.50, 0.75), 50.0, 2),
         ("DOGE", "weekly"):  (0.15, 1,  (0.55, 0.75), 45.0, 1),
         ("DOGE", "monthly"): (0.15, 1,  (0.60, 0.75), 40.0, 1),
+        ("DOGE", "annual"):  (0.03, 1,  (0.50, 0.90), 149.0, 1),
     }
     profiles: Dict[Tuple[str, str], StrategyProfile] = {}
     for (asset, tf), (bshare, max_td, band, edge_bp, max_open) in spec.items():

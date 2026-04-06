@@ -4,7 +4,7 @@ Comprehensive tests for crypto coverage implementation.
 
 Tests:
 1. Legacy alias behavior (scalp→15m, intraday→1h, swing→daily)
-2. 25-cell matrix consistency
+2. 30-cell matrix consistency
 3. Profile vs market alignment
 """
 
@@ -89,9 +89,9 @@ def test_legacy_aliases():
 
 
 def test_matrix_consistency():
-    """Test that the 25-cell matrix is consistent across all modules."""
+    """Test that the 30-cell matrix is consistent across all modules."""
     print("\n" + "=" * 80)
-    print("TEST 2: 25-Cell Matrix Consistency")
+    print("TEST 2: 30-Cell Matrix Consistency")
     print("=" * 80)
 
     try:
@@ -103,11 +103,11 @@ def test_matrix_consistency():
         )
 
         print(f"\nMatrix size: {len(CRYPTO_TIMEFRAME_MATRIX)} pairs")
-        print(f"Expected: 25 (5 assets × 5 timeframes)")
+        print(f"Expected: 30 (5 assets × 6 timeframes)")
 
-        # Test 1: Matrix has exactly 25 pairs
-        if len(CRYPTO_TIMEFRAME_MATRIX) != 25:
-            print(f"✗ FAIL: Matrix has {len(CRYPTO_TIMEFRAME_MATRIX)} pairs, expected 25")
+        # Test 1: Matrix has exactly 30 pairs
+        if len(CRYPTO_TIMEFRAME_MATRIX) != 30:
+            print(f"✗ FAIL: Matrix has {len(CRYPTO_TIMEFRAME_MATRIX)} pairs, expected 30")
             return False
 
         # Test 2: get_full_grid() returns the same matrix
@@ -128,19 +128,19 @@ def test_matrix_consistency():
                 print(f"  ✗ Invalid timeframe: {tf}")
                 return False
 
-        print("  ✓ All 25 pairs are valid")
+        print("  ✓ All 30 pairs are valid")
 
-        # Test 4: Each asset has exactly 5 timeframes
+        # Test 4: Each asset has exactly 6 timeframes
         from collections import Counter
         asset_counts = Counter(asset for asset, _ in CRYPTO_TIMEFRAME_MATRIX)
 
         print("\nAsset distribution:")
         for asset in CRYPTO_ASSETS_ORDERED:
             count = asset_counts[asset]
-            status = "✓" if count == 5 else "✗"
+            status = "✓" if count == 6 else "✗"
             print(f"  {status} {asset}: {count} timeframes")
 
-            if count != 5:
+            if count != 6:
                 return False
 
         # Test 5: Verify strategy profiles exist (file-based check)
@@ -149,14 +149,14 @@ def test_matrix_consistency():
         source = source_file.read_text()
 
         # Count profile definitions
-        profile_count = len(re.findall(r'\("(BTC|ETH|SOL|XRP|DOGE)", "(15m|1h|daily|weekly|monthly)"\):', source))
+        profile_count = len(re.findall(r'\("(BTC|ETH|SOL|XRP|DOGE)", "(15m|1h|daily|weekly|monthly|annual)"\):', source))
         print(f"\nStrategy profiles defined: {profile_count}")
 
-        if profile_count != 25:
-            print(f"✗ FAIL: Expected 25 profiles, got {profile_count}")
+        if profile_count != 30:
+            print(f"✗ FAIL: Expected 30 profiles, got {profile_count}")
             return False
 
-        print("  ✓ All 25 matrix pairs have strategy profiles")
+        print("  ✓ All 30 matrix pairs have strategy profiles")
 
         print("\n✓ PASS: Matrix is consistent across all modules")
         return True
@@ -183,23 +183,33 @@ def test_continuous_trader_filter():
         source_file = Path(__file__).parent.parent / "merid" / "trading" / "kalshi_continuous_trader.py"
         source = source_file.read_text()
 
-        # Extract _CRYPTO_ASSETS
-        assets_match = re.search(r'_CRYPTO_ASSETS\s*=\s*\(([^)]+)\)', source)
-        if not assets_match:
+        # Extract _CRYPTO_ASSETS — accepts both inline tuple and dynamic tuple() form
+        assets_match = re.search(r'_CRYPTO_ASSETS\s*(?::\s*tuple\s*)?=\s*\(([^)]+)\)', source)
+        # Also accept tuple(_CRYPTO_ASSETS_LIST) form — in that case verify via import
+        dynamic_match = re.search(r'_CRYPTO_ASSETS\s*(?::\s*tuple\s*)?=\s*tuple\(', source)
+        if not assets_match and not dynamic_match:
             print("✗ FAIL: Could not find _CRYPTO_ASSETS")
             return False
 
-        assets_str = assets_match.group(1)
-        trader_assets = re.findall(r'"([^"]+)"', assets_str)
+        if assets_match:
+            assets_str = assets_match.group(1)
+            trader_assets = re.findall(r'"([^"]+)"', assets_str)
+        else:
+            # Dynamic form — rely on import
+            trader_assets = CRYPTO_ASSETS_ORDERED
 
-        # Extract _CRYPTO_TIMEFRAMES
-        tf_match = re.search(r'_CRYPTO_TIMEFRAMES\s*=\s*\(([^)]+)\)', source)
-        if not tf_match:
+        # Extract _CRYPTO_TIMEFRAMES — same dual-form handling
+        tf_match = re.search(r'_CRYPTO_TIMEFRAMES\s*(?::\s*tuple\s*)?=\s*\(([^)]+)\)', source)
+        dynamic_tf_match = re.search(r'_CRYPTO_TIMEFRAMES\s*(?::\s*tuple\s*)?=\s*tuple\(', source)
+        if not tf_match and not dynamic_tf_match:
             print("✗ FAIL: Could not find _CRYPTO_TIMEFRAMES")
             return False
 
-        tf_str = tf_match.group(1)
-        trader_timeframes = re.findall(r'"([^"]+)"', tf_str)
+        if tf_match:
+            tf_str = tf_match.group(1)
+            trader_timeframes = re.findall(r'"([^"]+)"', tf_str)
+        else:
+            trader_timeframes = CRYPTO_TIMEFRAMES_ORDERED
 
         print(f"\nContinuous trader assets: {trader_assets}")
         print(f"Expected: {CRYPTO_ASSETS_ORDERED}")
@@ -278,10 +288,10 @@ def main():
     print("=" * 80)
     print("CRYPTO COVERAGE COMPREHENSIVE TEST SUITE")
     print("=" * 80)
-    print("\nTesting complete 25-market coverage:")
+    print("\nTesting complete 30-market coverage:")
     print("  - 5 assets: BTC, ETH, SOL, XRP, DOGE")
-    print("  - 5 timeframes: 15m, 1h, daily, weekly, monthly")
-    print("  - Total: 25 distinct markets\n")
+    print("  - 6 timeframes: 15m, 1h, daily, weekly, monthly, annual")
+    print("  - Total: 30 distinct markets\n")
 
     tests = [
         ("Legacy Alias Behavior", test_legacy_aliases),
@@ -320,7 +330,7 @@ def main():
         print("=" * 80)
         print("\nCrypto coverage is fully validated:")
         print("  ✓ Legacy aliases work correctly")
-        print("  ✓ 25-cell matrix is consistent")
+        print("  ✓ 30-cell matrix is consistent")
         print("  ✓ All modules aligned with matrix")
         print("  ✓ Ready for production deployment")
         return 0

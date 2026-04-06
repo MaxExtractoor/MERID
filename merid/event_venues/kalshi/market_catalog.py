@@ -142,7 +142,7 @@ _TIMEFRAME_PATTERNS = [
     (re.compile(r"daily|end[\s-]*of[\s-]*day|eod|close[\s-]*today", re.I), "daily"),
     (re.compile(r"weekly|end[\s-]*of[\s-]*week|eow", re.I), "weekly"),
     (re.compile(r"monthly|end[\s-]*of[\s-]*month|eom", re.I), "monthly"),
-    (re.compile(r"year|annual|eoy|end[\s-]*of[\s-]*year", re.I), "yearly"),
+    (re.compile(r"year|annual|eoy|end[\s-]*of[\s-]*year", re.I), "annual"),
     (re.compile(r"pre[\s-]*market|premarket", re.I), "pre-market"),
 ]
 
@@ -557,7 +557,7 @@ class KalshiMarketCatalog:
             elif minutes <= 60 * 24 * 31:
                 return "monthly"
             else:
-                return "yearly"
+                return "annual"
         return None
 
     @staticmethod
