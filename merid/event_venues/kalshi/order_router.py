@@ -174,6 +174,8 @@ class OrderIntent:
     order_group_id: Optional[str] = None
     self_trade_prevention_type: Optional[str] = None
     post_only: bool = False
+    # LEAK-009: Idempotency key for preventing duplicate orders
+    intent_id: Optional[str] = None
     # Live orderbook params (E1) — populated from the current orderbook snapshot
     spread_cents: Optional[int] = None
     depth_at_price: Optional[int] = None

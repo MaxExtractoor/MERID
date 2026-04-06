@@ -71,6 +71,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
 from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig, get_spot_band
 from merid.formulas import generate_correlation_id
+from merid.prediction.edge_calibration_tracker import get_edge_calibration_tracker
 from merid.prediction.opinion_strategy import OpinionStrategy, OpinionEstimate, OpinionExplanation
 from utils.logger import get_logger
 
@@ -672,6 +673,8 @@ class KalshiContinuousTrader:
         # Per-cycle stats from the most recent trade_cycle() call.
         # Empty dict until the first cycle completes.
         self._last_cycle_stats: Dict[str, Any] = {}
+        # LEAK-010: Track consecutive zero-intent cycles for alerting
+        self._consecutive_zero_intent_cycles: int = 0
 
         # ── Bankroll invariant state ─────────────────────────────────────────
         # Accumulated realized PnL (in cents) across all CT-owned settled markets.
@@ -1050,6 +1053,9 @@ class KalshiContinuousTrader:
             kelly_raw     = (p * b - q) / b
             kelly_frac    = kelly_raw * kelly_fraction
 
+        BUG-010 FIX: Uses execution price (best_ask for YES, best_bid for NO)
+        instead of mid_price when available. Direction is inferred from edge sign.
+
         Note: ``size_contracts`` returned here is based purely on Kelly notional.
         The caller (``trade_cycle``) must recompute ``size_contracts`` from the
         final ``notional`` after applying ``exposure_multiplier`` and any other
@@ -1057,12 +1063,18 @@ class KalshiContinuousTrader:
 
         Returns a ``SizingResult`` with all intermediate values for audit.
         """
-        price_cents = candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
-        implied_prob = price_cents / 100.0
+        # BUG-010: Determine execution price based on trade direction
+        # If we have positive edge, we're buying YES (use best_ask)
+        # If we have negative edge, we're buying NO (use best_bid)
+        # Fall back to mid_price if book data unavailable
+        mid_price_cents = candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
 
-        # 1. Resolve edge (priority: override > candidate signal > strategy > 0)
+        # 1. Resolve edge first to determine direction (priority: override > candidate signal > strategy > 0)
         edge = 0.0
         source = "none"
+
+        # Need implied_prob for estimate evaluation, use mid_price temporarily
+        temp_implied_prob = mid_price_cents / 100.0
 
         if edge_override is not None:
             edge = edge_override
@@ -1076,11 +1088,26 @@ class KalshiContinuousTrader:
             # invoking evaluate_candidate a second time per candidate (single
             # sizing pipeline — see module docstring).
             if estimate is None:
-                mid_prob = implied_prob if implied_prob > 0 else 0.5
+                mid_prob = temp_implied_prob if temp_implied_prob > 0 else 0.5
                 estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
             if estimate is not None and estimate.edge != 0.0:
                 edge = estimate.edge
                 source = "strategy"
+
+        # BUG-010: Now that we know the edge, determine execution price
+        # Positive edge with estimate means we think YES is underpriced → buy YES at best_ask
+        # Negative edge or estimate.agent_prob < mid means buy NO at best_bid
+        if estimate is not None and estimate.agent_prob > temp_implied_prob:
+            # Buying YES - use best_ask
+            price_cents = candidate.best_ask_cents or mid_price_cents
+        else:
+            # Buying NO - use best_bid (inverted: we pay 100 - best_bid for a NO contract)
+            # For NO contracts, our cost is (100 - bid_for_yes)
+            # But for Kelly sizing we still use the YES-side price as reference
+            price_cents = candidate.best_bid_cents or mid_price_cents
+
+        # Recompute implied_prob from execution price
+        implied_prob = price_cents / 100.0
 
         # 2. Compute win probability
         if win_prob_override is not None:
@@ -1454,6 +1481,10 @@ class KalshiContinuousTrader:
                 }
                 return []
 
+        # BUG-011: Track remaining bankroll within cycle
+        # Initialize with full bankroll, subtract approved notional after each intent
+        remaining_bankroll = bankroll
+
         for candidate in self._candidates:
             # Yield to event loop periodically during candidate processing
             await asyncio.sleep(0)
@@ -1503,7 +1534,8 @@ class KalshiContinuousTrader:
             # Use signal_to_sizing for Kelly-based notional.
             # Pass the pre-computed estimate so the strategy is invoked exactly
             # once per candidate (single sizing pipeline — see module docstring).
-            sizing = self.signal_to_sizing(candidate, bankroll, estimate=estimate)
+            # BUG-011: Use remaining_bankroll to prevent over-allocation
+            sizing = self.signal_to_sizing(candidate, remaining_bankroll, estimate=estimate)
 
             # Determine side based on estimate vs market probability
             side = "YES" if estimate.agent_prob > mid_prob else "NO"
@@ -1726,6 +1758,36 @@ class KalshiContinuousTrader:
                 _pas["approved_orders_intent"] += 1
                 _pas["orders_submitted"] += 1
             intents.append(intent)
+
+            # BUG-011: Subtract approved notional from remaining bankroll
+            remaining_bankroll = max(0.0, remaining_bankroll - notional)
+
+            # Record forecast edge for calibration tracking
+            try:
+                tracker = get_edge_calibration_tracker()
+                # Get the strategy name from the wired strategy
+                strategy_name = getattr(self._strategy, 'name', 'unknown')
+                # Use best_ask for YES, best_bid for NO, fallback to mid_price
+                if intent["direction"] == "yes":
+                    fill_price_cents = candidate.best_ask_cents or candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
+                else:
+                    fill_price_cents = candidate.best_bid_cents or candidate.mid_price_cents or _FALLBACK_YES_PRICE_CENTS
+
+                tracker.record_forecast(
+                    ticker=candidate.ticker,
+                    forecast_edge=intent["edge"],
+                    confidence=intent["confidence"],
+                    strategy_name=strategy_name,
+                    asset=candidate.underlying,
+                    timeframe=candidate.timeframe,
+                    fill_price_cents=fill_price_cents,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "EdgeCalibration: record_forecast failed for %s: %s",
+                    candidate.ticker, exc,
+                )
+
             ticker_diagnostics.append({
                 "ticker": candidate.ticker,
                 "asset": candidate.underlying,
@@ -1785,6 +1847,40 @@ class KalshiContinuousTrader:
             # pipeline audit's UPSTREAM invariant check.
             "scan_by_asset_timeframe": dict(self._last_scan_asset_counts),
         }
+
+        # LEAK-010: Track consecutive zero-intent cycles and alert if >= 50
+        if len(intents) == 0:
+            self._consecutive_zero_intent_cycles += 1
+            if self._consecutive_zero_intent_cycles >= 50:
+                logger.critical(
+                    "[CT-ALERT] ZERO-INTENT STARVATION: %d consecutive cycles with no intents. "
+                    "System may be misconfigured or markets unavailable. "
+                    "candidates_seen=%d markets_with_edge=%d vetoed=%d",
+                    self._consecutive_zero_intent_cycles,
+                    candidates_seen,
+                    markets_with_any_edge,
+                    candidates_seen - len(intents),
+                )
+            elif self._consecutive_zero_intent_cycles % 10 == 0:
+                # Warn every 10 cycles to track progression toward threshold
+                logger.warning(
+                    "[CT-ALERT] Zero-intent streak: %d consecutive cycles (threshold=50). "
+                    "candidates_seen=%d markets_with_edge=%d vetoed=%d",
+                    self._consecutive_zero_intent_cycles,
+                    candidates_seen,
+                    markets_with_any_edge,
+                    candidates_seen - len(intents),
+                )
+        else:
+            # Reset counter when we have at least one intent
+            if self._consecutive_zero_intent_cycles > 0:
+                logger.info(
+                    "[CT-ALERT] Zero-intent streak ended after %d cycles. "
+                    "Generated %d intents this cycle.",
+                    self._consecutive_zero_intent_cycles,
+                    len(intents),
+                )
+            self._consecutive_zero_intent_cycles = 0
 
         return intents
 
