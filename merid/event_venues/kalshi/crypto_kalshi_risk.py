@@ -224,10 +224,9 @@ def _build_default_profiles() -> Dict[Tuple[str, str], StrategyProfile]:
     # use wider bands to capture a broader range of strikes.
     #
     # Annual markets (regime bets only): very conservative settings — only engage
-    # when macro+crypto regime filter confirms a strong trend. Max 1 trade/week
-    # (expressed as max_trades_per_day=0 to require the canary / regime gate to
-    # approve explicitly), tight position limits, and the widest price bands since
-    # annual markets naturally span a broader strike range.
+    # when macro+crypto regime filter confirms a strong trend. At most 1 trade/day
+    # (max_trades_per_day=1), tight position limits (max_open_positions=1), and the
+    # widest price bands since annual markets naturally span a broader strike range.
     spec: Dict[Tuple[str, str], tuple] = {
         # ── BTC ──────────────────────────────────────────────────────────
         ("BTC", "15m"):      (0.20, 5,  (0.35, 0.75), 50.0, 3),
