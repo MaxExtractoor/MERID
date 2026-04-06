@@ -1,0 +1,432 @@
+# MERID Kalshi Strategy Catalog
+# ────────────────────────────────────────────────────────────────────────────
+# 30-cell matrix (5 assets × 6 timeframes) of tradeable strategy parameters.
+#
+# Each entry specifies:
+#   enabled           — whether this cell is active (bool)
+#   min_edge_bps      — minimum edge in basis points to place a trade
+#   kelly_fraction    — fractional Kelly multiplier (0 < k ≤ 0.5)
+#   max_risk_per_trade_pct — hard cap per trade as % of bankroll (independent of Kelly)
+#   daily_loss_limit_pct   — per-cell daily loss cap as % of bankroll (0 = use global)
+#   strategy_mode     — primary signal type: momentum | mean_revert | trend_carry |
+#                         vol_surface | day_close | range_compress | regime_bet
+#   profiles          — list of MERID profile names that enable this cell
+#   tier              — asset tier: core | satellite (controls default Kelly scale)
+#   notes             — human-readable commentary
+#
+# Global defaults (applied when a field is absent from a cell):
+#   kelly_fraction:    0.25
+#   max_risk_per_trade_pct: 1.0
+#   daily_loss_limit_pct: 0.0  (use global MERID_DAILY_LOSS_LIMIT_PCT)
+#   profiles: [kalshi-only, live]
+#
+# Promotion / pruning rules (evaluated by the StrategyGrid at the end of each
+# evaluation period, typically weekly):
+#   - Graduate to "core" when: trades >= 200, Sharpe > 0, realized_edge ≥ 0.5 × forecast_edge
+#   - Increase cap +25% per period after graduation (never jump)
+#   - Demote / disable when: hit_rate or pnl falls below thresholds for 2 periods
+#
+# See docs/STRATEGY_CATALOG_DESIGN.md for full spec.
+# ────────────────────────────────────────────────────────────────────────────
+
+assets:
+
+  # ── BTC — core engine ───────────────────────────────────────────────────
+
+  BTC:
+    tier: core
+
+    15m:
+      enabled: true
+      strategy_mode: momentum
+      secondary_mode: mean_revert      # enabled when over-extension is detected
+      min_edge_bps: 50                 # 0.5%  (initial_live profile)
+      kelly_fraction: 0.25
+      max_risk_per_trade_pct: 0.5
+      liquidity_requirements:
+        min_volume: 50
+        min_open_interest: 10
+      notes: >
+        Microstructure momentum + mean-revert.  Skip when realized 15m vol is
+        too low to cover Kalshi bid/ask + fee.  Fee-drag gated at execution time.
+
+    1h:
+      enabled: true
+      strategy_mode: momentum
+      min_edge_bps: 50
+      kelly_fraction: 0.25
+      max_risk_per_trade_pct: 0.5
+      liquidity_requirements:
+        min_volume: 50
+        min_open_interest: 10
+      notes: Short-term trend following; same as 15m with slightly wider windows.
+
+    daily:
+      enabled: true
+      strategy_mode: day_close
+      secondary_mode: range_compress
+      min_edge_bps: 100                # 1%
+      kelly_fraction: 0.30
+      max_risk_per_trade_pct: 1.0
+      liquidity_requirements:
+        min_volume: 30
+        min_open_interest: 5
+      notes: >
+        Day-close direction + range compression/expansion.  Trade when intraday
+        drift, realized vol, and cross-coin confirmation agree.
+
+    weekly:
+      enabled: true
+      strategy_mode: trend_carry
+      secondary_mode: vol_surface
+      min_edge_bps: 150                # 1.5%
+      kelly_fraction: 0.35
+      max_risk_per_trade_pct: 1.5
+      liquidity_requirements:
+        min_volume: 20
+        min_open_interest: 5
+      notes: Trend-follow + vol-tail mispricing.  All TFs must agree.
+
+    monthly:
+      enabled: true
+      strategy_mode: trend_carry
+      secondary_mode: vol_surface
+      min_edge_bps: 200                # 2%
+      kelly_fraction: 0.40
+      max_risk_per_trade_pct: 2.0
+      liquidity_requirements:
+        min_volume: 10
+        min_open_interest: 3
+      notes: Terminal distribution mispricing; long horizon reduces churn.
+
+    annual:
+      enabled: true
+      strategy_mode: regime_bet
+      min_edge_bps: 200                # 2%
+      kelly_fraction: 0.20             # Conservative: long horizon, illiquid
+      max_risk_per_trade_pct: 1.0
+      liquidity_requirements:
+        min_volume: 5
+        min_open_interest: 1
+      notes: >
+        Regime bets only (macro + on-chain trend confirmed).  CT stays flat
+        unless all regime filters fire.
+
+  # ── ETH — core engine ───────────────────────────────────────────────────
+
+  ETH:
+    tier: core
+
+    15m:
+      enabled: true
+      strategy_mode: momentum
+      secondary_mode: mean_revert
+      min_edge_bps: 80                 # 0.8%  (slightly stricter than BTC)
+      kelly_fraction: 0.25
+      max_risk_per_trade_pct: 0.5
+      liquidity_requirements:
+        min_volume: 50
+        min_open_interest: 10
+
+    1h:
+      enabled: true
+      strategy_mode: momentum
+      min_edge_bps: 80
+      kelly_fraction: 0.25
+      max_risk_per_trade_pct: 0.5
+      liquidity_requirements:
+        min_volume: 50
+        min_open_interest: 10
+
+    daily:
+      enabled: true
+      strategy_mode: day_close
+      secondary_mode: range_compress
+      min_edge_bps: 120
+      kelly_fraction: 0.30
+      max_risk_per_trade_pct: 1.0
+      liquidity_requirements:
+        min_volume: 30
+        min_open_interest: 5
+
+    weekly:
+      enabled: true
+      strategy_mode: trend_carry
+      min_edge_bps: 150
+      kelly_fraction: 0.35
+      max_risk_per_trade_pct: 1.5
+      liquidity_requirements:
+        min_volume: 20
+        min_open_interest: 5
+
+    monthly:
+      enabled: true
+      strategy_mode: trend_carry
+      secondary_mode: vol_surface
+      min_edge_bps: 200
+      kelly_fraction: 0.35
+      max_risk_per_trade_pct: 2.0
+      liquidity_requirements:
+        min_volume: 10
+        min_open_interest: 3
+
+    annual:
+      enabled: true
+      strategy_mode: regime_bet
+      min_edge_bps: 200
+      kelly_fraction: 0.15
+      max_risk_per_trade_pct: 1.0
+      liquidity_requirements:
+        min_volume: 5
+        min_open_interest: 1
+
+  # ── SOL — satellite engine ───────────────────────────────────────────────
+
+  SOL:
+    tier: satellite
+
+    15m:
+      enabled: false                   # Off until fill-trace shows acceptable fee drag
+      strategy_mode: momentum
+      min_edge_bps: 100
+      kelly_fraction: 0.15
+      max_risk_per_trade_pct: 0.25
+      liquidity_requirements:
+        min_volume: 75
+        min_open_interest: 15
+      notes: >
+        Enable only after fill traces confirm sustainable fee drag and slippage.
+
+    1h:
+      enabled: true
+      strategy_mode: momentum
+      min_edge_bps: 120
+      kelly_fraction: 0.15
+      max_risk_per_trade_pct: 0.50
+      liquidity_requirements:
+        min_volume: 75
+        min_open_interest: 15
+      notes: Conservative momentum; stricter volume filter than BTC/ETH.
+
+    daily:
+      enabled: true
+      strategy_mode: day_close
+      min_edge_bps: 150
+      kelly_fraction: 0.20
+      max_risk_per_trade_pct: 0.75
+      liquidity_requirements:
+        min_volume: 30
+        min_open_interest: 8
+
+    weekly:
+      enabled: true
+      strategy_mode: trend_carry
+      secondary_mode: vol_surface
+      min_edge_bps: 200
+      kelly_fraction: 0.20
+      max_risk_per_trade_pct: 1.0
+      liquidity_requirements:
+        min_volume: 20
+        min_open_interest: 5
+
+    monthly:
+      enabled: true
+      strategy_mode: trend_carry
+      min_edge_bps: 200
+      kelly_fraction: 0.15
+      max_risk_per_trade_pct: 1.0
+      liquidity_requirements:
+        min_volume: 10
+        min_open_interest: 3
+
+    annual:
+      enabled: false                   # Rare regime bets only; disabled by default
+      strategy_mode: regime_bet
+      min_edge_bps: 300
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 0.50
+      liquidity_requirements:
+        min_volume: 5
+        min_open_interest: 1
+
+  # ── XRP — satellite engine ───────────────────────────────────────────────
+
+  XRP:
+    tier: satellite
+
+    15m:
+      enabled: true
+      strategy_mode: momentum
+      min_edge_bps: 100
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 0.25
+      liquidity_requirements:
+        min_volume: 75
+        min_open_interest: 15
+      notes: Cautious; fee-aware.  Strict vol filter.
+
+    1h:
+      enabled: true
+      strategy_mode: momentum
+      min_edge_bps: 120
+      kelly_fraction: 0.15
+      max_risk_per_trade_pct: 0.50
+      liquidity_requirements:
+        min_volume: 75
+        min_open_interest: 15
+
+    daily:
+      enabled: true
+      strategy_mode: day_close
+      min_edge_bps: 150
+      kelly_fraction: 0.15
+      max_risk_per_trade_pct: 0.75
+      liquidity_requirements:
+        min_volume: 30
+        min_open_interest: 8
+
+    weekly:
+      enabled: true
+      strategy_mode: trend_carry
+      min_edge_bps: 200
+      kelly_fraction: 0.15
+      max_risk_per_trade_pct: 1.0
+      liquidity_requirements:
+        min_volume: 20
+        min_open_interest: 5
+      notes: Trend + spread vs BTC/ETH cross-asset confirmation.
+
+    monthly:
+      enabled: true
+      strategy_mode: trend_carry
+      min_edge_bps: 200
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 1.0
+      liquidity_requirements:
+        min_volume: 10
+        min_open_interest: 3
+
+    annual:
+      enabled: false
+      strategy_mode: regime_bet
+      min_edge_bps: 300
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 0.50
+      liquidity_requirements:
+        min_volume: 5
+        min_open_interest: 1
+
+  # ── DOGE — satellite engine ──────────────────────────────────────────────
+
+  DOGE:
+    tier: satellite
+
+    15m:
+      enabled: false                   # Off until depth verified
+      strategy_mode: momentum
+      min_edge_bps: 150
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 0.25
+      liquidity_requirements:
+        min_volume: 100
+        min_open_interest: 20
+      notes: Disabled until order-book depth is verified to be sufficient.
+
+    1h:
+      enabled: false                   # Enable only when volume is high
+      strategy_mode: momentum
+      min_edge_bps: 150
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 0.25
+      liquidity_requirements:
+        min_volume: 100
+        min_open_interest: 20
+      notes: Enable only when sustained high volume is confirmed.
+
+    daily:
+      enabled: true
+      strategy_mode: day_close
+      min_edge_bps: 150
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 0.50
+      liquidity_requirements:
+        min_volume: 50
+        min_open_interest: 10
+      notes: Small-cap day-close direction play.  Conservative caps.
+
+    weekly:
+      enabled: true
+      strategy_mode: trend_carry
+      min_edge_bps: 200
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 0.75
+      liquidity_requirements:
+        min_volume: 20
+        min_open_interest: 5
+      notes: Small trend plays only.
+
+    monthly:
+      enabled: false
+      strategy_mode: trend_carry
+      min_edge_bps: 300
+      kelly_fraction: 0.10
+      max_risk_per_trade_pct: 0.50
+      liquidity_requirements:
+        min_volume: 10
+        min_open_interest: 3
+      notes: Minimal participation; only if liquidity is proven.
+
+    annual:
+      enabled: false                   # Almost never
+      strategy_mode: regime_bet
+      min_edge_bps: 400
+      kelly_fraction: 0.05
+      max_risk_per_trade_pct: 0.25
+      liquidity_requirements:
+        min_volume: 5
+        min_open_interest: 1
+
+# ── Global risk parameters ───────────────────────────────────────────────────
+#
+# These override per-cell settings at the system level.
+# Values can also be set via environment variables (env vars take precedence).
+
+global_risk:
+  # Fractional Kelly multiplier applied on top of per-cell kelly_fraction.
+  # Used as a portfolio-level dampener.  Set MERID_KELLY_FRACTION to override.
+  kelly_multiplier: 1.0
+
+  # Global daily loss limit as fraction of starting bankroll.
+  # When realized loss ≥ this fraction, CT enters OBSERVE-ONLY mode.
+  # Set MERID_DAILY_LOSS_LIMIT_PCT to override.
+  daily_loss_limit_pct: 0.05
+
+  # Maximum notional per group (in USD).  Set MERID_GROUP_NOTIONAL_CAP to override.
+  max_group_notional_usd: 50.0
+
+  # Per-asset bankroll allocation (as % of total bankroll).
+  # These determine how much of the bankroll each asset can absorb.
+  asset_allocations:
+    BTC: 0.25
+    ETH: 0.25
+    SOL: 0.10
+    XRP: 0.10
+    DOGE: 0.10
+    reserve: 0.20
+
+# ── Strategy promotion rules ─────────────────────────────────────────────────
+#
+# Strategies are promoted from "experimental" to "core" when these thresholds
+# are met over the evaluation window.
+
+promotion_rules:
+  min_trades: 200
+  min_sharpe: 0.0
+  min_calmar: 0.0
+  max_realized_edge_discount: 0.50    # realized_edge ≥ 0.5 × forecast_edge
+  cap_increase_per_period_pct: 25     # +25% per evaluation period, never jump
+
+demotion_rules:
+  min_hit_rate: 0.40                  # below this → place under review
+  max_drawdown_pct: 0.20              # > 20% drawdown → disable
+  review_periods_before_disable: 2   # 2 consecutive bad periods → disabled
