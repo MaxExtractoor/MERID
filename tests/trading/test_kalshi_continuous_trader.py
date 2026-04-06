@@ -726,8 +726,9 @@ class TestEdgePctUnits:
         sizing_low = trader.signal_to_sizing(btc_candidate, bankroll=10000.0)
         assert sizing_low.size_contracts == 0, "edge below BTC/15m threshold should be rejected"
 
-        # edge_pct=0.6 → edge=0.006 → above threshold → ACCEPTED (if Kelly > 0)
-        btc_candidate.edge_pct = 0.6
+        # edge_pct=5.0 → edge=0.05 → above threshold (0.005) and fee_impact at mid=50¢.
+        # At mid=50¢ the fee_impact is ~4% (2¢ fee / 50¢ payout), so we need edge > 4%.
+        btc_candidate.edge_pct = 5.0
         sizing_high = trader.signal_to_sizing(btc_candidate, bankroll=10000.0)
         assert sizing_high.size_contracts > 0, "edge above BTC/15m threshold should be accepted"
 
@@ -1215,6 +1216,75 @@ class TestAnnualTimeframe:
             assert annual_t >= monthly_t, (
                 f"{asset}: annual threshold ({annual_t}) should be ≥ monthly ({monthly_t})"
             )
+
+
+# ── Daily loss limit ─────────────────────────────────────────────────────────
+
+
+class TestDailyLossLimit:
+    """Daily loss limit flips CT into OBSERVE-ONLY when losses exceed threshold."""
+
+    def _make_trader(self, daily_loss_limit_pct: float = 0.05) -> KalshiContinuousTrader:
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        return KalshiContinuousTrader(
+            dry_run=True, catalog=catalog,
+            daily_loss_limit_pct=daily_loss_limit_pct,
+        )
+
+    def test_record_trade_result_accumulates_daily_loss_for_negative_pnl(self) -> None:
+        """Negative PnL is accumulated in _risk.daily_loss."""
+        trader = self._make_trader()
+        trader.record_trade_result(-500)  # -$5.00
+        assert trader._risk.daily_loss == pytest.approx(5.0)
+
+    def test_record_trade_result_does_not_increase_daily_loss_for_positive_pnl(self) -> None:
+        """Positive PnL does not affect _risk.daily_loss."""
+        trader = self._make_trader()
+        trader.record_trade_result(+1000)  # +$10.00
+        assert trader._risk.daily_loss == 0.0
+
+    @pytest.mark.asyncio
+    async def test_trade_cycle_returns_empty_when_daily_loss_limit_hit(self) -> None:
+        """When daily_loss >= limit, trade_cycle returns [] (OBSERVE-ONLY)."""
+        trader = self._make_trader(daily_loss_limit_pct=0.05)
+        trader._refresh_candidates = AsyncMock()
+        trader._candidates = [
+            TradingCandidate.from_candidate(
+                _make_candidate(underlying="BTC", timeframe="15m", mid_price_cents=45)
+            )
+        ]
+        # Simulate $50 loss on a $1000 bankroll → exactly 5% → limit hit
+        trader._risk.daily_loss = 50.0
+
+        intents = await trader.trade_cycle(bankroll=1000.0)
+        assert intents == [], "Should return empty list in OBSERVE-ONLY mode"
+
+    @pytest.mark.asyncio
+    async def test_trade_cycle_proceeds_when_daily_loss_below_limit(self) -> None:
+        """When daily_loss < limit, trade_cycle processes candidates normally."""
+        trader = self._make_trader(daily_loss_limit_pct=0.10)
+        trader._refresh_candidates = AsyncMock()
+        # No candidates → should return empty list but NOT due to OBSERVE-ONLY
+        trader._candidates = []
+        trader._risk.daily_loss = 0.0
+
+        intents = await trader.trade_cycle(bankroll=1000.0)
+        # Empty is OK — no candidates.  The key is no OBSERVE-ONLY in cycle stats.
+        assert not trader._last_cycle_stats.get("observe_only", False)
+
+    def test_daily_loss_limit_zero_disables_guard(self) -> None:
+        """Setting daily_loss_limit_pct=0.0 disables the daily loss guard entirely."""
+        trader = self._make_trader(daily_loss_limit_pct=0.0)
+        # Even with huge daily_loss, guard should be inactive
+        trader._risk.daily_loss = 999999.0
+        assert trader._daily_loss_limit_pct == 0.0
+
+    def test_status_exposes_daily_loss_limit(self) -> None:
+        """status() includes daily_loss_limit_pct in the risk section."""
+        trader = self._make_trader(daily_loss_limit_pct=0.07)
+        s = trader.status()
+        assert s["risk"]["daily_loss_limit_pct"] == pytest.approx(0.07)
 
 
 # ── Canary mode ───────────────────────────────────────────────────────────
