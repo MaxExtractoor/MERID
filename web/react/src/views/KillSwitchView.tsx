@@ -7,6 +7,7 @@ import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { formatCurrency } from '../utils/formatters';
 import KalshiModeBadge from '../components/KalshiModeBadge';
+import type { OperatorRiskState } from '../types/api';
 
 interface BlockReason {
   source: string;
@@ -53,8 +54,6 @@ interface RiskState {
     near_limit: boolean;
   };
 }
-
-interface CategoryConfig {
   categories: Record<string, string>;
   known: string[];
 }
