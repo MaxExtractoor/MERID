@@ -99,6 +99,12 @@ export interface CTCycleStats {
   ticker_diagnostics: CTTickerDiagnostic[];
   /** Unix timestamp of the cycle. */
   cycle_ts: number;
+  /** Scan counts per asset×timeframe cell: { asset: { timeframe: count } } */
+  scan_by_asset_timeframe?: Record<string, Record<string, number>>;
+  /** Approved order intents per asset×timeframe cell: { asset: { timeframe: count } } */
+  approved_orders_intent_by_asset_timeframe?: Record<string, Record<string, number>>;
+  /** Submitted orders per asset×timeframe cell: { asset: { timeframe: count } } */
+  orders_submitted_by_asset_timeframe?: Record<string, Record<string, number>>;
 }
 
 /** Full CT status response from GET /api/v1/ct/status. */
@@ -131,4 +137,31 @@ export interface CTStatus {
 export interface CTStatusResponse {
   status: 'ok' | 'unavailable';
   data: CTStatus;
+}
+
+// ── Operator risk state (GET /api/v1/operator/risk-state) ─────────────────
+
+/** Canonical type for the /api/v1/operator/risk-state response. */
+export interface OperatorRiskState {
+  kill_switch: {
+    active: boolean;
+    reason: string | null;
+    can_trade: boolean;
+  };
+  pnl: {
+    daily_pnl: number;
+    daily_loss_limit: number;
+    limit_remaining: number;
+    utilization_pct: number;
+  };
+  position: {
+    total_value: number;
+    max_allowed: number;
+    utilization_pct: number;
+  };
+  errors: {
+    count_1h: number;
+    threshold: number;
+    near_limit: boolean;
+  };
 }

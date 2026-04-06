@@ -1,4 +1,4 @@
-export const TRADABLE_TIMEFRAMES = ['15m', '1h', 'daily', 'weekly', 'monthly'] as const;
+export const TRADABLE_TIMEFRAMES = ['15m', '1h', 'daily', 'weekly', 'monthly', 'annual'] as const;
 
 export type TradableTimeframe = (typeof TRADABLE_TIMEFRAMES)[number];
 
@@ -8,6 +8,7 @@ export const TRADABLE_TIMEFRAME_LABELS: Record<TradableTimeframe, string> = {
   daily: 'Daily',
   weekly: 'Weekly',
   monthly: 'Monthly',
+  annual: 'Annual',
 };
 
 const TIMEFRAME_ORDER: Record<string, number> = {
@@ -19,6 +20,7 @@ const TIMEFRAME_ORDER: Record<string, number> = {
   swing: 2,
   weekly: 3,
   monthly: 4,
+  annual: 5,
 };
 
 export function sortTimeframes<T extends string>(timeframes: T[]): T[] {

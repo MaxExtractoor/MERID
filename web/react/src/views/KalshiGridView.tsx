@@ -3,7 +3,7 @@
  *
  * Shows:
  *   - Header strip: session guard, grid running/stopped, kill switch
- *   - Agent grid matrix: 5 rows (assets) × 4 columns (timeframes)
+ *   - Agent grid matrix: 5 rows (assets) × 6 columns (timeframes)
  *   - Portfolio risk card
  *   - Controls: Start/Stop, Pause/Resume, Kill switch reset
  *   - Recent fills table
