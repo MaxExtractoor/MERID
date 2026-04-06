@@ -9,7 +9,7 @@ Guarantees:
   - All five crypto assets (BTC/ETH/SOL/XRP/DOGE) and all six timeframes
     are covered by parametrized scenarios.
 
-Run: py -m pytest tests/core/test_gate_limited_whitelist.py -xvs
+Run: python -m pytest tests/core/test_gate_limited_whitelist.py -xvs
 """
 
 from __future__ import annotations
@@ -256,6 +256,9 @@ class TestMultiAssetGateScenarios:
     The gate is global — these tests verify that ALL assets and timeframes
     experience exactly the same gate behaviour (no hardcoded per-asset rules
     inside the gate itself).
+
+    With 5 assets × 6 timeframes there are 30 asset/timeframe combinations;
+    each has 4 scenarios (S1–S4) giving 120 parametrized test cases total.
     """
 
     def setup_method(self):
