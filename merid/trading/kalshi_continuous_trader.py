@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import pathlib
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -249,6 +250,62 @@ _LAST_KNOWN_SPOT_MAX_AGE_SECONDS = float(
     os.getenv("MERID_SPOT_MAX_STALENESS_SECONDS", "600")
 )  # default: 10 minutes
 
+# ── Strategy catalog enabled/disabled gating ──────────────────────────────
+#
+# The strategy_catalog.yaml declares per-(asset, timeframe) `enabled` flags.
+# Disabled cells must be skipped by _refresh_candidates to avoid trading
+# strategies that are not yet validated (e.g. SOL/DOGE 15m off until fee-drag
+# and depth checks pass).
+#
+# _CATALOG_ENABLED[(asset, tf)] == False  →  skip during candidate refresh.
+# Missing key means the cell is implicitly enabled (safe default).
+
+def _load_strategy_catalog_enabled() -> Dict[Tuple[str, str], bool]:
+    """Load per-cell enabled flags from config/strategy_catalog.yaml.
+
+    Returns a dict mapping (asset, timeframe) → bool.  A missing entry is
+    treated as enabled so that new cells added to crypto_universe.py are live
+    by default until explicitly disabled in the catalog.
+
+    The YAML is located relative to this file's package root so it works
+    regardless of CWD.  Falls back to an empty dict (all cells enabled) if
+    the file is missing or malformed.
+    """
+    import yaml  # lazy import — yaml is only needed at module load time
+
+    yaml_path = (
+        pathlib.Path(__file__).parent.parent.parent / "config" / "strategy_catalog.yaml"
+    )
+    result: Dict[Tuple[str, str], bool] = {}
+    try:
+        with open(yaml_path, "r") as fh:
+            doc = yaml.safe_load(fh)
+        assets_block = (doc or {}).get("assets", {})
+        for asset, asset_cfg in assets_block.items():
+            if not isinstance(asset_cfg, dict):
+                continue
+            for tf, tf_cfg in asset_cfg.items():
+                if tf == "tier" or not isinstance(tf_cfg, dict):
+                    continue
+                enabled = tf_cfg.get("enabled", True)
+                result[(str(asset).upper(), str(tf).lower())] = bool(enabled)
+    except FileNotFoundError:
+        logger.warning(
+            "strategy_catalog.yaml not found at %s; all cells treated as enabled.",
+            yaml_path,
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to load strategy_catalog.yaml: %s — all cells treated as enabled.",
+            exc,
+        )
+    return result
+
+
+_CATALOG_ENABLED: Dict[Tuple[str, str], bool] = _load_strategy_catalog_enabled()
+
+
+
 
 # ── Module-level safety guards ─────────────────────────────────────────────
 
@@ -324,7 +381,13 @@ async def _fetch_spot_prices_with_fallback(
     *,
     http_session: Optional[Any] = None,
 ) -> Dict[str, float]:
-    """AUDIT-21: Fetch spot prices with CoinGecko → Coinbase → Binance → last-known fallback.
+    """Fetch spot prices with Coinbase → CoinGecko → Binance → last-known fallback.
+
+    Coinbase is the primary source because Kalshi uses Coinbase as their reference
+    exchange for crypto index prices.  Using Coinbase first keeps our internal spot
+    prices aligned with Kalshi's reference and eliminates systematic drift (e.g. the
+    ~$20 BTC offset observed when CoinGecko was used as primary).
+
 
     Returns a dict mapping asset symbols to USD prices.
     Assets whose price cannot be fetched (and have no recent last-known value)
@@ -345,7 +408,29 @@ async def _fetch_spot_prices_with_fallback(
     async def _fetch(session: aiohttp.ClientSession) -> None:
         nonlocal remaining
 
-        # ── CoinGecko ──────────────────────────────────────────────────────
+        # ── Coinbase (PRIMARY — single source of truth for Kalshi alignment) ──
+        # Coinbase is Kalshi's reference exchange for crypto markets.  Using
+        # it first keeps our spot prices aligned with Kalshi's reference price
+        # and eliminates the ~$20 drift that CoinGecko aggregation can introduce.
+        cb_remaining = list(remaining)
+        for sym in list(cb_remaining):
+            try:
+                url = f"https://api.coinbase.com/v2/prices/{sym}-USD/spot"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        amount = data.get("data", {}).get("amount")
+                        if amount:
+                            prices[sym] = float(amount)
+                            remaining = [a for a in remaining if a != sym]
+                            logger.debug("Coinbase spot %s=%.4f", sym, prices[sym])
+            except Exception as exc:
+                logger.warning("Coinbase spot fetch failed for %s: %s", sym, exc)
+
+        if not remaining:
+            return
+
+        # ── CoinGecko (SECONDARY fallback) ─────────────────────────────────
         ids = [_COINGECKO_IDS[a] for a in remaining if a in _COINGECKO_IDS]
         if ids:
             try:
@@ -361,6 +446,10 @@ async def _fetch_spot_prices_with_fallback(
                             sym = id_to_symbol.get(coin_id)
                             if sym and "usd" in vals:
                                 prices[sym] = float(vals["usd"])
+                                logger.debug(
+                                    "CoinGecko fallback spot %s=%.4f (Coinbase unavailable)",
+                                    sym, prices[sym],
+                                )
                         remaining = [a for a in remaining if a not in prices]
                     else:
                         logger.warning("CoinGecko returned HTTP %d", resp.status)
@@ -370,25 +459,7 @@ async def _fetch_spot_prices_with_fallback(
         if not remaining:
             return
 
-        # ── Coinbase ───────────────────────────────────────────────────────
-        cb_remaining = list(remaining)
-        for sym in list(cb_remaining):
-            try:
-                url = f"https://api.coinbase.com/v2/prices/{sym}-USD/spot"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        amount = data.get("data", {}).get("amount")
-                        if amount:
-                            prices[sym] = float(amount)
-                            remaining = [a for a in remaining if a != sym]
-            except Exception as exc:
-                logger.warning("Coinbase spot fetch failed for %s: %s", sym, exc)
-
-        if not remaining:
-            return
-
-        # ── Binance ────────────────────────────────────────────────────────
+        # ── Binance (TERTIARY fallback) ────────────────────────────────────
         for sym in list(remaining):
             try:
                 pair = f"{sym}USDT"
@@ -400,6 +471,10 @@ async def _fetch_spot_prices_with_fallback(
                         if price_str:
                             prices[sym] = float(price_str)
                             remaining = [a for a in remaining if a != sym]
+                            logger.debug(
+                                "Binance fallback spot %s=%.4f (Coinbase+CoinGecko unavailable)",
+                                sym, prices[sym],
+                            )
             except Exception as exc:
                 logger.warning("Binance spot fetch failed for %s: %s", sym, exc)
 
@@ -751,6 +826,16 @@ class KalshiContinuousTrader:
                     asset,
                 )
             for tf in _CRYPTO_TIMEFRAMES:
+                # Gate on strategy_catalog.yaml enabled flags.
+                # _CATALOG_ENABLED[(asset, tf)] == False → skip this cell.
+                # A missing key means the cell is implicitly enabled.
+                if _CATALOG_ENABLED.get((asset, tf)) is False:
+                    logger.debug(
+                        "ContinuousTrader: (%s, %s) disabled in strategy_catalog.yaml — skipping",
+                        asset, tf,
+                    )
+                    continue
+
                 catalog_markets = self._catalog.get_markets_by_asset(asset, timeframe=tf)
                 if not catalog_markets:
                     logger.debug("ContinuousTrader: no catalog markets for %s %s", asset, tf)
@@ -967,6 +1052,23 @@ class KalshiContinuousTrader:
                 logger.info(
                     "ContinuousTrader candidates: %s %s = %d", asset, tf, cnt
                 )
+
+        # 15m observability — explicitly log the state of every 15m cell so
+        # silent blocking is immediately visible in the logs.
+        fifteen_min_cells = [
+            (a, "15m") for a in _CRYPTO_ASSETS
+        ]
+        fifteen_min_summary = []
+        for a, tf in fifteen_min_cells:
+            if _CATALOG_ENABLED.get((a, tf)) is False:
+                fifteen_min_summary.append(f"{a}=catalog_disabled")
+            else:
+                cnt = asset_counts.get(a, {}).get(tf, 0)
+                fifteen_min_summary.append(f"{a}={cnt}")
+        logger.info(
+            "CT-15M-SCAN candidates_by_asset: %s",
+            " ".join(fifteen_min_summary),
+        )
 
         self._candidates = new_candidates
         # Persist per-asset/timeframe counts so trade_cycle() can include them in
@@ -1831,6 +1933,43 @@ class KalshiContinuousTrader:
                 s.get("orders_blocked_by_risk", 0),
                 s.get("orders_blocked_by_kill_switch", 0),
             )
+
+        # ── 15m cycle diagnostic — log why each 15m cell did/didn't trade ──────
+        fifteen_min_traded: Dict[str, int] = {}
+        fifteen_min_blocked: Dict[str, str] = {}
+        for asset in _CRYPTO_ASSETS:
+            if _CATALOG_ENABLED.get((asset, "15m")) is False:
+                fifteen_min_blocked[asset] = "catalog_disabled"
+                continue
+            scan_cnt = self._last_scan_asset_counts.get(asset, {}).get("15m", 0)
+            if scan_cnt == 0:
+                fifteen_min_blocked[asset] = "no_candidates"
+            else:
+                # Count how many 15m tickers were approved this cycle
+                approved_15m = sum(
+                    1 for d in ticker_diagnostics
+                    if d.get("asset") == asset
+                    and d.get("timeframe") == "15m"
+                    and d.get("veto_reason") is None
+                )
+                if approved_15m > 0:
+                    fifteen_min_traded[asset] = approved_15m
+                else:
+                    # Collect all unique veto reasons for this asset's 15m candidates
+                    veto_reasons_15m = list(dict.fromkeys(
+                        d.get("veto_reason", "unknown")
+                        for d in ticker_diagnostics
+                        if d.get("asset") == asset and d.get("timeframe") == "15m"
+                        and d.get("veto_reason")
+                    ))
+                    fifteen_min_blocked[asset] = (
+                        ",".join(veto_reasons_15m) if veto_reasons_15m else "scanned_no_trade"
+                    )
+        logger.info(
+            "[CT-15M-CYCLE] traded=%s blocked=%s",
+            fifteen_min_traded,
+            fifteen_min_blocked,
+        )
 
         # Persist cycle summary for status() / API consumers
         self._last_cycle_stats = {
