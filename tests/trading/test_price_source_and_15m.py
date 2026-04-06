@@ -345,17 +345,13 @@ class TestUIUsesCorrectPriceSource:
     def _import_live_data(self):
         """Import live_data module in isolation, bypassing the full web.api package."""
         import importlib.util
-        import sys
         spec = importlib.util.spec_from_file_location(
             "live_data_standalone",
             pathlib.Path(__file__).parent.parent.parent / "web" / "api" / "live_data.py",
         )
         mod = importlib.util.module_from_spec(spec)
-        # Provide minimal stubs for imports that live_data.py needs
-        if "utils.deps" not in sys.modules:
-            stub = MagicMock()
-            sys.modules["utils.deps"] = stub
-        spec.loader.exec_module(mod)
+        with patch.dict("sys.modules", {"utils.deps": MagicMock()}):
+            spec.loader.exec_module(mod)
         return mod
 
     def test_kalshi_crypto_symbols_constant(self):
