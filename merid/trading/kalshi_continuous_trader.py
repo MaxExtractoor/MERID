@@ -152,9 +152,10 @@ def _load_strategy_catalog_lookups() -> None:
     _CATALOG_MAX_RISK_PCT = _max_risk
     _CATALOG_ENABLED = _enabled_map
     logger.info(
-        "ContinuousTrader: loaded strategy catalog — %d cells "
-        "(%d min_edge, %d kelly_fraction, %d max_risk_pct, %d enabled entries)",
-        len(_enabled_map), len(_min_edge), len(_kelly), len(_max_risk), len(_enabled_map),
+        "ContinuousTrader: loaded strategy catalog — %d cells total, %d enabled "
+        "(%d min_edge, %d kelly_fraction, %d max_risk_pct entries)",
+        len(_enabled_map), sum(1 for v in _enabled_map.values() if v),
+        len(_min_edge), len(_kelly), len(_max_risk),
     )
 
 
@@ -1939,6 +1940,12 @@ class KalshiContinuousTrader:
             "scan_by_asset_timeframe": dict(self._last_scan_asset_counts),
             # Per-cell (asset × timeframe) approval counts for the 30-cell grid.
             # Mirrors scan_by_asset_timeframe but for orders that passed all gates.
+            # NOTE: approved_orders_intent and orders_submitted are identical in the
+            # current CT design — both are incremented simultaneously when an intent
+            # passes all gates.  Both keys are provided so API consumers can use the
+            # semantically correct name for their context, and so that the counts can
+            # diverge in a future version if REST submission failures are tracked
+            # independently from intent generation.
             "approved_orders_intent_by_asset_timeframe": {a: dict(tfd) for a, tfd in approved_by_tf.items()},
             "orders_submitted_by_asset_timeframe": {a: dict(tfd) for a, tfd in approved_by_tf.items()},
         }
