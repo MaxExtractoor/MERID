@@ -102,6 +102,11 @@ _DEFAULT_MAX_POSITION_CONTRACTS = int(os.getenv("MERID_CT_MAX_POSITION_CONTRACTS
 _DEFAULT_EXPOSURE_MULTIPLIER = float(os.getenv("MERID_CT_EXPOSURE_MULTIPLIER", "1.0"))
 _DEFAULT_COOLDOWN_SECONDS = float(os.getenv("MERID_CT_COOLDOWN_SECONDS", "0.0"))
 
+# Daily loss limit — when realized losses exceed this fraction of the session-start
+# bankroll, CT flips into OBSERVE-ONLY mode for the rest of the day.
+# Defaults to 5%.  Set MERID_DAILY_LOSS_LIMIT_PCT=0 to disable.
+_DEFAULT_DAILY_LOSS_LIMIT_PCT = float(os.getenv("MERID_DAILY_LOSS_LIMIT_PCT", "0.05"))
+
 # Canary diagnostic mode — when enabled, CT must emit ≥1 tiny intent per asset
 # per day to prove end-to-end execution is wired for all 5 assets.
 # Set MERID_CT_CANARY_MODE=true to enable.
@@ -568,6 +573,7 @@ class KalshiContinuousTrader:
         max_position_contracts: int = _DEFAULT_MAX_POSITION_CONTRACTS,
         exposure_multiplier: float = _DEFAULT_EXPOSURE_MULTIPLIER,
         per_asset_cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS,
+        daily_loss_limit_pct: float = _DEFAULT_DAILY_LOSS_LIMIT_PCT,
     ) -> None:
         self._catalog = catalog or get_market_catalog()
         self._strategy = strategy
@@ -595,6 +601,10 @@ class KalshiContinuousTrader:
         self._exposure_multiplier = exposure_multiplier
         self._per_asset_cooldown_seconds = per_asset_cooldown_seconds
         self._last_trade_ts: Dict[str, float] = {}  # asset → last trade timestamp
+        # Daily loss limit: stop trading for the rest of the day when realized
+        # losses exceed this fraction of the session-start bankroll.
+        # 0.0 means "disabled" — no daily loss cap is applied.
+        self._daily_loss_limit_pct: float = max(0.0, daily_loss_limit_pct)
 
         # ── Canary mode state ────────────────────────────────────────────────
         # When MERID_CT_CANARY_MODE=true, CT emits a tiny ($1) diagnostic intent
@@ -648,6 +658,10 @@ class KalshiContinuousTrader:
         # Aggregated filter stats from the most recent _refresh_candidates() call.
         # Empty dict until the first scan completes.
         self._last_scan_filter_stats: Dict[str, Any] = {}
+        # Per-asset/timeframe candidate counts from the most recent scan.
+        # Shape: {asset: {timeframe: count}}.  Used by trade_cycle() to populate
+        # scan_by_asset_timeframe in _last_cycle_stats for the pipeline audit.
+        self._last_scan_asset_counts: Dict[str, Dict[str, int]] = {}
         # Rolling history of per-scan volume_band_block_rate values (oldest first).
         # Capped at _VOLUME_BAND_RATE_HISTORY_MAXLEN entries.
         self._volume_band_rate_history: Deque[float] = deque(
@@ -952,6 +966,11 @@ class KalshiContinuousTrader:
                 )
 
         self._candidates = new_candidates
+        # Persist per-asset/timeframe counts so trade_cycle() can include them in
+        # _last_cycle_stats["scan_by_asset_timeframe"] for the pipeline audit.
+        self._last_scan_asset_counts = {
+            asset: dict(tfs) for asset, tfs in asset_counts.items()
+        }
         logger.info(
             "ContinuousTrader: %d total candidates across %d asset/timeframe pairs",
             len(new_candidates), sum(len(v) for v in asset_counts.values()),
@@ -1404,6 +1423,37 @@ class KalshiContinuousTrader:
             for a in _CRYPTO_ASSETS
         }
 
+        # Daily loss limit guard: if realized losses this session exceed the
+        # configured fraction of the starting bankroll, flip into OBSERVE-ONLY
+        # mode for the rest of the cycle (return empty intents but keep scanning).
+        if self._daily_loss_limit_pct > 0.0 and bankroll > 0.0:
+            _loss_limit_usd = bankroll * self._daily_loss_limit_pct
+            if self._risk.daily_loss >= _loss_limit_usd:
+                logger.warning(
+                    "[CT-OBSERVE-ONLY] Daily loss limit reached: daily_loss=%.4f >= "
+                    "limit=%.4f (%.1f%% of bankroll=%.2f). "
+                    "Switching to OBSERVE-ONLY for this cycle — no new orders will be placed.",
+                    self._risk.daily_loss,
+                    _loss_limit_usd,
+                    self._daily_loss_limit_pct * 100,
+                    bankroll,
+                )
+                # Still build scan_by_asset_timeframe so the pipeline audit has data.
+                self._last_cycle_stats = {
+                    "candidates_seen": 0,
+                    "markets_with_any_edge": 0,
+                    "markets_after_risk_veto": 0,
+                    "vetoed_total": 0,
+                    "vetoed_by_reason": {"daily_loss_limit": len(self._candidates)},
+                    "ticker_diagnostics": [],
+                    "cycle_ts": time.time(),
+                    "per_asset_stats": dict(per_asset_stats),
+                    "scan_by_asset_timeframe": dict(self._last_scan_asset_counts),
+                    "observe_only": True,
+                    "observe_only_reason": "daily_loss_limit",
+                }
+                return []
+
         for candidate in self._candidates:
             # Yield to event loop periodically during candidate processing
             await asyncio.sleep(0)
@@ -1674,6 +1724,7 @@ class KalshiContinuousTrader:
             if _pas is not None:
                 _pas["approved"] += 1
                 _pas["approved_orders_intent"] += 1
+                _pas["orders_submitted"] += 1
             intents.append(intent)
             ticker_diagnostics.append({
                 "ticker": candidate.ticker,
@@ -1730,6 +1781,9 @@ class KalshiContinuousTrader:
             "cycle_ts": time.time(),
             # Per-asset breakdown for pipeline audit and diagnostics.
             "per_asset_stats": dict(per_asset_stats),
+            # Per-asset/timeframe scan counts from _refresh_candidates() — used by
+            # pipeline audit's UPSTREAM invariant check.
+            "scan_by_asset_timeframe": dict(self._last_scan_asset_counts),
         }
 
         return intents
@@ -1750,10 +1804,15 @@ class KalshiContinuousTrader:
                        ``count × (settlement_cents - entry_price_cents)``  for YES buys, etc.
         """
         self._total_pnl_cents += pnl_cents
+        # Track intra-day losses for the daily loss limit.  Only negative PnL
+        # (realized losses) accumulates here; gains leave it unchanged.
+        if pnl_cents < 0:
+            self._risk.daily_loss += abs(pnl_cents) / 100.0
         logger.info(
-            "CT bankroll: settled pnl_cents=%+d cumulative_pnl_cents=%d",
+            "CT bankroll: settled pnl_cents=%+d cumulative_pnl_cents=%d daily_loss=%.4f",
             pnl_cents,
             self._total_pnl_cents,
+            self._risk.daily_loss,
         )
 
     def record_fee(self, fee_cents: int) -> None:
@@ -1896,6 +1955,8 @@ class KalshiContinuousTrader:
             "risk": {
                 "group_notional": dict(self._risk.group_notional),
                 "daily_loss": self._risk.daily_loss,
+                "daily_loss_limit_pct": self._daily_loss_limit_pct,
+                "observe_only": self._last_cycle_stats.get("observe_only", False),
                 "trade_count": self._risk.trade_count,
                 "execution_rejections": self._risk.execution_rejections,
             },

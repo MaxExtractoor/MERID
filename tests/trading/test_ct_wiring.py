@@ -63,7 +63,7 @@ class TestCryptoUniverseImport:
 
     def test_canonical_timeframes_contain_5(self):
         from merid.trading.kalshi_continuous_trader import _CRYPTO_TIMEFRAMES
-        assert len(_CRYPTO_TIMEFRAMES) == 5
+        assert len(_CRYPTO_TIMEFRAMES) == 6
 
 
 # ── AUDIT-02: max_candidates_per_asset ────────────────────────────────────────
