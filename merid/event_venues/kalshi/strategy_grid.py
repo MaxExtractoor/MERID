@@ -88,18 +88,18 @@ _KELLY_MULTIPLIER: Dict[str, float] = {
 _MIN_VOLUME: Dict[str, float] = {
     "BTC": 50.0,
     "ETH": 50.0,
-    "SOL": 75.0,
-    "XRP": 75.0,
-    "DOGE": 100.0,
+    "SOL": 60.0,      # Reduced from 75.0 for better coverage
+    "XRP": 60.0,      # Reduced from 75.0 for better coverage
+    "DOGE": 65.0,     # Reduced from 100.0 for better coverage
 }
 
 # Minimum open-interest required per asset tier.
 _MIN_OI: Dict[str, float] = {
     "BTC": 10.0,
     "ETH": 10.0,
-    "SOL": 15.0,
-    "XRP": 15.0,
-    "DOGE": 20.0,
+    "SOL": 12.0,      # Reduced from 15.0 for better coverage
+    "XRP": 12.0,      # Reduced from 15.0 for better coverage
+    "DOGE": 12.0,     # Reduced from 20.0 for better coverage
 }
 
 

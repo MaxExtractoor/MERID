@@ -186,32 +186,31 @@ assets:
     tier: satellite
 
     15m:
-      enabled: false                   # Off until fill-trace shows acceptable fee drag
+      enabled: true
       strategy_mode: momentum
-      min_edge_bps: 100
+      min_edge_bps: 80                 # Reduced from 100 to be achievable
       kelly_fraction: 0.15
       max_risk_per_trade_pct: 0.25
       liquidity_requirements:
-        min_volume: 75
-        min_open_interest: 15
-      notes: >
-        Enable only after fill traces confirm sustainable fee drag and slippage.
+        min_volume: 60                 # Reduced from 75 for better coverage
+        min_open_interest: 12          # Reduced from 15 for better coverage
+      notes: Conservative momentum with fee-drag awareness.
 
     1h:
       enabled: true
       strategy_mode: momentum
-      min_edge_bps: 120
+      min_edge_bps: 100                # Reduced from 120 to be achievable
       kelly_fraction: 0.15
       max_risk_per_trade_pct: 0.50
       liquidity_requirements:
-        min_volume: 75
-        min_open_interest: 15
+        min_volume: 60                 # Reduced from 75 for better coverage
+        min_open_interest: 12          # Reduced from 15 for better coverage
       notes: Conservative momentum; stricter volume filter than BTC/ETH.
 
     daily:
       enabled: true
       strategy_mode: day_close
-      min_edge_bps: 150
+      min_edge_bps: 120                # Reduced from 150 to be achievable
       kelly_fraction: 0.20
       max_risk_per_trade_pct: 0.75
       liquidity_requirements:
@@ -240,9 +239,9 @@ assets:
         min_open_interest: 3
 
     annual:
-      enabled: false                   # Rare regime bets only; disabled by default
+      enabled: true
       strategy_mode: regime_bet
-      min_edge_bps: 300
+      min_edge_bps: 200                # Reduced from 300 to be achievable
       kelly_fraction: 0.10
       max_risk_per_trade_pct: 0.50
       liquidity_requirements:
@@ -257,28 +256,28 @@ assets:
     15m:
       enabled: true
       strategy_mode: momentum
-      min_edge_bps: 100
+      min_edge_bps: 80                 # Reduced from 100 to be achievable
       kelly_fraction: 0.10
       max_risk_per_trade_pct: 0.25
       liquidity_requirements:
-        min_volume: 75
-        min_open_interest: 15
-      notes: Cautious; fee-aware.  Strict vol filter.
+        min_volume: 60                 # Reduced from 75 for better coverage
+        min_open_interest: 12          # Reduced from 15 for better coverage
+      notes: Cautious; fee-aware with moderate vol filter.
 
     1h:
       enabled: true
       strategy_mode: momentum
-      min_edge_bps: 120
+      min_edge_bps: 100                # Reduced from 120 to be achievable
       kelly_fraction: 0.15
       max_risk_per_trade_pct: 0.50
       liquidity_requirements:
-        min_volume: 75
-        min_open_interest: 15
+        min_volume: 60                 # Reduced from 75 for better coverage
+        min_open_interest: 12          # Reduced from 15 for better coverage
 
     daily:
       enabled: true
       strategy_mode: day_close
-      min_edge_bps: 150
+      min_edge_bps: 120                # Reduced from 150 to be achievable
       kelly_fraction: 0.15
       max_risk_per_trade_pct: 0.75
       liquidity_requirements:
@@ -307,9 +306,9 @@ assets:
         min_open_interest: 3
 
     annual:
-      enabled: false
+      enabled: true
       strategy_mode: regime_bet
-      min_edge_bps: 300
+      min_edge_bps: 200                # Reduced from 300 to be achievable
       kelly_fraction: 0.10
       max_risk_per_trade_pct: 0.50
       liquidity_requirements:
@@ -322,37 +321,37 @@ assets:
     tier: satellite
 
     15m:
-      enabled: false                   # Off until depth verified
+      enabled: true
       strategy_mode: momentum
-      min_edge_bps: 150
+      min_edge_bps: 100                # Reduced from 150 to be achievable
       kelly_fraction: 0.10
       max_risk_per_trade_pct: 0.25
       liquidity_requirements:
-        min_volume: 100
-        min_open_interest: 20
-      notes: Disabled until order-book depth is verified to be sufficient.
+        min_volume: 65                 # Reduced from 100 for better coverage
+        min_open_interest: 12          # Reduced from 20 for better coverage
+      notes: Conservative momentum with fee-drag awareness.
 
     1h:
-      enabled: false                   # Enable only when volume is high
+      enabled: true
       strategy_mode: momentum
-      min_edge_bps: 150
+      min_edge_bps: 100                # Reduced from 150 to be achievable
       kelly_fraction: 0.10
       max_risk_per_trade_pct: 0.25
       liquidity_requirements:
-        min_volume: 100
-        min_open_interest: 20
-      notes: Enable only when sustained high volume is confirmed.
+        min_volume: 65                 # Reduced from 100 for better coverage
+        min_open_interest: 12          # Reduced from 20 for better coverage
+      notes: Conservative momentum strategy.
 
     daily:
       enabled: true
       strategy_mode: day_close
-      min_edge_bps: 150
+      min_edge_bps: 120                # Reduced from 150 to be achievable
       kelly_fraction: 0.10
       max_risk_per_trade_pct: 0.50
       liquidity_requirements:
-        min_volume: 50
-        min_open_interest: 10
-      notes: Small-cap day-close direction play.  Conservative caps.
+        min_volume: 40                 # Reduced from 50 for better coverage
+        min_open_interest: 8           # Reduced from 10 for better coverage
+      notes: Day-close direction play with conservative caps.
 
     weekly:
       enabled: true
@@ -366,20 +365,19 @@ assets:
       notes: Small trend plays only.
 
     monthly:
-      enabled: false
+      enabled: true
       strategy_mode: trend_carry
-      min_edge_bps: 300
+      min_edge_bps: 200                # Reduced from 300 to be achievable
       kelly_fraction: 0.10
       max_risk_per_trade_pct: 0.50
       liquidity_requirements:
         min_volume: 10
         min_open_interest: 3
-      notes: Minimal participation; only if liquidity is proven.
 
     annual:
-      enabled: false                   # Almost never
+      enabled: true
       strategy_mode: regime_bet
-      min_edge_bps: 400
+      min_edge_bps: 200                # Reduced from 400 to be achievable
       kelly_fraction: 0.05
       max_risk_per_trade_pct: 0.25
       liquidity_requirements:
