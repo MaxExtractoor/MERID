@@ -354,16 +354,25 @@ class TestNoBtcBias:
         strategy = _EdgeStrategy(edge=0.10, conf=0.80)
         trader = _make_trader(strategy=strategy, max_yes_price=0.99, min_edge=0.01)
 
-        for asset in ("ETH", "SOL", "XRP", "DOGE"):
+        # Use catalog-enabled timeframes for each asset:
+        # SOL/15m and DOGE/15m are disabled in strategy_catalog.yaml; use 1h/daily.
+        asset_timeframes = {
+            "ETH": "15m",
+            "SOL": "1h",
+            "XRP": "15m",
+            "DOGE": "daily",
+        }
+        for asset, tf in asset_timeframes.items():
             candidate = TradingCandidate.from_candidate(
-                _market(ticker=f"KX{asset}-15M-T1", underlying=asset, mid=40)
+                _market(ticker=f"KX{asset}-{tf.upper()}-T1", underlying=asset,
+                        timeframe=tf, mid=40)
             )
             trader._candidates = [candidate]
             # Patch _refresh_candidates so it does not overwrite _candidates.
             with patch.object(trader, "_refresh_candidates", new=AsyncMock()):
                 intents = asyncio.run(trader.trade_cycle(bankroll=1000.0))
             trader.reset_daily()
-            assert len(intents) >= 1, f"No intent for {asset}"
+            assert len(intents) >= 1, f"No intent for {asset}/{tf}"
             assert intents[0]["underlying"] == asset
 
 

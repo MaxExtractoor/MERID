@@ -66,7 +66,10 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
+
+import yaml
 
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog
 from merid.event_venues.kalshi.market_filter import MarketCandidate, MarketFilter, MarketFilterConfig, get_spot_band
@@ -85,6 +88,77 @@ logger = get_logger("merid.trading.kalshi_continuous_trader")
 # iteration code that expects a sequence.
 _CRYPTO_ASSETS: tuple = tuple(_CRYPTO_ASSETS_LIST)
 _CRYPTO_TIMEFRAMES: tuple = tuple(_CRYPTO_TIMEFRAMES_LIST)
+
+# ── Strategy catalog — per-cell parameters ────────────────────────────────
+# Load config/strategy_catalog.yaml at import time.  Each of the 30 cells
+# (5 assets × 6 timeframes) can override min_edge_bps, kelly_fraction,
+# max_risk_per_trade_pct, and enabled independently of the global defaults.
+#
+# Lookup dicts built from the YAML:
+#   _CATALOG_MIN_EDGE:      {(asset, tf): edge_fraction}   e.g. 0.005 = 0.5%
+#   _CATALOG_KELLY_FRACTION:{(asset, tf): kelly_fraction}  e.g. 0.25
+#   _CATALOG_MAX_RISK_PCT:  {(asset, tf): max_risk_pct}    e.g. 0.5 means 0.5% of bankroll
+#   _CATALOG_ENABLED:       {(asset, tf): bool}
+#
+# When a cell is absent the caller falls back to the global constant or
+# EDGE_THRESHOLDS.  On load failure the dicts are empty so CT degrades
+# gracefully to its existing hard-coded defaults.
+
+_STRATEGY_CATALOG_PATH: Path = Path(__file__).parent.parent.parent / "config" / "strategy_catalog.yaml"
+
+_CATALOG_MIN_EDGE: Dict[Tuple[str, str], float] = {}
+_CATALOG_KELLY_FRACTION: Dict[Tuple[str, str], float] = {}
+_CATALOG_MAX_RISK_PCT: Dict[Tuple[str, str], float] = {}
+_CATALOG_ENABLED: Dict[Tuple[str, str], bool] = {}
+
+
+def _load_strategy_catalog_lookups() -> None:
+    """Populate module-level catalog dicts from strategy_catalog.yaml."""
+    global _CATALOG_MIN_EDGE, _CATALOG_KELLY_FRACTION, _CATALOG_MAX_RISK_PCT, _CATALOG_ENABLED
+    try:
+        with _STRATEGY_CATALOG_PATH.open() as _f:
+            _raw = yaml.safe_load(_f) or {}
+    except Exception as _exc:
+        logger.warning(
+            "ContinuousTrader: failed to load strategy catalog at %s: %s — "
+            "falling back to EDGE_THRESHOLDS and global defaults",
+            _STRATEGY_CATALOG_PATH, _exc,
+        )
+        return
+
+    _min_edge: Dict[Tuple[str, str], float] = {}
+    _kelly: Dict[Tuple[str, str], float] = {}
+    _max_risk: Dict[Tuple[str, str], float] = {}
+    _enabled_map: Dict[Tuple[str, str], bool] = {}
+
+    for _asset, _asset_data in _raw.get("assets", {}).items():
+        if not isinstance(_asset_data, dict):
+            continue
+        _asset_upper = _asset.upper()
+        for _tf, _cell in _asset_data.items():
+            if _tf == "tier" or not isinstance(_cell, dict):
+                continue
+            _key = (_asset_upper, _tf.lower())
+            if "min_edge_bps" in _cell:
+                _min_edge[_key] = float(_cell["min_edge_bps"]) / 10000.0
+            if "kelly_fraction" in _cell:
+                _kelly[_key] = float(_cell["kelly_fraction"])
+            if "max_risk_per_trade_pct" in _cell:
+                _max_risk[_key] = float(_cell["max_risk_per_trade_pct"])
+            _enabled_map[_key] = bool(_cell.get("enabled", True))
+
+    _CATALOG_MIN_EDGE = _min_edge
+    _CATALOG_KELLY_FRACTION = _kelly
+    _CATALOG_MAX_RISK_PCT = _max_risk
+    _CATALOG_ENABLED = _enabled_map
+    logger.info(
+        "ContinuousTrader: loaded strategy catalog — %d cells "
+        "(%d min_edge, %d kelly_fraction, %d max_risk_pct, %d enabled entries)",
+        len(_enabled_map), len(_min_edge), len(_kelly), len(_max_risk), len(_enabled_map),
+    )
+
+
+_load_strategy_catalog_lookups()
 
 _DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"))
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
@@ -996,8 +1070,9 @@ class KalshiContinuousTrader:
 
         Priority:
           1. ``KALSHI_CT_MIN_EDGE_{ASSET}_{TF}`` env var override (AUDIT-09).
-          2. Active EDGE_THRESHOLDS grid (profile-selected).
-          3. ``self._min_edge`` global fallback.
+          2. Strategy catalog per-cell ``min_edge_bps`` (config/strategy_catalog.yaml).
+          3. Active EDGE_THRESHOLDS grid (profile-selected).
+          4. ``self._min_edge`` global fallback.
 
         Args:
             candidate: The trading candidate to evaluate.
@@ -1018,7 +1093,19 @@ class KalshiContinuousTrader:
                 logger.warning("Invalid %s=%r — using grid value", env_key, env_raw)
 
         key = (asset, tf)
+        # Strategy catalog takes priority over EDGE_THRESHOLDS
+        if key in _CATALOG_MIN_EDGE:
+            return _CATALOG_MIN_EDGE[key]
         return EDGE_THRESHOLDS.get(key, self._min_edge)
+
+    def _get_catalog_kelly_fraction(self, candidate: TradingCandidate) -> float:
+        """Return the per-cell kelly_fraction from strategy_catalog.yaml, or global default.
+
+        Strategy catalog values are per (asset, timeframe).  When a cell entry
+        is absent the global ``self._kelly_fraction`` is used unchanged.
+        """
+        key = (candidate.underlying.upper(), candidate.timeframe.lower())
+        return _CATALOG_KELLY_FRACTION.get(key, self._kelly_fraction)
 
     def signal_to_sizing(
         self,
@@ -1096,7 +1183,7 @@ class KalshiContinuousTrader:
                 "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
                 "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) source=%s",
                 candidate.ticker, edge, win_prob, 0.0, 0.0, 0.0,
-                self._kelly_fraction * 100, source,
+                self._get_catalog_kelly_fraction(candidate) * 100, source,
             )
             return result
 
@@ -1107,6 +1194,9 @@ class KalshiContinuousTrader:
 
         # Get the appropriate minimum edge threshold for this candidate
         min_edge_threshold = self._get_min_edge(candidate)
+
+        # Per-cell kelly_fraction from strategy catalog (falls back to global default)
+        cell_kelly_fraction = self._get_catalog_kelly_fraction(candidate)
 
         # Fee profitability gate: reject if edge doesn't cover fee impact
         # Import fee calculation from order router
@@ -1124,7 +1214,7 @@ class KalshiContinuousTrader:
                 "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f fee=%d¢ fee_impact=%.4f | "
                 "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) source=%s REJECTED (edge < fee_impact)",
                 candidate.ticker, edge, win_prob, float(payout_cents), fee_cents, fee_impact,
-                kelly_raw, 0.0, self._kelly_fraction * 100, source,
+                kelly_raw, 0.0, cell_kelly_fraction * 100, source,
             )
             return result
 
@@ -1138,12 +1228,12 @@ class KalshiContinuousTrader:
                 "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
                 "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) source=%s min_edge_threshold=%.4f [%s/%s] REJECTED",
                 candidate.ticker, edge, win_prob, float(payout_cents),
-                kelly_raw, 0.0, self._kelly_fraction * 100, source,
+                kelly_raw, 0.0, cell_kelly_fraction * 100, source,
                 min_edge_threshold, candidate.underlying, candidate.timeframe,
             )
             return result
 
-        kelly_frac = kelly_raw * self._kelly_fraction
+        kelly_frac = kelly_raw * cell_kelly_fraction
         notional = bankroll * kelly_frac
         price_dollars = price_cents / 100.0
         size_contracts = int(math.floor(notional / price_dollars))
@@ -1168,7 +1258,7 @@ class KalshiContinuousTrader:
                 "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) notional=$%.4f size=%d source=%s "
                 "REJECTED (notional < $%.2f minimum or size=0)",
                 candidate.ticker, edge, win_prob, float(payout_cents),
-                kelly_raw, kelly_frac, self._kelly_fraction * 100,
+                kelly_raw, kelly_frac, cell_kelly_fraction * 100,
                 notional, size_contracts, source, MIN_VIABLE_NOTIONAL_USD,
             )
             return result
@@ -1187,7 +1277,7 @@ class KalshiContinuousTrader:
             "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
             "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) size=%d source=%s min_edge_threshold=%.4f [%s/%s] ACCEPTED",
             candidate.ticker, edge, win_prob, float(payout_cents),
-            kelly_raw, kelly_frac, self._kelly_fraction * 100,
+            kelly_raw, kelly_frac, cell_kelly_fraction * 100,
             size_contracts, source,
             min_edge_threshold, candidate.underlying, candidate.timeframe,
         )
@@ -1423,6 +1513,13 @@ class KalshiContinuousTrader:
             for a in _CRYPTO_ASSETS
         }
 
+        # Per-asset/timeframe approval tracking for the 30-cell grid.
+        # Shape: {asset: {timeframe: count}}.  Populated alongside per_asset_stats.
+        approved_by_tf: Dict[str, Dict[str, int]] = {
+            a: {tf: 0 for tf in _CRYPTO_TIMEFRAMES}
+            for a in _CRYPTO_ASSETS
+        }
+
         # Daily loss limit guard: if realized losses this session exceed the
         # configured fraction of the starting bankroll, flip into OBSERVE-ONLY
         # mode for the rest of the cycle (return empty intents but keep scanning).
@@ -1449,6 +1546,8 @@ class KalshiContinuousTrader:
                     "cycle_ts": time.time(),
                     "per_asset_stats": dict(per_asset_stats),
                     "scan_by_asset_timeframe": dict(self._last_scan_asset_counts),
+                    "approved_orders_intent_by_asset_timeframe": {a: dict(tfd) for a, tfd in approved_by_tf.items()},
+                    "orders_submitted_by_asset_timeframe": {a: dict(tfd) for a, tfd in approved_by_tf.items()},
                     "observe_only": True,
                     "observe_only_reason": "daily_loss_limit",
                 }
@@ -1463,6 +1562,28 @@ class KalshiContinuousTrader:
             _pas = per_asset_stats.get(_asset)
             if _pas is not None:
                 _pas["candidates_seen"] += 1
+
+            # Catalog-disabled filter: skip cells where strategy_catalog.yaml has enabled=false.
+            _cat_key = (_asset.upper(), candidate.timeframe.lower())
+            if _CATALOG_ENABLED and not _CATALOG_ENABLED.get(_cat_key, True):
+                veto_reason = "catalog_disabled"
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                if _pas is not None:
+                    _pas["vetoed"] += 1
+                    _pas["veto_reasons"][veto_reason] = _pas["veto_reasons"].get(veto_reason, 0) + 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": 0.0,
+                    "model_win_prob": 0.0,
+                    "edge_bps": 0.0,
+                    "side": "none",
+                    "kelly_raw": 0.0,
+                    "kelly_frac": 0.0,
+                    "veto_reason": veto_reason,
+                })
+                continue
 
             if spot_prices:
                 candidate.spot_price = spot_prices.get(candidate.underlying)
@@ -1592,6 +1713,23 @@ class KalshiContinuousTrader:
             # When Kelly sizing produces a positive notional, prefer it
             if sizing.notional_usd > 0:
                 notional = min(notional, sizing.notional_usd)
+
+            # Catalog max_risk_per_trade_pct base cap: limit notional to the configured
+            # percentage of bankroll for this specific (asset, timeframe) cell BEFORE
+            # applying the exposure multiplier.  This prevents the base Kelly+risk sizing
+            # from exceeding per-cell limits; the operator can still scale up via
+            # exposure_multiplier for intentional leverage.
+            _max_risk_pct = _CATALOG_MAX_RISK_PCT.get(_cat_key)
+            if _max_risk_pct is not None and bankroll > 0.0:
+                _max_risk_notional = bankroll * _max_risk_pct / 100.0
+                if notional > _max_risk_notional:
+                    logger.debug(
+                        "ContinuousTrader: notional capped %.4f → %.4f "
+                        "(catalog max_risk_per_trade_pct=%.2f%% [%s/%s])",
+                        notional, _max_risk_notional, _max_risk_pct,
+                        candidate.underlying, candidate.timeframe,
+                    )
+                    notional = _max_risk_notional
 
             # AUDIT-07: apply exposure multiplier (scale down/up computed Kelly notional)
             if self._exposure_multiplier != 1.0:
@@ -1725,6 +1863,10 @@ class KalshiContinuousTrader:
                 _pas["approved"] += 1
                 _pas["approved_orders_intent"] += 1
                 _pas["orders_submitted"] += 1
+            # Per-cell (asset × timeframe) approval count for the 30-cell grid
+            _tf_lower = candidate.timeframe.lower()
+            if _asset in approved_by_tf and _tf_lower in approved_by_tf[_asset]:
+                approved_by_tf[_asset][_tf_lower] += 1
             intents.append(intent)
             ticker_diagnostics.append({
                 "ticker": candidate.ticker,
@@ -1770,6 +1912,17 @@ class KalshiContinuousTrader:
                 s.get("orders_blocked_by_kill_switch", 0),
             )
 
+        # ── 30-cell grid summary log ──────────────────────────────────────────
+        for asset in _CRYPTO_ASSETS:
+            _scan_tfs = self._last_scan_asset_counts.get(asset, {})
+            _appr_tfs = approved_by_tf.get(asset, {})
+            logger.info(
+                "[CT-GRID-SUMMARY] asset=%s scan_by_tf=%s approved_by_tf=%s",
+                asset,
+                {tf: cnt for tf, cnt in _scan_tfs.items() if cnt > 0},
+                {tf: cnt for tf, cnt in _appr_tfs.items() if cnt > 0},
+            )
+
         # Persist cycle summary for status() / API consumers
         self._last_cycle_stats = {
             "candidates_seen": candidates_seen,
@@ -1784,6 +1937,10 @@ class KalshiContinuousTrader:
             # Per-asset/timeframe scan counts from _refresh_candidates() — used by
             # pipeline audit's UPSTREAM invariant check.
             "scan_by_asset_timeframe": dict(self._last_scan_asset_counts),
+            # Per-cell (asset × timeframe) approval counts for the 30-cell grid.
+            # Mirrors scan_by_asset_timeframe but for orders that passed all gates.
+            "approved_orders_intent_by_asset_timeframe": {a: dict(tfd) for a, tfd in approved_by_tf.items()},
+            "orders_submitted_by_asset_timeframe": {a: dict(tfd) for a, tfd in approved_by_tf.items()},
         }
 
         return intents

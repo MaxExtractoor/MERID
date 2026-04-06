@@ -28,8 +28,14 @@ from merid.trading.kalshi_continuous_trader import (
     DailyRiskState,
     KalshiContinuousTrader,
     TradingCandidate,
+    _CATALOG_ENABLED,
+    _CATALOG_KELLY_FRACTION,
+    _CATALOG_MAX_RISK_PCT,
+    _CATALOG_MIN_EDGE,
     _CRYPTO_ASSETS,
     _CRYPTO_TIMEFRAMES,
+    EDGE_THRESHOLDS,
+    _STRATEGY_CATALOG_PATH,
 )
 
 
@@ -1383,3 +1389,136 @@ class TestCanaryMode:
         assert canary["notional"] == trader._canary_notional
         assert "intent_id" in canary
         assert canary["size_contracts"] >= 1
+
+
+# ── Strategy catalog config-consistency ───────────────────────────────────────
+
+
+class TestStrategyConfigConsistency:
+    """Verify strategy_catalog.yaml and CT runtime are mutually consistent.
+
+    These tests guard against:
+      - Catalog cells without EDGE_THRESHOLDS fallback coverage.
+      - Catalog file not loading (empty lookup dicts).
+      - Invalid per-cell parameter values (e.g. zero kelly_fraction).
+      - Catalog cells that are enabled=True but absent from EDGE_THRESHOLDS.
+    """
+
+    def test_catalog_file_exists_and_loads(self) -> None:
+        """strategy_catalog.yaml must exist and produce non-empty lookup dicts."""
+        assert _STRATEGY_CATALOG_PATH.exists(), (
+            f"strategy_catalog.yaml not found at {_STRATEGY_CATALOG_PATH}"
+        )
+        assert len(_CATALOG_ENABLED) > 0, (
+            "Strategy catalog loaded but produced zero cell entries — "
+            "check YAML structure."
+        )
+        assert len(_CATALOG_MIN_EDGE) > 0, "Catalog must define at least one min_edge_bps"
+        assert len(_CATALOG_KELLY_FRACTION) > 0, "Catalog must define at least one kelly_fraction"
+        assert len(_CATALOG_MAX_RISK_PCT) > 0, "Catalog must define at least one max_risk_per_trade_pct"
+
+    def test_catalog_covers_all_asset_timeframe_pairs(self) -> None:
+        """Every (asset, timeframe) in the canonical universe must appear in the catalog."""
+        import yaml
+
+        with _STRATEGY_CATALOG_PATH.open() as f:
+            raw = yaml.safe_load(f) or {}
+
+        catalog_assets = {k.upper() for k in raw.get("assets", {})}
+        missing_assets = set(_CRYPTO_ASSETS) - catalog_assets
+        assert not missing_assets, (
+            f"Assets in CRYPTO_ASSETS but missing from catalog: {missing_assets}"
+        )
+
+        for asset in _CRYPTO_ASSETS:
+            asset_data = raw["assets"].get(asset) or raw["assets"].get(asset.lower()) or {}
+            catalog_tfs = {
+                k.lower()
+                for k, v in asset_data.items()
+                if isinstance(v, dict)
+            }
+            for tf in _CRYPTO_TIMEFRAMES:
+                assert tf in catalog_tfs, (
+                    f"({asset}, {tf}) missing from strategy_catalog.yaml"
+                )
+
+    def test_catalog_kelly_fractions_are_valid(self) -> None:
+        """All catalog kelly_fraction values must be in (0, 0.5]."""
+        invalid = [
+            (key, kf)
+            for key, kf in _CATALOG_KELLY_FRACTION.items()
+            if not (0 < kf <= 0.5)
+        ]
+        assert not invalid, (
+            f"Invalid kelly_fraction values in catalog: {invalid}"
+        )
+
+    def test_catalog_min_edge_values_are_valid(self) -> None:
+        """All catalog min_edge values must be positive and ≤ 20% (0.20)."""
+        invalid = [
+            (key, me)
+            for key, me in _CATALOG_MIN_EDGE.items()
+            if not (0 < me <= 0.20)
+        ]
+        assert not invalid, (
+            f"Invalid min_edge values in catalog (must be > 0 and ≤ 0.20): {invalid}"
+        )
+
+    def test_catalog_max_risk_pct_values_are_valid(self) -> None:
+        """All catalog max_risk_per_trade_pct values must be positive and ≤ 10%."""
+        invalid = [
+            (key, pct)
+            for key, pct in _CATALOG_MAX_RISK_PCT.items()
+            if not (0 < pct <= 10.0)
+        ]
+        assert not invalid, (
+            f"Invalid max_risk_per_trade_pct values (must be > 0 and ≤ 10.0): {invalid}"
+        )
+
+    def test_enabled_cells_have_edge_thresholds_or_catalog_min_edge(self) -> None:
+        """Every enabled catalog cell must have a min_edge source (catalog or EDGE_THRESHOLDS).
+
+        CT's _get_min_edge() falls back to the global default when both sources
+        are absent.  This test catches cells that would silently use the global 2%
+        fallback instead of the intended per-cell value.
+        """
+        cells_without_edge = [
+            key
+            for key, enabled in _CATALOG_ENABLED.items()
+            if enabled
+            and key not in _CATALOG_MIN_EDGE
+            and key not in EDGE_THRESHOLDS
+        ]
+        assert not cells_without_edge, (
+            f"Enabled catalog cells without per-cell min_edge source "
+            f"(will silently fall back to global default): {cells_without_edge}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cycle_stats_includes_grid_keys(self) -> None:
+        """After a trade cycle, _last_cycle_stats must contain the grid-level keys."""
+        from unittest.mock import MagicMock, AsyncMock
+
+        catalog = MagicMock()
+        catalog.get_markets_by_asset.return_value = []
+        trader = KalshiContinuousTrader(dry_run=True, catalog=catalog)
+        trader._refresh_candidates = AsyncMock()
+        trader._candidates = []
+
+        await trader.trade_cycle(bankroll=1000.0)
+
+        stats = trader._last_cycle_stats
+        assert "approved_orders_intent_by_asset_timeframe" in stats, (
+            "_last_cycle_stats must contain approved_orders_intent_by_asset_timeframe"
+        )
+        assert "orders_submitted_by_asset_timeframe" in stats, (
+            "_last_cycle_stats must contain orders_submitted_by_asset_timeframe"
+        )
+        # Verify structure: outer keys are assets, inner keys are timeframes
+        grid = stats["approved_orders_intent_by_asset_timeframe"]
+        for asset in _CRYPTO_ASSETS:
+            assert asset in grid, f"approved_orders_intent_by_asset_timeframe missing asset {asset}"
+            for tf in _CRYPTO_TIMEFRAMES:
+                assert tf in grid[asset], (
+                    f"approved_orders_intent_by_asset_timeframe[{asset}] missing timeframe {tf}"
+                )
