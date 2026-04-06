@@ -178,7 +178,9 @@ class TestKellySizingWithSmallEdges:
         Use 3% edge to verify Kelly sizing with a small-but-profitable edge.
         """
         trader = KalshiContinuousTrader(
-            dry_run=True, kelly_fraction=0.10)
+            dry_run=True,
+            kelly_fraction=0.10,
+        )
 
         candidate = TradingCandidate(
             ticker="KXBTC-15M-T95000",
@@ -204,7 +206,9 @@ class TestKellySizingWithSmallEdges:
         fee-unprofitable.  Kelly correctly sizes to 0 in these cases.
         """
         trader = KalshiContinuousTrader(
-            dry_run=True, kelly_fraction=0.10)
+            dry_run=True,
+            kelly_fraction=0.10,
+        )
 
         candidate = TradingCandidate(
             ticker="KXBTC-15M-T95000",
