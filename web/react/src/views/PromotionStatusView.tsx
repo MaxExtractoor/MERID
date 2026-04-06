@@ -6,7 +6,7 @@
 
 import React from 'react';
 import {
-  Award, ArrowRight, CheckCircle, XCircle, Clock, RefreshCw, AlertTriangle,
+  Award, ArrowRight, CheckCircle, Clock, RefreshCw, AlertTriangle,
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
@@ -65,16 +65,13 @@ function relTime(ts: string | undefined): string {
 function verdictStyle(verdict: string): string {
   switch (verdict?.toLowerCase()) {
     case 'promote': return 'text-green-400';
-    case 'hold':    return 'text-yellow-400';
-    case 'demote':  return 'text-red-400';
-    default:        return 'text-gray-400';
+    default:        return 'text-yellow-400'; // hold / blocked
   }
 }
 
 function VerdictIcon({ verdict }: { verdict: string }) {
   switch (verdict?.toLowerCase()) {
     case 'promote': return <CheckCircle className="w-4 h-4 text-green-400" />;
-    case 'demote':  return <XCircle className="w-4 h-4 text-red-400" />;
     default:        return <Clock className="w-4 h-4 text-yellow-400" />;
   }
 }
@@ -162,7 +159,7 @@ const PromotionStatusView: React.FC = () => {
             <h3 className="text-sm font-medium text-gray-300">Recent Outcomes</h3>
           </div>
           <div className="space-y-1.5 text-sm">
-            {(['promote', 'hold', 'demote'] as const).map(v => {
+            {(['promote', 'hold'] as const).map(v => {
               const count = promotions.filter(p => (p.promoted ? 'promote' : 'hold') === v).length;
               return (
                 <div key={v} className="flex justify-between">

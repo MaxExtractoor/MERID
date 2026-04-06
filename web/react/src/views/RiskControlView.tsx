@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import type { OperatorRiskState } from '../types/api';
 
 // ── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -17,16 +18,6 @@ interface KillSwitchStatus {
   active: boolean;
   can_trade: boolean;
   kill_reason: string | null;
-}
-
-interface RiskState {
-  pnl: {
-    daily_pnl: number;
-    utilization_pct: number;
-  };
-  position: {
-    utilization_pct: number;
-  };
 }
 
 interface HaltStatus {
@@ -56,7 +47,7 @@ const RiskControlView: React.FC = () => {
   const opts = { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH };
 
   const killRes  = useApiData<KillSwitchStatus>(API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, opts);
-  const riskRes  = useApiData<RiskState>(API_ENDPOINTS.OPERATOR_RISK_STATE, opts);
+  const riskRes  = useApiData<OperatorRiskState>(API_ENDPOINTS.OPERATOR_RISK_STATE, opts);
   const haltRes  = useApiData<HaltStatus>(API_ENDPOINTS.RISK_HALT_STATUS, opts);
 
   const [actionStatus, setActionStatus] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -212,6 +203,17 @@ const RiskControlView: React.FC = () => {
               </div>
               {pctBar((risk?.position.utilization_pct ?? 0) / 100, 'bg-blue-500')}
             </div>
+            {risk?.errors && (
+              <div className={`flex justify-between pt-1 border-t border-slate-800 ${
+                risk.errors.near_limit ? 'text-amber-400' : 'text-gray-400'
+              }`}>
+                <span>Errors (1 h)</span>
+                <span className="font-semibold">
+                  {risk.errors.count_1h} / {risk.errors.threshold}
+                  {risk.errors.near_limit && <AlertTriangle className="inline w-3 h-3 ml-1" />}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
