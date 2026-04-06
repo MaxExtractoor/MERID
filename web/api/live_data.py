@@ -27,48 +27,137 @@ _last_update = datetime.now(timezone.utc)
 _streaming_active = False
 
 
+# Kalshi crypto assets that must show Coinbase spot prices (Kalshi's reference exchange).
+# Prices for these symbols are fetched from Coinbase first; CoinGecko fills the rest.
+_KALSHI_CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+
+# Coinbase spot endpoint for a single symbol: GET /v2/prices/{SYM}-USD/spot
+_COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/{sym}-USD/spot"
+
+
+def _fetch_coinbase_spot_prices() -> Dict[str, float]:
+    """Fetch spot prices for the 5 Kalshi crypto assets from Coinbase (synchronous).
+
+    Returns a dict of ``{symbol: price}`` for whichever symbols succeeded.
+    Failures are logged and silently skipped so the caller can fall back to
+    CoinGecko for any missing symbols.
+    """
+    prices: Dict[str, float] = {}
+    with httpx.Client(timeout=5.0, verify=False) as client:
+        for sym in _KALSHI_CRYPTO_SYMBOLS:
+            try:
+                resp = client.get(_COINBASE_SPOT_URL.format(sym=sym))
+                if resp.status_code == 200:
+                    amount = resp.json().get("data", {}).get("amount")
+                    if amount:
+                        prices[sym] = float(amount)
+                        logger.debug("[LiveData] Coinbase spot %s=%.4f", sym, prices[sym])
+                else:
+                    logger.warning(
+                        "[LiveData] Coinbase returned HTTP %d for %s", resp.status_code, sym
+                    )
+            except Exception as exc:
+                logger.warning("[LiveData] Coinbase spot fetch failed for %s: %s", sym, exc)
+    return prices
+
+
 async def fetch_live_prices():
-    """Fetch real-time prices for all 50+ assets from CoinGecko API."""
+    """Fetch real-time prices for all tracked assets.
+
+    Price source strategy (aligns UI with Kalshi's reference exchange):
+      1. Coinbase (PRIMARY) — for the 5 Kalshi crypto assets (BTC/ETH/SOL/XRP/DOGE).
+         Kalshi uses Coinbase as their index reference; using the same source keeps
+         our displayed price aligned with contract strike prices.
+      2. CoinGecko (SECONDARY) — for all remaining assets, plus any Kalshi assets
+         where Coinbase is temporarily unavailable.
+    """
     global _price_cache, _last_update
     
+    # ── Step 1: Coinbase prices for the 5 Kalshi assets ───────────────────
+    def sync_coinbase():
+        return _fetch_coinbase_spot_prices()
+
+    coinbase_prices: Dict[str, float] = {}
+    try:
+        coinbase_prices = await asyncio.get_running_loop().run_in_executor(
+            None, sync_coinbase
+        )
+        if coinbase_prices:
+            logger.info(
+                "[LiveData] Coinbase spot prices fetched for: %s",
+                ", ".join(f"{s}={p}" for s, p in sorted(coinbase_prices.items())),
+            )
+    except Exception as exc:
+        logger.error("[LiveData] Coinbase bulk fetch failed: %s", exc)
+
+    # ── Step 2: CoinGecko for everything else (and fallback for missed assets) ─
     try:
         from data.asset_universe import get_all_coingecko_ids, ASSET_UNIVERSE
         
-        # Get all CoinGecko IDs
         coingecko_ids = get_all_coingecko_ids()
         
-        # Use sync client in thread pool to avoid event loop SSL issues
-        def sync_fetch():
+        def sync_coingecko():
             with httpx.Client(timeout=30.0, verify=False) as client:
                 ids_param = ','.join(coingecko_ids)
-                url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_param}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_market_cap=true"
+                url = (
+                    f"https://api.coingecko.com/api/v3/simple/price"
+                    f"?ids={ids_param}&vs_currencies=usd"
+                    f"&include_24hr_change=true&include_24hr_vol=true&include_market_cap=true"
+                )
                 return client.get(url)
         
-        response = await asyncio.get_running_loop().run_in_executor(None, sync_fetch)
+        response = await asyncio.get_running_loop().run_in_executor(None, sync_coingecko)
         
         if response.status_code == 200:
             data = response.json()
             
-            # Map CoinGecko data to our format
             for symbol, asset in ASSET_UNIVERSE.items():
                 coin_id = asset.coingecko_id
-                if coin_id in data:
-                    coin_data = data[coin_id]
-                    _price_cache[asset.symbol] = {
-                        'symbol': asset.symbol,
-                        'name': asset.name,
-                        'category': asset.category,
-                        'price': coin_data.get('usd', 0),
-                        'change_24h': coin_data.get('usd_24h_change', 0),
-                        'volume_24h': coin_data.get('usd_24h_vol', 0),
-                        'market_cap': coin_data.get('usd_market_cap', 0),
-                        'high_24h': coin_data.get('usd', 0) * 1.02,
-                        'low_24h': coin_data.get('usd', 0) * 0.98,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    }
+                if coin_id not in data:
+                    continue
+                coin_data = data[coin_id]
+                cg_price = coin_data.get('usd', 0)
+
+                # For Kalshi crypto assets: prefer Coinbase price; fall back to
+                # CoinGecko only if Coinbase was unavailable for this symbol.
+                if asset.symbol in _KALSHI_CRYPTO_SYMBOLS:
+                    display_price = coinbase_prices.get(asset.symbol, cg_price)
+                    if asset.symbol not in coinbase_prices:
+                        logger.warning(
+                            "[LiveData] %s: Coinbase unavailable — using CoinGecko fallback "
+                            "(price=%.4f). This may diverge from Kalshi reference.",
+                            asset.symbol, cg_price,
+                        )
+                else:
+                    display_price = cg_price
+
+                _price_cache[asset.symbol] = {
+                    'symbol': asset.symbol,
+                    'name': asset.name,
+                    'category': asset.category,
+                    'price': display_price,
+                    'change_24h': coin_data.get('usd_24h_change', 0),
+                    'volume_24h': coin_data.get('usd_24h_vol', 0),
+                    'market_cap': coin_data.get('usd_market_cap', 0),
+                    'high_24h': display_price * 1.02,
+                    'low_24h': display_price * 0.98,
+                    'price_source': (
+                        'coinbase' if asset.symbol in coinbase_prices else 'coingecko'
+                    ),
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
             
             _last_update = datetime.now(timezone.utc)
-            logger.info(f"[LiveData] Updated {len(_price_cache)} assets from CoinGecko")
+            kalshi_sources = {
+                s: _price_cache[s].get('price_source', '?')
+                for s in _KALSHI_CRYPTO_SYMBOLS
+                if s in _price_cache
+            }
+            logger.info(
+                "[LiveData] Updated %d assets. Kalshi crypto price sources: %s",
+                len(_price_cache),
+                kalshi_sources,
+            )
             return
         else:
             logger.info(f"[LiveData] CoinGecko returned status {response.status_code}")
@@ -76,7 +165,18 @@ async def fetch_live_prices():
         import traceback
         logger.error(f"[LiveData] Error fetching from CoinGecko: {type(e).__name__}: {str(e)}")
         logger.error(traceback.format_exc())
-        _last_update = datetime.now(timezone.utc)
+
+    # If CoinGecko also failed but we got Coinbase prices, at least update those.
+    if coinbase_prices:
+        for sym, price in coinbase_prices.items():
+            if sym in _price_cache:
+                _price_cache[sym]['price'] = price
+                _price_cache[sym]['price_source'] = 'coinbase'
+            # If symbol not yet in cache (e.g. very first call with CoinGecko down),
+            # leave it absent rather than creating a partial entry.
+
+    _last_update = datetime.now(timezone.utc)
+
 
 
 async def fetch_crypto_news():
