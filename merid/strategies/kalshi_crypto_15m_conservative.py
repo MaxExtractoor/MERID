@@ -201,7 +201,7 @@ class GlobalRateTracker:
             tracker.record(asset="BTC")
     """
 
-    _WINDOW_SECS: float = 3600.0  # 60 minutes
+    _HOUR_WINDOW_SECS: float = 3600.0  # 60-minute rolling window
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -210,7 +210,7 @@ class GlobalRateTracker:
 
     def _prune(self, now_ts: float) -> None:
         """Remove entries older than the rolling window.  Caller must hold lock."""
-        cutoff = now_ts - self._WINDOW_SECS
+        cutoff = now_ts - self._HOUR_WINDOW_SECS
         while self._history and self._history[0][0] < cutoff:
             self._history.popleft()
 

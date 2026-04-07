@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 
 import pytest
 
+from config.crypto_universe import CRYPTO_ASSETS_ORDERED
 from merid.strategies.kalshi_crypto_15m_conservative import (
     Conservative15mConfig,
     Conservative15mStrategy,
@@ -439,7 +440,6 @@ class TestStrategyGridIntegration:
 
     def test_all_15m_assets_have_conservative(self) -> None:
         from merid.event_venues.kalshi.strategy_grid import StrategyGrid
-        from config.crypto_universe import CRYPTO_ASSETS_ORDERED
         grid = StrategyGrid()
         for asset in CRYPTO_ASSETS_ORDERED:
             entry = grid.get(asset, "15m")
