@@ -203,6 +203,24 @@ async def get_risk_state() -> Dict[str, Any]:
         except Exception as _e:
             logger.debug("kalshi_risk live state skipped: %s", _e)
 
+        # Best-effort Redis health check
+        redis_healthy = False
+        redis_error = None
+        try:
+            import os
+            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+            try:
+                import redis.asyncio as redis
+                r = redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=1)
+                await r.ping()
+                redis_healthy = True
+            except Exception as redis_exc:
+                redis_error = str(redis_exc)
+        except ImportError:
+            redis_error = "Redis client not installed"
+        except Exception as health_exc:
+            redis_error = str(health_exc)
+
         state = {
             "kill_switch": {
                 "active": not _st["can_trade"],
@@ -229,6 +247,11 @@ async def get_risk_state() -> Dict[str, Any]:
                 "daily_loss_limit": _st["daily_loss_limit"],
                 "max_position_value": _st["max_position_value"],
                 "error_threshold": _st["error_threshold"],
+            },
+            "redis": {
+                "healthy": redis_healthy,
+                "error": redis_error,
+                "degraded_services": [] if redis_healthy else ["settlement_persistence", "risk_analytics"],
             },
         }
 

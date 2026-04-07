@@ -73,6 +73,10 @@ class ExecutionSubscriber:
         self._decisions_routed = 0
         self._decisions_skipped = 0
 
+        # Decision deduplication tracking
+        self._processed_decisions: Deque[str] = deque(maxlen=10000)
+        self._processed_set: set = set()
+
     async def start(self) -> None:
         """Subscribe to the bus and start processing decisions."""
         self._shutdown.clear()
@@ -147,6 +151,12 @@ class ExecutionSubscriber:
         size = data.get("size_contracts", 0)
         risk_approved = data.get("risk_approved", False)
 
+        # Deduplication: check if already processed
+        if decision_id != "unknown" and decision_id in self._processed_set:
+            logger.debug(f"Decision {decision_id} already processed, skipping duplicate")
+            self._decisions_skipped += 1
+            return
+
         record = ExecutionRecord(
             decision_id=decision_id,
             market_id=market_id,
@@ -187,6 +197,20 @@ class ExecutionSubscriber:
                 f"Decision {decision_id} routed: {action} {side} "
                 f"{size} contracts on {market_id}"
             )
+
+            # Mark as processed AFTER successful routing
+            if decision_id != "unknown":
+                self._processed_decisions.append(decision_id)
+                self._processed_set.add(decision_id)
+                # Prune old IDs if deque exceeded maxlen
+                while len(self._processed_decisions) < len(self._processed_set):
+                    # deque auto-pruned; sync set
+                    old_id = self._processed_decisions[0] if self._processed_decisions else None
+                    if old_id and old_id not in self._processed_decisions:
+                        self._processed_set.discard(old_id)
+                    else:
+                        break
+
         except Exception as exc:
             record.route_reason = f"Routing failed: {exc}"
             self._decisions_skipped += 1
