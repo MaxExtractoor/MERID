@@ -493,3 +493,5 @@
 {"timestamp": 1775529567.9349737, "category": "gate", "severity": "info", "title": "Execution gate CLEAR", "detail": "All safety checks passed \u2014 trading permitted", "hint": null, "metadata": {}, "session_id": "d0f83a95c5a1"}
 {"timestamp": 1775529777.361614, "category": "gate", "severity": "info", "title": "Execution gate CLEAR", "detail": "All safety checks passed \u2014 trading permitted", "hint": null, "metadata": {}, "session_id": "b7566b6226f1"}
 {"timestamp": 1775529785.774033, "category": "gate", "severity": "info", "title": "Execution gate CLEAR", "detail": "All safety checks passed \u2014 trading permitted", "hint": null, "metadata": {}, "session_id": "3f9f6a37f073"}
+{"timestamp": 1775530362.768222, "category": "gate", "severity": "info", "title": "Execution gate CLEAR", "detail": "All safety checks passed \u2014 trading permitted", "hint": null, "metadata": {}, "session_id": "79f527ca6d21"}
+{"timestamp": 1775530439.1205883, "category": "gate", "severity": "info", "title": "Execution gate CLEAR", "detail": "All safety checks passed \u2014 trading permitted", "hint": null, "metadata": {}, "session_id": "4244a5a385e6"}

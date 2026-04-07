@@ -2576,16 +2576,14 @@ async def _app_lifespan(application: FastAPI):
                         # Escalate to WARNING when there are actionable discrepancies
                         # (critical OR warning severity). Pure "info" severity (minor
                         # drift, within tolerance) is still noteworthy but not alarming.
+                        recon_msg = (
+                            "Kalshi venue reconciliation: %d discrepancies (%d critical, %d warning)",
+                            len(discs), n_crit, n_warn,
+                        )
                         if n_crit > 0 or n_warn > 0:
-                            logger.warning(
-                                "Kalshi venue reconciliation: %d discrepancies (%d critical, %d warning)",
-                                len(discs), n_crit, n_warn,
-                            )
+                            logger.warning(*recon_msg)
                         else:
-                            logger.info(
-                                "Kalshi venue reconciliation: %d discrepancies (%d critical, %d warning)",
-                                len(discs), n_crit, n_warn,
-                            )
+                            logger.info(*recon_msg)
                     else:
                         logger.info("Kalshi venue reconciliation: OK (0 discrepancies)")
                 except Exception as exc:
