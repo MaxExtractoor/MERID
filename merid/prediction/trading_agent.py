@@ -1013,20 +1013,23 @@ class KalshiTradingAgent:
                 
                 # Use per-agent singleton so daily PnL and open-exposure
                 # state persist across calls (not zeroed on every signal).
-                if self._btc15m_risk is None:
-                    # Bootstrap equity + phase from PromotionEngine if available
-                    _init_equity = 0.0
+                # _init_equity is resolved here (before the init-branch) so that
+                # update_from_phase() can use it on every cycle, not just the first.
+                _init_equity = 0.0
+                try:
+                    from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_ta
+                    _init_equity = float(getattr(_gkr_ta().state, 'current_equity_usd', 0) or 0)
+                except Exception as _e:
+                    self.logger.debug("equity_lookup_kalshi_risk: %s", _e)
+                if _init_equity <= 0:
                     try:
-                        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_ta
-                        _init_equity = float(getattr(_gkr_ta().state, 'current_equity_usd', 0) or 0)
+                        from merid.settings import settings as _s_ta
+                        _init_equity = float(getattr(_s_ta, 'PAPER_STARTING_BALANCE', 0) or 0)
                     except Exception as _e:
-                        self.logger.debug("equity_lookup_kalshi_risk: %s", _e)
-                    if _init_equity <= 0:
-                        try:
-                            from merid.settings import settings as _s_ta
-                            _init_equity = float(getattr(_s_ta, 'PAPER_STARTING_BALANCE', 0) or 0)
-                        except Exception as _e:
-                            self.logger.debug("equity_lookup_settings: %s", _e)
+                        self.logger.debug("equity_lookup_settings: %s", _e)
+
+                if self._btc15m_risk is None:
+                    # Bootstrap phase from PromotionEngine if available
                     _init_phase = RiskPhase.PHASE_0
                     try:
                         from merid.risk.promotion_engine import get_promotion_engine

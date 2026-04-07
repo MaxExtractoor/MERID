@@ -80,8 +80,9 @@ class DeploymentConfig:
     auto_rollback_on_drawdown_above_pct: float = 15.0
     auto_rollback_on_consecutive_losses: int = 10
 
-    # Max simultaneous live agents
-    max_live_agents: int = 3
+    # Max simultaneous live agents — raised to cover the full 35-agent grid.
+    # Set to a large number so all agents can operate live when promoted.
+    max_live_agents: int = 50
 
 
 DEFAULT_DEPLOYMENT_CONFIG = DeploymentConfig()
@@ -231,6 +232,31 @@ class DeploymentController:
         dep.promoted_at = datetime.now(timezone.utc).isoformat()
         self._log_transition(agent_name, old_mode.value, "LIVE", "Promoted to live")
         logger.info(f"[deploy] {agent_name}: {old_mode.value} → LIVE")
+        return True, "OK"
+
+    def force_live(self, agent_name: str) -> tuple[bool, str]:
+        """Unconditionally promote an agent to LIVE, bypassing readiness gates.
+
+        Use this when ``MERID_PM_LIVE_ENABLED=true`` at startup so that
+        every registered agent is immediately eligible to send live orders.
+        The normal gate path (paper-trades count, profit-factor, etc.) is
+        intentionally skipped; the VenueGate and KalshiRiskManager still
+        apply as the last line of defence.
+
+        Args:
+            agent_name: Agent to promote.
+
+        Returns:
+            (success, reason)
+        """
+        dep = self.register_agent(agent_name)
+        if dep.mode == AgentMode.LIVE:
+            return False, f"Agent {agent_name} is already LIVE"
+        old_mode = dep.mode
+        dep.mode = AgentMode.LIVE
+        dep.promoted_at = datetime.now(timezone.utc).isoformat()
+        self._log_transition(agent_name, old_mode.value, "LIVE", "Force-promoted (MERID_PM_LIVE_ENABLED=true)")
+        logger.info(f"[deploy] FORCE-LIVE {agent_name}: {old_mode.value} → LIVE")
         return True, "OK"
 
     # ── Rollback ─────────────────────────────────────────────────────
