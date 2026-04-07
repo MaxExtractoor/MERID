@@ -129,6 +129,88 @@ def _kelly_scale(asset: str) -> float:
     return _KELLY_MULTIPLIER.get(asset, 0.50)
 
 
+# ── Per-asset default annualized volatility ───────────────────────────────
+#
+# Used by _sigma_attenuation() when implied_vol is not provided in context.
+# These are representative crypto annual vol estimates (order-of-magnitude only).
+# Override per-asset via context key ``implied_vol_annual`` (decimal, e.g. 0.80).
+_DEFAULT_ANNUAL_VOL: Dict[str, float] = {
+    "BTC": 0.75,
+    "ETH": 0.90,
+    "SOL": 1.10,
+    "XRP": 1.00,
+    "DOGE": 1.20,
+}
+
+# Timeframe duration in fractional years, used to convert annualized vol to
+# per-timeframe vol.  Annual vol × sqrt(T) gives the standard deviation over
+# the holding period.
+_TIMEFRAME_YEARS: Dict[str, float] = {
+    "15m": 15 / (365 * 24 * 60),
+    "1h":  1  / (365 * 24),
+    "daily": 1 / 365,
+    "weekly": 7 / 365,
+    "monthly": 30 / 365,
+    "annual": 1.0,
+}
+
+
+def _sigma_attenuation(
+    asset: str,
+    timeframe: str,
+    strike_price: Optional[float],
+    spot_price: Optional[float],
+    *,
+    implied_vol_annual: Optional[float] = None,
+    expiry_secs: Optional[float] = None,
+    now_secs: Optional[float] = None,
+) -> float:
+    """Return a multiplicative attenuation factor ∈ (0, 1] based on how many
+    sigma the strike is from the current spot.
+
+    Factor = exp(-0.5 * d²) where d = (ln(K/S)) / (σ × √T).
+
+    When strike or spot is unavailable, returns 1.0 (no attenuation — do not
+    penalise candidates for missing data).  When the factor would be < 0.10 the
+    strike is so far out-of-the-money that the raw edge should be near-zero
+    already; the floor prevents division-by-zero-like collapses.
+
+    Args:
+        asset:              Asset symbol (used for default vol lookup).
+        timeframe:          Timeframe lane (used to determine T when expiry unknown).
+        strike_price:       Strike price in same units as spot_price.
+        spot_price:         Current spot price.
+        implied_vol_annual: Override annualised implied vol (decimal, e.g. 0.80).
+        expiry_secs:        Unix timestamp of market expiry.
+        now_secs:           Current Unix timestamp (defaults to time.time()).
+    """
+    import time as _time
+    if strike_price is None or spot_price is None or spot_price <= 0 or strike_price <= 0:
+        return 1.0  # No data → no attenuation.
+
+    # Annualised volatility
+    vol = implied_vol_annual if implied_vol_annual and implied_vol_annual > 0 else \
+        _DEFAULT_ANNUAL_VOL.get(asset, 0.80)
+
+    # Time to expiry in years
+    if expiry_secs and expiry_secs > 0:
+        _now = now_secs if now_secs else _time.time()
+        ttm_years = max(1e-6, (expiry_secs - _now) / (365.25 * 24 * 3600))
+    else:
+        ttm_years = _TIMEFRAME_YEARS.get(timeframe, 1 / 365)
+
+    sigma_T = vol * math.sqrt(ttm_years)
+    if sigma_T <= 0:
+        return 1.0
+
+    # Log-normal distance (signed; we use absolute value for attenuation)
+    log_moneyness = math.log(strike_price / spot_price)
+    d = log_moneyness / sigma_T
+
+    factor = math.exp(-0.5 * d * d)
+    return max(0.10, factor)  # floor at 0.10 to avoid near-zero collapse
+
+
 # ── Base class with common gates ──────────────────────────────────────────
 
 class _CryptoGridStrategy(OpinionStrategy):
@@ -185,8 +267,27 @@ class _CryptoGridStrategy(OpinionStrategy):
         if abs(raw_edge) < self.min_edge:
             return None
 
+        # ── Sigma-distance attenuation ────────────────────────────────────
+        # Scale edge by exp(-0.5 * d²) where d is the log-moneyness normalised
+        # by σ√T.  Applied uniformly across all assets and timeframes so that
+        # far-out-of-the-money strikes contribute proportionally less edge.
+        # Returns 1.0 when strike/spot data is absent (no penalty for missing data).
+        _atten = _sigma_attenuation(
+            asset=asset,
+            timeframe=timeframe,
+            strike_price=_safe_float(ctx, "strike_price", 0.0) or None,
+            spot_price=_safe_float(ctx, "spot_price", 0.0) or None,
+            implied_vol_annual=_safe_float(ctx, "implied_vol_annual", 0.0) or None,
+            expiry_secs=_safe_float(ctx, "expiry_ts", 0.0) or None,
+        )
+        attenuated_edge = raw_edge * _atten
+
+        # Re-check min_edge after attenuation; skip if below threshold.
+        if abs(attenuated_edge) < self.min_edge:
+            return None
+
         # Clamp agent_prob to (0.01, 0.99).
-        agent_prob = _clamp(market_prob + raw_edge, 0.01, 0.99)
+        agent_prob = _clamp(market_prob + attenuated_edge, 0.01, 0.99)
         edge = agent_prob - market_prob
 
         # Scale confidence by Kelly tier (satellite = lower confidence ceiling).
@@ -200,8 +301,13 @@ class _CryptoGridStrategy(OpinionStrategy):
                 "timeframe": timeframe,
                 "market_prob": market_prob,
                 "kelly_scale": k_scale,
+                "sigma_attenuation": round(_atten, 4),
             },
-            contributions={"raw_edge": raw_edge, "kelly_scale_adj": k_scale - 1.0},
+            contributions={
+                "raw_edge": raw_edge,
+                "attenuated_edge": round(attenuated_edge, 4),
+                "kelly_scale_adj": k_scale - 1.0,
+            },
             rationale=self.name,
         )
 
