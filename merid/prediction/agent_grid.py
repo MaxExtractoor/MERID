@@ -63,35 +63,35 @@ class AgentGrid:
         )
         try:
             validate_all_strategy_configs()
-        except StrategyConfigError as _sce:
-            logger.error("STRATEGY CONFIG ERROR — server will not trade:\n%s", _sce)
+        except StrategyConfigError as config_err:
+            logger.error("STRATEGY CONFIG ERROR — server will not trade:\n%s", config_err)
             raise
 
-        _catalog = load_strategy_catalog()
-        _enabled_profiles: List[str] = _catalog["enabled_profiles"]
+        catalog = load_strategy_catalog()
+        enabled_profiles: List[str] = catalog["enabled_profiles"]
 
         # Instantiate live strategy objects and log each one.
         self._active_strategy_instances: dict = {}
-        for _profile_name in _enabled_profiles:
+        for profile_name in enabled_profiles:
             try:
-                _instance = build_strategy_from_profile(_profile_name)
-                self._active_strategy_instances[_profile_name] = _instance
-                _cfg_obj = getattr(_instance, "_config", None) or getattr(
-                    _instance, "config", None
+                strategy_instance = build_strategy_from_profile(profile_name)
+                self._active_strategy_instances[profile_name] = strategy_instance
+                cfg_obj = getattr(strategy_instance, "_config", None) or getattr(
+                    strategy_instance, "config", None
                 )
-                _assets = getattr(_cfg_obj, "assets", None) if _cfg_obj else None
-                _tf = getattr(_cfg_obj, "primary_timeframe", None) if _cfg_obj else None
-                _enabled = getattr(_cfg_obj, "enabled", True) if _cfg_obj else True
+                strategy_assets = getattr(cfg_obj, "assets", None) if cfg_obj else None
+                strategy_tf = getattr(cfg_obj, "primary_timeframe", None) if cfg_obj else None
+                strategy_enabled = getattr(cfg_obj, "enabled", True) if cfg_obj else True
                 logger.info(
                     "Loaded strategy=%s assets=%s timeframe=%s enabled=%s",
-                    _profile_name,
-                    _assets,
-                    _tf,
-                    _enabled,
+                    profile_name,
+                    strategy_assets,
+                    strategy_tf,
+                    strategy_enabled,
                 )
-            except Exception as _exc:
+            except Exception as exc:
                 logger.error(
-                    "Failed to instantiate strategy '%s': %s", _profile_name, _exc
+                    "Failed to instantiate strategy '%s': %s", profile_name, exc
                 )
                 raise
 
