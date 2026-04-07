@@ -52,7 +52,49 @@ class AgentGrid:
     def __init__(self, config: Optional[AgentGridConfig] = None):
         self._config = config or get_agent_grid_config()
         self._session_guard = get_session_guard(self._config.session)
-        
+
+        # ── Strategy registry: validate configs and instantiate profiles ──
+        # Fail fast on misconfigured YAML so the server never starts half-wired.
+        from merid.trading.strategy_registry import (
+            StrategyConfigError,
+            build_strategy_from_profile,
+            load_strategy_catalog,
+            validate_all_strategy_configs,
+        )
+        try:
+            validate_all_strategy_configs()
+        except StrategyConfigError as _sce:
+            logger.error("STRATEGY CONFIG ERROR — server will not trade:\n%s", _sce)
+            raise
+
+        _catalog = load_strategy_catalog()
+        _enabled_profiles: List[str] = _catalog["enabled_profiles"]
+
+        # Instantiate live strategy objects and log each one.
+        self._active_strategy_instances: dict = {}
+        for _profile_name in _enabled_profiles:
+            try:
+                _instance = build_strategy_from_profile(_profile_name)
+                self._active_strategy_instances[_profile_name] = _instance
+                _cfg_obj = getattr(_instance, "_config", None) or getattr(
+                    _instance, "config", None
+                )
+                _assets = getattr(_cfg_obj, "assets", None) if _cfg_obj else None
+                _tf = getattr(_cfg_obj, "primary_timeframe", None) if _cfg_obj else None
+                _enabled = getattr(_cfg_obj, "enabled", True) if _cfg_obj else True
+                logger.info(
+                    "Loaded strategy=%s assets=%s timeframe=%s enabled=%s",
+                    _profile_name,
+                    _assets,
+                    _tf,
+                    _enabled,
+                )
+            except Exception as _exc:
+                logger.error(
+                    "Failed to instantiate strategy '%s': %s", _profile_name, _exc
+                )
+                raise
+
         # Market catalog for auto-discovery
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         self._catalog = get_market_catalog()
@@ -574,6 +616,16 @@ class AgentGrid:
         return self._agents
 
     @property
+    def loaded_profiles(self) -> List[str]:
+        """Profile names for strategies instantiated from strategy_catalog.yaml."""
+        return list(self._active_strategy_instances.keys())
+
+    @property
+    def active_strategies(self) -> dict:
+        """Live strategy instances keyed by profile name."""
+        return dict(self._active_strategy_instances)
+
+    @property
     def config(self) -> AgentGridConfig:
         return self._config
 
@@ -714,6 +766,7 @@ class AgentGrid:
             "portfolio_risk": self._portfolio_risk.summary(),
             "social_broadcaster": self._broadcaster.summary(),
             "paper_session": paper_session_data,
+            "loaded_profiles": self.loaded_profiles,
         }
 
     def agent_grid_matrix(self) -> Dict[str, Any]:
