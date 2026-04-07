@@ -524,10 +524,13 @@ class AutomatedStopLossManager:
 
 class TradingHaltManager:
     """Manages trading halt state triggered by risk breaches or circuit breakers.
-    
+
     This is the central authority for whether new orders can be submitted.
     When halted, all order submission must be blocked until an operator
     explicitly resumes or the auto-resume conditions are met.
+
+    Supports reason-specific halts so that staleness-triggered halts can be
+    auto-cleared when feeds recover, while operator/kill-switch halts remain manual.
     """
 
     def __init__(
@@ -541,7 +544,7 @@ class TradingHaltManager:
         self.circuit_breaker_halt_threshold = circuit_breaker_halt_threshold
 
         self._halted: bool = False
-        self._halt_reason: Optional[str] = None
+        self._halt_reasons: Dict[str, float] = {}  # reason -> timestamp
         self._halt_time: Optional[float] = None
         self._halt_history: List[Dict[str, Any]] = []
         self._on_halt_callbacks: List[Callable] = []
@@ -549,11 +552,15 @@ class TradingHaltManager:
 
     @property
     def is_halted(self) -> bool:
-        return self._halted
+        return len(self._halt_reasons) > 0
 
     @property
     def halt_reason(self) -> Optional[str]:
-        return self._halt_reason
+        if not self._halt_reasons:
+            return None
+        # Return most recent halt reason
+        sorted_reasons = sorted(self._halt_reasons.items(), key=lambda x: x[1], reverse=True)
+        return sorted_reasons[0][0] if sorted_reasons else None
 
     def register_on_halt(self, callback: Callable) -> None:
         """Register a callback invoked when trading is halted."""
@@ -563,46 +570,75 @@ class TradingHaltManager:
         """Register a callback invoked when trading is resumed."""
         self._on_resume_callbacks.append(callback)
 
-    def halt(self, reason: str) -> bool:
-        """Halt all trading.  Returns True if state changed."""
-        if self._halted:
-            logger.warning(f"Trading already halted ({self._halt_reason}). New reason: {reason}")
+    def halt(self, reason: str, operator: str = "system") -> bool:
+        """Halt all trading.  Returns True if a new reason was added."""
+        if reason in self._halt_reasons:
+            logger.debug(f"Trading already halted for reason '{reason}'")
             return False
 
-        self._halted = True
-        self._halt_reason = reason
-        self._halt_time = time.time()
+        self._halt_reasons[reason] = time.time()
+        if not self._halt_time:
+            self._halt_time = time.time()
+
         entry = {
             "action": "halt",
             "reason": reason,
-            "timestamp": self._halt_time,
+            "operator": operator,
+            "timestamp": time.time(),
         }
         self._halt_history.append(entry)
-        logger.critical(f"TRADING HALTED: {reason}")
+        logger.critical(f"TRADING HALTED: {reason} (by {operator})")
 
-        for cb in self._on_halt_callbacks:
-            try:
-                cb(reason)
-            except Exception as exc:
-                logger.error(f"on_halt callback error: {exc}")
+        # Only fire callbacks on first halt
+        if len(self._halt_reasons) == 1:
+            for cb in self._on_halt_callbacks:
+                try:
+                    cb(reason)
+                except Exception as exc:
+                    logger.error(f"on_halt callback error: {exc}")
+        return True
+
+    def clear_reason(self, reason: str, operator: str = "system") -> bool:
+        """Clear a specific halt reason.  Returns True if state changed."""
+        if reason not in self._halt_reasons:
+            return False
+
+        del self._halt_reasons[reason]
+        entry = {
+            "action": "clear_reason",
+            "reason": reason,
+            "operator": operator,
+            "timestamp": time.time(),
+        }
+        self._halt_history.append(entry)
+        logger.info(f"TRADING HALT CLEARED for reason: {reason} (by {operator})")
+
+        # Fire resume callbacks if all halts cleared
+        if len(self._halt_reasons) == 0:
+            self._halt_time = None
+            for cb in self._on_resume_callbacks:
+                try:
+                    cb(operator)
+                except Exception as exc:
+                    logger.error(f"on_resume callback error: {exc}")
         return True
 
     def resume(self, operator: str = "system") -> bool:
-        """Resume trading.  Returns True if state changed."""
-        if not self._halted:
+        """Resume trading (clear ALL halt reasons).  Returns True if state changed."""
+        if not self._halt_reasons:
             return False
 
-        prev_reason = self._halt_reason
-        self._halted = False
-        self._halt_reason = None
+        prev_reasons = list(self._halt_reasons.keys())
+        self._halt_reasons.clear()
+        self._halt_time = None
         entry = {
             "action": "resume",
-            "previous_reason": prev_reason,
+            "previous_reasons": prev_reasons,
             "resumed_by": operator,
             "timestamp": time.time(),
         }
         self._halt_history.append(entry)
-        logger.info(f"TRADING RESUMED by {operator} (was halted: {prev_reason})")
+        logger.info(f"TRADING RESUMED by {operator} (was halted: {', '.join(prev_reasons)})")
 
         for cb in self._on_resume_callbacks:
             try:
@@ -645,8 +681,9 @@ class TradingHaltManager:
 
     def get_status(self) -> Dict[str, Any]:
         return {
-            "halted": self._halted,
-            "reason": self._halt_reason,
+            "halted": self.is_halted,
+            "reasons": list(self._halt_reasons.keys()),
+            "reason": self.halt_reason,
             "halt_time": self._halt_time,
             "history_count": len(self._halt_history),
             "history": self._halt_history[-10:],
@@ -678,10 +715,18 @@ class RiskControlCoordinator:
     def wire_staleness_monitor(self, monitor) -> None:
         """Wire a FeedStalenessMonitor so stale feeds auto-halt trading."""
         self.staleness_monitor = monitor
-        monitor.on_stale(lambda fid, inst, age: self.halt_manager.halt(
-            f"Stale data: {fid}:{inst} ({age:.0f}s)"
-        ))
-        logger.info("Staleness monitor wired to risk coordinator")
+
+        def on_stale_callback(feed_id: str, instrument: str, age: float) -> None:
+            reason = f"feed_stale:{feed_id}:{instrument}"
+            self.halt_manager.halt(reason=reason, operator="staleness_monitor")
+
+        def on_recovered_callback(feed_id: str, instrument: str) -> None:
+            reason = f"feed_stale:{feed_id}:{instrument}"
+            self.halt_manager.clear_reason(reason=reason, operator="staleness_monitor")
+
+        monitor.on_stale(on_stale_callback)
+        monitor.on_recovered(on_recovered_callback)
+        logger.info("Staleness monitor wired to risk coordinator with auto-resume")
 
     def register_circuit_breaker(self, name_or_breaker: Any, breaker: Any = None) -> None:
         """Register an external circuit breaker for monitoring.
