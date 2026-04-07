@@ -137,7 +137,8 @@ _ASSET_PATTERNS: Dict[str, List[re.Pattern]] = {
 # ── Timeframe detection ─────────────────────────────────────────────────
 
 _TIMEFRAME_PATTERNS = [
-    (re.compile(r"15[\s-]*min", re.I), "15m"),
+    # 15m patterns - aggressive matching for critical short-term markets
+    (re.compile(r"15[\s-]*min|15M|FIFTEEN", re.I), "15m"),
     (re.compile(r"hourly|1[\s-]*hour|60[\s-]*min", re.I), "1h"),
     (re.compile(r"daily|end[\s-]*of[\s-]*day|eod|close[\s-]*today", re.I), "daily"),
     (re.compile(r"weekly|end[\s-]*of[\s-]*week|eow", re.I), "weekly"),

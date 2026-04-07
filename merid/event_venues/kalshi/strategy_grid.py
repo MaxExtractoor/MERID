@@ -85,21 +85,23 @@ _KELLY_MULTIPLIER: Dict[str, float] = {
 
 # Minimum liquidity (volume proxy) required per asset tier.  The strategy
 # reads the value from context["volume"] and skips if below the floor.
+# Production values lowered for 15m timeframes to ensure market discovery.
 _MIN_VOLUME: Dict[str, float] = {
-    "BTC": 50.0,
-    "ETH": 50.0,
-    "SOL": 60.0,      # Reduced from 75.0 for better coverage
-    "XRP": 60.0,      # Reduced from 75.0 for better coverage
-    "DOGE": 65.0,     # Reduced from 100.0 for better coverage
+    "BTC": 30.0,      # Lowered from 50.0 for 15m market capture
+    "ETH": 30.0,      # Lowered from 50.0 for 15m market capture
+    "SOL": 30.0,      # Lowered from 60.0 for 15m market capture
+    "XRP": 30.0,      # Lowered from 60.0 for 15m market capture
+    "DOGE": 30.0,     # Lowered from 65.0 for 15m market capture
 }
 
 # Minimum open-interest required per asset tier.
+# Production values lowered for 15m timeframes to ensure market discovery.
 _MIN_OI: Dict[str, float] = {
-    "BTC": 10.0,
-    "ETH": 10.0,
-    "SOL": 12.0,      # Reduced from 15.0 for better coverage
-    "XRP": 12.0,      # Reduced from 15.0 for better coverage
-    "DOGE": 12.0,     # Reduced from 20.0 for better coverage
+    "BTC": 5.0,       # Lowered from 10.0 for 15m market capture
+    "ETH": 5.0,       # Lowered from 10.0 for 15m market capture
+    "SOL": 5.0,       # Lowered from 12.0 for 15m market capture
+    "XRP": 5.0,       # Lowered from 12.0 for 15m market capture
+    "DOGE": 5.0,      # Lowered from 12.0 for 15m market capture
 }
 
 
