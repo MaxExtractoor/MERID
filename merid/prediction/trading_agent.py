@@ -304,6 +304,16 @@ class KalshiTradingAgent:
         active_markets = self._filter_active_contracts(self._resolved_markets, now)
         cycle_stats["candidates_total"] = len(active_markets)
 
+        if not active_markets:
+            self.logger.debug(
+                "[AGENT-VETO] no_active_markets | agent=%s resolved=%d "
+                "all markets expired or have no end_date",
+                self.config.name, len(self._resolved_markets),
+            )
+            cycle_stats["veto_no_markets"] = 1
+            self._log_cycle_summary(cycle_stats)
+            return
+
         # 5. Evaluate each filtered market
         for market in active_markets:
             # FIX-1: Yield between market evaluations to prevent long bursts
@@ -316,6 +326,21 @@ class KalshiTradingAgent:
             # Check entry window (already mostly handled by filter but good to be explicit)
             if not self._in_entry_window(market, now):
                 cycle_stats["veto_entry_window"] += 1
+                # Debug: show how long until the window opens so operators can diagnose blackouts
+                if market.end_date:
+                    ew = self.config.entry_window
+                    window_open = market.end_date - timedelta(minutes=ew.minutes_before_expiry)
+                    if now < window_open:
+                        wait = window_open - now
+                        self.logger.debug(
+                            "[AGENT-VETO] entry_window | agent=%s market=%s "
+                            "window_opens_in=%dm%ds (entry_window=%dmin cutoff=%dmin)",
+                            self.config.name, market.market_id,
+                            int(wait.total_seconds() // 60),
+                            int(wait.total_seconds() % 60),
+                            ew.minutes_before_expiry,
+                            ew.cutoff_minutes_before_expiry,
+                        )
                 continue
 
             # Check per-window order limit
@@ -862,59 +887,9 @@ class KalshiTradingAgent:
             stats["veto_degraded_pause"],
         )
 
-        # ── Calibration: log forecast for Brier scoring ──────────────────
-        try:
-            from merid.metrics.calibration import get_calibration_store
-            cal = get_calibration_store()
-            # p_model = our model's YES probability
-            p_model = None
-            if signal.edge and hasattr(signal.edge, 'model_prob'):
-                p_model = float(signal.edge.model_prob)
-            elif snapshot and snapshot.implied:
-                # Reconstruct: model_prob = implied + edge
-                imp = float(snapshot.implied.yes_prob)
-                edge_val = float(signal.edge.net_edge) if signal.edge and hasattr(signal.edge, 'net_edge') else 0.0
-                p_model = max(0.01, min(0.99, imp + edge_val))
-            if p_model is not None:
-                bucket = (market.category or "unknown").lower()
-                cal.record_forecast(
-                    forecaster_id=self.config.name,
-                    bucket=bucket,
-                    market_id=market.market_id,
-                    p_model=p_model,
-                    timestamp=now.timestamp(),
-                )
-        except Exception as _cal_exc:
-            self.logger.debug("calibration record_forecast skipped: %s", _cal_exc)
-
-        # ── Sprint B: Run heterogeneous forecasters (momentum, mean_reversion) ──
-        try:
-            from merid.prediction.forecasters.registry import get_forecaster_registry
-            registry = get_forecaster_registry()
-            imp_yes = float(snapshot.implied.yes_prob) if snapshot and snapshot.implied else 0.5
-            imp_no = float(snapshot.implied.no_prob) if snapshot and snapshot.implied else 0.5
-            vol = float(market.volume) if market.volume else 0.0
-            oi = float(market.open_interest) if market.open_interest else 0.0
-            tte = float(snapshot.time_to_expiry_hours) * 60.0 if snapshot and snapshot.time_to_expiry_hours else None
-            _bid = float(snapshot.implied.yes_bid) if snapshot and snapshot.implied and snapshot.implied.yes_bid else None
-            _ask = float(snapshot.implied.yes_ask) if snapshot and snapshot.implied and snapshot.implied.yes_ask else None
-            _asset = self.config.assets[0] if self.config.assets else None
-            _tf = self.config.timeframes[0] if self.config.timeframes else None
-            registry.predict_all(
-                market_id=market.market_id,
-                implied_yes=imp_yes,
-                implied_no=imp_no,
-                volume=vol,
-                open_interest=oi,
-                minutes_to_expiry=tte,
-                asset=_asset,
-                timeframe=_tf,
-                bid=_bid,
-                ask=_ask,
-                category=market.category,
-            )
-        except Exception as _fr_exc:
-            self.logger.debug("forecaster registry predict_all skipped: %s", _fr_exc)
+        # NOTE: calibration (record_forecast) and forecaster registry (predict_all)
+        # are called inline in _run_cycle after each signal evaluation, where the
+        # required local variables (signal, market, snapshot, now) are in scope.
 
     def _record_explainability_decision(
         self,
@@ -1038,20 +1013,23 @@ class KalshiTradingAgent:
                 
                 # Use per-agent singleton so daily PnL and open-exposure
                 # state persist across calls (not zeroed on every signal).
-                if self._btc15m_risk is None:
-                    # Bootstrap equity + phase from PromotionEngine if available
-                    _init_equity = 0.0
+                # _init_equity is resolved here (before the init-branch) so that
+                # update_from_phase() can use it on every cycle, not just the first.
+                _init_equity = 0.0
+                try:
+                    from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_ta
+                    _init_equity = float(getattr(_gkr_ta().state, 'current_equity_usd', 0) or 0)
+                except Exception as _e:
+                    self.logger.debug("equity_lookup_kalshi_risk: %s", _e)
+                if _init_equity <= 0:
                     try:
-                        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_ta
-                        _init_equity = float(getattr(_gkr_ta().state, 'current_equity_usd', 0) or 0)
+                        from merid.settings import settings as _s_ta
+                        _init_equity = float(getattr(_s_ta, 'PAPER_STARTING_BALANCE', 0) or 0)
                     except Exception as _e:
-                        self.logger.debug("equity_lookup_kalshi_risk: %s", _e)
-                    if _init_equity <= 0:
-                        try:
-                            from merid.settings import settings as _s_ta
-                            _init_equity = float(getattr(_s_ta, 'PAPER_STARTING_BALANCE', 0) or 0)
-                        except Exception as _e:
-                            self.logger.debug("equity_lookup_settings: %s", _e)
+                        self.logger.debug("equity_lookup_settings: %s", _e)
+
+                if self._btc15m_risk is None:
+                    # Bootstrap phase from PromotionEngine if available
                     _init_phase = RiskPhase.PHASE_0
                     try:
                         from merid.risk.promotion_engine import get_promotion_engine
