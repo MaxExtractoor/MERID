@@ -14,20 +14,28 @@ logger = get_logger("core.action_handlers")
 
 
 def _handle_propose_order(payload: Dict[str, Any]) -> Dict[str, Any]:
-    # Placeholder for order proposal integration.
-    logger.info("Routing order proposal: %s", payload)
-    return {"accepted": True, "details": payload}
+    """Stub handler - not used in production PM path.
+
+    Production orders go through: TradingAgent → VenueGate → ExecutionGate → KalshiAdapter.
+    This handler exists for dev/testing scenarios only.
+    """
+    logger.warning("STUB: propose_order called (not production path): %s", payload)
+    return {"accepted": False, "error": "Stub handler - use production TradingAgent → VenueGate path"}
 
 
 def _handle_explain_decision(payload: Dict[str, Any]) -> Dict[str, Any]:
-    # Could invoke explainability service for ad-hoc descriptions.
-    logger.info("Explain decision payload: %s", payload)
-    return {"explanation": "Explanation requested", "payload": payload}
+    """Stub handler - not used in production PM path.
+
+    Production explainability is handled by the explainability service.
+    """
+    logger.warning("STUB: explain_decision called (not production path): %s", payload)
+    return {"explanation": "Stub handler - use ExplainabilityService for production", "payload": payload}
 
 
 def _handle_request_sim(payload: Dict[str, Any]) -> Dict[str, Any]:
-    logger.info("Sim run requested: %s", payload)
-    return {"scheduled": True, "job_id": f"sim_{payload.get('scenario', 'default')}"}
+    """Stub handler - not used in production PM path."""
+    logger.warning("STUB: request_sim called (not production path): %s", payload)
+    return {"scheduled": False, "error": "Stub handler - not implemented"}
 
 
 def register_default_actions() -> None:
