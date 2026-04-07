@@ -1,14 +1,13 @@
 # ─── Kalshi Agent Grid Configuration ───────────────────────────────────
-# Full crypto surface: BTC/ETH/SOL/XRP/DOGE × 15m/hourly/daily/weekly
+# Complete crypto surface: BTC/ETH/SOL/XRP/DOGE × 15m/1h/daily/weekly/monthly/annual (30 cells)
 # Plus market-maker, arbitrage, macro, and catch-all agents.
-# The orchestrator resolves market_filter into live Kalshi tickers via GET /markets.
+# Production-ready configuration with all 30 crypto timeframe combinations.
 
 venue:
   name: kalshi
   base_url: "https://trading-api.kalshi.com/trade-api/v2"
   use_demo: false                      # PRODUCTION MODE - Real Kalshi trading
-  max_notional_per_expiry_usd: 5000
-  max_open_markets_per_asset: 20
+  agent_stagger_seconds: 0.5           # Delay between agent starts to avoid API thundering herd
 
 session:
   # Kalshi is 24/7 except Thu 3–5 AM ET maintenance
@@ -17,24 +16,22 @@ session:
   maintenance_end_et: "05:00"
 
 # ── Per-agent definitions ──────────────────────────────────────────────
-# Archetypes: directional, market_maker, arbitrage
+# Archetypes: directional, market_maker, arbitrage, contrarian, regime_switch, vol_breakout
 agents:
 
   # ═══════════════════════════════════════════════════════════════════
-  # BTC — Full timeframe coverage
+  # BTC — Full timeframe coverage (6 timeframes)
   # ═══════════════════════════════════════════════════════════════════
   - name: BTC_15M
     assets: [BTC]
     timeframes: [15m]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: fifteen_min
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 20
       max_notional_usd: 500
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 10
       cutoff_minutes_before_expiry: 1
@@ -43,14 +40,12 @@ agents:
     assets: [BTC]
     timeframes: [1h]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: hourly
     risk_limits:
-      max_yes_position: 5000
-      max_no_position: 5000
       max_orders_per_window: 15
       max_notional_usd: 1000
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 30
       cutoff_minutes_before_expiry: 2
@@ -59,14 +54,12 @@ agents:
     assets: [BTC]
     timeframes: [daily]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: daily
     risk_limits:
-      max_yes_position: 10000
-      max_no_position: 10000
       max_orders_per_window: 10
       max_notional_usd: 2000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 120
       cutoff_minutes_before_expiry: 15
@@ -75,33 +68,57 @@ agents:
     assets: [BTC]
     timeframes: [weekly]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: weekly
     risk_limits:
-      max_yes_position: 15000
-      max_no_position: 15000
       max_orders_per_window: 5
       max_notional_usd: 3000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
 
+  - name: BTC_MONTHLY
+    assets: [BTC]
+    timeframes: [monthly]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 5
+      max_notional_usd: 4000
+      max_slippage_cents: 5
+      min_depth_contracts: 2
+      max_spread_cents: 25
+    entry_window:
+      minutes_before_expiry: 10080      # 1 week
+      cutoff_minutes_before_expiry: 1440 # 1 day
+
+  - name: BTC_ANNUAL
+    assets: [BTC]
+    timeframes: [annual]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 3
+      max_notional_usd: 5000
+      max_slippage_cents: 10
+      min_depth_contracts: 2
+      max_spread_cents: 30
+    entry_window:
+      minutes_before_expiry: 43200      # 30 days
+      cutoff_minutes_before_expiry: 10080 # 1 week
+
   # ═══════════════════════════════════════════════════════════════════
-  # ETH — Full timeframe coverage
+  # ETH — Full timeframe coverage (6 timeframes)
   # ═══════════════════════════════════════════════════════════════════
   - name: ETH_15M
     assets: [ETH]
     timeframes: [15m]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: fifteen_min
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 20
       max_notional_usd: 500
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 10
       cutoff_minutes_before_expiry: 1
@@ -110,14 +127,12 @@ agents:
     assets: [ETH]
     timeframes: [1h]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: hourly
     risk_limits:
-      max_yes_position: 5000
-      max_no_position: 5000
       max_orders_per_window: 15
       max_notional_usd: 1000
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 30
       cutoff_minutes_before_expiry: 2
@@ -126,14 +141,12 @@ agents:
     assets: [ETH]
     timeframes: [daily]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: daily
     risk_limits:
-      max_yes_position: 10000
-      max_no_position: 10000
       max_orders_per_window: 10
       max_notional_usd: 2000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 120
       cutoff_minutes_before_expiry: 15
@@ -142,33 +155,57 @@ agents:
     assets: [ETH]
     timeframes: [weekly]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: weekly
     risk_limits:
-      max_yes_position: 15000
-      max_no_position: 15000
       max_orders_per_window: 5
       max_notional_usd: 3000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
 
+  - name: ETH_MONTHLY
+    assets: [ETH]
+    timeframes: [monthly]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 5
+      max_notional_usd: 4000
+      max_slippage_cents: 5
+      min_depth_contracts: 2
+      max_spread_cents: 25
+    entry_window:
+      minutes_before_expiry: 10080
+      cutoff_minutes_before_expiry: 1440
+
+  - name: ETH_ANNUAL
+    assets: [ETH]
+    timeframes: [annual]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 3
+      max_notional_usd: 5000
+      max_slippage_cents: 10
+      min_depth_contracts: 2
+      max_spread_cents: 30
+    entry_window:
+      minutes_before_expiry: 43200
+      cutoff_minutes_before_expiry: 10080
+
   # ═══════════════════════════════════════════════════════════════════
-  # SOL — Full timeframe coverage
+  # SOL — Full timeframe coverage (6 timeframes)
   # ═══════════════════════════════════════════════════════════════════
   - name: SOL_15M
     assets: [SOL]
     timeframes: [15m]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: fifteen_min
     risk_limits:
-      max_yes_position: 1500
-      max_no_position: 1500
       max_orders_per_window: 20
       max_notional_usd: 400
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 10
       cutoff_minutes_before_expiry: 1
@@ -177,14 +214,12 @@ agents:
     assets: [SOL]
     timeframes: [1h]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: hourly
     risk_limits:
-      max_yes_position: 3000
-      max_no_position: 3000
       max_orders_per_window: 15
       max_notional_usd: 800
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 30
       cutoff_minutes_before_expiry: 2
@@ -193,14 +228,12 @@ agents:
     assets: [SOL]
     timeframes: [daily]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: daily
     risk_limits:
-      max_yes_position: 8000
-      max_no_position: 8000
       max_orders_per_window: 10
       max_notional_usd: 1500
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 120
       cutoff_minutes_before_expiry: 15
@@ -209,33 +242,57 @@ agents:
     assets: [SOL]
     timeframes: [weekly]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: weekly
     risk_limits:
-      max_yes_position: 10000
-      max_no_position: 10000
       max_orders_per_window: 5
       max_notional_usd: 2000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
 
+  - name: SOL_MONTHLY
+    assets: [SOL]
+    timeframes: [monthly]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 5
+      max_notional_usd: 2500
+      max_slippage_cents: 5
+      min_depth_contracts: 2
+      max_spread_cents: 25
+    entry_window:
+      minutes_before_expiry: 10080
+      cutoff_minutes_before_expiry: 1440
+
+  - name: SOL_ANNUAL
+    assets: [SOL]
+    timeframes: [annual]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 3
+      max_notional_usd: 3000
+      max_slippage_cents: 10
+      min_depth_contracts: 2
+      max_spread_cents: 30
+    entry_window:
+      minutes_before_expiry: 43200
+      cutoff_minutes_before_expiry: 10080
+
   # ═══════════════════════════════════════════════════════════════════
-  # XRP — Full timeframe coverage
+  # XRP — Full timeframe coverage (6 timeframes)
   # ═══════════════════════════════════════════════════════════════════
   - name: XRP_15M
     assets: [XRP]
     timeframes: [15m]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: fifteen_min
     risk_limits:
-      max_yes_position: 1500
-      max_no_position: 1500
       max_orders_per_window: 20
       max_notional_usd: 400
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 10
       cutoff_minutes_before_expiry: 1
@@ -244,14 +301,12 @@ agents:
     assets: [XRP]
     timeframes: [1h]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: hourly
     risk_limits:
-      max_yes_position: 3000
-      max_no_position: 3000
       max_orders_per_window: 15
       max_notional_usd: 800
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 30
       cutoff_minutes_before_expiry: 2
@@ -260,14 +315,12 @@ agents:
     assets: [XRP]
     timeframes: [daily]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: daily
     risk_limits:
-      max_yes_position: 8000
-      max_no_position: 8000
       max_orders_per_window: 10
       max_notional_usd: 1500
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 120
       cutoff_minutes_before_expiry: 15
@@ -276,33 +329,57 @@ agents:
     assets: [XRP]
     timeframes: [weekly]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: weekly
     risk_limits:
-      max_yes_position: 10000
-      max_no_position: 10000
       max_orders_per_window: 5
       max_notional_usd: 2000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
 
+  - name: XRP_MONTHLY
+    assets: [XRP]
+    timeframes: [monthly]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 5
+      max_notional_usd: 2500
+      max_slippage_cents: 5
+      min_depth_contracts: 2
+      max_spread_cents: 25
+    entry_window:
+      minutes_before_expiry: 10080
+      cutoff_minutes_before_expiry: 1440
+
+  - name: XRP_ANNUAL
+    assets: [XRP]
+    timeframes: [annual]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 3
+      max_notional_usd: 3000
+      max_slippage_cents: 10
+      min_depth_contracts: 2
+      max_spread_cents: 30
+    entry_window:
+      minutes_before_expiry: 43200
+      cutoff_minutes_before_expiry: 10080
+
   # ═══════════════════════════════════════════════════════════════════
-  # DOGE — Full timeframe coverage
+  # DOGE — Full timeframe coverage (6 timeframes)
   # ═══════════════════════════════════════════════════════════════════
   - name: DOGE_15M
     assets: [DOGE]
     timeframes: [15m]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: fifteen_min
     risk_limits:
-      max_yes_position: 1000
-      max_no_position: 1000
       max_orders_per_window: 20
       max_notional_usd: 300
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 10
       cutoff_minutes_before_expiry: 1
@@ -311,14 +388,12 @@ agents:
     assets: [DOGE]
     timeframes: [1h]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: hourly
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 15
       max_notional_usd: 600
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 10
     entry_window:
       minutes_before_expiry: 30
       cutoff_minutes_before_expiry: 2
@@ -327,14 +402,12 @@ agents:
     assets: [DOGE]
     timeframes: [daily]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: daily
     risk_limits:
-      max_yes_position: 5000
-      max_no_position: 5000
       max_orders_per_window: 10
       max_notional_usd: 1000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 120
       cutoff_minutes_before_expiry: 15
@@ -343,17 +416,43 @@ agents:
     assets: [DOGE]
     timeframes: [weekly]
     archetype: directional
-    market_filter:
-      category: crypto
-      frequency: weekly
     risk_limits:
-      max_yes_position: 8000
-      max_no_position: 8000
       max_orders_per_window: 5
       max_notional_usd: 1500
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
+
+  - name: DOGE_MONTHLY
+    assets: [DOGE]
+    timeframes: [monthly]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 5
+      max_notional_usd: 2000
+      max_slippage_cents: 5
+      min_depth_contracts: 2
+      max_spread_cents: 25
+    entry_window:
+      minutes_before_expiry: 10080
+      cutoff_minutes_before_expiry: 1440
+
+  - name: DOGE_ANNUAL
+    assets: [DOGE]
+    timeframes: [annual]
+    archetype: directional
+    risk_limits:
+      max_orders_per_window: 3
+      max_notional_usd: 2500
+      max_slippage_cents: 10
+      min_depth_contracts: 2
+      max_spread_cents: 30
+    entry_window:
+      minutes_before_expiry: 43200
+      cutoff_minutes_before_expiry: 10080
 
   # ═══════════════════════════════════════════════════════════════════
   # Crypto Market Maker (cross-asset, 15m focus)
@@ -362,14 +461,12 @@ agents:
     assets: []
     timeframes: [15m]
     archetype: market_maker
-    market_filter:
-      category: crypto
-      frequency: fifteen_min
     risk_limits:
-      max_yes_position: 1000
-      max_no_position: 1000
       max_orders_per_window: 50
       max_notional_usd: 300
+      max_slippage_cents: 2
+      min_depth_contracts: 3
+      max_spread_cents: 8
     entry_window:
       minutes_before_expiry: 14
       cutoff_minutes_before_expiry: 0
@@ -381,13 +478,12 @@ agents:
     assets: []
     timeframes: []
     archetype: arbitrage
-    market_filter:
-      category: all
     risk_limits:
-      max_yes_position: 5000
-      max_no_position: 5000
       max_orders_per_window: 100
       max_notional_usd: 5000
+      max_slippage_cents: 1
+      min_depth_contracts: 5
+      max_spread_cents: 5
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 0
@@ -399,13 +495,12 @@ agents:
     assets: []
     timeframes: []
     archetype: directional
-    market_filter:
-      category: economics
     risk_limits:
-      max_yes_position: 5000
-      max_no_position: 5000
       max_orders_per_window: 10
       max_notional_usd: 1000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
@@ -417,13 +512,12 @@ agents:
     assets: [SPX, NDX, DJI]
     timeframes: []
     archetype: directional
-    market_filter:
-      category: financials
     risk_limits:
-      max_yes_position: 5000
-      max_no_position: 5000
       max_orders_per_window: 10
       max_notional_usd: 1000
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
@@ -435,13 +529,12 @@ agents:
     assets: [ELECTION]
     timeframes: []
     archetype: directional
-    market_filter:
-      category: politics
     risk_limits:
-      max_yes_position: 1000
-      max_no_position: 1000
       max_orders_per_window: 5
       max_notional_usd: 300
+      max_slippage_cents: 5
+      min_depth_contracts: 2
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 10080   # 1 week
       cutoff_minutes_before_expiry: 1440
@@ -453,13 +546,12 @@ agents:
     assets: [WEATHER, CLIMATE]
     timeframes: []
     archetype: directional
-    market_filter:
-      category: climate
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 5
       max_notional_usd: 400
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
@@ -471,13 +563,12 @@ agents:
     assets: []
     timeframes: []
     archetype: directional
-    market_filter:
-      category: sports
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 10
       max_notional_usd: 400
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 30
@@ -489,13 +580,12 @@ agents:
     assets: []
     timeframes: []
     archetype: directional
-    market_filter:
-      category: tech
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 5
       max_notional_usd: 400
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 10080
       cutoff_minutes_before_expiry: 1440
@@ -504,33 +594,29 @@ agents:
   # Sentiment: Contrarian (extreme regimes only, ≥10pp model gap)
   # ═══════════════════════════════════════════════════════════════════
   - name: SENTIMENT_CONTRARIAN_CRYPTO
-    category: crypto
     assets: [BTC, ETH, SOL, XRP, DOGE]
     timeframes: []
     archetype: contrarian
-    market_filter:
-      category: crypto
     risk_limits:
-      max_yes_position: 3000
-      max_no_position: 3000
       max_orders_per_window: 8
       max_notional_usd: 600
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 30
 
   - name: SENTIMENT_CONTRARIAN_MACRO
-    category: economics
     assets: []
     timeframes: []
     archetype: contrarian
-    market_filter:
-      category: economics
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 5
       max_notional_usd: 400
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 10080
       cutoff_minutes_before_expiry: 1440
@@ -539,33 +625,29 @@ agents:
   # Sentiment: Regime-Switch (momentum when category sentiment shifts)
   # ═══════════════════════════════════════════════════════════════════
   - name: SENTIMENT_REGIME_SWITCH_CRYPTO
-    category: crypto
     assets: [BTC, ETH, SOL]
     timeframes: []
     archetype: regime_switch
-    market_filter:
-      category: crypto
     risk_limits:
-      max_yes_position: 2500
-      max_no_position: 2500
       max_orders_per_window: 8
       max_notional_usd: 500
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 30
 
   - name: SENTIMENT_REGIME_SWITCH_FINANCIALS
-    category: financials
     assets: []
     timeframes: []
     archetype: regime_switch
-    market_filter:
-      category: financials
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 5
       max_notional_usd: 400
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 1440
       cutoff_minutes_before_expiry: 60
@@ -574,33 +656,29 @@ agents:
   # Sentiment: Vol-Breakout (elevated sentiment + book imbalance)
   # ═══════════════════════════════════════════════════════════════════
   - name: SENTIMENT_VOL_BREAKOUT_CRYPTO
-    category: crypto
     assets: [BTC, ETH]
     timeframes: [1h, 15m]
     archetype: vol_breakout
-    market_filter:
-      category: crypto
     risk_limits:
-      max_yes_position: 2000
-      max_no_position: 2000
       max_orders_per_window: 10
       max_notional_usd: 400
+      max_slippage_cents: 3
+      min_depth_contracts: 5
+      max_spread_cents: 12
     entry_window:
       minutes_before_expiry: 240
       cutoff_minutes_before_expiry: 5
 
   - name: SENTIMENT_VOL_BREAKOUT_GLOBAL
-    category: all
     assets: []
     timeframes: []
     archetype: vol_breakout
-    market_filter:
-      category: all
     risk_limits:
-      max_yes_position: 1500
-      max_no_position: 1500
       max_orders_per_window: 8
       max_notional_usd: 300
+      max_slippage_cents: 5
+      min_depth_contracts: 3
+      max_spread_cents: 15
     entry_window:
       minutes_before_expiry: 480
       cutoff_minutes_before_expiry: 10
@@ -609,24 +687,32 @@ agents:
   # Catch-All (low-risk, covers uncategorised markets)
   # ═══════════════════════════════════════════════════════════════════
   - name: KALSHI_CATCH_ALL
-    category: all
+    assets: []
+    timeframes: []
     archetype: directional
-    market_filter:
-      category: all
     risk_limits:
-      max_yes_position: 1000
-      max_no_position: 1000
       max_orders_per_window: 5
       max_notional_usd: 200
+      max_slippage_cents: 5
+      min_depth_contracts: 2
+      max_spread_cents: 20
     entry_window:
       minutes_before_expiry: 60
       cutoff_minutes_before_expiry: 5
 
 # ── Portfolio-level risk agent ─────────────────────────────────────────
 portfolio_risk:
+  starting_bankroll_usd: 100000        # Initial bankroll for sizing calculations
   max_total_notional_usd: 50000
   max_notional_per_asset_usd: 15000
   max_open_markets: 200
   max_daily_loss_usd: 5000
   max_margin_utilization_pct: 80
   rebalance_check_interval_seconds: 30
+
+# ── Monitoring and operational settings ────────────────────────────────
+monitoring:
+  volume_poll_interval_seconds: 60     # How often to poll volume monitor
+  reconciliation_interval_seconds: 300  # How often to run reconciliation (5 min)
+  alert_daily_loss_threshold_pct: 5    # Alert when daily loss exceeds 5% of bankroll
+  alert_margin_util_threshold_pct: 75  # Alert when margin utilization exceeds 75%
