@@ -773,6 +773,23 @@ class KalshiContinuousTrader:
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        # ── DEPRECATION WARNING ───────────────────────────────────────────────
+        # KalshiContinuousTrader is DEPRECATED and NOT started by main.py.
+        # The production system uses AgentGrid (merid/prediction/agent_grid.py)
+        # which is started in web/main.py _app_lifespan Phase 0.5.
+        #
+        # This class remains for:
+        # - API compatibility (/api/v1/ct/* endpoints)
+        # - Reconciliation hooks (merid/reconciliation.py)
+        # - Manual/CLI usage (scripts, debugging)
+        #
+        # DO NOT call this method in production startup code.
+        logger.warning(
+            "⚠️  KalshiContinuousTrader.start() called — this is DEPRECATED. "
+            "Production uses AgentGrid (merid.prediction.agent_grid). "
+            "CT is kept for API/reconciliation compatibility only."
+        )
+
         # ── AUDIT-15: smoke-test mode guard ──────────────────────────────────
         # Reject startup if MERID_SMOKE_TEST=true is set alongside any live-mode
         # flag.  This prevents accidental live trading during smoke tests.

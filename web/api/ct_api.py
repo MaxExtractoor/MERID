@@ -32,8 +32,14 @@ logger = get_logger("web.api.ct")
 async def get_ct_status() -> dict:
     """Return Continuous Trader status including last-cycle diagnostics.
 
+    **DEPRECATION NOTICE**: KalshiContinuousTrader is NOT started by main.py.
+    Production uses AgentGrid (merid.prediction.agent_grid). This endpoint
+    remains for API compatibility only.
+
     Fields:
-    - running: bool — whether CT task is active
+    - running: bool — whether CT task is active (ALWAYS FALSE in production)
+    - deprecated: bool — always true (indicates this is legacy system)
+    - production_system: str — points to the actual trading system
     - candidate_count: int — candidates loaded from catalog
     - config: dict — active thresholds (min_edge, kelly_fraction, etc.)
     - risk: dict — daily risk accumulators (loss, trades, rejections)
@@ -52,13 +58,27 @@ async def get_ct_status() -> dict:
     try:
         from merid.trading.kalshi_continuous_trader import get_continuous_trader
         trader = get_continuous_trader()
-        return {"status": "ok", "data": trader.status()}
+        data = trader.status()
+        # Add deprecation metadata
+        data["deprecated"] = True
+        data["production_system"] = "merid.prediction.agent_grid.AgentGrid"
+        data["deprecation_notice"] = (
+            "KalshiContinuousTrader is NOT started by main.py. "
+            "Production uses AgentGrid. See /api/v1/kalshi-agent-grid/status for live system."
+        )
+        return {"status": "ok", "data": data}
     except Exception as exc:
         logger.warning("CT status unavailable: %s", exc)
         return {
             "status": "unavailable",
             "data": {
                 "running": False,
+                "deprecated": True,
+                "production_system": "merid.prediction.agent_grid.AgentGrid",
+                "deprecation_notice": (
+                    "KalshiContinuousTrader is NOT started by main.py. "
+                    "Production uses AgentGrid. See /api/v1/kalshi-agent-grid/status for live system."
+                ),
                 "candidate_count": 0,
                 "config": {},
                 "risk": {},
