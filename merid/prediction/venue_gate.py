@@ -131,11 +131,17 @@ class VenueGate:
     def check_can_trade(self) -> None:
         """Raise ModeBlockedError if current mode does not allow order submission."""
         if self._mode == TradingMode.MOCK:
+            logger.info(
+                "[VENUE-GATE-VETO] mode_blocked | mode=MOCK message='No orders in MOCK mode'"
+            )
             raise self.ModeBlockedError(
                 "Trading mode is MOCK — no orders will be sent. "
                 "Switch to PAPER or LIVE to submit orders."
             )
         if self._mode == TradingMode.LIVE and not self._live_enabled:
+            logger.info(
+                "[VENUE-GATE-VETO] mode_blocked | mode=LIVE live_enabled=false message='LIVE mode disabled'"
+            )
             raise self.ModeBlockedError(
                 "Trading mode is LIVE but MERID_PM_LIVE_ENABLED is false. "
                 "Set MERID_PM_LIVE_ENABLED=true to allow live orders."

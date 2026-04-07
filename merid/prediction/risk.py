@@ -318,12 +318,17 @@ class PredictionMarketRisk:
 
         # 1. Kill switch
         if self._halted:
-            return PreTradeCheck(
+            result = PreTradeCheck(
                 allowed=False,
                 action=RiskAction.HALT,
                 reason=f"Kill switch active: {self._halt_reason}",
                 market_id=market_id,
             )
+            logger.info(
+                "[RISK-VETO] halt | market=%s reason=%s",
+                market_id, self._halt_reason
+            )
+            return result
 
         # 2. Max order size
         if contracts > self.config.max_contracts_per_order:
@@ -424,12 +429,17 @@ class PredictionMarketRisk:
         daily = self._daily_pnl.get(today)
         if daily and daily.total_pnl_usd < -self.config.max_daily_loss_usd:
             self.halt(f"Daily loss ${abs(daily.total_pnl_usd)} exceeds max ${self.config.max_daily_loss_usd}.")
-            return PreTradeCheck(
+            result = PreTradeCheck(
                 allowed=False,
                 action=RiskAction.HALT,
                 reason=f"Daily loss ${abs(daily.total_pnl_usd)} exceeds max ${self.config.max_daily_loss_usd}.",
                 market_id=market_id,
             )
+            logger.info(
+                "[RISK-VETO] daily_loss | market=%s loss=$%.2f max=$%.2f",
+                market_id, abs(daily.total_pnl_usd), self.config.max_daily_loss_usd
+            )
+            return result
 
         # 7. Max open markets
         open_markets = len(self._exposures)
@@ -487,12 +497,17 @@ class PredictionMarketRisk:
             payout_per = Decimal("100") - price_cents
             post_fee_edge = edge - (fee_per / payout_per) if payout_per > 0 else Decimal("0")
             if post_fee_edge < Decimal("0.01"):
-                return PreTradeCheck(
+                result = PreTradeCheck(
                     allowed=False,
                     action=RiskAction.REJECT,
                     reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.01",
                     market_id=market_id,
                 )
+                logger.info(
+                    "[RISK-VETO] edge_too_low | market=%s post_fee_edge=%.4f min=0.01",
+                    market_id, post_fee_edge
+                )
+                return result
 
         # 11. Tick size check
         if price_cents % self.config.tick_size_cents != 0:
