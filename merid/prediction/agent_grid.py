@@ -140,9 +140,8 @@ class AgentGrid:
 
         # Start trading agents
         logger.info(f"Starting {len(self._agents)} Kalshi trading agents...")
-        # AUDIT-11: stagger delay is env-driven to avoid thundering herd on Kalshi API.
-        # Default 0.5s; override via MERID_AGENT_STAGGER_SECONDS.
-        _stagger = float(os.getenv("MERID_AGENT_STAGGER_SECONDS", "0.5"))
+        # AUDIT-11: stagger delay from config to avoid thundering herd on Kalshi API.
+        _stagger = self._config.venue.agent_stagger_seconds
         for agent in self._agents:
             await agent.start()
             logger.info(
@@ -329,7 +328,7 @@ class AgentGrid:
     # ── Volume monitor loop ────────────────────────────────────────────
 
     async def _volume_poll_loop(self) -> None:
-        """Background task: poll volume monitor every 60 seconds + apply regime gating + feed mood bus."""
+        """Background task: poll volume monitor + apply regime gating + feed mood bus."""
         try:
             from merid.event_venues.kalshi.volume_monitor import get_volume_monitor
             monitor = get_volume_monitor()
@@ -337,6 +336,7 @@ class AgentGrid:
             logger.warning(f"Volume monitor unavailable: {exc}")
             monitor = None
 
+        interval = self._config.monitoring.volume_poll_interval_seconds
         while self._running:
             try:
                 if monitor:
@@ -359,7 +359,7 @@ class AgentGrid:
                 logger.debug(f"Mood bus feed error (ignored): {exc}")
 
             try:
-                await asyncio.wait_for(asyncio.sleep(60), timeout=65)
+                await asyncio.wait_for(asyncio.sleep(interval), timeout=interval + 5)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
 
@@ -457,7 +457,8 @@ class AgentGrid:
                         logger.info(f"Regime gate: resumed {agent.config.name} (contrarian, regime={regime})")
 
     async def _reconciliation_loop(self) -> None:
-        """Background task: run reconciliation every 5 minutes and auto-fix critical issues."""
+        """Background task: run reconciliation and auto-fix critical issues."""
+        interval = self._config.monitoring.reconciliation_interval_seconds
         while self._running:
             try:
                 # Run auto-reconciliation with auto-fix enabled
@@ -484,8 +485,7 @@ class AgentGrid:
                 logger.warning(f"Reconciliation loop error: {exc}")
 
             try:
-                # Run every 5 minutes (300 seconds)
-                await asyncio.wait_for(asyncio.sleep(300), timeout=310)
+                await asyncio.wait_for(asyncio.sleep(interval), timeout=interval + 10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
 
