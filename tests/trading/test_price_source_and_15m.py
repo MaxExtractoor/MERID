@@ -187,17 +187,15 @@ class TestCoinbasePrimary:
 class TestCatalogEnabledGating:
     """Cells with enabled: false in strategy_catalog.yaml must be skipped."""
 
-    def test_sol_15m_disabled_in_catalog(self):
-        """SOL 15m is disabled in the shipped catalog."""
-        assert _CATALOG_ENABLED.get(("SOL", "15m")) is False, (
-            "SOL 15m should be disabled per strategy_catalog.yaml"
-        )
+    def test_sol_15m_enabled_in_catalog(self):
+        """SOL 15m is enabled — all 30 cells (5 assets × 6 timeframes) are active."""
+        enabled = _CATALOG_ENABLED.get(("SOL", "15m"), True)
+        assert enabled is True, "SOL 15m should be enabled per strategy_catalog.yaml"
 
-    def test_doge_15m_disabled_in_catalog(self):
-        """DOGE 15m is disabled in the shipped catalog."""
-        assert _CATALOG_ENABLED.get(("DOGE", "15m")) is False, (
-            "DOGE 15m should be disabled per strategy_catalog.yaml"
-        )
+    def test_doge_15m_enabled_in_catalog(self):
+        """DOGE 15m is enabled — all 30 cells (5 assets × 6 timeframes) are active."""
+        enabled = _CATALOG_ENABLED.get(("DOGE", "15m"), True)
+        assert enabled is True, "DOGE 15m should be enabled per strategy_catalog.yaml"
 
     def test_btc_15m_enabled_in_catalog(self):
         """BTC 15m is enabled — the most liquid 15m cell."""
@@ -314,8 +312,17 @@ class TestFifteenMinuteEligibility:
         ), patch.object(trader, "_refresh_candidates", new=AsyncMock()):
             intents = await trader.trade_cycle(bankroll=1000.0)
 
-        # evaluate_candidate was called — meaning the 15m candidate reached the cycle
-        trader.evaluate_candidate.assert_called_once_with(candidate, market_prob=0.55)
+        # evaluate_candidate was called with the candidate and a context dict —
+        # confirming the 15m candidate reached the evaluation cycle and that the
+        # context (asset/timeframe/volume/open_interest) was forwarded correctly.
+        assert trader.evaluate_candidate.call_count == 1, "evaluate_candidate should be called once"
+        call_args, call_kwargs = trader.evaluate_candidate.call_args
+        assert call_args[0] is candidate, "First arg must be the candidate"
+        assert call_kwargs.get("market_prob") == 0.55 or (len(call_args) > 1 and call_args[1] == 0.55)
+        # Verify context was passed with correct asset/timeframe
+        ctx = call_kwargs.get("context", {})
+        assert ctx.get("asset") == "BTC", f"context.asset should be BTC, got {ctx.get('asset')}"
+        assert ctx.get("timeframe") == "15m", f"context.timeframe should be 15m, got {ctx.get('timeframe')}"
 
     def test_15m_timeframe_in_crypto_timeframes(self):
         """'15m' must be in _CRYPTO_TIMEFRAMES so it is included in candidate scans."""
@@ -324,17 +331,10 @@ class TestFifteenMinuteEligibility:
         )
 
     def test_enabled_15m_cells(self):
-        """Exactly BTC/ETH/XRP 15m are enabled; SOL/DOGE 15m are disabled."""
-        expected_enabled = {"BTC", "ETH", "XRP"}
-        expected_disabled = {"SOL", "DOGE"}
-
-        for asset in expected_enabled:
+        """All 5 assets (BTC/ETH/SOL/XRP/DOGE) have 15m enabled — full 30-cell grid active."""
+        for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
             enabled = _CATALOG_ENABLED.get((asset, "15m"), True)
             assert enabled is True, f"{asset} 15m should be enabled"
-
-        for asset in expected_disabled:
-            enabled = _CATALOG_ENABLED.get((asset, "15m"), True)
-            assert enabled is False, f"{asset} 15m should be disabled"
 
 
 # ── D. UI live_data.py uses Coinbase for Kalshi assets ───────────────────

@@ -41,9 +41,12 @@ CRYPTO_SERIES = {
 # Timeframe labels for series matching
 TIMEFRAME_SERIES_SUFFIXES = {
     "hourly": "",       # e.g. KXBTC
+    "1h": "",           # alias for hourly
     "15m": "-15M",      # e.g. KXBTC-15M
     "daily": "-D",
     "weekly": "-W",
+    "monthly": "-M",    # e.g. KXBTC-M
+    "annual": "-Y",     # e.g. KXBTC-Y
 }
 
 

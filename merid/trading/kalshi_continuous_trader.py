@@ -2265,16 +2265,21 @@ class KalshiContinuousTrader:
     def _emit_rejection(self, symbol: str, reason: str, intent_id: str = "") -> None:
         """Publish execution_rejected event for audit trail."""
         try:
-            from core.streaming_bus import streaming_bus, EventChannel
-            event = {
-                "symbol": symbol,
-                "reason": reason,
-                "intent_id": intent_id or f"reject-{symbol}-{int(time.time())}",
-                "timestamp": time.time(),
-            }
+            from core.streaming_bus import streaming_bus, StreamEvent, EventChannel
+            event = StreamEvent(
+                channel=EventChannel.EXECUTION,
+                event_type="execution_rejected",
+                data={
+                    "symbol": symbol,
+                    "reason": reason,
+                    "intent_id": intent_id or f"reject-{symbol}-{int(time.time())}",
+                    "timestamp": time.time(),
+                },
+                source="continuous_trader",
+            )
             asyncio.get_event_loop().call_soon_threadsafe(
                 lambda: asyncio.ensure_future(
-                    streaming_bus.publish(EventChannel.EXECUTION, "execution_rejected", event)
+                    streaming_bus.publish(event)
                 )
             )
         except Exception as exc:
