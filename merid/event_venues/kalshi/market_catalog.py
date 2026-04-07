@@ -170,6 +170,7 @@ class CatalogMarket:
     cap_strike: Optional[float] = None
     expires_at: Optional[datetime] = None
     minutes_to_expiry: Optional[float] = None
+    direction: Optional[str] = None  # "up" or "down" for crypto markets
 
 
 @dataclass
@@ -472,6 +473,16 @@ class KalshiMarketCatalog:
         if mkt.end_date and mkt.end_date > now:
             minutes_to_expiry = (mkt.end_date - now).total_seconds() / 60.0
 
+        # 3. Parse direction for crypto up/down markets
+        direction = None
+        if category == "crypto" and asset:
+            from merid.event_venues.kalshi.direction_semantics import parse_kalshi_crypto_direction
+            direction = parse_kalshi_crypto_direction(
+                ticker=event_ticker or mkt.market_id,
+                title=mkt.question,
+                description=mkt.description
+            )
+
         return CatalogMarket(
             market=mkt,
             asset=asset,
@@ -485,6 +496,7 @@ class KalshiMarketCatalog:
             cap_strike=strikes.get("cap"),
             expires_at=mkt.end_date,
             minutes_to_expiry=minutes_to_expiry,
+            direction=direction,
         )
 
     @staticmethod

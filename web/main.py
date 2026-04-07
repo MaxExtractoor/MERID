@@ -1733,6 +1733,57 @@ async def _app_lifespan(application: FastAPI):
     logger.info("STARTUP EVENT: Legacy WS publishers SKIPPED (Kalshi-only mode)")
     logger.info("=" * 80)
 
+    # ── Phase 0.4: CF Benchmarks RTI Buffer ────────────────────────────
+    # Settlement feed for Kalshi crypto markets — must start before AgentGrid
+    logger.info("=" * 80)
+    logger.info("📊 Initializing CF Benchmarks RTI Buffer")
+    logger.info("=" * 80)
+    try:
+        from merid.data.settlement_rti_buffer import get_rti_buffer, is_cfb_rti_enabled
+        if is_cfb_rti_enabled():
+            rti_buffer = get_rti_buffer()
+            if rti_buffer is not None:
+                rti_buffer.start()
+                logger.info("✅ CF Benchmarks RTI buffer started (settlement feed active)")
+                _startup_state["services"]["cfb_rti_buffer"] = {"status": "running", "started_at": time.time()}
+            else:
+                logger.warning("⚠️  CFB RTI buffer disabled by config")
+                _startup_state["services"]["cfb_rti_buffer"] = {"status": "disabled"}
+        else:
+            logger.info("⚠️  CFB RTI disabled (MERID_CFB_RTI_ENABLED=false)")
+            _startup_state["services"]["cfb_rti_buffer"] = {"status": "disabled"}
+    except Exception as e:
+        logger.warning("⚠️  CFB RTI buffer failed to start: %s", e)
+        _startup_state["services"]["cfb_rti_buffer"] = {"status": "failed", "error": str(e)}
+
+    # ── Phase 0.45: Kalshi Direction Semantics Initialization ──────────
+    # Initialize direction mapper, strike/spot tracker, gap optimizer singletons
+    logger.info("=" * 80)
+    logger.info("🎯 Initializing Kalshi Direction Semantics Infrastructure")
+    logger.info("=" * 80)
+    try:
+        from merid.event_venues.kalshi.direction_mapper import get_direction_mapper
+        from merid.event_venues.kalshi.strike_spot_tracker import get_strike_spot_tracker
+        from merid.event_venues.kalshi.gap_imbalance_optimizer import get_gap_imbalance_optimizer
+
+        # Initialize singletons
+        direction_mapper = get_direction_mapper()
+        strike_spot_tracker = get_strike_spot_tracker()
+        gap_optimizer = get_gap_imbalance_optimizer()
+
+        logger.info("✅ Direction semantics infrastructure initialized:")
+        logger.info("   • DirectionMapper: forecast-to-side conversion")
+        logger.info("   • StrikeSpotTracker: audit logging for strike/spot decisions")
+        logger.info("   • GapImbalanceOptimizer: edge calculation with fees")
+        _startup_state["services"]["direction_semantics"] = {
+            "status": "running",
+            "started_at": time.time(),
+            "components": ["direction_mapper", "strike_spot_tracker", "gap_imbalance_optimizer"]
+        }
+    except Exception as e:
+        logger.warning("⚠️  Direction semantics infrastructure failed to initialize: %s", e)
+        _startup_state["services"]["direction_semantics"] = {"status": "failed", "error": str(e)}
+
     # ── Phase 0.5: Kalshi Agent Grid ───────────────────────────────────
     logger.info("=" * 80)
     logger.info("🤖 Starting Kalshi Trading Agent Grid")
