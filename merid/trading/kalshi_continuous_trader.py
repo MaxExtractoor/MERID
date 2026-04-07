@@ -1526,6 +1526,30 @@ class KalshiContinuousTrader:
         # expired / illiquid markets are dropped without restarting the trader.
         await self._refresh_candidates()
 
+        # Snapshot execution gate once per tick — all entry decisions in this
+        # cycle read from this snapshot. Components only READ from the gate;
+        # they never set gate state.
+        # Lazy import: core.execution_gate lives outside the merid package and
+        # pulling it at module level creates a circular-import risk across the
+        # broader monorepo. Importing inside the method is intentional and safe
+        # because Python caches the module after the first import.
+        # Fail-open (gate_view=None → assume clear): if the gate module itself
+        # is broken the CT should continue with its own layered risk guards
+        # (kill switch, risk caps, daily-loss limit) rather than silently halt
+        # all trading. The gate snapshot failure is logged as a WARNING so
+        # operators are alerted immediately.
+        gate_view = None
+        try:
+            from core.execution_gate import check_execution_gate as _check_gate
+            gate_view = _check_gate()
+        except Exception as _gate_exc:
+            logger.warning(
+                "[CT-GATE] Execution gate snapshot failed: %s — "
+                "entries are NOT blocked by gate this cycle (fail-open fallback). "
+                "Investigate gate module health.",
+                _gate_exc,
+            )
+
         intents = []
         candidates_seen = 0
         markets_with_any_edge = 0
@@ -1601,9 +1625,41 @@ class KalshiContinuousTrader:
                 candidate.spot_price = spot_prices.get(candidate.underlying)
 
             mid_prob = candidate.mid_price_cents / 100.0 if candidate.mid_price_cents else 0.5
-            estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
 
             veto_reason = None
+            # ── Execution gate entry check ──────────────────────────────
+            # All CT candidates are entry trades. When the gate does not allow
+            # new entries, veto every candidate with a tagged reason. Exits are
+            # not managed by CT; they are handled by position-management agents
+            # which only veto when gate_state=blocked (exits_allowed=False).
+            if gate_view is not None and not gate_view.entries_allowed:
+                veto_reason = "execution_gate_entries_disabled"
+                logger.debug(
+                    "[CT-GATE] Entries disabled by execution gate (gate_state=%s) — "
+                    "vetoing ticker=%s asset=%s tf=%s",
+                    gate_view.gate_state, candidate.ticker,
+                    candidate.underlying, candidate.timeframe,
+                )
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                if _pas is not None:
+                    _pas["vetoed"] += 1
+                    _pas["veto_reasons"][veto_reason] = _pas["veto_reasons"].get(veto_reason, 0) + 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": mid_prob,
+                    "model_win_prob": 0.0,
+                    "edge_bps": 0.0,
+                    "side": "none",
+                    "kelly_raw": 0.0,
+                    "kelly_frac": 0.0,
+                    "veto_reason": veto_reason,
+                })
+                continue
+
+            estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
+
             if estimate is None:
                 veto_reason = "no_estimate"
                 logger.info(
