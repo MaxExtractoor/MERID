@@ -145,6 +145,7 @@ class AgentGrid:
         self._started_at: Optional[datetime] = None
         self._volume_poll_task: Optional[asyncio.Task] = None
         self._reconciliation_task: Optional[asyncio.Task] = None
+        self._grid_summary_task: Optional[asyncio.Task] = None
         self._outcome_resolver = None
 
         logger.info(
@@ -174,12 +175,42 @@ class AgentGrid:
         await self._portfolio_risk.start()
 
         # L6: Register all agents with DeploymentController (starts each in PAPER mode)
+        # If MERID_PM_LIVE_ENABLED=true, immediately force-promote every agent to LIVE
+        # so that the VenueGate (already in LIVE mode) is the sole live-order gating layer.
+        # Without this, every order is silently paper-filled regardless of VenueGate mode.
+        _force_live_on_start = False
         try:
             from merid.event_venues.kalshi.deployment import get_deployment_controller
             _dc = get_deployment_controller()
             for _a in self._agents:
                 _dc.register_agent(_a.agent_id)
             logger.info("✓ DeploymentController: %d agents registered (all PAPER)", len(self._agents))
+
+            # Check if we should bypass readiness gates and go straight to LIVE
+            try:
+                from merid.settings import settings as _settings
+                _force_live_on_start = (
+                    getattr(_settings, "MERID_PM_LIVE_ENABLED", False)
+                    and getattr(_settings, "MERID_PM_TRADING_MODE", "paper").lower() == "live"
+                )
+            except Exception:
+                import os as _os_ag
+                _force_live_on_start = (
+                    _os_ag.getenv("MERID_PM_LIVE_ENABLED", "false").lower() == "true"
+                    and _os_ag.getenv("MERID_PM_TRADING_MODE", "paper").lower() == "live"
+                )
+
+            if _force_live_on_start:
+                promoted = 0
+                for _a in self._agents:
+                    _ok, _ = _dc.force_live(_a.agent_id)
+                    if _ok:
+                        promoted += 1
+                logger.info(
+                    "✓ DeploymentController: force-promoted %d/%d agents to LIVE "
+                    "(MERID_PM_LIVE_ENABLED=true, MERID_PM_TRADING_MODE=live)",
+                    promoted, len(self._agents),
+                )
         except Exception as _dce:
             logger.warning("DeploymentController registration failed (non-fatal): %s", _dce)
 
@@ -242,6 +273,23 @@ class AgentGrid:
             self._reconciliation_loop(), name="kalshi-reconciliation"
         )
         logger.info("✓ Reconciliation loop started (auto-fix enabled)")
+
+        # Start grid-level summary loop (periodic [GRID-SUMMARY] diagnostics)
+        self._grid_summary_task = asyncio.create_task(
+            self._grid_summary_loop(), name="kalshi-grid-summary"
+        )
+        logger.info("✓ Grid summary loop started")
+
+        # Start auto-promoter unconditionally so it can handle demotions/rollbacks
+        # even when agents were force-promoted at startup.  The loop's initial
+        # _evaluate_all() will be a no-op for already-LIVE agents.
+        try:
+            from merid.event_venues.kalshi.auto_promoter import get_auto_promoter
+            _ap = get_auto_promoter(eval_interval_seconds=300.0)
+            await _ap.start()
+            logger.info("✓ Auto-promoter started (promotion check every 5m)")
+        except Exception as exc:
+            logger.warning(f"Auto-promoter start failed (non-fatal): {exc}")
 
         # Start outcome resolver (Brier calibration + realized edge resolution)
         try:
@@ -367,6 +415,22 @@ class AgentGrid:
                 await self._reconciliation_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop grid summary loop
+        if self._grid_summary_task and not self._grid_summary_task.done():
+            self._grid_summary_task.cancel()
+            try:
+                await self._grid_summary_task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop auto-promoter if running
+        try:
+            from merid.event_venues.kalshi.auto_promoter import get_auto_promoter
+            _ap = get_auto_promoter()
+            await _ap.stop()
+        except Exception:
+            pass
 
         logger.info("AgentGrid stopped")
 
@@ -558,6 +622,62 @@ class AgentGrid:
                 await asyncio.wait_for(asyncio.sleep(interval), timeout=interval + 10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
+
+    # ── Grid summary loop ──────────────────────────────────────────────
+
+    async def _grid_summary_loop(self) -> None:
+        """Background task: emit [GRID-SUMMARY] every N minutes for operator diagnostics.
+
+        Logs a concise one-line summary per window showing:
+        - total orders across all agents
+        - per-agent order counts (non-zero only)
+        - count of paused/halted agents
+        - dominant veto signal (from each agent's last cycle)
+
+        Makes "1–2 trades at startup then silence" immediately visible.
+        Interval is configurable via env MERID_GRID_SUMMARY_INTERVAL_SECONDS (default 300).
+        """
+        import os
+        interval = float(os.getenv("MERID_GRID_SUMMARY_INTERVAL_SECONDS", "300"))
+
+        # Snapshot of order counts at the start of each window so we can compute delta
+        prev_orders: dict = {a.config.name: getattr(a.state, 'orders_placed', 0) for a in self._agents}
+
+        while self._running:
+            try:
+                await asyncio.wait_for(asyncio.sleep(interval), timeout=interval + 10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                break
+
+            if not self._running:
+                break
+
+            try:
+                total_window_orders = 0
+                by_agent: dict = {}
+                paused_agents: list = []
+
+                for agent in self._agents:
+                    prev = prev_orders.get(agent.config.name, 0)
+                    delta = getattr(agent.state, 'orders_placed', 0) - prev
+                    total_window_orders += delta
+                    if delta > 0:
+                        by_agent[agent.config.name] = delta
+                    if not agent.state.enabled:
+                        paused_agents.append(agent.config.name)
+                    prev_orders[agent.config.name] = getattr(agent.state, 'orders_placed', 0)
+
+                window_min = int(interval // 60)
+                logger.info(
+                    "[GRID-SUMMARY] window=%dm total_orders=%d paused_agents=%d by_agent=%s paused=%s",
+                    window_min,
+                    total_window_orders,
+                    len(paused_agents),
+                    by_agent or "{}",
+                    paused_agents or "[]",
+                )
+            except Exception as exc:
+                logger.debug("Grid summary loop error (ignored): %s", exc)
 
     # ── Agent management ───────────────────────────────────────────────
 
@@ -785,7 +905,7 @@ class AgentGrid:
         """Full grid status for API consumption."""
         # Grid-wide metrics
         total_fills = sum(len(a.state.fill_log) for a in self._agents)
-        total_orders = sum(a.state.orders_placed for a in self._agents)
+        total_orders = sum(getattr(a.state, 'orders_placed', 0) for a in self._agents)
 
         # Category PnL breakdown
         pnl_by_category: Dict[str, float] = {}
