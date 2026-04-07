@@ -622,3 +622,51 @@ class TestMissingSpotPriceHandling:
         assert result.passed == 1
         assert result.rejected_missing_spot == 1
         assert result.candidates[0].ticker == "with_spot"
+
+
+class TestSpotBands30CellCoverage:
+    """Verify SPOT_BANDS covers all 30 (asset, timeframe) cells.
+
+    All 5 assets × 6 timeframes must have an explicit per-cell entry in
+    SPOT_BANDS so that the filter uses optimized per-cell bands rather
+    than falling back to the default 12.5% for any cell.
+    """
+
+    def test_all_30_cells_have_explicit_spot_band(self):
+        """SPOT_BANDS must have an explicit entry for every cell in the 30-cell matrix."""
+        from merid.event_venues.kalshi.market_filter import SPOT_BANDS, get_spot_band
+        from config.crypto_universe import CRYPTO_ASSETS_ORDERED, CRYPTO_TIMEFRAMES_ORDERED
+
+        missing = []
+        for asset in CRYPTO_ASSETS_ORDERED:
+            for tf in CRYPTO_TIMEFRAMES_ORDERED:
+                key = (asset.upper(), tf.lower())
+                if key not in SPOT_BANDS:
+                    missing.append(f"{asset}/{tf}")
+
+        assert not missing, (
+            f"SPOT_BANDS is missing explicit entries for: {missing}. "
+            "Add them to merid/event_venues/kalshi/market_filter.py."
+        )
+
+    def test_all_annual_cells_have_wide_enough_bands(self):
+        """Annual timeframe bands must be ≥ 0.40 (40%) to capture meaningful candidates."""
+        from merid.event_venues.kalshi.market_filter import SPOT_BANDS
+        from config.crypto_universe import CRYPTO_ASSETS_ORDERED
+
+        for asset in CRYPTO_ASSETS_ORDERED:
+            band = SPOT_BANDS.get((asset.upper(), "annual"), 0)
+            assert band >= 0.40, (
+                f"Annual spot band for {asset} is {band:.2f} (<0.40). "
+                "Annual markets have wide strike ranges — use at least 40%."
+            )
+
+    def test_get_spot_band_returns_percentage_not_decimal(self):
+        """get_spot_band() must return a percentage (e.g. 20.0), not a decimal (0.20)."""
+        from merid.event_venues.kalshi.market_filter import get_spot_band
+
+        band = get_spot_band("BTC", "annual")
+        assert band >= 1.0, (
+            f"get_spot_band('BTC', 'annual') returned {band} which looks like a decimal. "
+            "It should return percentage form (e.g. 50.0, not 0.50)."
+        )

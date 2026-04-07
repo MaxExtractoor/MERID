@@ -206,16 +206,24 @@ def reconcile_venue(venue_name: str) -> List[PositionDiscrepancy]:
             )
             discrepancies.append(disc)
 
-    # Log detailed diff for each discrepancy
+    # Log detailed diff for each discrepancy.
+    # Only WARNING when there are critical or warning-severity discrepancies.
+    # Pure "info" severity discrepancies (minor drift, within tolerance) are
+    # logged at INFO level to avoid noisy false-alarm warnings.
     if discrepancies:
         n_crit = sum(1 for d in discrepancies if d.severity == "critical")
         n_warn = sum(1 for d in discrepancies if d.severity == "warning")
-        logger.warning(
+        summary_msg = (
             f"Reconciliation {venue_name}: {len(discrepancies)} discrepancies "
             f"({n_crit} critical, {n_warn} warning)"
         )
+        if n_crit > 0 or n_warn > 0:
+            logger.warning(summary_msg)
+        else:
+            logger.info(summary_msg)
         for d in discrepancies:
-            logger.warning(
+            _log = logger.warning if d.severity in ("critical", "warning") else logger.debug
+            _log(
                 f"  [{d.severity.upper()}] {d.symbol}: "
                 f"merid_qty={d.merid_qty:.4f} venue_qty={d.venue_qty:.4f} "
                 f"delta_qty={d.delta_qty:+.4f} | "
