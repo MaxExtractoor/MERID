@@ -58,30 +58,35 @@ SPOT_BANDS: Dict[Tuple[str, str], float] = {
     ("BTC", "daily"): 0.30,  # 30% - wider for daily strikes
     ("BTC", "weekly"): 0.35, # 35% - capture weekly candidates
     ("BTC", "monthly"): 0.40, # 40% - sufficient long-dated strikes
+    ("BTC", "annual"): 0.50, # 50% - annual markets span wide price range
     # ETH — Moderately liquid → balanced bands
     ("ETH", "15m"): 0.25,    # 25% - moderate focus
     ("ETH", "1h"): 0.30,     # 30% - good candidate pool
     ("ETH", "daily"): 0.35,  # 35% - daily coverage
     ("ETH", "weekly"): 0.40, # 40% - weekly strikes
     ("ETH", "monthly"): 0.45, # 45% - long-dated coverage
+    ("ETH", "annual"): 0.55, # 55% - annual markets span wide price range
     # SOL — Less liquid → wider bands for throughput
     ("SOL", "15m"): 0.30,    # 30% - ensure candidates
     ("SOL", "1h"): 0.35,     # 35% - adequate pool
     ("SOL", "daily"): 0.40,  # 40% - daily coverage
     ("SOL", "weekly"): 0.45, # 45% - weekly strikes
     ("SOL", "monthly"): 0.50, # 50% - max coverage
+    ("SOL", "annual"): 0.60, # 60% - annual markets span very wide range
     # XRP — Similar to SOL, wider for liquidity
     ("XRP", "15m"): 0.30,    # 30% - sufficient candidates
     ("XRP", "1h"): 0.35,     # 35% - good pool
     ("XRP", "daily"): 0.40,  # 40% - daily strikes
     ("XRP", "weekly"): 0.45, # 45% - weekly coverage
     ("XRP", "monthly"): 0.50, # 50% - long-dated strikes
+    ("XRP", "annual"): 0.60, # 60% - annual markets span very wide range
     # DOGE — Least liquid → widest bands for candidate availability
     ("DOGE", "15m"): 0.35,   # 35% - wide search needed
     ("DOGE", "1h"): 0.40,    # 40% - ensure pool
     ("DOGE", "daily"): 0.45, # 45% - daily coverage
     ("DOGE", "weekly"): 0.50, # 50% - weekly strikes
     ("DOGE", "monthly"): 0.50, # 50% - max coverage
+    ("DOGE", "annual"): 0.65, # 65% - annual markets, high volatility asset
 }
 
 
