@@ -175,12 +175,42 @@ class AgentGrid:
         await self._portfolio_risk.start()
 
         # L6: Register all agents with DeploymentController (starts each in PAPER mode)
+        # If MERID_PM_LIVE_ENABLED=true, immediately force-promote every agent to LIVE
+        # so that the VenueGate (already in LIVE mode) is the sole live-order gating layer.
+        # Without this, every order is silently paper-filled regardless of VenueGate mode.
+        _force_live_on_start = False
         try:
             from merid.event_venues.kalshi.deployment import get_deployment_controller
             _dc = get_deployment_controller()
             for _a in self._agents:
                 _dc.register_agent(_a.agent_id)
             logger.info("✓ DeploymentController: %d agents registered (all PAPER)", len(self._agents))
+
+            # Check if we should bypass readiness gates and go straight to LIVE
+            try:
+                from merid.settings import settings as _settings
+                _force_live_on_start = (
+                    getattr(_settings, "MERID_PM_LIVE_ENABLED", False)
+                    and getattr(_settings, "MERID_PM_TRADING_MODE", "paper").lower() == "live"
+                )
+            except Exception:
+                import os as _os_ag
+                _force_live_on_start = (
+                    _os_ag.getenv("MERID_PM_LIVE_ENABLED", "false").lower() == "true"
+                    and _os_ag.getenv("MERID_PM_TRADING_MODE", "paper").lower() == "live"
+                )
+
+            if _force_live_on_start:
+                promoted = 0
+                for _a in self._agents:
+                    _ok, _ = _dc.force_live(_a.agent_id)
+                    if _ok:
+                        promoted += 1
+                logger.info(
+                    "✓ DeploymentController: force-promoted %d/%d agents to LIVE "
+                    "(MERID_PM_LIVE_ENABLED=true, MERID_PM_TRADING_MODE=live)",
+                    promoted, len(self._agents),
+                )
         except Exception as _dce:
             logger.warning("DeploymentController registration failed (non-fatal): %s", _dce)
 
@@ -249,6 +279,18 @@ class AgentGrid:
             self._grid_summary_loop(), name="kalshi-grid-summary"
         )
         logger.info("✓ Grid summary loop started")
+
+        # Start auto-promoter (paper → shadow → live promotion engine).
+        # When MERID_PM_LIVE_ENABLED=true agents were already force-promoted above;
+        # the auto-promoter still runs so it can demote/rollback on degradation.
+        if not _force_live_on_start:
+            try:
+                from merid.event_venues.kalshi.auto_promoter import get_auto_promoter
+                _ap = get_auto_promoter(eval_interval_seconds=300.0)
+                await _ap.start()
+                logger.info("✓ Auto-promoter started (promotion check every 5m)")
+            except Exception as exc:
+                logger.warning(f"Auto-promoter start failed (non-fatal): {exc}")
 
         # Start outcome resolver (Brier calibration + realized edge resolution)
         try:
@@ -382,6 +424,14 @@ class AgentGrid:
                 await self._grid_summary_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop auto-promoter if running
+        try:
+            from merid.event_venues.kalshi.auto_promoter import get_auto_promoter
+            _ap = get_auto_promoter()
+            await _ap.stop()
+        except Exception:
+            pass
 
         logger.info("AgentGrid stopped")
 

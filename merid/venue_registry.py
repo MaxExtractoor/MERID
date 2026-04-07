@@ -218,7 +218,7 @@ def _initialize_default_venues() -> None:
     # Register Kalshi
     try:
         from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
-        kalshi = get_kalshi_venue_adapter(mode="paper")
+        kalshi = get_kalshi_venue_adapter()  # reads mode from settings (MERID_PM_LIVE_ENABLED)
         registry.register(kalshi, enabled=True)
     except Exception as exc:
         logger.warning(f"Failed to register Kalshi venue: {exc}")
