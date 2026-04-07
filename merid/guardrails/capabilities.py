@@ -106,6 +106,24 @@ def _trading_profile(agent_id: str) -> AgentCapabilityMap:
     )
 
 
+def _kalshi_pm_profile(agent_id: str) -> AgentCapabilityMap:
+    """Kalshi PM execution agent — full live trading capabilities."""
+    return AgentCapabilityMap(
+        agent_id=agent_id,
+        allowed_tools={
+            "kalshi_list_markets", "kalshi_get_market_state",
+            "kalshi_place_order", "kalshi_cancel_order",
+            "kalshi_get_positions", "kalshi_get_balance",
+            "get_order_book", "get_ticker", "get_price_history",
+            "get_position_state", "get_portfolio_summary",
+            "get_config_flag", "get_risk_metrics",
+        },
+        max_notional_usd=50_000.0,
+        max_orders_per_minute=30,
+        max_scope="live",
+    )
+
+
 def _risk_profile(agent_id: str) -> AgentCapabilityMap:
     """Risk agent — can observe everything and trigger halts but not trade."""
     return AgentCapabilityMap(
@@ -141,6 +159,7 @@ def _governance_profile(agent_id: str) -> AgentCapabilityMap:
 PROFILE_FACTORIES = {
     "research": _research_profile,
     "trading": _trading_profile,
+    "kalshi_pm": _kalshi_pm_profile,
     "risk": _risk_profile,
     "governance": _governance_profile,
 }

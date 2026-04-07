@@ -202,7 +202,11 @@ class KalshiSettlementPoller:
                 logger.debug("SettlementPoller cursor loaded from Redis: %s", self._last_cursor)
                 return
             except Exception as exc:
-                logger.warning("SettlementPoller: Redis load failed (%s); using in-memory cursor", exc)
+                logger.warning(
+                    "[REDIS-UNAVAILABLE] Settlement cursor load failed, using in-memory cursor | err=%s",
+                    exc,
+                    exc_info=True,
+                )
 
     async def _advance_cursor(self, new_cursor: str) -> None:
         """Update cursor and persist to Redis (or in-memory history)."""
@@ -217,7 +221,12 @@ class KalshiSettlementPoller:
                 await self._redis.rpush(_CURSOR_HISTORY_KEY, new_cursor)
                 await self._redis.ltrim(_CURSOR_HISTORY_KEY, -_CURSOR_HISTORY_MAX, -1)
             except Exception as exc:
-                logger.warning("SettlementPoller: Redis cursor save failed: %s", exc)
+                logger.warning(
+                    "[REDIS-UNAVAILABLE] Settlement persistence failed, continuing without cursor | err=%s",
+                    exc,
+                    exc_info=True,
+                )
+                # Continue: worst case we reprocess some settlements on restart
 
     # ── Fetch ─────────────────────────────────────────────────────────────
 

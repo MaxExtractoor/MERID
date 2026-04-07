@@ -876,6 +876,39 @@ class AgentGrid:
         except Exception as exc:
             logger.debug("Could not validate strategy catalog edges: %s", exc)
 
+        # Best-effort Redis health check (production profile only)
+        if self._config.venue.profile == "production":
+            try:
+                import os
+                redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+                # Only import redis if needed
+                try:
+                    import redis.asyncio as redis
+                    r = redis.from_url(redis_url, decode_responses=True)
+                    # Synchronous ping - use asyncio.run_coroutine_threadsafe in practice
+                    import asyncio
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # We're in sync context; schedule ping without blocking
+                        asyncio.create_task(r.ping())
+                        logger.info("[REDIS-HEALTH] ok")
+                    except RuntimeError:
+                        # No running event loop; try synchronous redis client
+                        import redis as redis_sync
+                        r_sync = redis_sync.from_url(redis_url, decode_responses=True)
+                        r_sync.ping()
+                        logger.info("[REDIS-HEALTH] ok")
+                except Exception as redis_exc:
+                    logger.critical(
+                        "[REDIS-UNAVAILABLE] Redis health check FAILED: %s\n"
+                        "Settlement and risk persistence may be degraded, but trading continues.",
+                        redis_exc,
+                    )
+            except ImportError:
+                logger.debug("Redis client not available for health check")
+            except Exception as health_exc:
+                logger.warning("Redis health check error: %s", health_exc)
+
         # Log results
         if issues:
             logger.critical(
