@@ -222,7 +222,7 @@ def reconcile_venue(venue_name: str) -> List[PositionDiscrepancy]:
         else:
             logger.info(summary_msg)
         for d in discrepancies:
-            _log = logger.warning if d.severity in ("critical", "warning") else logger.debug
+            _log = logger.warning if d.severity in ("critical", "warning") else logger.info
             _log(
                 f"  [{d.severity.upper()}] {d.symbol}: "
                 f"merid_qty={d.merid_qty:.4f} venue_qty={d.venue_qty:.4f} "
