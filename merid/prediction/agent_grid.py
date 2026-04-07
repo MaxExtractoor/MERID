@@ -145,6 +145,7 @@ class AgentGrid:
         self._started_at: Optional[datetime] = None
         self._volume_poll_task: Optional[asyncio.Task] = None
         self._reconciliation_task: Optional[asyncio.Task] = None
+        self._grid_summary_task: Optional[asyncio.Task] = None
         self._outcome_resolver = None
 
         logger.info(
@@ -242,6 +243,12 @@ class AgentGrid:
             self._reconciliation_loop(), name="kalshi-reconciliation"
         )
         logger.info("✓ Reconciliation loop started (auto-fix enabled)")
+
+        # Start grid-level summary loop (periodic [GRID-SUMMARY] diagnostics)
+        self._grid_summary_task = asyncio.create_task(
+            self._grid_summary_loop(), name="kalshi-grid-summary"
+        )
+        logger.info("✓ Grid summary loop started")
 
         # Start outcome resolver (Brier calibration + realized edge resolution)
         try:
@@ -365,6 +372,14 @@ class AgentGrid:
             self._reconciliation_task.cancel()
             try:
                 await self._reconciliation_task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop grid summary loop
+        if self._grid_summary_task and not self._grid_summary_task.done():
+            self._grid_summary_task.cancel()
+            try:
+                await self._grid_summary_task
             except asyncio.CancelledError:
                 pass
 
@@ -558,6 +573,62 @@ class AgentGrid:
                 await asyncio.wait_for(asyncio.sleep(interval), timeout=interval + 10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
+
+    # ── Grid summary loop ──────────────────────────────────────────────
+
+    async def _grid_summary_loop(self) -> None:
+        """Background task: emit [GRID-SUMMARY] every N minutes for operator diagnostics.
+
+        Logs a concise one-line summary per window showing:
+        - total orders across all agents
+        - per-agent order counts (non-zero only)
+        - count of paused/halted agents
+        - dominant veto signal (from each agent's last cycle)
+
+        Makes "1–2 trades at startup then silence" immediately visible.
+        Interval is configurable via env MERID_GRID_SUMMARY_INTERVAL_SECONDS (default 300).
+        """
+        import os as _os
+        interval = float(_os.getenv("MERID_GRID_SUMMARY_INTERVAL_SECONDS", "300"))
+
+        # Snapshot of order counts at the start of each window so we can compute delta
+        _prev_orders: dict = {a.config.name: a.state.orders_placed for a in self._agents}
+
+        while self._running:
+            try:
+                await asyncio.wait_for(asyncio.sleep(interval), timeout=interval + 10)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                break
+
+            if not self._running:
+                break
+
+            try:
+                total_window_orders = 0
+                by_agent: dict = {}
+                paused_agents: list = []
+
+                for agent in self._agents:
+                    prev = _prev_orders.get(agent.config.name, 0)
+                    delta = agent.state.orders_placed - prev
+                    total_window_orders += delta
+                    if delta > 0:
+                        by_agent[agent.config.name] = delta
+                    if not agent.state.enabled:
+                        paused_agents.append(agent.config.name)
+                    _prev_orders[agent.config.name] = agent.state.orders_placed
+
+                window_min = int(interval // 60)
+                logger.info(
+                    "[GRID-SUMMARY] window=%dm total_orders=%d paused_agents=%d by_agent=%s paused=%s",
+                    window_min,
+                    total_window_orders,
+                    len(paused_agents),
+                    by_agent or "{}",
+                    paused_agents or "[]",
+                )
+            except Exception as exc:
+                logger.debug("Grid summary loop error (ignored): %s", exc)
 
     # ── Agent management ───────────────────────────────────────────────
 
