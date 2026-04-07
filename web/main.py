@@ -2573,12 +2573,13 @@ async def _app_lifespan(application: FastAPI):
                     n_crit = sum(1 for d in discs if d.severity == "critical")
                     n_warn = sum(1 for d in discs if d.severity == "warning")
                     if discs:
-                        # Only escalate to WARNING when there are actionable discrepancies.
-                        # Pure "info" severity (minor drift, within tolerance) stays at INFO.
-                        if n_crit > 0:
+                        # Escalate to WARNING when there are actionable discrepancies
+                        # (critical OR warning severity). Pure "info" severity (minor
+                        # drift, within tolerance) is still noteworthy but not alarming.
+                        if n_crit > 0 or n_warn > 0:
                             logger.warning(
-                                "Kalshi venue reconciliation: %d discrepancies (%d critical)",
-                                len(discs), n_crit,
+                                "Kalshi venue reconciliation: %d discrepancies (%d critical, %d warning)",
+                                len(discs), n_crit, n_warn,
                             )
                         else:
                             logger.info(
