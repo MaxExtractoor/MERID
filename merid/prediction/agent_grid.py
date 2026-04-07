@@ -588,11 +588,11 @@ class AgentGrid:
         Makes "1–2 trades at startup then silence" immediately visible.
         Interval is configurable via env MERID_GRID_SUMMARY_INTERVAL_SECONDS (default 300).
         """
-        import os as _os
-        interval = float(_os.getenv("MERID_GRID_SUMMARY_INTERVAL_SECONDS", "300"))
+        import os
+        interval = float(os.getenv("MERID_GRID_SUMMARY_INTERVAL_SECONDS", "300"))
 
         # Snapshot of order counts at the start of each window so we can compute delta
-        _prev_orders: dict = {a.config.name: a.state.orders_placed for a in self._agents}
+        prev_orders: dict = {a.config.name: a.state.orders_placed for a in self._agents}
 
         while self._running:
             try:
@@ -609,14 +609,14 @@ class AgentGrid:
                 paused_agents: list = []
 
                 for agent in self._agents:
-                    prev = _prev_orders.get(agent.config.name, 0)
+                    prev = prev_orders.get(agent.config.name, 0)
                     delta = agent.state.orders_placed - prev
                     total_window_orders += delta
                     if delta > 0:
                         by_agent[agent.config.name] = delta
                     if not agent.state.enabled:
                         paused_agents.append(agent.config.name)
-                    _prev_orders[agent.config.name] = agent.state.orders_placed
+                    prev_orders[agent.config.name] = agent.state.orders_placed
 
                 window_min = int(interval // 60)
                 logger.info(
