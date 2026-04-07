@@ -1,0 +1,90 @@
+# ─── Kalshi Crypto 15m Conservative Strategy Config ─────────────────────────
+# Profile name: kalshi_crypto_15m_conservative
+#
+# Aggressively conservative 15-minute Kalshi crypto strategy for
+# BTC / ETH / SOL / XRP / DOGE.
+#
+# Goal: target ~10–15 quality trades per hour across all assets combined,
+# only entering when probability conviction is very high and structure is aligned.
+#
+# This config is loaded at import time by Conservative15mStrategy and the gate
+# module.  All numeric thresholds can be tuned here without code changes.
+#
+# Kill switch: set `enabled: false` to fully disable this profile at runtime
+# (requires server restart to take effect; no code change needed).
+# ─────────────────────────────────────────────────────────────────────────────
+
+profile: kalshi_crypto_15m_conservative
+version: "1"
+
+# ── Global switch ──────────────────────────────────────────────────────────
+enabled: true
+
+# ── Assets and timeframe ──────────────────────────────────────────────────
+assets: [BTC, ETH, SOL, XRP, DOGE]
+primary_timeframe: "15m"
+context_timeframes: ["1m", "5m", "15m", "1h", "4h"]
+
+# ── Probability / edge thresholds ─────────────────────────────────────────
+# min_p: Minimum agent_prob (or 1-agent_prob for NO side) to approve a signal.
+# Core assets (BTC/ETH) use min_p; satellites use min_p_satellite.
+min_p: 0.64
+min_p_satellite: 0.66          # Stricter for SOL, XRP, DOGE
+
+# min_edge_bps: Minimum net edge after fees (in basis points).
+# 1 bps = 0.01%.  50 bps = 0.5%.
+min_edge_bps: 50
+
+# ── Rate limits ────────────────────────────────────────────────────────────
+# Soft target: ~10–15 approved trades/hour across all 5 assets combined.
+# When the rolling 60-minute count exceeds soft_target, thresholds tighten
+# (min_p raised by rate_tighten_delta per trade over the soft target).
+soft_target_trades_per_hour: 12
+
+# Hard cap: refuse new approvals when this is breached, regardless of quality.
+global_max_trades_per_hour: 30
+
+# Max trades per asset within any 15-minute window.
+per_asset_max_per_15m: 2
+
+# ── Position sizing ────────────────────────────────────────────────────────
+# Fractional Kelly.  Nominal Kelly × kelly_fraction.
+# Very conservative: ~1/4 of the usual 0.50 Kelly fraction.
+kelly_fraction: 0.125
+
+# Maximum notional risk per trade, as a fraction of current bankroll.
+max_risk_per_trade_pct: 0.25
+
+# ── HTF / structure alignment ─────────────────────────────────────────────
+# htf_alignment_key: context key containing the composite multi-TF alignment
+# score.  Range: -1 (strongly bearish) to +1 (strongly bullish).
+htf_alignment_key: "multi_tf_alignment"
+
+# Min absolute alignment to proceed: below this the structure is ambiguous.
+htf_alignment_min: 0.30
+
+# If alignment is below this value AND contradicts the signal direction,
+# the signal is vetoed (no-trade flag).
+htf_contradiction_threshold: -0.50
+
+# ── Dynamic threshold tightening when rate target is exceeded ─────────────
+# Each approved trade over soft_target raises min_p by this amount.
+rate_tighten_delta: 0.005      # 0.5% per trade over soft target
+
+# ── Drawdown-aware tightening ─────────────────────────────────────────────
+# drawdown_warning_pct: % of bankroll lost → tighten thresholds.
+drawdown_warning_pct: 3.0
+# drawdown_pause_pct: % of bankroll lost → pause strategy.
+drawdown_pause_pct: 6.0
+# How much to add to min_p when drawdown_warning_pct is reached.
+drawdown_min_p_delta: 0.02
+# How much to multiply kelly_fraction by when drawdown_warning_pct is reached.
+drawdown_kelly_scale: 0.5
+
+# ── Liquidity sanity checks ───────────────────────────────────────────────
+# Minimum Kalshi 15m contract volume and open-interest before approving.
+# These are additive to the base strategy_grid liquidity gates.
+min_contract_volume: 30
+min_contract_oi: 5
+# Maximum bid-ask spread (in cents) on the 15m Kalshi contract.
+max_spread_cents: 10

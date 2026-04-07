@@ -643,9 +643,18 @@ _TREND_CARRY = TrendFollowCarryStrategy()
 _VOL_SURFACE = VolSurfaceMispricingStrategy()
 _REGIME_BET = RegimeBetStrategy()
 
+# Conservative 15m strategy (aggressively conservative, high-conviction only).
+# Imported lazily to avoid circular imports at module load time.
+def _get_conservative_15m():  # type: ignore[return]
+    from merid.strategies.kalshi_crypto_15m_conservative import get_conservative_15m_strategy
+    return get_conservative_15m_strategy()
+
 # Per-timeframe ordered list of strategies.
 # Core assets (BTC/ETH) get the full playbook.
 # Satellite assets get the same strategies but with their built-in tier caps.
+# For 15m: Conservative15mStrategy is prepended so it is tried FIRST.
+# It has the highest probability bar; if it declines, SpotMomentum/MeanRevert
+# can still emit a signal using the standard lower-threshold path.
 _STRATEGIES_BY_TIMEFRAME: Dict[str, List[_CryptoGridStrategy]] = {
     "15m":     [_SPOT_MOMENTUM, _MEAN_REVERT],
     "1h":      [_SPOT_MOMENTUM, _MEAN_REVERT],
@@ -654,6 +663,23 @@ _STRATEGIES_BY_TIMEFRAME: Dict[str, List[_CryptoGridStrategy]] = {
     "monthly": [_TREND_CARRY, _VOL_SURFACE],
     "annual":  [_REGIME_BET],
 }
+
+
+def _build_15m_strategy_list() -> List[_CryptoGridStrategy]:
+    """Return the 15m strategy list, prepending the conservative strategy.
+
+    The conservative strategy is loaded lazily so that circular imports
+    are avoided at module-level.  SpotMomentum and MeanRevert follow as
+    fallbacks.
+    """
+    try:
+        conservative = _get_conservative_15m()
+        return [conservative, _SPOT_MOMENTUM, _MEAN_REVERT]  # type: ignore[list-item]
+    except Exception as exc:  # pragma: no cover
+        logger.warning(
+            "Conservative15mStrategy unavailable (%s) — using base 15m strategies", exc
+        )
+        return [_SPOT_MOMENTUM, _MEAN_REVERT]
 
 
 @dataclass
@@ -694,9 +720,14 @@ class StrategyGrid:
 
     def _build(self) -> None:
         from config.crypto_universe import CRYPTO_ASSETS_ORDERED, CRYPTO_TIMEFRAMES_ORDERED
+        # Build the 15m list once, with the conservative strategy prepended.
+        _15m_strategies = _build_15m_strategy_list()
         for asset in CRYPTO_ASSETS_ORDERED:
             for tf in CRYPTO_TIMEFRAMES_ORDERED:
-                strategies = list(_STRATEGIES_BY_TIMEFRAME.get(tf, []))
+                if tf == "15m":
+                    strategies = list(_15m_strategies)
+                else:
+                    strategies = list(_STRATEGIES_BY_TIMEFRAME.get(tf, []))
                 self._grid[(asset, tf)] = GridEntry(
                     asset=asset,
                     timeframe=tf,
