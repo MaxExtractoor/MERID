@@ -41,6 +41,9 @@ class SessionConfig:
     maintenance_end_et: str = "05:00"
 
 
+# MarketFilterConfig removed - unused dead code
+
+
 @dataclass
 class AgentRiskLimits:
     """Per-agent risk limits."""
@@ -62,49 +65,23 @@ class EntryWindowConfig:
 class AgentConfig:
     """Configuration for a single Kalshi trading agent."""
     name: str
+    category: str = "crypto"  # crypto, economics, financials, etc.
     assets: List[str] = field(default_factory=list)
     timeframes: List[str] = field(default_factory=list)
+    market_filter: MarketFilterConfig = field(default_factory=MarketFilterConfig)
     risk_limits: AgentRiskLimits = field(default_factory=AgentRiskLimits)
     entry_window: EntryWindowConfig = field(default_factory=EntryWindowConfig)
     enabled: bool = True
-    archetype: str = "directional"  # directional, market_maker, arbitrage, contrarian, regime_switch, vol_breakout
+    archetype: str = "directional"  # directional, market_maker, arbitrage
 
     @property
     def agent_id(self) -> str:
         return f"kalshi-{self.name.lower()}"
 
-    @property
-    def category(self) -> str:
-        """Infer category from agent name or assets."""
-        name_lower = self.name.lower()
-        if any(x in name_lower for x in ["btc", "eth", "sol", "xrp", "doge", "crypto"]):
-            return "crypto"
-        elif "macro" in name_lower or "economics" in name_lower:
-            return "economics"
-        elif "financial" in name_lower:
-            return "financials"
-        elif "politic" in name_lower:
-            return "politics"
-        elif "climate" in name_lower or "weather" in name_lower:
-            return "climate"
-        elif "sport" in name_lower:
-            return "sports"
-        elif "tech" in name_lower:
-            return "tech"
-        elif "sentiment" in name_lower:
-            # Check assets for more specific category
-            if self.assets:
-                if any(a in ["BTC", "ETH", "SOL", "XRP", "DOGE"] for a in self.assets):
-                    return "crypto"
-            return "sentiment"
-        else:
-            return "all"
-
 
 @dataclass
 class PortfolioRiskConfig:
     """Portfolio-level risk limits across all agents."""
-    starting_bankroll_usd: Decimal = Decimal("100000")
     max_total_notional_usd: Decimal = Decimal("25000")
     max_notional_per_asset_usd: Decimal = Decimal("8000")
     max_open_markets: int = 50
@@ -114,22 +91,12 @@ class PortfolioRiskConfig:
 
 
 @dataclass
-class MonitoringConfig:
-    """Monitoring and operational settings."""
-    volume_poll_interval_seconds: int = 60
-    reconciliation_interval_seconds: int = 300
-    alert_daily_loss_threshold_pct: Decimal = Decimal("5")
-    alert_margin_util_threshold_pct: Decimal = Decimal("75")
-
-
-@dataclass
 class AgentGridConfig:
     """Complete agent grid configuration."""
     venue: VenueConfig
     session: SessionConfig
     agents: List[AgentConfig]
     portfolio_risk: PortfolioRiskConfig
-    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
 
     def get_agent(self, name: str) -> Optional[AgentConfig]:
         """Look up an agent by name (case-insensitive)."""
@@ -164,19 +131,25 @@ class AgentGridConfig:
             "agents": [a.name for a in self.agents],
             "assets": self.all_assets,
             "portfolio_max_notional": str(self.portfolio_risk.max_total_notional_usd),
-            "starting_bankroll": str(self.portfolio_risk.starting_bankroll_usd),
         }
 
 
 # ── YAML loader ────────────────────────────────────────────────────────
 
+def _parse_market_filter(raw: Dict[str, Any]) -> MarketFilterConfig:
+    return MarketFilterConfig(
+        category=raw.get("category", "crypto"),
+        frequency=raw.get("frequency"),
+        tags=raw.get("tags", []),
+    )
+
+
 def _parse_risk_limits(raw: Dict[str, Any]) -> AgentRiskLimits:
     return AgentRiskLimits(
+        max_yes_position=raw.get("max_yes_position", 3000),
+        max_no_position=raw.get("max_no_position", 3000),
         max_orders_per_window=raw.get("max_orders_per_window", 10),
         max_notional_usd=Decimal(str(raw.get("max_notional_usd", 500))),
-        max_slippage_cents=Decimal(str(raw.get("max_slippage_cents", 3))),
-        min_depth_contracts=raw.get("min_depth_contracts", 5),
-        max_spread_cents=Decimal(str(raw.get("max_spread_cents", 10))),
     )
 
 
@@ -190,8 +163,10 @@ def _parse_entry_window(raw: Dict[str, Any]) -> EntryWindowConfig:
 def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
     return AgentConfig(
         name=raw["name"],
+        category=raw.get("category", "crypto"),
         assets=raw.get("assets", []),
         timeframes=raw.get("timeframes", []),
+        market_filter=_parse_market_filter(raw.get("market_filter", {})),
         risk_limits=_parse_risk_limits(raw.get("risk_limits", {})),
         entry_window=_parse_entry_window(raw.get("entry_window", {})),
         enabled=raw.get("enabled", True),
@@ -205,7 +180,6 @@ def _default_agent_grid_config() -> AgentGridConfig:
         session=SessionConfig(),
         agents=[],
         portfolio_risk=PortfolioRiskConfig(),
-        monitoring=MonitoringConfig(),
     )
 
 
@@ -265,7 +239,8 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
         name=v.get("name", "kalshi"),
         base_url=v.get("base_url", VenueConfig.base_url),
         use_demo=v.get("use_demo", False),
-        agent_stagger_seconds=float(v.get("agent_stagger_seconds", 0.5)),
+        max_notional_per_expiry_usd=Decimal(str(v.get("max_notional_per_expiry_usd", 5000))),
+        max_open_markets_per_asset=v.get("max_open_markets_per_asset", 20),
     )
 
     # Session
@@ -282,7 +257,6 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
     # Portfolio risk
     pr = raw.get("portfolio_risk", {})
     portfolio_risk = PortfolioRiskConfig(
-        starting_bankroll_usd=Decimal(str(pr.get("starting_bankroll_usd", 100000))),
         max_total_notional_usd=Decimal(str(pr.get("max_total_notional_usd", 25000))),
         max_notional_per_asset_usd=Decimal(str(pr.get("max_notional_per_asset_usd", 8000))),
         max_open_markets=pr.get("max_open_markets", 50),
@@ -291,21 +265,11 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
         rebalance_check_interval_seconds=pr.get("rebalance_check_interval_seconds", 30),
     )
 
-    # Monitoring
-    m = raw.get("monitoring", {})
-    monitoring = MonitoringConfig(
-        volume_poll_interval_seconds=m.get("volume_poll_interval_seconds", 60),
-        reconciliation_interval_seconds=m.get("reconciliation_interval_seconds", 300),
-        alert_daily_loss_threshold_pct=Decimal(str(m.get("alert_daily_loss_threshold_pct", 5))),
-        alert_margin_util_threshold_pct=Decimal(str(m.get("alert_margin_util_threshold_pct", 75))),
-    )
-
     config = AgentGridConfig(
         venue=venue,
         session=session,
         agents=agents,
         portfolio_risk=portfolio_risk,
-        monitoring=monitoring,
     )
 
     logger.info(
