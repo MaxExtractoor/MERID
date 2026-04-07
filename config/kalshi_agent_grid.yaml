@@ -47,7 +47,7 @@ agents:
       min_depth_contracts: 5
       max_spread_cents: 10
     entry_window:
-      minutes_before_expiry: 30
+      minutes_before_expiry: 55
       cutoff_minutes_before_expiry: 2
 
   - name: BTC_DAILY
@@ -61,7 +61,7 @@ agents:
       min_depth_contracts: 3
       max_spread_cents: 15
     entry_window:
-      minutes_before_expiry: 120
+      minutes_before_expiry: 480
       cutoff_minutes_before_expiry: 15
 
   - name: BTC_WEEKLY
@@ -134,7 +134,7 @@ agents:
       min_depth_contracts: 5
       max_spread_cents: 10
     entry_window:
-      minutes_before_expiry: 30
+      minutes_before_expiry: 55
       cutoff_minutes_before_expiry: 2
 
   - name: ETH_DAILY
@@ -148,7 +148,7 @@ agents:
       min_depth_contracts: 3
       max_spread_cents: 15
     entry_window:
-      minutes_before_expiry: 120
+      minutes_before_expiry: 480
       cutoff_minutes_before_expiry: 15
 
   - name: ETH_WEEKLY
@@ -221,7 +221,7 @@ agents:
       min_depth_contracts: 5
       max_spread_cents: 10
     entry_window:
-      minutes_before_expiry: 30
+      minutes_before_expiry: 55
       cutoff_minutes_before_expiry: 2
 
   - name: SOL_DAILY
@@ -235,7 +235,7 @@ agents:
       min_depth_contracts: 3
       max_spread_cents: 15
     entry_window:
-      minutes_before_expiry: 120
+      minutes_before_expiry: 480
       cutoff_minutes_before_expiry: 15
 
   - name: SOL_WEEKLY
@@ -308,7 +308,7 @@ agents:
       min_depth_contracts: 5
       max_spread_cents: 10
     entry_window:
-      minutes_before_expiry: 30
+      minutes_before_expiry: 55
       cutoff_minutes_before_expiry: 2
 
   - name: XRP_DAILY
@@ -322,7 +322,7 @@ agents:
       min_depth_contracts: 3
       max_spread_cents: 15
     entry_window:
-      minutes_before_expiry: 120
+      minutes_before_expiry: 480
       cutoff_minutes_before_expiry: 15
 
   - name: XRP_WEEKLY
@@ -395,7 +395,7 @@ agents:
       min_depth_contracts: 5
       max_spread_cents: 10
     entry_window:
-      minutes_before_expiry: 30
+      minutes_before_expiry: 55
       cutoff_minutes_before_expiry: 2
 
   - name: DOGE_DAILY
@@ -409,7 +409,7 @@ agents:
       min_depth_contracts: 3
       max_spread_cents: 15
     entry_window:
-      minutes_before_expiry: 120
+      minutes_before_expiry: 480
       cutoff_minutes_before_expiry: 15
 
   - name: DOGE_WEEKLY
