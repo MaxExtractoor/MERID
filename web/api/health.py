@@ -66,6 +66,30 @@ async def get_global_health(request: Request) -> dict:
         logger.debug(f"Settlement poller check failed: {exc}")
         settlement_poller_status = "not_configured"
 
+    # Check CFB RTI buffer
+    cfb_rti_status = "unknown"
+    cfb_rti_info = {}
+    try:
+        from merid.data.settlement_rti_buffer import get_rti_buffer, is_cfb_rti_enabled
+        if is_cfb_rti_enabled():
+            rti_buffer = get_rti_buffer()
+            if rti_buffer is not None:
+                health = rti_buffer.health_dict()
+                cfb_rti_status = health.get("status", "unknown")
+                cfb_rti_info = {
+                    "tick_count": health.get("tick_count", 0),
+                    "last_tick": health.get("last_tick"),
+                    "adapter": health.get("adapter", "unknown"),
+                }
+            else:
+                cfb_rti_status = "disabled"
+        else:
+            cfb_rti_status = "disabled"
+    except Exception as exc:
+        logger.debug(f"CFB RTI check failed: {exc}")
+        cfb_rti_status = "error"
+        cfb_rti_info = {"error": str(exc)}
+
     return {
         "status": "degraded" if event_loop_degraded else "healthy",
         "timestamp": int(time.time()),
@@ -85,6 +109,10 @@ async def get_global_health(request: Request) -> dict:
                 "status": settlement_poller_status,
                 "running": settlement_poller_running,
                 **settlement_poller_info,
+            },
+            "cfb_rti_buffer": {
+                "status": cfb_rti_status,
+                **cfb_rti_info,
             },
             "price_feed": {
                 "status": "healthy",
