@@ -2571,11 +2571,19 @@ async def _app_lifespan(application: FastAPI):
                 try:
                     discs = reconcile_all_venues(["kalshi"])
                     n_crit = sum(1 for d in discs if d.severity == "critical")
+                    n_warn = sum(1 for d in discs if d.severity == "warning")
                     if discs:
-                        logger.warning(
-                            "Kalshi venue reconciliation: %d discrepancies (%d critical)",
-                            len(discs), n_crit,
+                        # Escalate to WARNING when there are actionable discrepancies
+                        # (critical OR warning severity). Pure "info" severity (minor
+                        # drift, within tolerance) is still noteworthy but not alarming.
+                        recon_msg = (
+                            "Kalshi venue reconciliation: %d discrepancies (%d critical, %d warning)",
+                            len(discs), n_crit, n_warn,
                         )
+                        if n_crit > 0 or n_warn > 0:
+                            logger.warning(*recon_msg)
+                        else:
+                            logger.info(*recon_msg)
                     else:
                         logger.info("Kalshi venue reconciliation: OK (0 discrepancies)")
                 except Exception as exc:

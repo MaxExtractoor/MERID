@@ -1559,6 +1559,15 @@ class KalshiContinuousTrader:
         try:
             from core.execution_gate import check_execution_gate as _check_gate
             gate_view = _check_gate()
+            # Log gate status at INFO only when not fully clear, so operators see it
+            # without generating noise every cycle. "limited" (warnings only) does NOT
+            # block CT entries — see entry-check comment below.
+            if gate_view is not None and gate_view.gate_state != "clear":
+                reasons_str = "; ".join(r.message for r in gate_view.reasons) if gate_view.reasons else "none"
+                logger.info(
+                    "[CT-GATE] execution_gate: state=%s blocked=%s safe_to_trade=%s reasons=[%s]",
+                    gate_view.gate_state, gate_view.blocked, gate_view.safe_to_trade, reasons_str,
+                )
         except Exception as _gate_exc:
             logger.warning(
                 "[CT-GATE] Execution gate snapshot failed: %s — "
@@ -1645,14 +1654,18 @@ class KalshiContinuousTrader:
 
             veto_reason = None
             # ── Execution gate entry check ──────────────────────────────
-            # All CT candidates are entry trades. When the gate does not allow
-            # new entries, veto every candidate with a tagged reason. Exits are
-            # not managed by CT; they are handled by position-management agents
-            # which only veto when gate_state=blocked (exits_allowed=False).
-            if gate_view is not None and not gate_view.entries_allowed:
+            # CT entries (new risk positions) are blocked ONLY when gate_state=blocked
+            # (critical issues: kill switch, critical recon discrepancies, dead price feed).
+            # gate_state=limited (warnings only: pnl_consistency drift, recon never-ran on
+            # fresh start, paper recon issues) does NOT block entries — warnings are
+            # informational and safe_to_trade=True means trading can proceed.
+            # This is more permissive than the original entries_allowed check (which blocked
+            # on both blocked AND limited), because limited-state warnings should not
+            # prevent Kalshi crypto trading.
+            if gate_view is not None and gate_view.blocked:
                 veto_reason = "execution_gate_entries_disabled"
                 logger.debug(
-                    "[CT-GATE] Entries disabled by execution gate (gate_state=%s) — "
+                    "[CT-GATE] Entries blocked by execution gate (gate_state=%s) — "
                     "vetoing ticker=%s asset=%s tf=%s",
                     gate_view.gate_state, candidate.ticker,
                     candidate.underlying, candidate.timeframe,

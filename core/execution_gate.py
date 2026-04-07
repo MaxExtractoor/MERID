@@ -260,7 +260,9 @@ def check_execution_gate() -> ExecutionGateStatus:
                 details="Execution allowed with warning — reconciliation will run on first cycle",
                 hint="Wait for first reconciliation cycle to complete for full safety checks",
             ))
-            logger.warning("Kalshi reconciliation: NEVER_RAN — allowing execution with warning")
+            # Log at INFO (not WARNING) — this is a normal transient startup condition
+            # and should not alarm operators on every gate check during startup.
+            logger.info("Kalshi reconciliation: NEVER_RAN — allowing execution with warning (startup normal)")
         elif kalshi_has_critical():
             # RAN_CRITICAL state: reconciliation ran and found genuine critical discrepancies
             discrepancies = get_last_discrepancies()
