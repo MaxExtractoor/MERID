@@ -164,6 +164,9 @@ class AgentGrid:
         self._running = True
         self._started_at = datetime.now(timezone.utc)
 
+        # Validate live trading readiness before starting agents
+        self._validate_live_trading_readiness()
+
         # Start market catalog
         await self._catalog.start()
 
@@ -678,6 +681,105 @@ class AgentGrid:
         self._alert_manager.add_sink(twitter_alert_sink)
         self._alert_manager.add_sink(telegram_alert_sink)
         logger.info("✓ Alert sinks registered (Twitter + Telegram)")
+
+    # ── Trading readiness validation ──────────────────────────────────
+
+    def _validate_live_trading_readiness(self) -> None:
+        """Validate that AgentGrid is properly configured for live trading.
+
+        Checks:
+        1. VenueGate mode and live_enabled flag
+        2. PortfolioRiskAgent not halted
+        3. At least some agents enabled
+        4. Min edge thresholds are realistic (not too high)
+
+        Logs CRITICAL warning if misconfigured but does not raise (fail-safe: don't
+        prevent startup, just make operator very aware of the issue).
+        """
+        issues = []
+
+        # Check VenueGate mode
+        if self._venue_gate.mode.value == "mock":
+            issues.append(
+                "VenueGate mode=MOCK — no orders will be submitted. "
+                "Set MERID_PM_TRADING_MODE=live or paper to enable trading."
+            )
+        elif self._venue_gate.mode.value == "live" and not self._venue_gate.live_enabled:
+            issues.append(
+                "VenueGate mode=LIVE but live_enabled=false. "
+                "Set MERID_PM_LIVE_ENABLED=true to allow live orders."
+            )
+
+        # Check PortfolioRiskAgent not halted
+        if self._portfolio_risk._halted:
+            issues.append(
+                f"PortfolioRiskAgent is HALTED: {self._portfolio_risk._halt_reason}. "
+                "Call portfolio_risk.resume() to allow trading."
+            )
+
+        # Check at least some agents are enabled
+        enabled_agents = [a for a in self._agents if a.state.enabled]
+        if not enabled_agents:
+            issues.append(
+                f"All {len(self._agents)} agents are paused/disabled. "
+                "No trading will occur. Call agent.resume() to enable."
+            )
+
+        # Check strategy catalog for unrealistic min_edge thresholds
+        # (Example: BTC 15m should be ~0.5-2%, not 10-15%)
+        try:
+            from merid.trading.strategy_registry import load_strategy_catalog
+            catalog = load_strategy_catalog()
+            high_edge_cells = []
+            for asset_name, asset_data in catalog.get("assets", {}).items():
+                if not isinstance(asset_data, dict):
+                    continue
+                for tf_name, tf_data in asset_data.items():
+                    if tf_name in ("tier", "notes"):
+                        continue
+                    if not isinstance(tf_data, dict):
+                        continue
+                    enabled = tf_data.get("enabled", False)
+                    min_edge_bps = tf_data.get("min_edge_bps", 0)
+                    # Warn if enabled and min_edge > 800 bps (8%)
+                    if enabled and min_edge_bps > 800:
+                        high_edge_cells.append(
+                            f"{asset_name}/{tf_name}: {min_edge_bps}bps (>{min_edge_bps/100:.1f}%)"
+                        )
+
+            if high_edge_cells:
+                issues.append(
+                    f"Strategy catalog has {len(high_edge_cells)} cells with min_edge > 8%: "
+                    f"{', '.join(high_edge_cells[:5])}. "
+                    "Typical realistic edges are 0.5-6%. High thresholds may prevent all trades."
+                )
+        except Exception as exc:
+            logger.debug("Could not validate strategy catalog edges: %s", exc)
+
+        # Log results
+        if issues:
+            logger.critical(
+                "\n" + "=" * 80 + "\n"
+                "⚠️  AGENT GRID LIVE TRADING READINESS CHECK FAILED\n"
+                "=" * 80 + "\n"
+                f"Found {len(issues)} issue(s) that may prevent live trading:\n\n"
+                + "\n\n".join(f"  {i+1}. {issue}" for i, issue in enumerate(issues))
+                + "\n\n"
+                + "If this is intentional (e.g., running in MOCK mode for testing), ignore this warning.\n"
+                + "Otherwise, fix the issues above before expecting live trades.\n"
+                + "=" * 80
+            )
+        else:
+            # All checks passed — log a concise summary
+            logger.info(
+                "[GRID-START] live_agents=%d mode=%s live_enabled=%s risk_halted=%s",
+                len(enabled_agents),
+                self._venue_gate.mode.value,
+                self._venue_gate.live_enabled,
+                self._portfolio_risk._halted,
+            )
+
+    # ── Status & monitoring ────────────────────────────────────────────
 
     def summary(self) -> Dict[str, Any]:
         """Full grid status for API consumption."""
