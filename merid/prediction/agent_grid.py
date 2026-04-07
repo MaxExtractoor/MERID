@@ -369,22 +369,47 @@ class AgentGrid:
             # Get active markets from catalog
             markets = await self._catalog.get_active_markets()
 
+            # Asset detection map covers all 5 supported crypto assets
+            _ASSET_KEYWORDS = [
+                ("BTC", ("BTC", "BITCOIN")),
+                ("ETH", ("ETH", "ETHEREUM")),
+                ("SOL", ("SOL", "SOLANA")),
+                ("XRP", ("XRP", "RIPPLE")),
+                ("DOGE", ("DOGE", "DOGECOIN")),
+            ]
+
+            # Timeframe inference from catalog tag or title text
+            _TF_KEYWORDS = [
+                ("15m", ("15MIN", "15M", "15-MIN")),
+                ("1h", ("1HOUR", "1H", "HOURLY", "60MIN")),
+                ("daily", ("DAILY", "EOD", "END-OF-DAY")),
+                ("weekly", ("WEEKLY", "EOW")),
+                ("monthly", ("MONTHLY", "EOM")),
+                ("annual", ("ANNUAL", "YEARLY", "EOY")),
+            ]
+
+            def _infer_asset(ticker_upper: str) -> str | None:
+                for sym, keywords in _ASSET_KEYWORDS:
+                    if any(kw in ticker_upper for kw in keywords):
+                        return sym
+                return None
+
+            def _infer_timeframe(ticker_upper: str) -> str:
+                for tf, keywords in _TF_KEYWORDS:
+                    if any(kw in ticker_upper for kw in keywords):
+                        return tf
+                return "1h"  # safe default if unable to infer
+
             # Group by asset/timeframe and feed data
             for market in markets[:20]:  # Limit to top 20 markets to avoid rate limits
                 try:
-                    # Extract asset from ticker (e.g., "KXBTC-23DEC01-B71000" -> "BTC")
-                    ticker = market.market_id
-                    asset = None
-                    if "BTC" in ticker.upper():
-                        asset = "BTC"
-                    elif "ETH" in ticker.upper():
-                        asset = "ETH"
+                    ticker_upper = (market.market_id or "").upper()
+                    asset = _infer_asset(ticker_upper)
 
                     if not asset:
                         continue
 
-                    # Infer timeframe (for now use "15m" as default)
-                    timeframe = "15m"
+                    timeframe = _infer_timeframe(ticker_upper)
 
                     # Feed Kalshi data
                     self._mood_bus.update_kalshi_data(
