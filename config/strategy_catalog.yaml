@@ -412,6 +412,22 @@ global_risk:
     DOGE: 0.10
     reserve: 0.20
 
+# ── Enabled strategy profiles ────────────────────────────────────────────────
+#
+# List of named strategy profiles that are active on server start.
+# Remove a profile name to disable it; add it back to re-enable.
+#
+# kalshi_crypto_15m_conservative: aggressively conservative 15m Kalshi
+#   crypto strategy for BTC/ETH/SOL/XRP/DOGE.  Only enters when model
+#   probability conviction ≥ 0.64 (core) / 0.66 (satellite) and HTF
+#   structure is aligned.  Targets 10–15 approved trades/hour across all
+#   assets.  Config: config/strategies/kalshi_crypto_15m_conservative.yaml
+#
+trading:
+  strategies:
+    enabled_profiles:
+      - kalshi_crypto_15m_conservative
+
 # ── Strategy promotion rules ─────────────────────────────────────────────────
 #
 # Strategies are promoted from "experimental" to "core" when these thresholds
