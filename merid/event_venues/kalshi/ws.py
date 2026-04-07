@@ -43,7 +43,10 @@ _WS_HEALTH_QUEUE_DEPTH_CRIT = float(os.getenv("MERID_WS_HEALTH_QUEUE_DEPTH_CRIT"
 _WS_HEALTH_STALE_SECONDS = float(os.getenv("MERID_WS_HEALTH_STALE_SECONDS", "30.0"))
 
 # ── PERF-1: Event loop watchdog thresholds ───────────────────────────────
-_LOOP_LAG_WARN_MS = float(os.getenv("MERID_LOOP_LAG_WARN_MS", "100"))
+# Warn threshold raised to 300ms (from 100ms) to reduce noise from transient
+# scheduling delays. Only log WARNING for sustained high lag (>300ms per sample).
+# Critical (ERROR) threshold remains at 500ms — this is the degrade boundary.
+_LOOP_LAG_WARN_MS = float(os.getenv("MERID_LOOP_LAG_WARN_MS", "300"))
 _LOOP_LAG_CRIT_MS = float(os.getenv("MERID_LOOP_LAG_CRIT_MS", "500"))
 
 
@@ -730,7 +733,9 @@ class KalshiWebSocket(EventVenueStream):
             self._loop_lag_alerts.append({
                 "ts": now, "lag_ms": round(lag_ms, 1), "severity": "warning",
             })
-            logger.warning(
+            # Log at DEBUG to avoid noisy per-sample spam; alerts are still tracked
+            # in _loop_lag_alerts for observability dashboards and health endpoints.
+            logger.debug(
                 f"Event-loop lag: {lag_ms:.0f}ms (threshold: {_LOOP_LAG_WARN_MS}ms) "
                 f"— total warnings: {self._loop_lag_warn_count}"
             )
