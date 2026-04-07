@@ -255,16 +255,45 @@ class KalshiTradingAgent:
         self.state.last_cycle_at = now
         self.state.cycles_run += 1
 
+        # Cycle veto/action counters for INFO summary at end
+        cycle_stats = {
+            "candidates_total": 0,
+            "veto_session_guard": 0,
+            "veto_no_markets": 0,
+            "veto_entry_window": 0,
+            "veto_order_limit": 0,
+            "veto_no_action": 0,
+            "veto_consensus_conflicted": 0,
+            "veto_consensus_forming": 0,
+            "veto_degraded_pause": 0,
+            "veto_risk": 0,
+            "orders_attempted": 0,
+            "orders_succeeded": 0,
+        }
+
         # 0. Stop-loss sweep — check all open positions before new signals
         await self._check_stop_losses()
 
         # 1. Session guard
         if not self._session_guard.is_trading_allowed(now):
+            reason = self._session_guard.block_reason(now)
+            self.logger.info(
+                "[AGENT-VETO] session_guard | agent=%s reason=%s",
+                self.config.name, reason
+            )
+            cycle_stats["veto_session_guard"] = 1
+            self._log_cycle_summary(cycle_stats)
             return
 
         # 2. Resolve markets
         await self._resolve_markets()
         if not self._resolved_markets:
+            self.logger.info(
+                "[AGENT-VETO] no_markets | agent=%s resolved=0",
+                self.config.name
+            )
+            cycle_stats["veto_no_markets"] = 1
+            self._log_cycle_summary(cycle_stats)
             return
 
         # 3. Reset per-window order count if window rolled
@@ -273,6 +302,7 @@ class KalshiTradingAgent:
         # 4. Filter for the "most active" contract per asset/timeframe slot
         # Requirement: at most one active Kalshi contract at a time per slot.
         active_markets = self._filter_active_contracts(self._resolved_markets, now)
+        cycle_stats["candidates_total"] = len(active_markets)
 
         # 5. Evaluate each filtered market
         for market in active_markets:
@@ -285,11 +315,18 @@ class KalshiTradingAgent:
 
             # Check entry window (already mostly handled by filter but good to be explicit)
             if not self._in_entry_window(market, now):
+                cycle_stats["veto_entry_window"] += 1
                 continue
 
             # Check per-window order limit
             if self.state.orders_this_window >= self.config.risk_limits.max_orders_per_window:
-                self.logger.debug(f"Order limit reached for window ({self.state.orders_this_window})")
+                self.logger.info(
+                    "[AGENT-VETO] order_limit | agent=%s limit=%d current=%d",
+                    self.config.name,
+                    self.config.risk_limits.max_orders_per_window,
+                    self.state.orders_this_window
+                )
+                cycle_stats["veto_order_limit"] += 1
                 break
 
             # Build snapshot and evaluate
@@ -333,9 +370,10 @@ class KalshiTradingAgent:
                         signal_dir = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
                         if consensus.consensus_direction != signal_dir:
                             self.logger.info(
-                                f"Signal {signal_dir} blocked: consensus is {consensus.consensus_direction} "
-                                f"(conf={consensus.consensus_confidence:.2f})"
+                                "[AGENT-VETO] consensus_mismatch | agent=%s market=%s signal=%s consensus=%s",
+                                self.config.name, market.market_id, signal_dir, consensus.consensus_direction
                             )
+                            cycle_stats["veto_consensus_conflicted"] += 1
                             continue
 
                         # Use consensus confidence for sizing
@@ -349,8 +387,10 @@ class KalshiTradingAgent:
                         )
                     elif consensus and consensus.status.value == "conflicted":
                         self.logger.info(
-                            f"Signal blocked: swarm conflicted - {consensus.disagreement_flags}"
+                            "[AGENT-VETO] consensus_conflicted | agent=%s market=%s flags=%s",
+                            self.config.name, market.market_id, consensus.disagreement_flags
                         )
+                        cycle_stats["veto_consensus_conflicted"] += 1
                         continue
                     elif not consensus:
                         # ── AUDIT-10: Swarm degraded-mode check ─────────────────
@@ -376,24 +416,25 @@ class KalshiTradingAgent:
                                 # Allow the signal through; increment solo counter
                                 # after a successful order attempt (below)
                             else:
-                                self.logger.warning(
-                                    "DEGRADED_MODE_PAUSED market=%s — solo trade "
-                                    "limit (%d) reached; waiting for swarm recovery",
-                                    market.market_id,
-                                    _MAX_SOLO_TRADES_DEGRADED,
+                                self.logger.info(
+                                    "[AGENT-VETO] degraded_mode_paused | agent=%s market=%s solo_limit=%d",
+                                    self.config.name, market.market_id, _MAX_SOLO_TRADES_DEGRADED
                                 )
+                                cycle_stats["veto_degraded_pause"] += 1
                                 continue
                         else:
                             self.logger.info(
-                                "CONSENSUS_STATUS=FORMING market=%s — signal held pending more proposals",
-                                market.market_id,
+                                "[AGENT-VETO] consensus_forming | agent=%s market=%s",
+                                self.config.name, market.market_id
                             )
+                            cycle_stats["veto_consensus_forming"] += 1
                             continue
             except Exception as exc:
                 self.logger.warning(f"Error evaluating {market.market_id}: {exc}")
                 continue
 
             if signal.action == SignalAction.NO_ACTION or signal.action == SignalAction.HOLD:
+                cycle_stats["veto_no_action"] += 1
                 continue
 
             # Pre-trade risk check
@@ -426,7 +467,11 @@ class KalshiTradingAgent:
                         now=now,
                         allowed=False,
                     )
-                    self.logger.info(f"Risk blocked {market.market_id}: {check.reason}")
+                    self.logger.info(
+                        "[AGENT-VETO] risk | agent=%s market=%s reason=%s",
+                        self.config.name, market.market_id, check.reason
+                    )
+                    cycle_stats["veto_risk"] += 1
                     continue
 
                 self._record_explainability_decision(
@@ -439,11 +484,16 @@ class KalshiTradingAgent:
                 )
 
                 # Place order via tool
+                cycle_stats["orders_attempted"] += 1
                 await self._execute_signal(market, signal, check, snapshot)
+                cycle_stats["orders_succeeded"] += 1
 
             except Exception as exc:
                 self.logger.warning(f"Error executing {market.market_id}: {exc}")
                 continue
+
+        # Log cycle summary after processing all markets
+        self._log_cycle_summary(cycle_stats)
 
     def _filter_active_contracts(self, markets: List[EventMarket], now: datetime) -> List[EventMarket]:
         """Filter resolved markets to ensure only the most relevant contract(s) are traded.
@@ -774,6 +824,43 @@ class KalshiTradingAgent:
         self.state.signal_log.append(entry)
         if len(self.state.signal_log) > _MAX_LOG_ENTRIES:
             self.state.signal_log = self.state.signal_log[-_MAX_LOG_ENTRIES:]
+
+    def _log_cycle_summary(self, stats: Dict[str, int]) -> None:
+        """Log a concise INFO-level summary of this cycle's vetoes and actions.
+
+        Purpose: Allow operators to diagnose "10-12 hours, zero trades" issues
+        by eyeballing a single log line per cycle showing dominant veto reason.
+
+        Args:
+            stats: Dictionary with veto counts and order counts from this cycle
+        """
+        # Only log if there were candidates or vetoes
+        if stats["candidates_total"] == 0 and all(v == 0 for v in stats.values()):
+            return
+
+        total_vetoes = sum(
+            stats[k] for k in stats
+            if k.startswith("veto_") and k != "veto_no_action"
+        )
+
+        # Build compact summary
+        self.logger.info(
+            "[AGENT-CYCLE] agent=%s candidates=%d orders=%d vetoes=%d "
+            "(session_guard=%d no_markets=%d entry_window=%d order_limit=%d "
+            "no_action=%d consensus=%d risk=%d degraded=%d)",
+            self.config.name,
+            stats["candidates_total"],
+            stats["orders_succeeded"],
+            total_vetoes,
+            stats["veto_session_guard"],
+            stats["veto_no_markets"],
+            stats["veto_entry_window"],
+            stats["veto_order_limit"],
+            stats["veto_no_action"],
+            stats["veto_consensus_conflicted"] + stats["veto_consensus_forming"],
+            stats["veto_risk"],
+            stats["veto_degraded_pause"],
+        )
 
         # ── Calibration: log forecast for Brier scoring ──────────────────
         try:
