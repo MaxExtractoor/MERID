@@ -124,7 +124,7 @@ def build_strategy_from_profile(profile_name: str) -> Any:
 # ── Built-in registrations ─────────────────────────────────────────────────
 
 @register_strategy("kalshi_crypto_15m_conservative")
-def _kalshi_crypto_15m_conservative_factory():  # type: ignore[return]
+def _kalshi_crypto_15m_conservative_factory() -> Any:
     """Return the Conservative15mStrategy singleton."""
     from merid.strategies.kalshi_crypto_15m_conservative import get_conservative_15m_strategy
     return get_conservative_15m_strategy()
