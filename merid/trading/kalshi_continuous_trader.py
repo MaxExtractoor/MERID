@@ -1688,7 +1688,20 @@ class KalshiContinuousTrader:
                 })
                 continue
 
-            estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
+            # Build context so strategy grid can apply the correct asset-tier
+            # Kelly multiplier, min-liquidity gate, and timeframe-specific
+            # signal logic.  Without this context, _CryptoGridStrategy.estimate
+            # defaults to asset="BTC"/timeframe="1h" and the liquidity gate
+            # (volume=0.0 < min_volume) always fails, producing zero intents.
+            _eval_context: Dict[str, Any] = {
+                "asset": candidate.underlying,
+                "timeframe": candidate.timeframe,
+                "volume": float(candidate.volume),
+                "open_interest": float(candidate.open_interest),
+            }
+            if candidate.spot_price is not None:
+                _eval_context["spot_price"] = candidate.spot_price
+            estimate = self.evaluate_candidate(candidate, market_prob=mid_prob, context=_eval_context)
 
             if estimate is None:
                 veto_reason = "no_estimate"
