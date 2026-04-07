@@ -280,17 +280,16 @@ class AgentGrid:
         )
         logger.info("✓ Grid summary loop started")
 
-        # Start auto-promoter (paper → shadow → live promotion engine).
-        # When MERID_PM_LIVE_ENABLED=true agents were already force-promoted above;
-        # the auto-promoter still runs so it can demote/rollback on degradation.
-        if not _force_live_on_start:
-            try:
-                from merid.event_venues.kalshi.auto_promoter import get_auto_promoter
-                _ap = get_auto_promoter(eval_interval_seconds=300.0)
-                await _ap.start()
-                logger.info("✓ Auto-promoter started (promotion check every 5m)")
-            except Exception as exc:
-                logger.warning(f"Auto-promoter start failed (non-fatal): {exc}")
+        # Start auto-promoter unconditionally so it can handle demotions/rollbacks
+        # even when agents were force-promoted at startup.  The loop's initial
+        # _evaluate_all() will be a no-op for already-LIVE agents.
+        try:
+            from merid.event_venues.kalshi.auto_promoter import get_auto_promoter
+            _ap = get_auto_promoter(eval_interval_seconds=300.0)
+            await _ap.start()
+            logger.info("✓ Auto-promoter started (promotion check every 5m)")
+        except Exception as exc:
+            logger.warning(f"Auto-promoter start failed (non-fatal): {exc}")
 
         # Start outcome resolver (Brier calibration + realized edge resolution)
         try:
@@ -642,7 +641,7 @@ class AgentGrid:
         interval = float(os.getenv("MERID_GRID_SUMMARY_INTERVAL_SECONDS", "300"))
 
         # Snapshot of order counts at the start of each window so we can compute delta
-        prev_orders: dict = {a.config.name: a.state.orders_placed for a in self._agents}
+        prev_orders: dict = {a.config.name: getattr(a.state, 'orders_placed', 0) for a in self._agents}
 
         while self._running:
             try:
@@ -660,13 +659,13 @@ class AgentGrid:
 
                 for agent in self._agents:
                     prev = prev_orders.get(agent.config.name, 0)
-                    delta = agent.state.orders_placed - prev
+                    delta = getattr(agent.state, 'orders_placed', 0) - prev
                     total_window_orders += delta
                     if delta > 0:
                         by_agent[agent.config.name] = delta
                     if not agent.state.enabled:
                         paused_agents.append(agent.config.name)
-                    prev_orders[agent.config.name] = agent.state.orders_placed
+                    prev_orders[agent.config.name] = getattr(agent.state, 'orders_placed', 0)
 
                 window_min = int(interval // 60)
                 logger.info(
@@ -906,7 +905,7 @@ class AgentGrid:
         """Full grid status for API consumption."""
         # Grid-wide metrics
         total_fills = sum(len(a.state.fill_log) for a in self._agents)
-        total_orders = sum(a.state.orders_placed for a in self._agents)
+        total_orders = sum(getattr(a.state, 'orders_placed', 0) for a in self._agents)
 
         # Category PnL breakdown
         pnl_by_category: Dict[str, float] = {}
