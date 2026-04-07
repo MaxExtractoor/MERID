@@ -88,7 +88,17 @@ logger = get_logger("merid.trading.kalshi_continuous_trader")
 _CRYPTO_ASSETS: tuple = tuple(_CRYPTO_ASSETS_LIST)
 _CRYPTO_TIMEFRAMES: tuple = tuple(_CRYPTO_TIMEFRAMES_LIST)
 
+# Hard-dollar group notional cap (legacy).  When MERID_GROUP_NOTIONAL_PCT is
+# also set the percentage-based cap takes precedence and this value is ignored.
 _DEFAULT_MAX_GROUP_NOTIONAL = float(os.getenv("MERID_GROUP_NOTIONAL_CAP", "50.0"))
+# Percentage-of-bankroll group notional cap.  When non-zero, the effective cap
+# per group each cycle is bankroll * _GROUP_NOTIONAL_PCT (e.g. 0.05 = 5%).
+# Set MERID_GROUP_NOTIONAL_PCT=0 to use only the hard-dollar cap above.
+_GROUP_NOTIONAL_PCT: float = float(os.getenv("MERID_GROUP_NOTIONAL_PCT", "0.05"))
+# Total aggregate crypto-risk cap across ALL asset groups in a single cycle.
+# When non-zero, no further intents are approved once the running notional total
+# exceeds bankroll * _TOTAL_CRYPTO_RISK_PCT.  Set to 0 to disable.
+_TOTAL_CRYPTO_RISK_PCT: float = float(os.getenv("MERID_TOTAL_CRYPTO_RISK_PCT", "0.15"))
 _DEFAULT_MIN_CONFIDENCE = float(os.getenv("MERID_MIN_CONFIDENCE", "0.55"))
 _DEFAULT_BANKROLL_FRACTION = float(os.getenv("MERID_BANKROLL_FRACTION", "0.01"))
 _DEFAULT_MAX_YES_PRICE = float(os.getenv("MERID_MAX_YES_PRICE", "0.50"))
@@ -136,13 +146,15 @@ _EDGE_PROFILE = os.getenv("KALSHI_CT_EDGE_PROFILE", "initial_live")
 # Keys are (asset, timeframe) tuples; values are edge fractions (e.g. 0.03 = 3%).
 #
 # Two profiles:
-#   - "initial_live": Permissive thresholds for micro-size trading (0.5-1.5%)
-#   - "production": Conservative thresholds for full-size trading (2-8%)
+#   - "initial_live": Low-threshold validation profile (0.5-1.5%) used while
+#     establishing baseline statistics.  Kelly sizing is unchanged.
+#   - "production": Conservative thresholds for fee-profitable trading (2-8%).
 #
 # If a specific (asset, timeframe) is not found, falls back to _DEFAULT_MIN_EDGE.
 #
 
-# INITIAL_LIVE profile: Relaxed thresholds for getting live with micro-size
+# INITIAL_LIVE profile: Permissive edge thresholds for live validation.
+# Sizes are still fully Kelly-scaled; only the minimum-edge admission gate is lower.
 EDGE_THRESHOLDS_INITIAL_LIVE: Dict[Tuple[str, str], float] = {
     # BTC - most liquid, tightest spreads
     ("BTC", "15m"): 0.005,    # 0.5% - very permissive for initial live
@@ -250,33 +262,40 @@ _LAST_KNOWN_SPOT_MAX_AGE_SECONDS = float(
     os.getenv("MERID_SPOT_MAX_STALENESS_SECONDS", "600")
 )  # default: 10 minutes
 
-# ── Strategy catalog enabled/disabled gating ──────────────────────────────
+# ── Strategy catalog per-cell parameter loading ───────────────────────────
 #
-# The strategy_catalog.yaml declares per-(asset, timeframe) `enabled` flags.
-# Disabled cells must be skipped by _refresh_candidates to avoid trading
-# strategies that are not yet validated (e.g. SOL/DOGE 15m off until fee-drag
-# and depth checks pass).
+# The strategy_catalog.yaml declares per-(asset, timeframe) parameters:
+#   enabled              — gating flag for _refresh_candidates
+#   kelly_fraction       — per-cell fractional Kelly multiplier
+#   max_risk_per_trade_pct — hard cap per trade as % of bankroll
 #
-# _CATALOG_ENABLED[(asset, tf)] == False  →  skip during candidate refresh.
-# Missing key means the cell is implicitly enabled (safe default).
+# These are loaded once at module import and used by:
+#   _CATALOG_ENABLED[(asset, tf)]         → bool
+#   _CATALOG_KELLY_FRACTION[(asset, tf)]  → float
+#   _CATALOG_MAX_RISK_PCT[(asset, tf)]    → float
+#
+# Missing keys fall back to global defaults (_DEFAULT_KELLY_FRACTION, etc.).
 
-def _load_strategy_catalog_enabled() -> Dict[Tuple[str, str], bool]:
-    """Load per-cell enabled flags from config/strategy_catalog.yaml.
+def _load_strategy_catalog_lookups() -> Tuple[
+    Dict[Tuple[str, str], bool],
+    Dict[Tuple[str, str], float],
+    Dict[Tuple[str, str], float],
+]:
+    """Load per-cell parameters from config/strategy_catalog.yaml.
 
-    Returns a dict mapping (asset, timeframe) → bool.  A missing entry is
-    treated as enabled so that new cells added to crypto_universe.py are live
-    by default until explicitly disabled in the catalog.
-
-    The YAML is located relative to this file's package root so it works
-    regardless of CWD.  Falls back to an empty dict (all cells enabled) if
-    the file is missing or malformed.
+    Returns three dicts keyed by (asset, timeframe):
+      enabled_map      — bool (True by default when key is absent)
+      kelly_map        — float kelly_fraction
+      max_risk_map     — float max_risk_per_trade_pct
     """
     import yaml  # lazy import — yaml is only needed at module load time
 
     yaml_path = (
         pathlib.Path(__file__).parent.parent.parent / "config" / "strategy_catalog.yaml"
     )
-    result: Dict[Tuple[str, str], bool] = {}
+    enabled_map: Dict[Tuple[str, str], bool] = {}
+    kelly_map: Dict[Tuple[str, str], float] = {}
+    max_risk_map: Dict[Tuple[str, str], float] = {}
     try:
         with open(yaml_path, "r") as fh:
             doc = yaml.safe_load(fh)
@@ -287,22 +306,37 @@ def _load_strategy_catalog_enabled() -> Dict[Tuple[str, str], bool]:
             for tf, tf_cfg in asset_cfg.items():
                 if tf == "tier" or not isinstance(tf_cfg, dict):
                     continue
-                enabled = tf_cfg.get("enabled", True)
-                result[(str(asset).upper(), str(tf).lower())] = bool(enabled)
+                key = (str(asset).upper(), str(tf).lower())
+                enabled_map[key] = bool(tf_cfg.get("enabled", True))
+                kf = tf_cfg.get("kelly_fraction")
+                if kf is not None:
+                    try:
+                        kelly_map[key] = float(kf)
+                    except (TypeError, ValueError):
+                        pass
+                mrp = tf_cfg.get("max_risk_per_trade_pct")
+                if mrp is not None:
+                    try:
+                        max_risk_map[key] = float(mrp) / 100.0  # convert % → fraction
+                    except (TypeError, ValueError):
+                        pass
     except FileNotFoundError:
         logger.warning(
-            "strategy_catalog.yaml not found at %s; all cells treated as enabled.",
+            "strategy_catalog.yaml not found at %s; using global defaults for all cells.",
             yaml_path,
         )
     except Exception as exc:
         logger.error(
-            "Failed to load strategy_catalog.yaml: %s — all cells treated as enabled.",
+            "Failed to load strategy_catalog.yaml: %s — using global defaults for all cells.",
             exc,
         )
-    return result
+    return enabled_map, kelly_map, max_risk_map
 
 
-_CATALOG_ENABLED: Dict[Tuple[str, str], bool] = _load_strategy_catalog_enabled()
+_CATALOG_ENABLED: Dict[Tuple[str, str], bool]
+_CATALOG_KELLY_FRACTION: Dict[Tuple[str, str], float]
+_CATALOG_MAX_RISK_PCT: Dict[Tuple[str, str], float]
+_CATALOG_ENABLED, _CATALOG_KELLY_FRACTION, _CATALOG_MAX_RISK_PCT = _load_strategy_catalog_lookups()
 
 
 
@@ -1289,7 +1323,12 @@ class KalshiContinuousTrader:
             )
             return result
 
-        kelly_frac = kelly_raw * self._kelly_fraction
+        # Resolve per-cell Kelly fraction: catalog overrides the global default.
+        # Priority: catalog per-cell > self._kelly_fraction (global default).
+        _cell_key = (candidate.underlying.upper(), candidate.timeframe.lower())
+        effective_kelly_fraction = _CATALOG_KELLY_FRACTION.get(_cell_key, self._kelly_fraction)
+
+        kelly_frac = kelly_raw * effective_kelly_fraction
         notional = bankroll * kelly_frac
         price_dollars = price_cents / 100.0
         size_contracts = int(math.floor(notional / price_dollars))
@@ -1314,7 +1353,7 @@ class KalshiContinuousTrader:
                 "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) notional=$%.4f size=%d source=%s "
                 "REJECTED (notional < $%.2f minimum or size=0)",
                 candidate.ticker, edge, win_prob, float(payout_cents),
-                kelly_raw, kelly_frac, self._kelly_fraction * 100,
+                kelly_raw, kelly_frac, effective_kelly_fraction * 100,
                 notional, size_contracts, source, MIN_VIABLE_NOTIONAL_USD,
             )
             return result
@@ -1331,9 +1370,10 @@ class KalshiContinuousTrader:
         )
         logger.info(
             "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
-            "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) size=%d source=%s min_edge_threshold=%.4f [%s/%s] ACCEPTED",
+            "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) size=%d source=%s "
+            "min_edge_threshold=%.4f [%s/%s] ACCEPTED",
             candidate.ticker, edge, win_prob, float(payout_cents),
-            kelly_raw, kelly_frac, self._kelly_fraction * 100,
+            kelly_raw, kelly_frac, effective_kelly_fraction * 100,
             size_contracts, source,
             min_edge_threshold, candidate.underlying, candidate.timeframe,
         )
@@ -1345,16 +1385,38 @@ class KalshiContinuousTrader:
         estimate: OpinionEstimate,
         bankroll: float,
     ) -> Optional[float]:
-        """Return approved notional ($) or None if any risk check fails.
+        """Return approved max notional ($) or None if any risk check fails.
+
+        Enforces the following constraints in order:
+          1. **Group notional cap** — logged when blocked.
+             Production threshold: MERID_GROUP_NOTIONAL_PCT × bankroll (default 5%).
+          2. **Confidence gate** — logged when blocked.
+             Production threshold: MERID_MIN_CONFIDENCE (default 0.55).
+          3. **Per-cell max risk cap** — limits each trade to the catalog's
+             max_risk_per_trade_pct fraction of bankroll (e.g. 0.5–2%).
+
+        Returns the maximum permitted notional for this trade; callers further
+        cap to ``min(returned_cap, kelly_notional)`` so Kelly drives actual size.
 
         Uses group_id from the canonical TradingCandidate (never a local guess).
         """
+        # Resolve effective group notional cap.
+        # Use the more conservative of: percentage-based cap and hard-dollar cap.
+        # This ensures explicitly configured hard caps are always respected while
+        # allowing the percentage-based cap to automatically scale with bankroll.
+        if _GROUP_NOTIONAL_PCT > 0 and bankroll > 0:
+            pct_cap = bankroll * _GROUP_NOTIONAL_PCT
+            effective_group_cap = min(pct_cap, self._max_group_notional) \
+                if self._max_group_notional > 0 else pct_cap
+        else:
+            effective_group_cap = self._max_group_notional
+
         # Group notional cap
         group_used = self._risk.group_used(candidate.group_id)
-        if group_used >= self._max_group_notional:
+        if group_used >= effective_group_cap:
             logger.debug(
                 "ContinuousTrader: group_notional_cap hit group=%s used=%.2f cap=%.2f",
-                candidate.group_id, group_used, self._max_group_notional,
+                candidate.group_id, group_used, effective_group_cap,
             )
             self._risk.execution_rejections += 1
             self._emit_rejection(candidate.ticker, "group_notional_cap")
@@ -1366,9 +1428,13 @@ class KalshiContinuousTrader:
             self._emit_rejection(candidate.ticker, "low_confidence")
             return None
 
-        # Bankroll fraction sizing
-        notional = bankroll * self._bankroll_fraction
-        remaining_cap = self._max_group_notional - group_used
+        # Per-cell max risk cap: catalog overrides global bankroll_fraction.
+        # This caps notional at max_risk_per_trade_pct of bankroll regardless of
+        # what Kelly suggests, providing a hard upper bound per trade.
+        _cell_key = (candidate.underlying.upper(), candidate.timeframe.lower())
+        cell_max_risk = _CATALOG_MAX_RISK_PCT.get(_cell_key, self._bankroll_fraction)
+        notional = bankroll * cell_max_risk
+        remaining_cap = effective_group_cap - group_used
         notional = min(notional, remaining_cap)
         return notional if notional > 0 else None
 
@@ -1637,6 +1703,15 @@ class KalshiContinuousTrader:
         # Initialize with full bankroll, subtract approved notional after each intent
         remaining_bankroll = bankroll
 
+        # Total aggregate crypto risk cap: stop approving further intents in this
+        # cycle once cumulative notional exceeds bankroll × _TOTAL_CRYPTO_RISK_PCT.
+        # Tracks notional committed across ALL groups and assets in this cycle.
+        _cycle_total_notional: float = 0.0
+        _total_crypto_risk_cap: float = (
+            bankroll * _TOTAL_CRYPTO_RISK_PCT if _TOTAL_CRYPTO_RISK_PCT > 0 and bankroll > 0
+            else float("inf")
+        )
+
         for candidate in self._candidates:
             # Yield to event loop periodically during candidate processing
             await asyncio.sleep(0)
@@ -1789,7 +1864,13 @@ class KalshiContinuousTrader:
             if notional is None:
                 # Determine which risk check failed
                 group_used = self._risk.group_used(candidate.group_id)
-                if group_used >= self._max_group_notional:
+                _pct_cap2 = bankroll * _GROUP_NOTIONAL_PCT if _GROUP_NOTIONAL_PCT > 0 and bankroll > 0 else float("inf")
+                _eff_group_cap = (
+                    min(_pct_cap2, self._max_group_notional)
+                    if self._max_group_notional > 0
+                    else _pct_cap2
+                )
+                if group_used >= _eff_group_cap:
                     veto_reason = "group_notional_cap"
                 elif estimate.confidence < self._min_confidence:
                     veto_reason = "low_confidence"
@@ -1949,6 +2030,34 @@ class KalshiContinuousTrader:
                 final_size_contracts, "none",
             )
 
+            # Total aggregate crypto risk cap: veto if this intent would exceed the
+            # cycle-wide notional budget (bankroll × _TOTAL_CRYPTO_RISK_PCT).
+            if _cycle_total_notional + notional > _total_crypto_risk_cap:
+                veto_reason = "total_crypto_risk_cap"
+                logger.info(
+                    "[CT-RISK-CAP] ticker=%s VETOED: aggregate notional %.2f + %.2f "
+                    "would exceed total_crypto_risk_cap=%.2f",
+                    candidate.ticker, _cycle_total_notional, notional, _total_crypto_risk_cap,
+                )
+                vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                if _pas is not None:
+                    _pas["vetoed"] += 1
+                    _pas["veto_reasons"][veto_reason] = _pas["veto_reasons"].get(veto_reason, 0) + 1
+                    _pas["orders_blocked_by_risk"] += 1
+                ticker_diagnostics.append({
+                    "ticker": candidate.ticker,
+                    "asset": candidate.underlying,
+                    "timeframe": candidate.timeframe,
+                    "implied_yes_prob": mid_prob,
+                    "model_win_prob": sizing.win_prob,
+                    "edge_bps": edge_bps,
+                    "side": side,
+                    "kelly_raw": sizing.kelly_raw,
+                    "kelly_frac": sizing.kelly_frac,
+                    "veto_reason": veto_reason,
+                })
+                continue
+
             self._risk.add_notional(candidate.group_id, notional)
             self._risk.trade_count += 1
             # AUDIT-08: record trade timestamp for per-asset cooldown tracking
@@ -1962,6 +2071,8 @@ class KalshiContinuousTrader:
 
             # BUG-011: Subtract approved notional from remaining bankroll
             remaining_bankroll = max(0.0, remaining_bankroll - notional)
+            # Update cycle-wide aggregate notional for the total_crypto_risk_cap check
+            _cycle_total_notional += notional
 
             # Record forecast edge for calibration tracking
             try:
