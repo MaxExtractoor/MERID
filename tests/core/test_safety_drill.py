@@ -54,15 +54,45 @@ def _mock_feed(symbols_age: dict):
     return feed
 
 
+def _mock_kalshi_recon(discrepancies=False, ever_completed=True):
+    """Build a mock for merid.reconciliation (Kalshi venue reconciliation).
+
+    Maps the same (discrepancies, ever_completed) params used by the helper
+    onto the Kalshi three-state model:
+      - ever_completed=False           → NEVER_RAN  (has_ever_run=False)
+      - ever_completed=True, disc=True → RAN_CRITICAL
+      - ever_completed=True, disc=False→ RAN_NO_CRITICAL
+    """
+    m = MagicMock()
+    m.has_ever_run = MagicMock(return_value=ever_completed)
+    m.has_critical_discrepancies = MagicMock(return_value=discrepancies)
+    if discrepancies:
+        disc = MagicMock()
+        disc.severity = "critical"
+        m.get_last_discrepancies = MagicMock(return_value=[disc])
+    else:
+        m.get_last_discrepancies = MagicMock(return_value=[])
+    return m
+
+
 def _gate_with_mocks(
     kill=False, kill_details=None,
     discrepancies=False, ever_completed=True,
     pnl_consistent=True, pnl_divergence=0.0,
     feed_safe=True, stale_symbols=None,
 ):
-    """Run check_execution_gate with fully mocked dependencies."""
+    """Run check_execution_gate with fully mocked dependencies.
+
+    `discrepancies` and `ever_completed` control the **Kalshi** venue
+    reconciliation (merid.reconciliation).  The paper reconciliation
+    (trading.reconciliation) is always mocked as OK (no discrepancies) so
+    that it doesn't add paper_reconciliation reasons that would interfere
+    with assertions targeted at the Kalshi recon path.
+    """
     rc = _mock_rc(kill=kill, details=kill_details)
-    recon = _mock_recon(discrepancies=discrepancies, ever_completed=ever_completed)
+    # Paper recon always OK — tests here target Kalshi recon behaviour.
+    paper_recon = _mock_recon(discrepancies=False, ever_completed=True)
+    kalshi_recon = _mock_kalshi_recon(discrepancies=discrepancies, ever_completed=ever_completed)
 
     pnl_result = {
         "consistent": pnl_consistent,
@@ -80,7 +110,8 @@ def _gate_with_mocks(
         with patch("core.execution_gate.check_price_feed_staleness", return_value=stale_result):
             with patch.dict("sys.modules", {
                 "merid.risk.kill_switches": MagicMock(risk_controller=rc),
-                "trading.reconciliation": recon,
+                "trading.reconciliation": paper_recon,
+                "merid.reconciliation": kalshi_recon,
             }):
                 return check_execution_gate()
 
@@ -205,13 +236,21 @@ class TestDrillReconFailure:
         _update_blocked_state(False)
         clear_events()
 
-    def test_recon_never_completed_blocks(self):
-        result = _gate_with_mocks(discrepancies=True, ever_completed=False)
+    def test_recon_never_ran_gives_warning(self):
+        """NEVER_RAN: Kalshi recon has never run → warning (not critical), gate=limited.
 
-        assert result.blocked is True
+        The 3-state model intentionally allows execution on fresh start so the
+        system doesn't hard-block on every restart.  Trading is permitted with
+        a logged warning until the first reconciliation cycle completes.
+        """
+        result = _gate_with_mocks(discrepancies=False, ever_completed=False)
+
+        assert result.blocked is False
+        assert result.gate_state == "limited"
         recon_reasons = [r for r in result.reasons if r.source == "reconciliation"]
         assert len(recon_reasons) == 1
-        assert "never completed" in recon_reasons[0].message.lower()
+        assert recon_reasons[0].severity == "warning"
+        assert "never run" in recon_reasons[0].message.lower()
 
     def test_recon_discrepancies_block(self):
         result = _gate_with_mocks(discrepancies=True, ever_completed=True)
