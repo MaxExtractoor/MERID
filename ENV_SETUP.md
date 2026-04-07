@@ -26,8 +26,8 @@ Get credentials at [https://kalshi.com/](https://kalshi.com/) → Account → AP
 ## Trading Mode
 
 ```bash
-MERID_PM_TRADING_MODE=sim             # sim | paper | live
-MERID_PM_LIVE_ENABLED=false           # must be true to enable live trading
+MERID_PM_TRADING_MODE=live            # sim | paper | live  ← PRODUCTION: live
+MERID_PM_LIVE_ENABLED=true            # must be true to enable live trading  ← PRODUCTION: true
 ```
 
 | Mode | Behavior |
@@ -35,6 +35,10 @@ MERID_PM_LIVE_ENABLED=false           # must be true to enable live trading
 | `sim` | Simulated fills, no API calls |
 | `paper` | Real market data from Kalshi, simulated execution |
 | `live` | Real orders on Kalshi (requires `MERID_PM_LIVE_ENABLED=true`) |
+
+> **Live startup behaviour**: when both `MERID_PM_TRADING_MODE=live` and `MERID_PM_LIVE_ENABLED=true`
+> are set, all 35 AgentGrid agents are force-promoted to LIVE mode at startup (bypassing paper-trade
+> readiness gates). The VenueGate and KalshiRiskManager remain as safety layers for every order.
 
 ---
 
