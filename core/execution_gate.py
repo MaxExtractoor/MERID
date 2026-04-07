@@ -22,6 +22,7 @@ Every backend path that wants to execute a trade should call
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -37,6 +38,18 @@ class GateState(str, Enum):
     CLEAR = "clear"        # all checks pass — full trading
     LIMITED = "limited"    # warnings only — reduce/close positions OK, no new risk
     BLOCKED = "blocked"    # critical issues — no execution at all
+
+
+# ── Whitelist: the ONLY sources allowed to set gate_state=limited ──────
+# Any warning from a source NOT in this set is rejected (logged as error,
+# does not trigger limited). Loop lag and transient WS hiccups must never
+# appear here — they can only log diagnostics or set blocked/closed.
+GATE_LIMITED_WHITELIST: frozenset = frozenset({
+    "pnl_consistency",       # PnL source divergence — makes sizing less trustworthy
+    "reconciliation",        # Kalshi venue recon degradation (e.g. never-ran fresh start)
+    "paper_reconciliation",  # Crypto paper recon issues — not outright broken
+    "operator",              # Explicit operator "degrade" decision (UI / admin endpoint)
+})
 
 
 # ── Remediation hints per source ──────────────────────────────────────
@@ -76,9 +89,26 @@ class ExecutionGateStatus:
         """True when gate is in reduce-only mode (warnings but no critical)."""
         return self.gate_state == GateState.LIMITED.value
 
+    @property
+    def entries_allowed(self) -> bool:
+        """True only when gate is fully clear — no new risk entries permitted otherwise."""
+        return self.gate_state == GateState.CLEAR.value
+
+    @property
+    def exits_allowed(self) -> bool:
+        """True when closing/reducing positions is permitted (clear or limited).
+
+        Exits are only forbidden when gate_state=blocked.
+        """
+        return self.gate_state in (GateState.CLEAR.value, GateState.LIMITED.value)
+
     def allows_reduce(self) -> bool:
         """True when closing/reducing positions is permitted (clear or limited)."""
         return self.gate_state in (GateState.CLEAR.value, GateState.LIMITED.value)
+
+    def snapshot(self) -> "ExecutionGateStatus":
+        """Return self — already an immutable point-in-time snapshot."""
+        return self
 
     def to_dict(self) -> dict:
         return {
@@ -287,13 +317,54 @@ def check_execution_gate() -> ExecutionGateStatus:
     except Exception as exc:
         _log_check_failure("pnl_consistency", exc)
 
+    # ── 5. Kalshi WebSocket staleness ───────────────────────────────
+    # If the WS feed is required (default) and enters the "failed" state,
+    # gate moves to blocked (fail-closed). Never sets limited — it is either
+    # fine or broken; half-measures for connectivity are explicitly avoided.
+    # Override with env MERID_EXEC_GATE_REQUIRE_KALSHI_WS=0 to run without WS.
+    _require_ws = os.environ.get("MERID_EXEC_GATE_REQUIRE_KALSHI_WS", "1").lower() not in ("0", "false", "no")
+    if _require_ws:
+        try:
+            from merid.event_venues.kalshi.ws import get_kalshi_ws
+            _ws = get_kalshi_ws()
+            if _ws is not None and _ws.ws_health_status == "failed":
+                reasons.append(BlockReason(
+                    source="kalshi_ws",
+                    severity="critical",
+                    message="Kalshi WebSocket feed has failed (stale/dead)",
+                    details="WS completely dead — no new order book data available",
+                    hint="Check Kalshi connectivity; set MERID_EXEC_GATE_REQUIRE_KALSHI_WS=0 to run without WS.",
+                ))
+                logger.warning("GATE: Kalshi WS failed — blocking execution (fail-closed)")
+        except Exception as exc:
+            _log_check_failure("kalshi_ws", exc)
+
+    # ── Whitelist enforcement — determine gate_state ─────────────────
+    # Only warnings from GATE_LIMITED_WHITELIST sources may set gate_state=limited.
+    # Warnings from non-whitelisted sources are rejected with an error log and do
+    # NOT cause the gate to become limited — they remain as diagnostic info only.
+    # This ensures loop lag, transient connectivity noise, etc. can never produce
+    # a "limited" gate state.
     has_critical = any(r.severity == "critical" for r in reasons)
-    has_warning = any(r.severity == "warning" for r in reasons)
+    whitelisted_warnings = []
+    for r in reasons:
+        if r.severity == "warning":
+            if r.source not in GATE_LIMITED_WHITELIST:
+                logger.error(
+                    "GATE WHITELIST VIOLATION: source=%r attempted to set gate=limited — "
+                    "rejected; only whitelisted sources may produce a limited gate state. "
+                    "message=%r",
+                    r.source, r.message,
+                )
+            else:
+                whitelisted_warnings.append(r)
+
+    has_valid_warning = bool(whitelisted_warnings)
     blocked = has_critical
 
     if has_critical:
         gate_state = GateState.BLOCKED.value
-    elif has_warning:
+    elif has_valid_warning:
         gate_state = GateState.LIMITED.value
     else:
         gate_state = GateState.CLEAR.value
