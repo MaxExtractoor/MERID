@@ -1688,7 +1688,20 @@ class KalshiContinuousTrader:
                 })
                 continue
 
-            estimate = self.evaluate_candidate(candidate, market_prob=mid_prob)
+            # Build context so strategy grid can apply the correct asset-tier
+            # Kelly multiplier, min-liquidity gate, and timeframe-specific
+            # signal logic.  Without this context, _CryptoGridStrategy.estimate
+            # defaults to asset="BTC"/timeframe="1h" and the liquidity gate
+            # (volume=0.0 < min_volume) always fails, producing zero intents.
+            _eval_context: Dict[str, Any] = {
+                "asset": candidate.underlying,
+                "timeframe": candidate.timeframe,
+                "volume": float(candidate.volume),
+                "open_interest": float(candidate.open_interest),
+            }
+            if candidate.spot_price is not None:
+                _eval_context["spot_price"] = candidate.spot_price
+            estimate = self.evaluate_candidate(candidate, market_prob=mid_prob, context=_eval_context)
 
             if estimate is None:
                 veto_reason = "no_estimate"
@@ -2252,16 +2265,21 @@ class KalshiContinuousTrader:
     def _emit_rejection(self, symbol: str, reason: str, intent_id: str = "") -> None:
         """Publish execution_rejected event for audit trail."""
         try:
-            from core.streaming_bus import streaming_bus, EventChannel
-            event = {
-                "symbol": symbol,
-                "reason": reason,
-                "intent_id": intent_id or f"reject-{symbol}-{int(time.time())}",
-                "timestamp": time.time(),
-            }
+            from core.streaming_bus import streaming_bus, StreamEvent, EventChannel
+            event = StreamEvent(
+                channel=EventChannel.EXECUTION,
+                event_type="execution_rejected",
+                data={
+                    "symbol": symbol,
+                    "reason": reason,
+                    "intent_id": intent_id or f"reject-{symbol}-{int(time.time())}",
+                    "timestamp": time.time(),
+                },
+                source="continuous_trader",
+            )
             asyncio.get_event_loop().call_soon_threadsafe(
                 lambda: asyncio.ensure_future(
-                    streaming_bus.publish(EventChannel.EXECUTION, "execution_rejected", event)
+                    streaming_bus.publish(event)
                 )
             )
         except Exception as exc:
