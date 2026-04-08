@@ -68,9 +68,9 @@ def _kalshi_default_mode() -> TradingMode:
     """Resolve Kalshi's default TradingMode from environment variables.
 
     Precedence:
-      1. ``KALSHI_ENV=live``  → TradingMode.LIVE
-      2. ``KALSHI_ENV=demo``  → TradingMode.SIM  (explicit demo/sandbox)
-      3. ``KALSHI_ENV`` unset → TradingMode.SIM  + WARNING log
+      1. ``KALSHI_ENV=live``                      → TradingMode.LIVE
+      2. ``KALSHI_ENV=demo|sandbox|staging``       → TradingMode.SIM  (explicit non-live)
+      3. ``KALSHI_ENV`` unset                      → TradingMode.SIM  + WARNING log
     """
     kalshi_env = os.getenv("KALSHI_ENV", "").lower().strip()
     if kalshi_env == "live":
