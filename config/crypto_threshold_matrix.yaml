@@ -1,0 +1,446 @@
+# ─── MERID Crypto Threshold Matrix ─────────────────────────────────────────
+# Production-ready crypto trading parameters for BTC/ETH/SOL/XRP/DOGE across
+# all timeframes (15m, 1h, 1d, 1w, 1M, 1Y) and archetypes.
+#
+# Risk Philosophy:
+#   - Bankroll: $100,000
+#   - Max daily loss: 15% = $15,000
+#   - Target: 10-15 quality trades/hour across all 5 assets
+#   - Risk per trade: 0.25-0.75% of bankroll with hard caps at 1%
+#   - Kelly: Fractional Kelly ~0.20 default (0.22 for BTC)
+#
+# Asset Tiers:
+#   - BTC: Anchor (most permissive edges, highest Kelly)
+#   - ETH: Core (slightly stricter than BTC)
+#   - SOL/XRP/DOGE: Satellites (stricter edges, lower Kelly)
+#
+# Matrix Structure:
+#   Rows are evaluated in order. Later rows override earlier ones for matching
+#   (asset, timeframe, archetype) triples. Use "*" wildcards for defaults.
+#
+# Environment:
+#   Set MERID_CRYPTO_EDGE_PRODUCTION_PROFILE=modern (default) or legacy
+# ────────────────────────────────────────────────────────────────────────────
+
+profiles:
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # LEGACY PROFILE (conservative, for reference only)
+  # ══════════════════════════════════════════════════════════════════════════
+  legacy:
+    # Global wildcard defaults for legacy profile
+    - asset: "*"
+      timeframe: "*"
+      archetype: "*"
+      directional_min_edge: 0.0200          # 2.0% base edge
+      sentiment_vol_regime_min_edge: null
+      contrarian_sentiment_min: 60
+      contrarian_model_gap_min: 0.12
+      mm_max_spread_cents: 50
+      pm_risk_max_spread_cents: 50
+      tier_min_edge_floor: 0.010
+      kelly_fraction: 0.20
+      min_order_notional_usd: 1.00
+      vol_low_threshold: 0.20
+      vol_high_threshold: 1.20
+      vol_size_mult_low: 0.75
+      vol_size_mult_mid: 1.00
+      vol_size_mult_high: 0.50
+      spot_strike_veto_flag: false
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # MODERN PROFILE (production, aggressive but conservative)
+  # ══════════════════════════════════════════════════════════════════════════
+  modern:
+
+    # ──────────────────────────────────────────────────────────────────────
+    # GLOBAL WILDCARD DEFAULTS (apply to all assets/timeframes/archetypes)
+    # ──────────────────────────────────────────────────────────────────────
+    - asset: "*"
+      timeframe: "*"
+      archetype: "*"
+      directional_min_edge: null            # Overridden per timeframe
+      sentiment_vol_regime_min_edge: null
+      contrarian_sentiment_min: 59          # Contrarian at sentiment ≥59
+      contrarian_model_gap_min: 0.11        # Contrarian needs 11% model gap
+      mm_max_spread_cents: 40               # Market-maker spread cap
+      pm_risk_max_spread_cents: 40          # PM risk module spread cap
+      tier_min_edge_floor: 0.005            # 0.5% absolute floor
+      kelly_fraction: 0.20                  # Default fractional Kelly
+      min_order_notional_usd: 0.50          # $0.50 minimum order size
+      vol_low_threshold: 0.25               # 25% annualized vol → LOW band
+      vol_high_threshold: 1.40              # 140% annualized vol → HIGH band
+      vol_size_mult_low: 0.75               # 75% size in quiet markets
+      vol_size_mult_mid: 1.00               # 100% size in normal vol
+      vol_size_mult_high: 0.45              # 45% size in extreme vol
+      spot_strike_veto_flag: false          # Default: no veto
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TIMEFRAME-SPECIFIC DEFAULTS (wildcard asset and archetype)
+    # ──────────────────────────────────────────────────────────────────────
+
+    # 15-minute timeframe (high frequency, tightest execution)
+    - asset: "*"
+      timeframe: "15m"
+      archetype: "*"
+      directional_min_edge: 0.0125          # 1.25% edge for 15m base
+      min_order_notional_usd: 0.50
+
+    # 1-hour timeframe
+    - asset: "*"
+      timeframe: "1h"
+      archetype: "*"
+      directional_min_edge: 0.0150          # 1.50% edge for 1h base
+      min_order_notional_usd: 0.75
+
+    # Daily timeframe
+    - asset: "*"
+      timeframe: "1d"
+      archetype: "*"
+      directional_min_edge: 0.0200          # 2.00% edge for daily base
+      min_order_notional_usd: 1.00
+
+    # Weekly timeframe
+    - asset: "*"
+      timeframe: "1w"
+      archetype: "*"
+      directional_min_edge: 0.0250          # 2.50% edge for weekly base
+      min_order_notional_usd: 2.00
+
+    # Monthly timeframe
+    - asset: "*"
+      timeframe: "1M"
+      archetype: "*"
+      directional_min_edge: 0.0300          # 3.00% edge for monthly base
+      min_order_notional_usd: 3.00
+
+    # Annual timeframe
+    - asset: "*"
+      timeframe: "1Y"
+      archetype: "*"
+      directional_min_edge: 0.0350          # 3.50% edge for annual base
+      min_order_notional_usd: 5.00
+
+    # ──────────────────────────────────────────────────────────────────────
+    # BTC ANCHOR (most permissive edges, highest Kelly allowed)
+    # ──────────────────────────────────────────────────────────────────────
+
+    - asset: "BTC"
+      timeframe: "15m"
+      archetype: "*"
+      directional_min_edge: 0.0100          # 1.00% edge for BTC 15m
+      kelly_fraction: 0.22
+
+    - asset: "BTC"
+      timeframe: "1h"
+      archetype: "*"
+      directional_min_edge: 0.0125          # 1.25% edge for BTC 1h
+      kelly_fraction: 0.22
+
+    - asset: "BTC"
+      timeframe: "1d"
+      archetype: "*"
+      directional_min_edge: 0.0175          # 1.75% edge for BTC daily
+      kelly_fraction: 0.22
+
+    - asset: "BTC"
+      timeframe: "1w"
+      archetype: "*"
+      directional_min_edge: 0.0225          # 2.25% edge for BTC weekly
+      kelly_fraction: 0.22
+
+    - asset: "BTC"
+      timeframe: "1M"
+      archetype: "*"
+      directional_min_edge: 0.0275          # 2.75% edge for BTC monthly
+      kelly_fraction: 0.22
+
+    - asset: "BTC"
+      timeframe: "1Y"
+      archetype: "*"
+      directional_min_edge: 0.0325          # 3.25% edge for BTC annual
+      kelly_fraction: 0.22
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ETH CORE (slightly stricter than BTC)
+    # ──────────────────────────────────────────────────────────────────────
+
+    - asset: "ETH"
+      timeframe: "15m"
+      archetype: "*"
+      directional_min_edge: 0.0115          # 1.15% edge for ETH 15m
+      kelly_fraction: 0.21
+
+    - asset: "ETH"
+      timeframe: "1h"
+      archetype: "*"
+      directional_min_edge: 0.0140          # 1.40% edge for ETH 1h
+      kelly_fraction: 0.21
+
+    - asset: "ETH"
+      timeframe: "1d"
+      archetype: "*"
+      directional_min_edge: 0.0190          # 1.90% edge for ETH daily
+      kelly_fraction: 0.21
+
+    - asset: "ETH"
+      timeframe: "1w"
+      archetype: "*"
+      directional_min_edge: 0.0240          # 2.40% edge for ETH weekly
+      kelly_fraction: 0.21
+
+    - asset: "ETH"
+      timeframe: "1M"
+      archetype: "*"
+      directional_min_edge: 0.0290          # 2.90% edge for ETH monthly
+      kelly_fraction: 0.21
+
+    - asset: "ETH"
+      timeframe: "1Y"
+      archetype: "*"
+      directional_min_edge: 0.0340          # 3.40% edge for ETH annual
+      kelly_fraction: 0.21
+
+    # ──────────────────────────────────────────────────────────────────────
+    # SOL SATELLITE (stricter edges, lower Kelly)
+    # ──────────────────────────────────────────────────────────────────────
+
+    - asset: "SOL"
+      timeframe: "15m"
+      archetype: "*"
+      directional_min_edge: 0.0135          # 1.35% edge for SOL 15m
+      kelly_fraction: 0.18
+
+    - asset: "SOL"
+      timeframe: "1h"
+      archetype: "*"
+      directional_min_edge: 0.0160          # 1.60% edge for SOL 1h
+      kelly_fraction: 0.18
+
+    - asset: "SOL"
+      timeframe: "1d"
+      archetype: "*"
+      directional_min_edge: 0.0210          # 2.10% edge for SOL daily
+      kelly_fraction: 0.18
+
+    - asset: "SOL"
+      timeframe: "1w"
+      archetype: "*"
+      directional_min_edge: 0.0260          # 2.60% edge for SOL weekly
+      kelly_fraction: 0.18
+
+    - asset: "SOL"
+      timeframe: "1M"
+      archetype: "*"
+      directional_min_edge: 0.0310          # 3.10% edge for SOL monthly
+      kelly_fraction: 0.18
+
+    - asset: "SOL"
+      timeframe: "1Y"
+      archetype: "*"
+      directional_min_edge: 0.0360          # 3.60% edge for SOL annual
+      kelly_fraction: 0.18
+
+    # ──────────────────────────────────────────────────────────────────────
+    # XRP SATELLITE (stricter edges, lower Kelly)
+    # ──────────────────────────────────────────────────────────────────────
+
+    - asset: "XRP"
+      timeframe: "15m"
+      archetype: "*"
+      directional_min_edge: 0.0140          # 1.40% edge for XRP 15m
+      kelly_fraction: 0.17
+
+    - asset: "XRP"
+      timeframe: "1h"
+      archetype: "*"
+      directional_min_edge: 0.0165          # 1.65% edge for XRP 1h
+      kelly_fraction: 0.17
+
+    - asset: "XRP"
+      timeframe: "1d"
+      archetype: "*"
+      directional_min_edge: 0.0215          # 2.15% edge for XRP daily
+      kelly_fraction: 0.17
+
+    - asset: "XRP"
+      timeframe: "1w"
+      archetype: "*"
+      directional_min_edge: 0.0265          # 2.65% edge for XRP weekly
+      kelly_fraction: 0.17
+
+    - asset: "XRP"
+      timeframe: "1M"
+      archetype: "*"
+      directional_min_edge: 0.0315          # 3.15% edge for XRP monthly
+      kelly_fraction: 0.17
+
+    - asset: "XRP"
+      timeframe: "1Y"
+      archetype: "*"
+      directional_min_edge: 0.0365          # 3.65% edge for XRP annual
+      kelly_fraction: 0.17
+
+    # ──────────────────────────────────────────────────────────────────────
+    # DOGE SATELLITE (strictest edges among crypto, lowest Kelly)
+    # ──────────────────────────────────────────────────────────────────────
+
+    - asset: "DOGE"
+      timeframe: "15m"
+      archetype: "*"
+      directional_min_edge: 0.0145          # 1.45% edge for DOGE 15m
+      kelly_fraction: 0.16
+
+    - asset: "DOGE"
+      timeframe: "1h"
+      archetype: "*"
+      directional_min_edge: 0.0170          # 1.70% edge for DOGE 1h
+      kelly_fraction: 0.16
+
+    - asset: "DOGE"
+      timeframe: "1d"
+      archetype: "*"
+      directional_min_edge: 0.0220          # 2.20% edge for DOGE daily
+      kelly_fraction: 0.16
+
+    - asset: "DOGE"
+      timeframe: "1w"
+      archetype: "*"
+      directional_min_edge: 0.0270          # 2.70% edge for DOGE weekly
+      kelly_fraction: 0.16
+
+    - asset: "DOGE"
+      timeframe: "1M"
+      archetype: "*"
+      directional_min_edge: 0.0320          # 3.20% edge for DOGE monthly
+      kelly_fraction: 0.16
+
+    - asset: "DOGE"
+      timeframe: "1Y"
+      archetype: "*"
+      directional_min_edge: 0.0370          # 3.70% edge for DOGE annual
+      kelly_fraction: 0.16
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ARCHETYPE-SPECIFIC OVERRIDES
+    # ──────────────────────────────────────────────────────────────────────
+
+    # Contrarian archetype (extreme sentiment, large model gaps)
+    - asset: "*"
+      timeframe: "*"
+      archetype: "contrarian"
+      contrarian_sentiment_min: 59          # Fire at sentiment ≥59%
+      contrarian_model_gap_min: 0.12        # Need 12% model-market gap
+      directional_min_edge: 0.0150          # 1.50% min edge for contrarian
+
+    # Market-maker archetype (tighter spreads, inventory management)
+    - asset: "*"
+      timeframe: "*"
+      archetype: "market_maker"
+      mm_max_spread_cents: 30               # MM tighter spread cap
+      directional_min_edge: 0.0080          # 0.80% min edge for MM
+      kelly_fraction: 0.15                  # Lower Kelly for MM
+
+    # Vol-breakout archetype (elevated vol + book imbalance)
+    - asset: "*"
+      timeframe: "*"
+      archetype: "vol_breakout"
+      directional_min_edge: 0.0100          # 1.00% min edge for vol breakout
+      vol_size_mult_high: 0.60              # Less aggressive cut in high vol
+
+    # Regime-switch archetype (momentum on sentiment shifts)
+    - asset: "*"
+      timeframe: "*"
+      archetype: "regime_switch"
+      directional_min_edge: 0.0120          # 1.20% min edge for regime switch
+
+    # Arbitrage archetype (very tight edges, high frequency)
+    - asset: "*"
+      timeframe: "*"
+      archetype: "arbitrage"
+      directional_min_edge: 0.0050          # 0.50% min edge for arb
+      kelly_fraction: 0.25                  # Higher Kelly for arb
+      min_order_notional_usd: 0.25          # Lower min for arb
+
+    # ──────────────────────────────────────────────────────────────────────
+    # SPOT/STRIKE VETO OVERRIDES (long-dated BTC/ETH require valid spot)
+    # ──────────────────────────────────────────────────────────────────────
+
+    # BTC monthly/annual: enable spot/strike veto
+    - asset: "BTC"
+      timeframe: "1M"
+      archetype: "*"
+      spot_strike_veto_flag: true
+
+    - asset: "BTC"
+      timeframe: "1Y"
+      archetype: "*"
+      spot_strike_veto_flag: true
+
+    # ETH monthly/annual: enable spot/strike veto
+    - asset: "ETH"
+      timeframe: "1M"
+      archetype: "*"
+      spot_strike_veto_flag: true
+
+    - asset: "ETH"
+      timeframe: "1Y"
+      archetype: "*"
+      spot_strike_veto_flag: true
+
+    # SOL annual: enable spot/strike veto (monthly still disabled)
+    - asset: "SOL"
+      timeframe: "1Y"
+      archetype: "*"
+      spot_strike_veto_flag: true
+
+    # XRP annual: enable spot/strike veto
+    - asset: "XRP"
+      timeframe: "1Y"
+      archetype: "*"
+      spot_strike_veto_flag: true
+
+    # DOGE annual: enable spot/strike veto
+    - asset: "DOGE"
+      timeframe: "1Y"
+      archetype: "*"
+      spot_strike_veto_flag: true
+
+# ────────────────────────────────────────────────────────────────────────────
+# USAGE NOTES
+# ────────────────────────────────────────────────────────────────────────────
+#
+# 1. Matrix Evaluation:
+#    - Rows are evaluated in order from top to bottom
+#    - Later matching rows override earlier ones
+#    - Wildcards ("*") match any value for that dimension
+#
+# 2. Environment Variables:
+#    - MERID_CRYPTO_EDGE_PRODUCTION_PROFILE: "modern" (default) or "legacy"
+#    - MERID_CRYPTO_THRESHOLD_MATRIX_PATH: override config file path
+#
+# 3. Vol Bands:
+#    - LOW: realized_vol < vol_low_threshold → size × vol_size_mult_low
+#    - MID: vol_low_threshold ≤ vol < vol_high_threshold → size × vol_size_mult_mid
+#    - HIGH: vol ≥ vol_high_threshold → size × vol_size_mult_high
+#
+# 4. Spot/Strike Veto:
+#    - When spot_strike_veto_flag=true, orders are rejected if:
+#      - Spot price missing or stale
+#      - Strike price missing or invalid
+#      - Distance fraction (spot-strike)/strike is extreme
+#
+# 5. Kelly Sizing:
+#    - Final size = kelly_fraction × nominal_kelly × vol_band_multiplier
+#    - Capped by max_contracts_per_order and max_notional_usd in grid config
+#
+# 6. Min Edge:
+#    - directional_min_edge: applies to directional archetype
+#    - sentiment_vol_regime_min_edge: if set, applies to regime/vol archetypes
+#    - tier_min_edge_floor: absolute minimum across all archetypes
+#
+# 7. Contrarian Triggers:
+#    - Fire when: sentiment ≥ contrarian_sentiment_min AND
+#                 |model_prob - market_prob| ≥ contrarian_model_gap_min
+#
+# ────────────────────────────────────────────────────────────────────────────
