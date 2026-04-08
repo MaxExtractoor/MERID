@@ -68,7 +68,7 @@ async def test_kalshi_unified_adapter_integration(mock_kalshi_api):
     
     registry = get_adapter_registry()
     # Force re-registration with fresh config if needed
-    adapter = KalshiUnifiedAdapter(paper=True)
+    adapter = KalshiUnifiedAdapter()
     registry.register(adapter)
     
     connected = await adapter.connect()

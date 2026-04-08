@@ -1,7 +1,12 @@
-"""MERID Alpaca Adapter - US Stocks, ETFs, and Crypto.
+"""LEGACY (Alpaca/IBKR) — not used in production Kalshi.
+
+MERID Alpaca Adapter - US Stocks, ETFs, and Crypto.
 
 US-compliant trading via Alpaca Markets API (paper and live).
 Uses the official alpaca-py SDK for all API calls.
+
+This adapter is NOT imported by the Kalshi production pipeline.
+It is retained for legacy equity trading support only.
 
 Env vars:
     MERID_ALPACA_API_KEY  / ALPACA_API_KEY
