@@ -11,12 +11,15 @@ class TestCoinbasePrimarySource:
 
     def test_spot_fetch_tries_coinbase_first(self):
         """_fetch_spot_prices_with_fallback should try Coinbase first."""
-        from merid.trading.kalshi_continuous_trader import KalshiContinuousTrader
-
-        # We can't easily instantiate CT without full setup, so just verify
-        # the source code contains the expected priority
         import inspect
-        source = inspect.getsource(KalshiContinuousTrader._fetch_spot_prices_with_fallback)
+        import merid.trading.kalshi_continuous_trader as _ct_module
+
+        # The function is a module-level async function, not a class method
+        func = getattr(_ct_module, "_fetch_spot_prices_with_fallback", None)
+        assert func is not None, (
+            "_fetch_spot_prices_with_fallback not found in kalshi_continuous_trader"
+        )
+        source = inspect.getsource(func)
 
         # Should mention Coinbase as PRIMARY
         assert "Coinbase" in source or "coinbase" in source.lower()
@@ -24,10 +27,12 @@ class TestCoinbasePrimarySource:
 
     def test_spot_source_priority_documented(self):
         """Verify spot source priority is documented in code."""
-        from merid.trading.kalshi_continuous_trader import KalshiContinuousTrader
         import inspect
+        import merid.trading.kalshi_continuous_trader as _ct_module
 
-        source = inspect.getsource(KalshiContinuousTrader._fetch_spot_prices_with_fallback)
+        func = getattr(_ct_module, "_fetch_spot_prices_with_fallback", None)
+        assert func is not None
+        source = inspect.getsource(func)
 
         # Should document the fallback chain
         # Expected: Coinbase → CoinGecko → Binance → last-known

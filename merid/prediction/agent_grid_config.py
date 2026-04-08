@@ -68,14 +68,17 @@ class AgentConfig:
     entry_window: EntryWindowConfig = field(default_factory=EntryWindowConfig)
     enabled: bool = True
     archetype: str = "directional"  # directional, market_maker, arbitrage, contrarian, regime_switch, vol_breakout
+    # Optional explicit category override — when None the category is inferred from name/assets.
+    category: Optional[str] = None
 
     @property
     def agent_id(self) -> str:
         return f"kalshi-{self.name.lower()}"
 
-    @property
-    def category(self) -> str:
-        """Infer category from agent name or assets."""
+    def resolve_category(self) -> str:
+        """Return explicit category if set, otherwise infer from agent name and assets."""
+        if self.category is not None:
+            return self.category
         name_lower = self.name.lower()
         if any(x in name_lower for x in ["btc", "eth", "sol", "xrp", "doge", "crypto"]):
             return "crypto"
