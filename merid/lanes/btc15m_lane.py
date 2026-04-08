@@ -1454,7 +1454,10 @@ class BTC15MLane:
                 from merid.trading.trade_mode import get_trade_mode, TradeMode
                 effective_mode = "live" if get_trade_mode() == TradeMode.LIVE else "paper"
             except Exception as _tm_exc:
-                logger.debug("get_trade_mode failed, defaulting to paper: %s", _tm_exc)
+                logger.warning(
+                    "get_trade_mode raised unexpectedly — defaulting to paper for this order. "
+                    "Investigate immediately: %s", _tm_exc
+                )
                 effective_mode = "paper"
 
         # --- Structured ORDER log: full risk inputs for every order attempt ---

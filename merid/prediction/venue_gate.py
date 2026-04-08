@@ -58,7 +58,10 @@ class VenueGate:
                 from merid.settings import settings
                 raw_mode_str = settings.MERID_PM_TRADING_MODE
             except Exception as _se:
-                logger.debug("VenueGate: settings unavailable for mode, using env: %s", _se)
+                logger.warning(
+                    "VenueGate: merid.settings unavailable for mode, falling back to env — "
+                    "verify MERID_PM_TRADING_MODE is set. Error: %s", _se
+                )
                 raw_mode_str = os.getenv("MERID_PM_TRADING_MODE", "mock")
             val = raw_mode_str.lower()
             if val == "sim":
@@ -80,7 +83,10 @@ class VenueGate:
                 from merid.settings import settings
                 self._live_enabled = settings.MERID_PM_LIVE_ENABLED
             except Exception as _se:
-                logger.debug("VenueGate: settings unavailable for live_enabled, using env: %s", _se)
+                logger.warning(
+                    "VenueGate: merid.settings unavailable for live_enabled, falling back to env — "
+                    "verify MERID_PM_LIVE_ENABLED is set. Error: %s", _se
+                )
                 self._live_enabled = os.getenv(
                     "MERID_PM_LIVE_ENABLED", "false"
                 ).lower() == "true"
@@ -174,6 +180,9 @@ class VenueGate:
             self._mode = TradingMode(raw)
             self._live_enabled = settings.MERID_PM_LIVE_ENABLED
         except Exception as _se:
+            logger.warning(
+                "VenueGate.reload: merid.settings unavailable, falling back to env. Error: %s", _se
+            )
             raw = os.getenv("MERID_PM_TRADING_MODE", "mock").lower()
             if raw == "sim":
                 raw = "mock"
