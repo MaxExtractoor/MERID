@@ -28,7 +28,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 20
-      max_notional_usd: 500
+      max_contracts_per_order: 5        # Small size for high-frequency 15m
+      max_yes_position: 20               # Max 20 contracts YES per market
+      max_no_position: 20                # Max 20 contracts NO per market
+      max_notional_usd: 750              # ~0.75% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -42,7 +45,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 15
-      max_notional_usd: 1000
+      max_contracts_per_order: 10        # Larger size for 1h
+      max_yes_position: 40               # Max 40 contracts YES per market
+      max_no_position: 40                # Max 40 contracts NO per market
+      max_notional_usd: 1500             # ~1.5% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -56,7 +62,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 10
-      max_notional_usd: 2000
+      max_contracts_per_order: 15        # Moderate size for daily
+      max_yes_position: 50               # Max 50 contracts YES per market
+      max_no_position: 50                # Max 50 contracts NO per market
+      max_notional_usd: 3000             # ~3% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 15
@@ -70,7 +79,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 3000
+      max_contracts_per_order: 20        # Larger size for weekly
+      max_yes_position: 60               # Max 60 contracts YES per market
+      max_no_position: 60                # Max 60 contracts NO per market
+      max_notional_usd: 4000             # ~4% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 20
@@ -84,7 +96,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 4000
+      max_contracts_per_order: 25        # Larger size for monthly
+      max_yes_position: 70               # Max 70 contracts YES per market
+      max_no_position: 70                # Max 70 contracts NO per market
+      max_notional_usd: 5000             # ~5% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 2
       max_spread_cents: 25
@@ -98,7 +113,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 3
-      max_notional_usd: 5000
+      max_contracts_per_order: 30        # Largest size for annual
+      max_yes_position: 80               # Max 80 contracts YES per market
+      max_no_position: 80                # Max 80 contracts NO per market
+      max_notional_usd: 6000             # ~6% of bankroll per market
       max_slippage_cents: 10
       min_depth_contracts: 2
       max_spread_cents: 30
@@ -115,7 +133,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 20
-      max_notional_usd: 500
+      max_contracts_per_order: 5         # Small size for high-frequency 15m
+      max_yes_position: 18               # Slightly lower than BTC
+      max_no_position: 18
+      max_notional_usd: 700              # ~0.70% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -129,7 +150,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 15
-      max_notional_usd: 1000
+      max_contracts_per_order: 10
+      max_yes_position: 35               # Slightly lower than BTC
+      max_no_position: 35
+      max_notional_usd: 1400             # ~1.4% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -143,7 +167,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 10
-      max_notional_usd: 2000
+      max_contracts_per_order: 15
+      max_yes_position: 45               # Slightly lower than BTC
+      max_no_position: 45
+      max_notional_usd: 2800             # ~2.8% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 15
@@ -157,7 +184,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 3000
+      max_contracts_per_order: 20
+      max_yes_position: 55               # Slightly lower than BTC
+      max_no_position: 55
+      max_notional_usd: 3500             # ~3.5% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 20
@@ -171,7 +201,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 4000
+      max_contracts_per_order: 25
+      max_yes_position: 65               # Slightly lower than BTC
+      max_no_position: 65
+      max_notional_usd: 4500             # ~4.5% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 2
       max_spread_cents: 25
@@ -185,7 +218,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 3
-      max_notional_usd: 5000
+      max_contracts_per_order: 30
+      max_yes_position: 75               # Slightly lower than BTC
+      max_no_position: 75
+      max_notional_usd: 5500             # ~5.5% of bankroll per market
       max_slippage_cents: 10
       min_depth_contracts: 2
       max_spread_cents: 30
@@ -202,7 +238,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 20
-      max_notional_usd: 400
+      max_contracts_per_order: 4         # Smaller for satellite
+      max_yes_position: 15               # Satellite tier
+      max_no_position: 15
+      max_notional_usd: 500              # ~0.50% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -216,7 +255,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 15
-      max_notional_usd: 800
+      max_contracts_per_order: 8
+      max_yes_position: 25               # Satellite tier
+      max_no_position: 25
+      max_notional_usd: 1000             # ~1.0% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -230,7 +272,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 10
-      max_notional_usd: 1500
+      max_contracts_per_order: 12
+      max_yes_position: 35               # Satellite tier
+      max_no_position: 35
+      max_notional_usd: 2000             # ~2.0% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 15
@@ -244,7 +289,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 2000
+      max_contracts_per_order: 15
+      max_yes_position: 40               # Satellite tier
+      max_no_position: 40
+      max_notional_usd: 2500             # ~2.5% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 20
@@ -258,7 +306,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 2500
+      max_contracts_per_order: 18
+      max_yes_position: 45               # Satellite tier
+      max_no_position: 45
+      max_notional_usd: 3000             # ~3.0% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 2
       max_spread_cents: 25
@@ -272,7 +323,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 3
-      max_notional_usd: 3000
+      max_contracts_per_order: 20
+      max_yes_position: 50               # Satellite tier
+      max_no_position: 50
+      max_notional_usd: 3500             # ~3.5% of bankroll per market
       max_slippage_cents: 10
       min_depth_contracts: 2
       max_spread_cents: 30
@@ -289,7 +343,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 20
-      max_notional_usd: 400
+      max_contracts_per_order: 4         # Smaller for satellite
+      max_yes_position: 15               # Satellite tier
+      max_no_position: 15
+      max_notional_usd: 450              # ~0.45% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -303,7 +360,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 15
-      max_notional_usd: 800
+      max_contracts_per_order: 8
+      max_yes_position: 25               # Satellite tier
+      max_no_position: 25
+      max_notional_usd: 950              # ~0.95% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -317,7 +377,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 10
-      max_notional_usd: 1500
+      max_contracts_per_order: 12
+      max_yes_position: 35               # Satellite tier
+      max_no_position: 35
+      max_notional_usd: 1900             # ~1.9% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 15
@@ -331,7 +394,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 2000
+      max_contracts_per_order: 15
+      max_yes_position: 40               # Satellite tier
+      max_no_position: 40
+      max_notional_usd: 2400             # ~2.4% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 20
@@ -345,7 +411,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 2500
+      max_contracts_per_order: 18
+      max_yes_position: 45               # Satellite tier
+      max_no_position: 45
+      max_notional_usd: 2900             # ~2.9% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 2
       max_spread_cents: 25
@@ -359,7 +428,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 3
-      max_notional_usd: 3000
+      max_contracts_per_order: 20
+      max_yes_position: 50               # Satellite tier
+      max_no_position: 50
+      max_notional_usd: 3400             # ~3.4% of bankroll per market
       max_slippage_cents: 10
       min_depth_contracts: 2
       max_spread_cents: 30
@@ -376,7 +448,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 20
-      max_notional_usd: 300
+      max_contracts_per_order: 3         # Smallest for satellite DOGE
+      max_yes_position: 12               # Satellite tier (most conservative)
+      max_no_position: 12
+      max_notional_usd: 400              # ~0.40% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -390,7 +465,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 15
-      max_notional_usd: 600
+      max_contracts_per_order: 6
+      max_yes_position: 20               # Satellite tier (most conservative)
+      max_no_position: 20
+      max_notional_usd: 800              # ~0.80% of bankroll per market
       max_slippage_cents: 3
       min_depth_contracts: 5
       max_spread_cents: 10
@@ -404,7 +482,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 10
-      max_notional_usd: 1000
+      max_contracts_per_order: 10
+      max_yes_position: 30               # Satellite tier (most conservative)
+      max_no_position: 30
+      max_notional_usd: 1500             # ~1.5% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 15
@@ -418,7 +499,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 1500
+      max_contracts_per_order: 12
+      max_yes_position: 35               # Satellite tier (most conservative)
+      max_no_position: 35
+      max_notional_usd: 2000             # ~2.0% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 3
       max_spread_cents: 20
@@ -432,7 +516,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 5
-      max_notional_usd: 2000
+      max_contracts_per_order: 15
+      max_yes_position: 40               # Satellite tier (most conservative)
+      max_no_position: 40
+      max_notional_usd: 2500             # ~2.5% of bankroll per market
       max_slippage_cents: 5
       min_depth_contracts: 2
       max_spread_cents: 25
@@ -446,7 +533,10 @@ agents:
     archetype: directional
     risk_limits:
       max_orders_per_window: 3
-      max_notional_usd: 2500
+      max_contracts_per_order: 18
+      max_yes_position: 45               # Satellite tier (most conservative)
+      max_no_position: 45
+      max_notional_usd: 3000             # ~3.0% of bankroll per market
       max_slippage_cents: 10
       min_depth_contracts: 2
       max_spread_cents: 30
@@ -703,11 +793,16 @@ agents:
 # ── Portfolio-level risk agent ─────────────────────────────────────────
 portfolio_risk:
   starting_bankroll_usd: 100000        # Initial bankroll for sizing calculations
-  max_total_notional_usd: 50000
-  max_notional_per_asset_usd: 15000
-  max_open_markets: 200
-  max_daily_loss_usd: 5000
-  max_margin_utilization_pct: 80
+  max_total_notional_usd: 25000        # Max 25% of bankroll deployed at once
+  max_notional_per_asset_usd:
+    BTC: 10000                         # BTC anchor gets highest allocation
+    ETH: 7000                          # ETH core slightly lower
+    SOL: 4000                          # SOL satellite
+    XRP: 3000                          # XRP satellite
+    DOGE: 3000                         # DOGE satellite
+  max_open_markets: 40                 # Reduced from 200 for tighter control
+  max_daily_loss_usd: 15000            # 15% of bankroll daily loss tolerance
+  max_margin_utilization_pct: 50       # Conservative 50% margin cap
   rebalance_check_interval_seconds: 30
 
 # ── Monitoring and operational settings ────────────────────────────────
