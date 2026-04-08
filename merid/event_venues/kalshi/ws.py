@@ -132,8 +132,8 @@ class KalshiWebSocket(EventVenueStream):
                 websockets.connect(
                     self.config.ws_url,
                     extra_headers=headers if headers else None,
-                    ping_interval=20,
-                    ping_timeout=10,
+                    ping_interval=30,   # Extended from 20s: allows for moderate loop lag
+                    ping_timeout=20,    # Extended from 10s: tolerates up to ~20s loop lag
                     close_timeout=5,
                 ),
                 timeout=30.0,
