@@ -112,7 +112,7 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
             _api_key = os.getenv("KALSHI_API_KEY_ID")
             _key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
             _key_pem = None
-            _use_demo = os.getenv("KALSHI_USE_DEMO", "true").lower() == "true"
+            _use_demo = os.getenv("KALSHI_USE_DEMO", "false").lower() == "true"
             _rate_tier = os.getenv("KALSHI_RATE_TIER", "basic")
         config = KalshiConfig(
             api_key=_api_key,
