@@ -1,7 +1,7 @@
 # MERID Makefile
 # Common development commands
 
-.PHONY: help test coverage run-paper-demo smoke-test lint golden-path preflight risk-context serve swarm-integrity-check
+.PHONY: help test coverage run-paper-demo smoke-test lint golden-path preflight risk-context serve swarm-integrity-check live-mode-check
 
 help:
 	@echo "MERID Development Commands"
@@ -12,6 +12,7 @@ help:
 	@echo "  make run-paper-demo  - Run paper trading demo"
 	@echo "  make smoke-test      - Run smoke tests (fast sanity check)"
 	@echo "  make lint            - Run linters"
+	@echo "  make live-mode-check - Check for silent paper/demo behavior and Alpaca/IBKR isolation"
 	@echo ""
 
 # Run all tests
@@ -34,6 +35,13 @@ smoke-test:
 lint:
 	ruff check .
 	mypy trading/ merid/ core/ --ignore-missing-imports
+
+# Check for silent paper/demo behavior and Alpaca/IBKR isolation (no install required)
+live-mode-check:
+	@echo "Running Kalshi live-mode spec enforcement..."
+	python scripts/enforce_live_mode_spec.py --strict
+	@echo "Running live-mode layer unit tests..."
+	pytest tests/test_live_mode_layers.py -q --tb=short --no-header
 
 # Full sanity check - env, imports, coverage, smoke tests, demo
 sanity:
