@@ -501,18 +501,43 @@ class KalshiMarketCatalog:
 
     @staticmethod
     def _detect_strikes(text: str) -> Dict[str, float]:
-        """Extract strike prices from market text."""
+        """Extract strike prices from market text and ticker components.
+
+        Supports:
+        1. Ticker-embedded strikes: KXETH-26APR0722-T2839.99 → strike=2839.99
+        2. Ticker-embedded strikes with decimals: KXXRP-15M-T2.0399 → strike=2.0399
+        3. Text-based strikes: "above 50,000" → strike=50000
+        4. Range strikes: "between 100 and 200" → floor=100, cap=200
+        """
         res = {}
-        # Patterns for various strike formats
-        # Examples: "above 50,000", "below $1.50", "between 100 and 200"
-        
-        # Simple "above/below X"
-        strike_match = re.search(r"(?:above|below|at|over|under)\s*\$?([\d,]+\.?\d*)", text, re.I)
-        if strike_match:
+
+        # PRIORITY 1: Parse ticker-embedded strikes (-T<number>)
+        # Format: KXETH-26APR0722-T2839.99 or KXXRP-15M-T2.0399
+        ticker_strike_match = re.search(r"-T([\d]+\.?[\d]*)", text, re.I)
+        if ticker_strike_match:
             try:
-                res["strike"] = float(strike_match.group(1).replace(",", ""))
-            except ValueError:
-                pass
+                strike_val = float(ticker_strike_match.group(1))
+                res["strike"] = strike_val
+                logger.debug(
+                    "[SPOT-STRIKE] Parsed ticker-embedded strike: %s → %.4f",
+                    ticker_strike_match.group(0), strike_val
+                )
+            except ValueError as e:
+                logger.warning(
+                    "[SPOT-STRIKE] Failed to parse ticker strike '%s': %s",
+                    ticker_strike_match.group(0), e
+                )
+
+        # FALLBACK 2: Text-based strike extraction (legacy support)
+        # Only apply if ticker parsing didn't find a strike
+        if "strike" not in res:
+            # Simple "above/below X"
+            strike_match = re.search(r"(?:above|below|at|over|under)\s*\$?([\d,]+\.?\d*)", text, re.I)
+            if strike_match:
+                try:
+                    res["strike"] = float(strike_match.group(1).replace(",", ""))
+                except ValueError:
+                    pass
 
         # Range "between X and Y"
         range_match = re.search(r"between\s*\$?([\d,]+\.?\d*)\s*and\s*\$?([\d,]+\.?\d*)", text, re.I)
@@ -522,7 +547,7 @@ class KalshiMarketCatalog:
                 res["cap"] = float(range_match.group(2).replace(",", ""))
             except ValueError:
                 pass
-        
+
         return res
 
     @staticmethod
