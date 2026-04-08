@@ -1356,7 +1356,8 @@ class KalshiTradingAgent:
             _notional = size * (_check_price_cents / 100.0)
             if _notional < _MIN_NOTIONAL_USD:
                 # Round up to the minimum contract count that meets the floor.
-                _min_size = max(1, int(_MIN_NOTIONAL_USD / (_check_price_cents / 100.0)) + 1)
+                import math as _math
+                _min_size = max(1, _math.ceil(_MIN_NOTIONAL_USD / (_check_price_cents / 100.0)))
                 self.logger.debug(
                     "[MM_NOTIONAL] agent=%s market=%s size=%d price=%dc notional=$%.2f "
                     "< floor=$%.2f — rounding up to %d contracts",
