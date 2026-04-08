@@ -30,6 +30,7 @@ from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.model import PredictionMarketModel, MarketSnapshot, ContractState, ImpliedProbability
 from merid.prediction.strategy import KalshiStrategy, StrategySignal, SignalAction, StrategyConfig
 from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig, PreTradeCheck
+from merid.prediction.no_trade_reasons import get_no_trade_tracker, NoTradeReason
 from merid.event_venues.base import EventMarket
 from merid.event_venues.kalshi.stop_loss import StopLossRules, TrackedPosition
 import os
@@ -385,7 +386,13 @@ class KalshiTradingAgent:
                     self._submit_to_consensus(market, signal, snapshot, mood_context)
 
                     # Check if we have consensus before acting
-                    consensus = self._get_consensus(asset, timeframe)
+                    # For MM agents, use specialized MM consensus resolution
+                    if self.config.archetype == "market_maker":
+                        mm_mode = getattr(self._strategy.config, 'mm_consensus_mode', 'full')
+                        consensus = self._resolve_consensus_for_mm(asset, timeframe, mm_mode)
+                    else:
+                        consensus = self._get_consensus(asset, timeframe, wait_for_ready=False)
+
                     if consensus and consensus.status.value == "ready":
                         # Record last successful consensus time for degraded-mode tracking
                         self._last_consensus_at = time.monotonic()
@@ -394,6 +401,21 @@ class KalshiTradingAgent:
                         # Check if consensus direction matches our signal
                         signal_dir = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
                         if consensus.consensus_direction != signal_dir:
+                            tracker = get_no_trade_tracker()
+                            tracker.record(
+                                agent_name=self.config.name,
+                                market_id=market.market_id,
+                                asset=asset,
+                                timeframe=timeframe,
+                                reason=NoTradeReason.CONSENSUS_MISMATCH,
+                                net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                                consensus_status="ready",
+                                additional_context={
+                                    "signal_dir": signal_dir,
+                                    "consensus_dir": consensus.consensus_direction,
+                                },
+                            )
+
                             self.logger.info(
                                 "[AGENT-VETO] consensus_mismatch | agent=%s market=%s signal=%s consensus=%s",
                                 self.config.name, market.market_id, signal_dir, consensus.consensus_direction
@@ -411,6 +433,20 @@ class KalshiTradingAgent:
                             f"(size={consensus.size_band})"
                         )
                     elif consensus and consensus.status.value == "conflicted":
+                        tracker = get_no_trade_tracker()
+                        tracker.record(
+                            agent_name=self.config.name,
+                            market_id=market.market_id,
+                            asset=asset,
+                            timeframe=timeframe,
+                            reason=NoTradeReason.CONSENSUS_CONFLICTED,
+                            net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                            consensus_status="conflicted",
+                            additional_context={
+                                "disagreement_flags": consensus.disagreement_flags,
+                            },
+                        )
+
                         self.logger.info(
                             "[AGENT-VETO] consensus_conflicted | agent=%s market=%s flags=%s",
                             self.config.name, market.market_id, consensus.disagreement_flags
@@ -422,43 +458,135 @@ class KalshiTradingAgent:
                         # If the swarm has been silent for longer than _MAX_SOLO_SECONDS
                         # allow the agent to trade on its own signal, up to
                         # _MAX_SOLO_TRADES_DEGRADED trades, then pause.
-                        now_mono = time.monotonic()
-                        swarm_silence = (
-                            now_mono - self._last_consensus_at
-                            if self._last_consensus_at is not None
-                            else float("inf")
-                        )
-                        if swarm_silence >= _MAX_SOLO_SECONDS:
-                            if self._solo_trades_taken < _MAX_SOLO_TRADES_DEGRADED:
-                                self.logger.warning(
-                                    "DEGRADED_MODE market=%s swarm_silence=%.0fs "
-                                    "solo_trade=%d/%d — proceeding without consensus",
-                                    market.market_id,
-                                    swarm_silence,
-                                    self._solo_trades_taken + 1,
-                                    _MAX_SOLO_TRADES_DEGRADED,
-                                )
-                                # Allow the signal through; increment solo counter
-                                # after a successful order attempt (below)
+                        # EXCEPTION: MM agents in soft/bypass mode skip this check
+                        if self.config.archetype == "market_maker":
+                            mm_mode = getattr(self._strategy.config, 'mm_consensus_mode', 'full')
+                            if mm_mode in ("soft", "bypass"):
+                                # MM in soft/bypass: consensus=None is expected, proceed
+                                pass
                             else:
-                                self.logger.info(
-                                    "[AGENT-VETO] degraded_mode_paused | agent=%s market=%s solo_limit=%d",
-                                    self.config.name, market.market_id, _MAX_SOLO_TRADES_DEGRADED
+                                # MM in full mode: apply standard degraded logic
+                                now_mono = time.monotonic()
+                                swarm_silence = (
+                                    now_mono - self._last_consensus_at
+                                    if self._last_consensus_at is not None
+                                    else float("inf")
                                 )
-                                cycle_stats["veto_degraded_pause"] += 1
-                                continue
+                                if swarm_silence >= _MAX_SOLO_SECONDS:
+                                    if self._solo_trades_taken < _MAX_SOLO_TRADES_DEGRADED:
+                                        self.logger.warning(
+                                            "DEGRADED_MODE market=%s swarm_silence=%.0fs "
+                                            "solo_trade=%d/%d — proceeding without consensus",
+                                            market.market_id,
+                                            swarm_silence,
+                                            self._solo_trades_taken + 1,
+                                            _MAX_SOLO_TRADES_DEGRADED,
+                                        )
+                                        # Allow the signal through; increment solo counter
+                                        # after a successful order attempt (below)
+                                    else:
+                                        self.logger.info(
+                                            "[AGENT-VETO] degraded_mode_paused | agent=%s market=%s solo_limit=%d",
+                                            self.config.name, market.market_id, _MAX_SOLO_TRADES_DEGRADED
+                                        )
+                                        cycle_stats["veto_degraded_pause"] += 1
+                                        continue
+                                else:
+                                    tracker = get_no_trade_tracker()
+                                    tracker.record(
+                                        agent_name=self.config.name,
+                                        market_id=market.market_id,
+                                        asset=asset,
+                                        timeframe=timeframe,
+                                        reason=NoTradeReason.CONSENSUS_FORMING,
+                                        net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                                        consensus_status="forming",
+                                    )
+
+                                    self.logger.info(
+                                        "[AGENT-VETO] consensus_forming | agent=%s market=%s",
+                                        self.config.name, market.market_id
+                                    )
+                                    cycle_stats["veto_consensus_forming"] += 1
+                                    continue
                         else:
-                            self.logger.info(
-                                "[AGENT-VETO] consensus_forming | agent=%s market=%s",
-                                self.config.name, market.market_id
+                            # Non-MM agent: standard degraded-mode logic
+                            now_mono = time.monotonic()
+                            swarm_silence = (
+                                now_mono - self._last_consensus_at
+                                if self._last_consensus_at is not None
+                                else float("inf")
                             )
-                            cycle_stats["veto_consensus_forming"] += 1
-                            continue
+                            if swarm_silence >= _MAX_SOLO_SECONDS:
+                                if self._solo_trades_taken < _MAX_SOLO_TRADES_DEGRADED:
+                                    self.logger.warning(
+                                        "DEGRADED_MODE market=%s swarm_silence=%.0fs "
+                                        "solo_trade=%d/%d — proceeding without consensus",
+                                        market.market_id,
+                                        swarm_silence,
+                                        self._solo_trades_taken + 1,
+                                        _MAX_SOLO_TRADES_DEGRADED,
+                                    )
+                                    # Allow the signal through; increment solo counter
+                                    # after a successful order attempt (below)
+                                else:
+                                    self.logger.info(
+                                        "[AGENT-VETO] degraded_mode_paused | agent=%s market=%s solo_limit=%d",
+                                        self.config.name, market.market_id, _MAX_SOLO_TRADES_DEGRADED
+                                    )
+                                    cycle_stats["veto_degraded_pause"] += 1
+                                    continue
+                            else:
+                                tracker = get_no_trade_tracker()
+                                tracker.record(
+                                    agent_name=self.config.name,
+                                    market_id=market.market_id,
+                                    asset=asset,
+                                    timeframe=timeframe,
+                                    reason=NoTradeReason.CONSENSUS_FORMING,
+                                    net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                                    consensus_status="forming",
+                                )
+
+                                self.logger.info(
+                                    "[AGENT-VETO] consensus_forming | agent=%s market=%s",
+                                    self.config.name, market.market_id
+                                )
+                                cycle_stats["veto_consensus_forming"] += 1
+                                continue
             except Exception as exc:
                 self.logger.warning(f"Error evaluating {market.market_id}: {exc}")
                 continue
 
             if signal.action == SignalAction.NO_ACTION or signal.action == SignalAction.HOLD:
+                # Track reason for no-action
+                tracker = get_no_trade_tracker()
+
+                # Determine specific reason from signal.reason field
+                reason_text = signal.reason.lower() if hasattr(signal, 'reason') else ""
+                if "edge" in reason_text and "below" in reason_text:
+                    reason_enum = NoTradeReason.EDGE_BELOW_THRESHOLD
+                elif "confidence" in reason_text:
+                    reason_enum = NoTradeReason.CONFIDENCE_BELOW_THRESHOLD
+                elif "kelly" in reason_text:
+                    reason_enum = NoTradeReason.KELLY_SIZE_ZERO
+                elif "liquidity" in reason_text or "volume" in reason_text or "oi" in reason_text:
+                    reason_enum = NoTradeReason.LIQUIDITY_INSUFFICIENT
+                elif "state" in reason_text or "tradeable" in reason_text:
+                    reason_enum = NoTradeReason.MARKET_NOT_TRADEABLE
+                else:
+                    reason_enum = NoTradeReason.NO_ACTIONABLE_EDGE
+
+                tracker.record(
+                    agent_name=self.config.name,
+                    market_id=market.market_id,
+                    asset=asset,
+                    timeframe=timeframe,
+                    reason=reason_enum,
+                    net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                    additional_context={"signal_reason": signal.reason},
+                )
+
                 cycle_stats["veto_no_action"] += 1
                 continue
 
@@ -1711,12 +1839,87 @@ class KalshiTradingAgent:
         self,
         asset: str,
         timeframe: str,
+        wait_for_ready: bool = False,
+        timeout_ms: int = 500,
     ) -> Optional[Any]:
-        """Get current consensus view from SwarmConsensusAggregator."""
+        """Get current consensus view from SwarmConsensusAggregator.
+
+        Args:
+            asset: Asset symbol (BTC, ETH, etc.)
+            timeframe: Timeframe string (15m, 1h, etc.)
+            wait_for_ready: If True, wait up to timeout_ms for FORMING → READY
+            timeout_ms: Maximum milliseconds to wait for transition
+
+        Returns:
+            ConsensusView or None
+        """
         try:
-            from merid.swarm.consensus_aggregator import get_consensus_aggregator
+            from merid.swarm.consensus_aggregator import get_consensus_aggregator, ConsensusStatus
             aggregator = get_consensus_aggregator()
-            return aggregator.get_consensus(asset, timeframe)
+
+            consensus = aggregator.get_consensus(asset, timeframe)
+
+            # If wait requested and status is FORMING, poll for up to timeout_ms
+            if wait_for_ready and consensus and consensus.status == ConsensusStatus.FORMING:
+                import time
+                start_ms = time.time() * 1000
+                poll_interval_ms = 50  # Poll every 50ms
+
+                while (time.time() * 1000 - start_ms) < timeout_ms:
+                    time.sleep(poll_interval_ms / 1000)
+                    consensus = aggregator.get_consensus(asset, timeframe)
+
+                    if consensus and consensus.status == ConsensusStatus.READY:
+                        self.logger.debug(
+                            "Consensus transitioned FORMING→READY for %s:%s in %.0fms",
+                            asset, timeframe, time.time() * 1000 - start_ms
+                        )
+                        break
+                    elif not consensus or consensus.status != ConsensusStatus.FORMING:
+                        break
+
+            return consensus
         except Exception as exc:
             self.logger.debug(f"Consensus fetch error: {exc}")
             return None
+
+    def _resolve_consensus_for_mm(
+        self,
+        asset: str,
+        timeframe: str,
+        mm_consensus_mode: str,
+    ) -> Optional[Any]:
+        """Resolve consensus for market making with special handling based on mm_consensus_mode.
+
+        Modes:
+        - full: Standard consensus requirement (FORMING blocks)
+        - soft: FORMING treated as no_consensus, fall back to MM-only decision
+        - bypass: Never consult consensus, always proceed on MM signal alone
+
+        Args:
+            asset: Asset symbol
+            timeframe: Timeframe string
+            mm_consensus_mode: One of "full", "soft", "bypass"
+
+        Returns:
+            ConsensusView or None (None means "proceed without consensus")
+        """
+        if mm_consensus_mode == "bypass":
+            # Never consult consensus in bypass mode
+            return None
+
+        # Get consensus (with wait-for-ready if configured)
+        consensus = self._get_consensus(asset, timeframe, wait_for_ready=True, timeout_ms=500)
+
+        if mm_consensus_mode == "soft" and consensus:
+            from merid.swarm.consensus_aggregator import ConsensusStatus
+            if consensus.status == ConsensusStatus.FORMING:
+                # Soft mode: treat FORMING as no_consensus
+                self.logger.info(
+                    "[MM-SOFT] Consensus FORMING for %s:%s, proceeding with MM-only decision",
+                    asset, timeframe
+                )
+                return None  # Signals to caller: proceed without consensus
+
+        # Full mode (or soft mode with READY/CONFLICTED): return consensus as-is
+        return consensus
