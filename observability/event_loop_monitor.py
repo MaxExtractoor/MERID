@@ -6,6 +6,29 @@ the delay between when they were scheduled and when they actually execute.
 This is critical for detecting event loop starvation, tight loops without
 yields, and blocking operations on the main event loop.
 
+⚠️  ADVISORY-ONLY POLICY
+==========================
+Event loop lag is a **diagnostic signal only**.  It MUST NOT:
+- Flip any global ``trading_enabled`` / ``execution_gate`` flag.
+- Activate any kill switch (global or per-domain).
+- Set ``/api/health`` top-level status to "degraded".
+- Appear in ``/api/v1/system/execution-gate`` reasons.
+
+The ``_degraded`` flag and ``is_degraded()`` method on ``EventLoopMonitor``
+are purely advisory and exist for operator dashboards and profiling.
+
+Enforcement
+-----------
+``MERID_LOOP_LAG_KILL_SWITCH_ENABLED`` (default: ``false``)
+    Guard for any hypothetical future kill-switch code path.  The default
+    is ``false`` (non-blocking).  Set to ``true`` only in isolated test
+    environments where you explicitly want lag to block execution.
+
+Slow-action profiling (e.g. ``arb_scan`` 2-7 s spikes) is captured as
+``HighLagProfile`` entries for post-hoc analysis but does NOT affect
+the trading pipeline.  See ``get_profiles()`` and the
+``/health/event_loop/profiles`` endpoint.
+
 References:
 - https://til.simonwillison.net/python/yielding-in-asyncio
 - https://oneuptime.com/blog/post/2026-02-06-monitor-asyncio-event-loop-performance-opentelemetry/view
@@ -14,6 +37,7 @@ References:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 import traceback
@@ -25,6 +49,18 @@ from typing import Any, Deque, Dict, List, Optional
 from utils.logger import get_logger
 
 logger = get_logger("observability.event_loop_monitor")
+
+# ── Config ────────────────────────────────────────────────────────────────────
+# MERID_LOOP_LAG_KILL_SWITCH_ENABLED: if true, a hypothetical kill-switch path
+# would be activated on halt-band lag.  Default is false (non-blocking, advisory).
+# Production MUST keep this false.
+_LAG_KILL_SWITCH_ENABLED: bool = os.environ.get(
+    "MERID_LOOP_LAG_KILL_SWITCH_ENABLED", "false"
+).lower() in ("1", "true", "yes")
+
+# Advisory metric counter — incremented when lag exceeds a "halt-band" threshold.
+# Read by dashboards only; MUST NOT be used to gate execution.
+_metric_halt_band_total: int = 0   # samples that exceeded halt-band threshold (advisory)
 
 
 @dataclass
@@ -76,6 +112,10 @@ class LagStats:
 
 class EventLoopMonitor:
     """Continuously monitors event loop lag and exposes metrics.
+
+    All lag state is **advisory only**.  High lag NEVER blocks trading or
+    activates any kill switch.  Use the ``is_degraded()`` / ``_degraded``
+    flag only for dashboards and alerting — never for execution gating.
 
     Usage:
         monitor = EventLoopMonitor()
@@ -219,7 +259,17 @@ class EventLoopMonitor:
             logger.error(f"Failed to capture high-lag profile: {exc}")
 
     async def _monitor_loop(self) -> None:
-        """Main monitoring loop."""
+        """Main monitoring loop.
+
+        All state mutations here are advisory.  No kill switch is activated
+        regardless of lag magnitude.  ``_degraded`` is a dashboard flag only.
+        """
+        global _metric_halt_band_total
+
+        # Halt-band threshold: "extreme" lag used solely for the advisory counter.
+        # Does NOT trigger any kill switch.
+        _HALT_BAND_MS = float(os.environ.get("MERID_LOOP_LAG_HALT_BAND_MS", "2000"))
+
         while self._running:
             try:
                 # Schedule a callback to measure lag
@@ -241,7 +291,35 @@ class EventLoopMonitor:
                 )
                 self._samples.append(sample)
 
-                # Check thresholds
+                # ── Halt-band advisory counter (NO kill switch) ────────────
+                # When lag exceeds the halt-band threshold, we:
+                #   1. Increment the advisory metric counter.
+                #   2. Log at WARNING with context.
+                # We do NOT flip any execution gate or kill switch.
+                # _LAG_KILL_SWITCH_ENABLED guard is provided for isolated tests only.
+                if lag_ms >= _HALT_BAND_MS:
+                    _metric_halt_band_total += 1
+                    logger.warning(
+                        "event_loop_lag_halt_band: lag=%.0fms "
+                        "halt_band_ms=%.0f event_loop_lag_halt_band_total=%d "
+                        "[ADVISORY — no kill switch triggered]",
+                        lag_ms,
+                        _HALT_BAND_MS,
+                        _metric_halt_band_total,
+                    )
+                    # ── Kill-switch guard (disabled by default) ──
+                    if _LAG_KILL_SWITCH_ENABLED:
+                        logger.error(
+                            "MERID_LOOP_LAG_KILL_SWITCH_ENABLED=true — "
+                            "halt-band kill-switch path enabled (non-prod only). "
+                            "lag=%.0fms", lag_ms,
+                        )
+                        # NOTE: Even with the flag set we do NOT actually activate
+                        # a kill switch here; this block exists only to document
+                        # where such code would go and to emit a clear error so the
+                        # flag mis-configuration is immediately visible in logs.
+
+                # ── Standard threshold checks (advisory only) ─────────────
                 if lag_ms >= self.crit_threshold_ms:
                     # Capture profile for high lag events
                     if lag_ms >= self.profile_threshold_ms:
@@ -251,19 +329,24 @@ class EventLoopMonitor:
                         self._degraded = True
                         self._degraded_since = sample.measured_at
                         logger.warning(
-                            f"Event loop DEGRADED: lag={lag_ms:.1f}ms "
-                            f"(crit threshold={self.crit_threshold_ms}ms)"
+                            "Event loop DEGRADED [advisory]: lag=%.1fms "
+                            "(crit threshold=%.0fms) — no trading halt triggered",
+                            lag_ms, self.crit_threshold_ms,
                         )
                     else:
-                        logger.warning(f"Event loop lag spike: {lag_ms:.1f}ms")
+                        logger.warning(
+                            "Event loop lag spike [advisory]: %.1fms", lag_ms
+                        )
                 elif lag_ms >= self.warn_threshold_ms:
-                    logger.debug(f"Event loop lag warning: {lag_ms:.1f}ms")
+                    logger.debug("Event loop lag warning: %.1fms", lag_ms)
                 else:
                     # Reset degraded state if lag drops below crit
                     if self._degraded:
                         logger.info(
-                            f"Event loop recovered: lag={lag_ms:.1f}ms "
-                            f"(was degraded for {(sample.measured_at - self._degraded_since).total_seconds():.1f}s)"
+                            "Event loop recovered: lag=%.1fms "
+                            "(was degraded for %.1fs)",
+                            lag_ms,
+                            (sample.measured_at - self._degraded_since).total_seconds(),
                         )
                         self._degraded = False
                         self._degraded_since = None
@@ -329,8 +412,22 @@ class EventLoopMonitor:
         )
 
     def is_degraded(self) -> bool:
-        """Check if event loop is currently degraded."""
+        """Return True when event loop is currently experiencing sustained high lag.
+
+        ⚠️ ADVISORY ONLY — this flag must never be used to block execution or
+        activate a kill switch.  It exists solely for operator dashboards and
+        alerting.  See module docstring for the advisory-only policy.
+        """
         return self._degraded
+
+    def halt_band_count(self) -> int:
+        """Return total number of samples that exceeded the halt-band threshold.
+
+        This is the ``event_loop_lag_halt_band_total`` advisory metric.
+        It is a cumulative counter since process start and MUST NOT be used
+        to gate execution decisions.
+        """
+        return _metric_halt_band_total
 
     def get_profiles(self, max_count: Optional[int] = None) -> List[HighLagProfile]:
         """Get captured high-lag profiles.
@@ -360,13 +457,21 @@ class EventLoopMonitor:
         return count
 
     def get_current_status(self) -> Dict[str, object]:
-        """Get current monitor status."""
+        """Get current monitor status.
+
+        All fields are advisory.  ``degraded`` and ``advisory_degraded`` MUST
+        NOT be used to block execution.  See module-level docstring.
+        """
         stats_5m = self.get_stats(window_seconds=300)
         stats_1m = self.get_stats(window_seconds=60)
 
         return {
             "running": self._running,
-            "degraded": self._degraded,
+            # advisory_degraded replaces the old "degraded" key.
+            # Both are kept for backward compatibility but MUST NOT gate execution.
+            "degraded": self._degraded,           # legacy — advisory only
+            "advisory_degraded": self._degraded,  # explicit advisory label
+            "blocks_trading": False,              # always False — loop lag never blocks
             "degraded_since": self._degraded_since.isoformat() if self._degraded_since else None,
             "sample_interval_ms": self.sample_interval_ms,
             "warn_threshold_ms": self.warn_threshold_ms,
@@ -375,6 +480,9 @@ class EventLoopMonitor:
             "total_samples": len(self._samples),
             "total_profiles": len(self._profiles),
             "max_profiles": self.max_profiles,
+            # Advisory metric counter for dashboards / Prometheus
+            "event_loop_lag_halt_band_total": _metric_halt_band_total,
+            "kill_switch_enabled": _LAG_KILL_SWITCH_ENABLED,
             "stats_1m": {
                 "sample_count": stats_1m.sample_count,
                 "mean_ms": round(stats_1m.mean_ms, 2),

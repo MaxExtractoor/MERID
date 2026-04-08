@@ -4,7 +4,31 @@ Provides exception hierarchy for order-related errors with proper categorization
 for retry logic and user-facing error messages.
 """
 
+from enum import Enum
 from typing import Any, Dict, Optional
+
+
+class KalshiOrderErrorCode(str, Enum):
+    """Structured error codes for Kalshi order operations.
+
+    These codes are used in metrics, NoTrade tracking, and structured logging
+    so operators can correlate failure types across the pipeline.
+    """
+    # Execution failures at the PM-agent layer (before any venue call)
+    PM_AGENT_EXECUTION = "pm_agent_execution"
+    # Venue / API-level errors
+    VALIDATION_ERROR = "validation_error"
+    AUTH_ERROR = "auth_error"
+    RATE_LIMIT = "rate_limit"
+    EXCHANGE_ERROR = "exchange_error"
+    INSUFFICIENT_FUNDS = "insufficient_funds"
+    MARKET_CLOSED = "market_closed"
+    # Risk / gate errors
+    RISK_BLOCKED = "risk_blocked"
+    KILL_SWITCH = "kill_switch"
+    STALE_SNAPSHOT = "stale_snapshot"
+    # Misc
+    UNKNOWN = "unknown"
 
 
 class KalshiOrderError(Exception):

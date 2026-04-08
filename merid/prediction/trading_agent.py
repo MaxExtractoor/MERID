@@ -116,9 +116,20 @@ class KalshiTradingAgent:
 
         # Reuse existing subsystems
         self._model = PredictionMarketModel()
-        self._strategy = KalshiStrategy(StrategyConfig(
+        _strategy_config = StrategyConfig(
             max_contracts_per_order=config.risk_limits.max_orders_per_window,
-        ))
+        )
+        # Apply crypto-specific edge thresholds when this is a crypto agent
+        try:
+            from merid.prediction.crypto_thresholds import apply_crypto_strategy_thresholds_to_config
+            apply_crypto_strategy_thresholds_to_config(
+                _strategy_config,
+                agent_name=config.name,
+                assets=config.assets,
+            )
+        except Exception as _cte:
+            self.logger.debug("crypto_threshold_apply skipped: %s", _cte)
+        self._strategy = KalshiStrategy(_strategy_config)
         self._risk = PredictionMarketRisk(PredictionRiskConfig(
             max_notional_per_market_usd=config.risk_limits.max_notional_usd,
             max_contracts_per_order=min(50, config.risk_limits.max_orders_per_window),
@@ -143,6 +154,8 @@ class KalshiTradingAgent:
         # ── Swarm degraded-mode tracking (AUDIT-10) ──────────────────────────
         # Timestamp of the last time consensus was successfully obtained.
         self._last_consensus_at: Optional[float] = None
+        # Reserved slot: consensus coordinator reference (used in tests / future wiring).
+        self._consensus_coordinator: Optional[Any] = None
         # Count of consecutive solo trades taken while swarm was degraded.
         self._solo_trades_taken: int = 0
 
@@ -779,7 +792,7 @@ class KalshiTradingAgent:
             from merid.prediction.kalshi_tools import _kalshi_list_markets
 
             # Use parameters from config
-            category = self.config.category
+            category = self.config.resolve_category()
             asset = self.config.assets[0] if self.config.assets else ""
             timeframe = self.config.timeframes[0] if self.config.timeframes else ""
 
@@ -931,6 +944,55 @@ class KalshiTradingAgent:
                 strike_price=strike
             ),
         ]
+
+        # ── Spot/strike basis enrichment ─────────────────────────────────────
+        # Compute the fractional distance between the current spot price and the
+        # contract strike.  This drives [PM_SIGNAL] logging and is available to
+        # downstream consumers (risk, sizing, logging) via snapshot fields.
+        snapshot.strike_price = float(strike) if strike is not None else None
+        _basis_note: str = "ok"
+        try:
+            if asset is None:
+                _basis_note = "missing_asset_for_spot"
+            elif strike is None:
+                _basis_note = "missing_strike"
+            elif strike == 0:
+                _basis_note = "invalid_strike_zero"
+            else:
+                from data.live_price_feed import get_live_price_feed
+                _feed = get_live_price_feed()
+                _price_data = _feed.get_price(asset)
+                if _price_data is None:
+                    _basis_note = "missing_spot"
+                else:
+                    _spot = float(_price_data.price)
+                    snapshot.spot_price = _spot
+                    snapshot.dist_frac = (_spot - strike) / strike
+        except Exception as _be:
+            self.logger.debug("spot_strike_basis enrichment skipped: %s", _be)
+            _basis_note = "missing_spot"
+        snapshot.spot_strike_basis = _basis_note
+
+        # ── [PM_SIGNAL] structured log ────────────────────────────────────────
+        _tte_h = float(snapshot.time_to_expiry_hours) if snapshot.time_to_expiry_hours else None
+        self.logger.info(
+            "[PM_SIGNAL] agent=%s market=%s snapshot_ts=%.0f "
+            "yes_prob=%.3f tte_h=%s spot=%s strike=%s dist_pct=%s basis=%s "
+            "sentiment_global=%s sentiment_regime=%s vol=%.0f oi=%.0f",
+            self.config.name,
+            market.market_id,
+            snapshot.snapshot_timestamp_utc_epoch_seconds,
+            float(implied.yes_prob) if implied else 0.0,
+            f"{_tte_h:.2f}" if _tte_h is not None else "N/A",
+            f"{snapshot.spot_price:.2f}" if snapshot.spot_price is not None else "N/A",
+            f"{snapshot.strike_price:.2f}" if snapshot.strike_price is not None else "N/A",
+            f"{snapshot.dist_frac * 100:.2f}%" if snapshot.dist_frac is not None else "N/A",
+            _basis_note,
+            f"{snapshot.sentiment_global:.1f}" if snapshot.sentiment_global is not None else "N/A",
+            snapshot.sentiment_regime or "N/A",
+            float(snapshot.volume),
+            float(snapshot.open_interest),
+        )
 
         return snapshot
 
@@ -1105,13 +1167,62 @@ class KalshiTradingAgent:
         side, action = action_map[signal.action]
         size = check.adjusted_size if check.adjusted_size else signal.contracts
         price_cents = signal.limit_price_cents or 0
+
+        # === Vol-band size adjustment ===
+        # For crypto agents apply the vol-band size multiplier before sizing is
+        # finalised.  The multiplier is 1.0 for mid vol (no change), <1 for low
+        # and high vol (risk reduction in illiquid / highly volatile conditions).
+        asset = self.config.assets[0] if self.config.assets else ""
+        timeframe = self.config.timeframes[0] if self.config.timeframes else ""
+        _vol_band_label = "N/A"
+        _vol_mult = 1.0
+        try:
+            from merid.prediction.crypto_thresholds import (
+                classify_vol_band,
+                vol_band_size_multiplier,
+                is_crypto_agent,
+            )
+            if is_crypto_agent(agent_name=self.config.name, assets=self.config.assets):
+                # Derive a short-window realised vol proxy from the spread/OI
+                # (0 = unavailable → mid-band assumed).
+                _rv = 0.0
+                if snapshot and snapshot.implied:
+                    _yes_bid = float(snapshot.implied.yes_bid or 0)
+                    _yes_ask = float(snapshot.implied.yes_ask or 0)
+                    if _yes_ask > 0 and _yes_bid >= 0:
+                        _rv = (_yes_ask - _yes_bid) / max(_yes_ask, 1.0)
+                _band = classify_vol_band(_rv)
+                _vol_band_label = _band.value
+                _vol_mult = vol_band_size_multiplier(_band)
+                if _vol_mult != 1.0:
+                    _pre_mult_size = size
+                    size = max(1, int(size * _vol_mult))
+                    self.logger.debug(
+                        "[PM_SIZE] vol_band=%s mult=%.2f size %d→%d",
+                        _vol_band_label, _vol_mult, _pre_mult_size, size,
+                    )
+        except Exception as _vbe:
+            self.logger.debug("vol_band_size_adjustment skipped: %s", _vbe)
+
+        # === [PM_SIZE] structured log ===
+        self.logger.info(
+            "[PM_SIZE] agent=%s market=%s action=%s side=%s contracts=%d "
+            "price_cents=%d vol_band=%s vol_mult=%.2f dist_pct=%s basis=%s",
+            self.config.name,
+            market.market_id,
+            action,
+            side,
+            size,
+            price_cents,
+            _vol_band_label,
+            _vol_mult,
+            (f"{snapshot.dist_frac * 100:.2f}%"
+             if snapshot and snapshot.dist_frac is not None else "N/A"),
+            (snapshot.spot_strike_basis or "N/A") if snapshot else "N/A",
+        )
         
         # === BTC 15m Risk Layer Integration ===
         # Evaluate proposal through single-lane risk manager
-        asset = self.config.assets[0] if self.config.assets else ""
-        timeframe = self.config.timeframes[0] if self.config.timeframes else ""
-        
-        # Only apply BTC 15m risk layer to BTC 15m markets
         is_btc_15m = asset.upper() == "BTC" and timeframe == "15m"
         
         if is_btc_15m:
@@ -1589,8 +1700,31 @@ class KalshiTradingAgent:
                 _rc.record_error()
             except Exception as _kse:
                 self.logger.debug("kill_switch record_error skipped: %s", _kse)
+            # Record PM_AGENT_EXECUTION error in NoTradeDecisionTracker so the
+            # failure is visible in the /api/no-trade and metrics endpoints.
+            try:
+                from merid.event_venues.kalshi.order_errors import KalshiOrderErrorCode
+                _asset = self.config.assets[0] if self.config.assets else ""
+                _tf = self.config.timeframes[0] if self.config.timeframes else ""
+                _tracker = get_no_trade_tracker()
+                _tracker.observe(
+                    agent_name=self.config.name,
+                    market_id=market.market_id,
+                    asset=_asset,
+                    timeframe=_tf,
+                    reason=NoTradeReason.INFRA_BACKOFF,
+                    additional_context={
+                        "error_code": KalshiOrderErrorCode.PM_AGENT_EXECUTION.value,
+                        "error_message": result_error or "order_failed",
+                    },
+                )
+            except Exception as _nte:
+                self.logger.debug("no_trade pm_agent_execution record skipped: %s", _nte)
             self.logger.warning(
-                f"Order failed for {market.market_id}: {result_error}"
+                "[PM_AGENT_EXECUTION] agent=%s market=%s error=%s",
+                self.config.name,
+                market.market_id,
+                result_error,
             )
 
     def summary(self) -> Dict[str, Any]:
@@ -1762,11 +1896,14 @@ class KalshiTradingAgent:
             from datetime import datetime
 
             # Determine direction from signal action
+            # BUY_YES and BUY_NO represent betting that the outcome WILL / WON'T happen.
+            # SELL_YES means we're selling the YES side (effectively a NO/bearish view).
+            # SELL_NO means we're selling the NO side (effectively a YES/bullish view).
             direction_map = {
                 SignalAction.BUY_YES: "yes",
-                SignalAction.SELL_YES: "yes",
+                SignalAction.SELL_YES: "no",
                 SignalAction.BUY_NO: "no",
-                SignalAction.SELL_NO: "no",
+                SignalAction.SELL_NO: "yes",
             }
             direction = direction_map.get(signal.action, "neutral")
 

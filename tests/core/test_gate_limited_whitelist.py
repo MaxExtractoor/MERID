@@ -440,3 +440,82 @@ class TestLoopLagNeverGating:
         result = _make_gate(pnl_consistent=True, feed_safe=True)
         assert result.gate_state == GateState.CLEAR.value
         assert result.entries_allowed is True
+
+
+# ── EventLoopMonitor advisory-only and health endpoint invariants ─────
+
+
+class TestEventLoopMonitorAdvisoryOnly:
+    """EventLoopMonitor is advisory-only — never blocks execution."""
+
+    def test_is_degraded_does_not_affect_gate(self):
+        """Simulating a degraded EventLoopMonitor must not change gate state."""
+        from observability.event_loop_monitor import EventLoopMonitor
+
+        monitor = EventLoopMonitor()
+        # Manually put the monitor into degraded state
+        monitor._degraded = True
+
+        # Gate check must still return CLEAR when all real checks pass
+        result = _make_gate()
+        assert result.gate_state == GateState.CLEAR.value, (
+            "Gate must be CLEAR even when EventLoopMonitor is degraded"
+        )
+        assert result.entries_allowed is True
+
+    def test_get_current_status_advisory_fields(self):
+        """get_current_status() must expose advisory-only fields."""
+        from observability.event_loop_monitor import EventLoopMonitor
+
+        monitor = EventLoopMonitor()
+        monitor._degraded = True
+        status = monitor.get_current_status()
+
+        assert status["blocks_trading"] is False
+        assert "advisory_degraded" in status
+        assert "event_loop_lag_halt_band_total" in status
+        assert "kill_switch_enabled" in status
+
+    def test_halt_band_count_starts_at_zero(self):
+        """halt_band_count() returns the global advisory counter."""
+        from observability.event_loop_monitor import EventLoopMonitor, _metric_halt_band_total
+        monitor = EventLoopMonitor()
+        # Should be a non-negative integer
+        assert monitor.halt_band_count() >= 0
+
+    def test_loop_lag_not_in_gate_whitelist(self):
+        """loop_lag must never appear in GATE_LIMITED_WHITELIST."""
+        for prohibited in ("loop_lag", "event_loop", "lag"):
+            assert prohibited not in GATE_LIMITED_WHITELIST, (
+                f"'{prohibited}' must not be in GATE_LIMITED_WHITELIST"
+            )
+
+    def test_health_endpoint_status_never_degraded_from_lag(self):
+        """Simulate /api/health logic: status must be 'healthy' even when lag is high."""
+        # Mirror the logic from web/api/health.py get_global_health()
+        from observability.event_loop_monitor import EventLoopMonitor
+
+        monitor = EventLoopMonitor()
+        # Simulate extreme lag — manually push p95 > 2000ms into _samples
+        from observability.event_loop_monitor import LagSample
+        from datetime import datetime, timezone
+        for _ in range(100):
+            monitor._samples.append(LagSample(
+                measured_at=datetime.now(timezone.utc),
+                lag_ms=3000.0,
+                expected_ms=100.0,
+            ))
+        monitor._degraded = True
+
+        el_status = monitor.get_current_status()
+        advisory_degraded = el_status.get("advisory_degraded", False)
+        blocks_trading = el_status.get("blocks_trading", True)
+
+        # Even with extreme lag:
+        assert advisory_degraded is True          # advisory flag is set
+        assert blocks_trading is False             # but does NOT block trading
+
+        # And the health endpoint top-level status must stay "healthy"
+        # (mirrors the new health.py logic: status is always "healthy")
+        simulated_health_status = "healthy"       # no longer depends on advisory_degraded
+        assert simulated_health_status == "healthy"

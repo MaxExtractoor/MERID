@@ -97,6 +97,22 @@ class MarketSnapshot:
     sentiment_global: Optional[float] = None   # 0–100, all Kalshi markets
     sentiment_regime: Optional[str] = None     # extreme_fear|fear|greed|extreme_greed
 
+    # Spot/strike basis context — populated when a crypto spot price is available
+    # basis: "ok" | "missing_spot" | "missing_strike" | "missing_strike_and_spot"
+    #        | "missing_asset_for_spot" | "invalid_strike_zero"
+    spot_price: Optional[float] = None
+    strike_price: Optional[float] = None
+    dist_frac: Optional[float] = None          # (spot - strike) / strike; positive = OTM for YES
+    spot_strike_basis: Optional[str] = None    # human-readable basis note (see above)
+
+    @property
+    def snapshot_timestamp_utc_epoch_seconds(self) -> float:
+        """Snapshot creation time as a UTC POSIX timestamp (seconds).
+
+        Used by execution gates to check snapshot staleness before live orders.
+        """
+        return self.timestamp.timestamp()
+
 
 _active_snapshots: List[MarketSnapshot] = []
 
