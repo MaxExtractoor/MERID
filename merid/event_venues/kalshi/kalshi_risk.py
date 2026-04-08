@@ -28,11 +28,25 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.kalshi_risk")
+
+
+# ── Orderbook state classification ──────────────────────────────────────
+
+class OrderbookState(str, Enum):
+    """Orderbook data quality classification.
+
+    Used to distinguish missing/stale data from genuine wide spreads.
+    """
+    MISSING = "missing"      # No bid/ask data available (both None or 0/100 defaults)
+    STALE = "stale"          # Data older than threshold
+    THIN = "thin"            # Book present but insufficient depth
+    NORMAL = "normal"        # Healthy book with reasonable spread and depth
 
 
 # ── Fee schedule ─────────────────────────────────────────────────────────
@@ -607,18 +621,68 @@ class KalshiRiskManager:
             return False, f"Rate limit: {self._state.orders_this_hour} orders this hour"
 
         # 10. Live orderbook checks (E1) — applied only when caller supplies real params
-        if spread_cents is not None and spread_cents > self._config.max_spread_cents:
-            return False, (
-                f"Spread {spread_cents}¢ exceeds max {self._config.max_spread_cents}¢ "
-                f"(live orderbook check)"
-            )
-        if depth_at_price is not None and depth_at_price < self._config.min_depth_contracts:
-            return False, (
-                f"Depth {depth_at_price} contracts below minimum "
-                f"{self._config.min_depth_contracts} (live orderbook check)"
+        # Classify orderbook state to distinguish missing data from real wide spreads
+        book_state = self._classify_orderbook_state(spread_cents, depth_at_price)
+
+        # Log orderbook classification for MM debugging
+        if spread_cents is not None and spread_cents >= 50:
+            logger.info(
+                "[MM-SPREAD] ticker=%s spread=%d¢ depth=%s book_state=%s",
+                ticker, spread_cents, depth_at_price, book_state.value
             )
 
+        # MISSING/STALE: Skip rather than block - data issue, not market condition
+        if book_state in (OrderbookState.MISSING, OrderbookState.STALE):
+            # Don't enforce spread/depth checks when book is missing/stale
+            # This prevents blocking MM on data issues (100¢ spread from 0/100 defaults)
+            logger.debug(
+                "[MM-SPREAD] Skipping orderbook checks for %s - book_state=%s",
+                ticker, book_state.value
+            )
+        else:
+            # THIN/NORMAL: Apply standard risk checks
+            if spread_cents is not None and spread_cents > self._config.max_spread_cents:
+                return False, (
+                    f"Spread {spread_cents}¢ exceeds max {self._config.max_spread_cents}¢ "
+                    f"(live orderbook check, book_state={book_state.value})"
+                )
+            if depth_at_price is not None and depth_at_price < self._config.min_depth_contracts:
+                return False, (
+                    f"Depth {depth_at_price} contracts below minimum "
+                    f"{self._config.min_depth_contracts} (live orderbook check, book_state={book_state.value})"
+                )
+
         return True, "OK"
+
+    def _classify_orderbook_state(
+        self,
+        spread_cents: Optional[int],
+        depth_at_price: Optional[int],
+    ) -> OrderbookState:
+        """Classify orderbook data quality.
+
+        Returns:
+            MISSING if no spread data or spread indicates missing book (>= 80¢)
+            THIN if depth is very low (< 3 contracts)
+            NORMAL otherwise
+
+        Note: Spread >= 80¢ indicates missing orderbook data (likely 0/100 defaults)
+        rather than a genuinely wide market. Real Kalshi crypto spreads rarely exceed 30¢.
+        """
+        # No spread data provided
+        if spread_cents is None:
+            return OrderbookState.NORMAL  # Assume normal if not provided
+
+        # Spread >= 80¢ strongly suggests missing/default book data
+        # Real spreads on active Kalshi crypto markets are typically 2-20¢
+        if spread_cents >= 80:
+            return OrderbookState.MISSING
+
+        # Check depth if provided
+        if depth_at_price is not None and depth_at_price < 3:
+            return OrderbookState.THIN
+
+        return OrderbookState.NORMAL
 
     # ── State updates ────────────────────────────────────────────────────
 
