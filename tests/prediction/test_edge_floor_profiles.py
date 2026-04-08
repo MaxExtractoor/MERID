@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 
 import pytest
 
@@ -133,7 +134,12 @@ class TestShadowEdgeThresholds:
 class TestEdgeGateWithProfiles:
     """Integration tests for edge gating with different profiles."""
 
-    def _create_snapshot_with_edge(self, net_edge: Decimal, minutes_to_expiry: float = 30.0) -> MarketSnapshot:
+    def _create_snapshot_with_edge(
+        self,
+        net_edge: Decimal,
+        minutes_to_expiry: float = 30.0,
+        time_to_expiry_hours: Optional[Decimal] = None,
+    ) -> MarketSnapshot:
         """Helper to create a market snapshot with specific net edge."""
         model = PredictionMarketModel()
 
@@ -146,6 +152,12 @@ class TestEdgeGateWithProfiles:
             no_ask=Decimal("51"),
         )
 
+        tte = (
+            time_to_expiry_hours
+            if time_to_expiry_hours is not None
+            else Decimal(str(minutes_to_expiry / 60.0))
+        )
+
         snapshot = MarketSnapshot(
             market_id="KXBTC-TEST",
             event_id="KXBTC-EVENT",
@@ -155,16 +167,25 @@ class TestEdgeGateWithProfiles:
             volume=Decimal("10000"),
             open_interest=Decimal("5000"),
             timestamp=datetime.now(timezone.utc),
-            minutes_to_expiry=minutes_to_expiry,
+            time_to_expiry_hours=tte,
         )
 
-        # Mock the edge estimate directly
-        snapshot._edge_estimate = EdgeEstimate(
-            probability=Decimal("0.55"),
-            net_edge=net_edge,
-            confidence=Decimal("0.7"),
-            raw_edge=net_edge + Decimal("0.01"),  # Simulate some fee drag
-        )
+        # Inject the edge estimate into snapshot.edges (used by _evaluate_directional)
+        snapshot.edges = [
+            EdgeEstimate(
+                market_id="KXBTC-TEST",
+                side="yes",
+                action="buy",
+                market_prob=Decimal("0.50"),
+                model_prob=Decimal("0.55"),
+                raw_edge=net_edge + Decimal("0.01"),
+                fee_drag=Decimal("0.005"),
+                slippage_est=Decimal("0.005"),
+                net_edge=net_edge,
+                edge_type="speculative",
+                confidence=Decimal("0.7"),
+            )
+        ]
 
         return snapshot
 
@@ -179,7 +200,7 @@ class TestEdgeGateWithProfiles:
         # Edge = 3%, threshold = 5% → should block
         snapshot = self._create_snapshot_with_edge(
             net_edge=Decimal("0.03"),
-            minutes_to_expiry=2000.0,  # Early phase
+            time_to_expiry_hours=Decimal("33.33"),  # Early phase
         )
 
         signal = strategy.evaluate(snapshot, archetype="directional")
@@ -199,7 +220,7 @@ class TestEdgeGateWithProfiles:
         # Edge = 6%, threshold = 5% → should pass
         snapshot = self._create_snapshot_with_edge(
             net_edge=Decimal("0.06"),
-            minutes_to_expiry=2000.0,  # Early phase
+            time_to_expiry_hours=Decimal("33.33"),  # Early phase
         )
 
         signal = strategy.evaluate(snapshot, archetype="directional")
@@ -224,7 +245,7 @@ class TestEdgeGateWithProfiles:
         # Edge = 3.5%, strict threshold = 5%, medium threshold = 3%
         snapshot = self._create_snapshot_with_edge(
             net_edge=Decimal("0.035"),
-            minutes_to_expiry=2000.0,
+            time_to_expiry_hours=Decimal("33.33"),
         )
 
         signal_strict = strategy_strict.evaluate(snapshot, archetype="directional")
@@ -248,7 +269,7 @@ class TestEdgeGateWithProfiles:
         # Edge = 2.5%, relaxed threshold = 2%
         snapshot = self._create_snapshot_with_edge(
             net_edge=Decimal("0.025"),
-            minutes_to_expiry=2000.0,
+            time_to_expiry_hours=Decimal("33.33"),
         )
 
         signal = strategy.evaluate(snapshot, archetype="directional")
@@ -271,11 +292,11 @@ class TestEdgeGateWithProfiles:
 
         snapshot_early = self._create_snapshot_with_edge(
             net_edge=edge,
-            minutes_to_expiry=2000.0,  # Early: threshold 5%
+            time_to_expiry_hours=Decimal("33.33"),  # Early: threshold 5%
         )
         snapshot_terminal = self._create_snapshot_with_edge(
             net_edge=edge,
-            minutes_to_expiry=30.0,  # Terminal: threshold 2%
+            time_to_expiry_hours=Decimal("0.5"),  # Terminal: threshold 2%
         )
 
         signal_early = strategy.evaluate(snapshot_early, archetype="directional")
