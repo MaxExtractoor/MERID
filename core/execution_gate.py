@@ -42,8 +42,12 @@ class GateState(str, Enum):
 
 # ── Whitelist: the ONLY sources allowed to set gate_state=limited ──────
 # Any warning from a source NOT in this set is rejected (logged as error,
-# does not trigger limited). Loop lag and transient WS hiccups must never
-# appear here — they can only log diagnostics or set blocked/closed.
+# does not trigger limited).
+#
+# INVARIANT: Loop lag (event-loop monitor "degraded" state) is NEVER a
+# gate source.  It is advisory-only.  Adding "loop_lag" or any variant
+# here is PROHIBITED and would be caught by test_gate_limited_whitelist.py.
+# Transient WS hiccups must also never appear here.
 GATE_LIMITED_WHITELIST: frozenset = frozenset({
     "pnl_consistency",       # PnL source divergence — makes sizing less trustworthy
     "reconciliation",        # Kalshi venue recon degradation (e.g. never-ran fresh start)

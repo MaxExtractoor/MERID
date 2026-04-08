@@ -22,31 +22,41 @@ router = APIRouter(tags=["health"])
 
 @router.get("/api/health")
 async def get_global_health(request: Request) -> dict:
-    """Simple health check for MERID system."""
+    """Simple health check for MERID system.
 
-    # Check event loop lag
-    event_loop_status = "healthy"
-    event_loop_degraded = False
+    Event-loop lag is **advisory only** — it never affects the top-level
+    ``status`` field or the execution gate.  High lag is surfaced in
+    ``checks.event_loop`` for observability dashboards but does not block
+    trading.  Use ``/api/v1/system/execution-gate`` for the authoritative
+    trading-allowed decision.
+    """
+
+    # Check event loop lag — ADVISORY ONLY.
+    # Loop lag must never set top-level status=degraded or influence the
+    # execution gate.  It is recorded here purely for operator visibility.
+    event_loop_lag_status = "healthy"
+    event_loop_lag_advisory_degraded = False
     event_loop_metrics = {}
 
     try:
         from observability.event_loop_monitor import get_event_loop_monitor
         monitor = get_event_loop_monitor()
-        status = monitor.get_current_status()
-        event_loop_degraded = status.get("degraded", False)
-        event_loop_metrics = status.get("stats_5m", {})
+        el_status = monitor.get_current_status()
+        # _degraded is advisory: sustained lag > crit_threshold but NOT a kill-switch trigger.
+        event_loop_lag_advisory_degraded = el_status.get("degraded", False)
+        event_loop_metrics = el_status.get("stats_5m", {})
 
-        # Determine health status based on P95 lag
+        # Determine lag status label for the sub-check (advisory, not structural)
         p95_lag = event_loop_metrics.get("p95_ms", 0.0)
         if p95_lag > 500:
-            event_loop_status = "degraded"
+            event_loop_lag_status = "warning"   # downgraded from "degraded" — advisory only
         elif p95_lag > 200:
-            event_loop_status = "warning"
+            event_loop_lag_status = "warning"
         else:
-            event_loop_status = "healthy"
+            event_loop_lag_status = "healthy"
     except Exception as exc:
         logger.debug(f"Event loop monitor check failed: {exc}")
-        event_loop_status = "unknown"
+        event_loop_lag_status = "unknown"
 
     # Check settlement poller
     settlement_poller_status = "unknown"
@@ -90,14 +100,22 @@ async def get_global_health(request: Request) -> dict:
         cfb_rti_status = "error"
         cfb_rti_info = {"error": str(exc)}
 
+    # Top-level status is always "healthy" from a process/server perspective.
+    # Loop lag does NOT degrade this field — consumers must not use it as a
+    # trading-blocked signal.  See /api/v1/system/execution-gate instead.
     return {
-        "status": "degraded" if event_loop_degraded else "healthy",
+        "status": "healthy",
         "timestamp": int(time.time()),
-        "degraded": event_loop_degraded,
+        # Legacy field kept for backward compatibility — always False now.
+        # Callers should NOT use this to gate trading decisions.
+        "degraded": False,
         "checks": {
             "event_loop": {
-                "status": event_loop_status,
-                "degraded": event_loop_degraded,
+                # advisory_degraded: true means sustained lag was detected.
+                # This is for operator dashboards only — it does NOT block trades.
+                "status": event_loop_lag_status,
+                "advisory_degraded": event_loop_lag_advisory_degraded,
+                "blocks_trading": False,
                 "p50_lag_ms": event_loop_metrics.get("p50_ms", 0.0),
                 "p95_lag_ms": event_loop_metrics.get("p95_ms", 0.0),
                 "p99_lag_ms": event_loop_metrics.get("p99_ms", 0.0),
