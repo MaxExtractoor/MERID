@@ -186,18 +186,30 @@ class AgentGrid:
                 _dc.register_agent(_a.agent_id)
             logger.info("✓ DeploymentController: %d agents registered (all PAPER)", len(self._agents))
 
+            _MISSING_PM_MODE_WARNING = (
+                "MERID_PM_TRADING_MODE is not set — "
+                "agents will NOT be force-promoted to LIVE. "
+                "Set MERID_PM_TRADING_MODE=live for production trading."
+            )
+
             # Check if we should bypass readiness gates and go straight to LIVE
             try:
                 from merid.settings import settings as _settings
+                _pm_mode = getattr(_settings, "MERID_PM_TRADING_MODE", "").lower()
+                if not _pm_mode:
+                    logger.warning(_MISSING_PM_MODE_WARNING)
                 _force_live_on_start = (
                     getattr(_settings, "MERID_PM_LIVE_ENABLED", False)
-                    and getattr(_settings, "MERID_PM_TRADING_MODE", "paper").lower() == "live"
+                    and _pm_mode == "live"
                 )
             except Exception:
                 import os as _os_ag
+                _pm_mode_env = _os_ag.getenv("MERID_PM_TRADING_MODE", "").lower().strip()
+                if not _pm_mode_env:
+                    logger.warning(_MISSING_PM_MODE_WARNING)
                 _force_live_on_start = (
                     _os_ag.getenv("MERID_PM_LIVE_ENABLED", "false").lower() == "true"
-                    and _os_ag.getenv("MERID_PM_TRADING_MODE", "paper").lower() == "live"
+                    and _pm_mode_env == "live"
                 )
 
             if _force_live_on_start:

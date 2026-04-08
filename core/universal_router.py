@@ -2,6 +2,11 @@
 
 Unified trading interface across US-compliant venues with geo-blocking.
 Routes trades to appropriate venues based on asset class and compliance.
+
+NOTE: This module is NOT imported by the production Kalshi pipeline.
+The Kalshi production path uses merid/pipeline/router.py + adapter.py.
+Alpaca and IBKR adapters imported here are LEGACY and inactive in a
+pure Kalshi deployment.
 """
 
 from typing import Dict, Any, List, Optional
