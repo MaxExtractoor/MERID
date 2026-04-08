@@ -125,9 +125,10 @@ class KalshiBalance:
 class KalshiConfig:
     """Configuration for Kalshi client."""
     
-    # API endpoints — use api.kalshi.com for crypto/FX trading (NOT elections)
-    rest_api_url: str = "https://api.kalshi.com/trade-api/v2"
-    ws_api_url: str = "wss://api.kalshi.com/trade-api/ws/v2"
+    # API endpoints — api.elections.kalshi.com is Kalshi's production trade API
+    # for ALL markets (crypto, FX, etc.), not just elections.
+    rest_api_url: str = "https://api.elections.kalshi.com/trade-api/v2"
+    ws_api_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
     demo_rest_api_url: str = "https://demo-api.kalshi.co/trade-api/v2"
     demo_ws_api_url: str = "wss://demo-ws.kalshi.co/v2"
     
@@ -180,8 +181,6 @@ class KalshiConfig:
         if not self.use_demo:
             self.use_demo = _use_demo
         # Override rest_api_url if KALSHI_API_HOST is set.
-        # Note: the elections endpoint (api.elections.kalshi.com) is NOT valid for
-        # crypto/FX trading. The invariants check below will warn loudly if it is used.
         if _api_host and not self.use_demo:
             self.rest_api_url = _api_host
 

@@ -1,18 +1,18 @@
 """Kalshi URL invariants — single source of truth for valid API endpoints.
 
-Validates REST and WebSocket URLs at startup to prevent silent misconfiguration
-(e.g. using the elections-only host for crypto/FX trading).
+Validates REST and WebSocket URLs at startup to prevent silent misconfiguration.
 
-Live production endpoints (crypto/FX):
-    REST : https://api.kalshi.com/trade-api/v2
-    WS   : wss://api.kalshi.com/trade-api/ws/v2
+Live production endpoints (all markets, including crypto/FX):
+    REST : https://api.elections.kalshi.com/trade-api/v2
+    WS   : wss://api.elections.kalshi.com/trade-api/ws/v2
 
 Demo/sandbox endpoints:
     REST : https://demo-api.kalshi.co/trade-api/v2
     WS   : wss://demo-ws.kalshi.co/v2
 
-PROHIBITED for production crypto/FX:
-    https://api.elections.kalshi.com  — elections-only, NOT valid for crypto/FX
+Note: ``api.elections.kalshi.com`` is Kalshi's **production** trade API for all
+markets (crypto, FX, elections, etc.).  It is NOT elections-only.  Despite the
+hostname, this is the endpoint documented by Kalshi for live real-money trading.
 
 Usage::
 
@@ -39,11 +39,13 @@ logger = get_logger("merid.event_venues.kalshi.invariants")
 
 # ── Canonical endpoints ───────────────────────────────────────────────────
 
-#: Live production REST base URL (crypto/FX trading on api.kalshi.com).
-LIVE_REST_BASE: str = "https://api.kalshi.com/trade-api/v2"
+#: Live production REST base URL — Kalshi's official trade API for all markets.
+#: Despite the hostname containing "elections", this is used for ALL Kalshi
+#: markets including crypto and FX.
+LIVE_REST_BASE: str = "https://api.elections.kalshi.com/trade-api/v2"
 
-#: Live production WebSocket URL.
-LIVE_WS_BASE: str = "wss://api.kalshi.com/trade-api/ws/v2"
+#: Live production WebSocket URL — matches the live REST host.
+LIVE_WS_BASE: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
 #: Demo/sandbox REST base URL.
 DEMO_REST_BASE: str = "https://demo-api.kalshi.co/trade-api/v2"
@@ -54,38 +56,23 @@ DEMO_WS_BASE: str = "wss://demo-ws.kalshi.co/v2"
 # ── Pattern sets for validation ───────────────────────────────────────────
 
 #: URL prefixes accepted as valid Kalshi REST endpoints.
-#: The elections host is intentionally absent — it is not valid for crypto/FX.
+#: Includes api.elections.kalshi.com (Kalshi's production trade API).
 VALID_KALSHI_API_PATTERNS: tuple = (
-    "https://api.kalshi.com",
+    "https://api.elections.kalshi.com",
     "https://demo-api.kalshi.co",
 )
 
 #: URL prefixes accepted as valid Kalshi WebSocket endpoints.
 VALID_KALSHI_WS_PATTERNS: tuple = (
-    "wss://api.kalshi.com",
+    "wss://api.elections.kalshi.com",
     "wss://demo-ws.kalshi.co",
-)
-
-#: Hosts that are explicitly prohibited for production crypto/FX trading.
-_ELECTIONS_HOSTS: tuple = (
-    "api.elections.kalshi.com",
-    "elections.kalshi.com",
 )
 
 
 # ── Validation helpers ────────────────────────────────────────────────────
 
-def _contains_elections_host(url: str) -> bool:
-    """Return True if *url* routes to the elections-only host."""
-    url_lower = url.lower()
-    return any(host in url_lower for host in _ELECTIONS_HOSTS)
-
-
 def assert_valid_rest_url(url: str) -> None:
     """Raise ValueError if *url* is not a recognised Kalshi REST endpoint.
-
-    Specifically rejects the elections-only host (``api.elections.kalshi.com``)
-    which does not serve crypto/FX markets and causes catalog degradation.
 
     Args:
         url: The REST base URL to validate.
@@ -100,19 +87,12 @@ def assert_valid_rest_url(url: str) -> None:
             f"or {DEMO_REST_BASE!r} for demo/sandbox."
         )
 
-    if _contains_elections_host(url):
-        raise ValueError(
-            f"Kalshi REST URL {url!r} uses the elections-only host "
-            f"(api.elections.kalshi.com) which does NOT serve crypto/FX markets. "
-            f"For live crypto/FX trading use {LIVE_REST_BASE!r}. "
-            f"For demo/sandbox use {DEMO_REST_BASE!r}."
-        )
-
     if not any(url.startswith(p) for p in VALID_KALSHI_API_PATTERNS):
         raise ValueError(
             f"Kalshi REST URL {url!r} does not match any recognised endpoint. "
             f"Valid prefixes: {', '.join(VALID_KALSHI_API_PATTERNS)}. "
-            f"For live trading use {LIVE_REST_BASE!r}."
+            f"For live trading use {LIVE_REST_BASE!r}. "
+            f"For demo/sandbox use {DEMO_REST_BASE!r}."
         )
 
 
@@ -132,19 +112,12 @@ def assert_valid_ws_url(url: str) -> None:
             f"or {DEMO_WS_BASE!r} for demo/sandbox."
         )
 
-    if _contains_elections_host(url):
-        raise ValueError(
-            f"Kalshi WS URL {url!r} uses the elections-only host "
-            f"(api.elections.kalshi.com) which does NOT serve crypto/FX markets. "
-            f"For live crypto/FX trading use {LIVE_WS_BASE!r}. "
-            f"For demo/sandbox use {DEMO_WS_BASE!r}."
-        )
-
     if not any(url.startswith(p) for p in VALID_KALSHI_WS_PATTERNS):
         raise ValueError(
             f"Kalshi WS URL {url!r} does not match any recognised endpoint. "
             f"Valid prefixes: {', '.join(VALID_KALSHI_WS_PATTERNS)}. "
-            f"For live trading use {LIVE_WS_BASE!r}."
+            f"For live trading use {LIVE_WS_BASE!r}. "
+            f"For demo/sandbox use {DEMO_WS_BASE!r}."
         )
 
 
@@ -187,16 +160,6 @@ def validate_config_env_match(config: object, kalshi_env: Optional[str] = None) 
                 f"KALSHI_ENV=live but WS URL {ws_url!r} looks like a demo endpoint. "
                 f"Expected {LIVE_WS_BASE!r}."
             )
-        if base_url and _contains_elections_host(base_url):
-            issues.append(
-                f"KALSHI_ENV=live but REST URL {base_url!r} uses the elections-only host. "
-                f"Use {LIVE_REST_BASE!r} for live crypto/FX trading."
-            )
-        if ws_url and _contains_elections_host(ws_url):
-            issues.append(
-                f"KALSHI_ENV=live but WS URL {ws_url!r} uses the elections-only host. "
-                f"Use {LIVE_WS_BASE!r} for live crypto/FX trading."
-            )
 
     elif env in ("demo", "paper", "sandbox"):
         if not use_demo:
@@ -220,8 +183,7 @@ def validate_config_or_raise(config: object, kalshi_env: Optional[str] = None) -
         kalshi_env: Value of ``KALSHI_ENV`` (read from env if not provided).
 
     Raises:
-        ValueError: If the REST or WS URL contains the elections-only host or
-                    is otherwise unrecognised.
+        ValueError: If the REST or WS URL is not a recognised Kalshi endpoint.
     """
     base_url = getattr(config, "base_url", None) or getattr(config, "rest_api_url", None) or ""
     ws_url = getattr(config, "ws_url", None) or getattr(config, "ws_api_url", None) or ""

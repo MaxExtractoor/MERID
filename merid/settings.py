@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     KALSHI_API_KEY_ID: Optional[str] = Field(default=None, description="Kalshi API key ID")
     KALSHI_PRIVATE_KEY_PATH: Optional[str] = Field(default="change_me", description="Kalshi private key path")
     KALSHI_PRIVATE_KEY_PEM: Optional[str] = Field(default=None, description="Kalshi private key PEM")
-    KALSHI_API_HOST: Optional[str] = Field(default="https://api.kalshi.com/trade-api/v2", description="Kalshi API host (live: api.kalshi.com, demo: demo-api.kalshi.co)")
+    KALSHI_API_HOST: Optional[str] = Field(default="https://api.elections.kalshi.com/trade-api/v2", description="Kalshi API host (live: api.elections.kalshi.com, demo: demo-api.kalshi.co)")
     
     # =============================================================================
     # CFB RTI SETTINGS (CF Benchmarks Real-Time Index)
