@@ -23,10 +23,11 @@ Usage:
 from __future__ import annotations
 
 import time
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional, Set
 
 from utils.logger import get_logger
 
@@ -71,7 +72,15 @@ class RiskController:
     
     daily_loss_limit: float = 500.0
     max_position_value: float = 10000.0
-    error_threshold: int = 10
+    # Threshold raised from 10 to 50: benign repeating errors (min_notional misconfig,
+    # WS reconnects) must not exhaust the budget before a human can investigate.
+    error_threshold: int = 50
+    # Error classes that are downgraded to warnings and do NOT count toward the
+    # error budget.  One misconfigured asset/TF producing repeated identical
+    # min_notional failures must not instantly trip the breaker.
+    error_exempt_classes: Set[str] = field(
+        default_factory=lambda: {"min_notional", "ws_reconnect", "loop_lag"}
+    )
     
     def __post_init__(self):
         self._global_kill: bool = False
@@ -83,8 +92,15 @@ class RiskController:
         self._daily_pnl_reset_date: str = self._today()
         self._total_position_value: float = 0.0
         
+        # Sliding-window error tracking: each entry is (timestamp, error_class).
+        # Using a deque sized to a large but bounded number of events so old
+        # timestamps can be purged on each record_error() call without a full
+        # O(N) rebuild.  A maxlen of 10 × threshold prevents unbounded growth.
+        self._error_log: deque = deque(maxlen=self.error_threshold * 10)
+        # Class-level count within the current sliding window (rebuilt on purge).
+        self._error_class_counts: Counter = Counter()
+        # Legacy scalar kept for backward-compat with get_status().
         self._error_count: int = 0
-        self._error_window_start: float = time.time()
         
         self._events: List[KillSwitchEvent] = []
         self._callbacks: List[Callable[[KillSwitchEvent], None]] = []
@@ -178,6 +194,8 @@ class RiskController:
             "max_position_value": self.max_position_value,
             "error_count": self._error_count,
             "error_threshold": self.error_threshold,
+            "error_class_counts": dict(self._error_class_counts),
+            "error_exempt_classes": list(self.error_exempt_classes),
             "events_count": len(self._events),
         }
     
@@ -284,6 +302,8 @@ class RiskController:
         self._kill_timestamp = None
         
         # Don't reset daily P&L - that persists
+        self._error_log.clear()
+        self._error_class_counts.clear()
         self._error_count = 0
         
         event = KillSwitchEvent(
@@ -309,7 +329,11 @@ class RiskController:
         except Exception as _se_exc:
             logger.debug("[risk] kill_switch reset session log failed: %s", _se_exc)
         
-        logger.warning(f"[risk] Kill switch RESET by {operator}")
+        logger.warning(
+            "[risk] Kill switch RESET by %s (was: %s — %s). "
+            "Trading re-enabled; monitor error rate for recurrence.",
+            operator, old_reason, old_details,
+        )
         return True
     
     # -------------------------------------------------------------------------
@@ -363,32 +387,62 @@ class RiskController:
     # Error Tracking
     # -------------------------------------------------------------------------
     
-    def record_error(self) -> bool:
+    def record_error(self, error_class: str = "generic") -> bool:
         """
         Record an error occurrence.
-        
-        Triggers kill if error threshold exceeded within 1 hour.
-        Returns True if trading can continue.
+
+        Errors are tracked in a true 1-hour sliding window rather than a
+        tumbling window that resets every hour.  Exempt error classes (e.g.,
+        ``min_notional``, ``ws_reconnect``) are logged at WARNING but do **not**
+        contribute to the kill-switch budget.
+
+        Args:
+            error_class: Short descriptor for the error category.  Classes in
+                ``error_exempt_classes`` are downgraded to warnings only.
+
+        Returns:
+            True if trading can continue, False if kill switch was triggered.
         """
         now = time.time()
-        
-        # Reset counter if outside 1-hour window
-        if now - self._error_window_start > 3600:
-            self._error_count = 0
-            self._error_window_start = now
-        
-        self._error_count += 1
-        
-        if self._error_count >= self.error_threshold:
-            self._trigger_kill(
-                KillSwitchReason.ERROR_THRESHOLD,
-                f"{self._error_count} errors in last hour exceeds threshold {self.error_threshold}"
+        window_start = now - 3600.0  # 1-hour sliding window
+
+        if error_class in self.error_exempt_classes:
+            # Exempt class — warn but don't count
+            logger.warning(
+                "[risk] Exempt error recorded (class=%s, not counted toward budget). "
+                "Threshold %d/hr, current budget errors: %d",
+                error_class, self.error_threshold, self._error_count,
             )
+            return not self._global_kill
+
+        # Append to sliding log
+        self._error_log.append((now, error_class))
+        self._error_class_counts[error_class] += 1
+
+        # Purge entries that have aged out of the window and rebuild counter
+        while self._error_log and self._error_log[0][0] < window_start:
+            _, aged_class = self._error_log.popleft()
+            self._error_class_counts[aged_class] -= 1
+            if self._error_class_counts[aged_class] <= 0:
+                del self._error_class_counts[aged_class]
+
+        self._error_count = len(self._error_log)
+
+        if self._error_count >= self.error_threshold:
+            top_classes = self._error_class_counts.most_common(3)
+            detail = (
+                f"{self._error_count} errors in last hour exceeds threshold "
+                f"{self.error_threshold}; top classes: {top_classes}"
+            )
+            self._trigger_kill(KillSwitchReason.ERROR_THRESHOLD, detail)
             logger.critical(
-                f"[risk] ERROR THRESHOLD KILL: {self._error_count} errors in 1 hour"
+                "[risk] ERROR THRESHOLD KILL: %d errors/hr (top classes: %s). "
+                "To auto-reopen: reset() after error rate drops below %d/hr and "
+                "root cause is resolved.",
+                self._error_count, top_classes, self.error_threshold,
             )
             return False
-        
+
         return True
     
     # -------------------------------------------------------------------------
@@ -405,8 +459,9 @@ class RiskController:
         self._daily_pnl = 0.0
         self._daily_pnl_reset_date = self._today()
         self._total_position_value = 0.0
+        self._error_log.clear()
+        self._error_class_counts.clear()
         self._error_count = 0
-        self._error_window_start = time.time()
         self._events.clear()
         logger.info("[risk] Daily counters reset (kill-switch state preserved)")
 
