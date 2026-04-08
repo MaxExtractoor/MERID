@@ -1,6 +1,11 @@
-"""MERID IBKR Adapter - Futures, Options, and FX via Interactive Brokers.
+"""LEGACY (Alpaca/IBKR) — not used in production Kalshi.
+
+MERID IBKR Adapter - Futures, Options, and FX via Interactive Brokers.
 
 US-compliant trading via IBKR TWS/IB Gateway using ib_insync.
+
+This adapter is NOT imported by the Kalshi production pipeline.
+It is retained for legacy equity trading support only.
 """
 
 from typing import Dict, Any, List, Optional
