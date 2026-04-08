@@ -1315,10 +1315,17 @@ class KalshiTradingAgent:
                 # Adjust size based on risk decision
                 if decision.final_size < proposal.intent_risk:
                     original_contracts = size
+                    if decision.final_size <= 0.0:
+                        # Risk approved $0.00 — skip order entirely rather than
+                        # forcing 1 contract which would fail min_notional checks.
+                        self.logger.info(
+                            "BTC 15m risk size=$0.00 (adjustments: %s) — suppressing order",
+                            list(decision.adjustments.keys()),
+                        )
+                        return
                     # Recalculate contracts based on final dollar size
                     if price_cents > 0:
-                        size = int(decision.final_size / (price_cents / 100.0))
-                        size = max(1, size)  # At least 1 contract
+                        size = max(1, int(decision.final_size / (price_cents / 100.0)))
                     self.logger.info(
                         f"BTC 15m size adjusted: {original_contracts} → {size} contracts "
                         f"(${decision.final_size:.2f})"
@@ -1335,6 +1342,29 @@ class KalshiTradingAgent:
             # Non-BTC-15m: route through existing paper/live gate
             force_paper = False
         
+        # ── Pre-execution notional floor check ────────────────────────────────
+        # Suppress orders whose dollar notional is below the $1 minimum rather
+        # than sending them to the exchange (or order router) and counting them
+        # as errors toward the circuit-breaker budget.
+        _MIN_NOTIONAL_USD = 1.0
+        if action == "quote":
+            # For a two-sided quote use the lower of bid/ask to be conservative.
+            _check_price_cents = signal.bid_price_cents or signal.ask_price_cents or price_cents
+        else:
+            _check_price_cents = price_cents
+        if _check_price_cents > 0:
+            _notional = size * (_check_price_cents / 100.0)
+            if _notional < _MIN_NOTIONAL_USD:
+                # Round up to the minimum contract count that meets the floor.
+                _min_size = max(1, int(_MIN_NOTIONAL_USD / (_check_price_cents / 100.0)) + 1)
+                self.logger.debug(
+                    "[MM_NOTIONAL] agent=%s market=%s size=%d price=%dc notional=$%.2f "
+                    "< floor=$%.2f — rounding up to %d contracts",
+                    self.config.name, market.market_id, size, _check_price_cents,
+                    _notional, _MIN_NOTIONAL_USD, _min_size,
+                )
+                size = _min_size
+
         if action == "quote":
             # For quotes, place a buy and sell limit order pair
             _q_bid_result = None
@@ -1697,7 +1727,15 @@ class KalshiTradingAgent:
             # Wire into global error-threshold kill switch
             try:
                 from merid.risk.kill_switches import risk_controller as _rc
-                _rc.record_error()
+                # Classify the error so benign repeating failures (e.g., min_notional
+                # misconfig, WS reconnects) do not exhaust the error budget.
+                _err_class = "generic"
+                if result_error and "notional" in str(result_error).lower():
+                    _err_class = "min_notional"
+                elif result_error and ("reconnect" in str(result_error).lower()
+                                       or "ws_disconnect" in str(result_error).lower()):
+                    _err_class = "ws_reconnect"
+                _rc.record_error(error_class=_err_class)
             except Exception as _kse:
                 self.logger.debug("kill_switch record_error skipped: %s", _kse)
             # Record PM_AGENT_EXECUTION error in NoTradeDecisionTracker so the

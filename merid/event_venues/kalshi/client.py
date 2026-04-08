@@ -2628,7 +2628,23 @@ class KalshiVenueClient(EventVenueClient):
 
             data = result.data or {}
             fills = data.get("fills", [])
-            all_fills.extend(fills)
+            # Filter out placeholder/incomplete fills that Kalshi occasionally
+            # returns with size=0, price_usd=0, is_complete=False.  These are
+            # pagination artifacts and should not be processed as real trades.
+            valid_fills = [
+                f for f in fills
+                if not (
+                    f.get("count", 0) == 0
+                    and f.get("price_usd", 0) == 0
+                    and not f.get("is_complete", True)
+                )
+            ]
+            if len(valid_fills) < len(fills):
+                logger.debug(
+                    "get_fills: dropped %d placeholder fill(s) (size=0, price=0, incomplete)",
+                    len(fills) - len(valid_fills),
+                )
+            all_fills.extend(valid_fills)
 
             cursor = data.get("cursor")
             if not cursor:
