@@ -99,7 +99,7 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
     This connects the resilient Kalshi client to the modern trade pipeline.
     """
     
-    def __init__(self, paper: bool = True):
+    def __init__(self):
         try:
             from merid.settings import settings as _s
             _api_key = _s.KALSHI_API_KEY_ID
@@ -124,7 +124,6 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
             use_demo=_use_demo,
         )
         self._client = KalshiVenueClient(config, rate_tier=_rate_tier)
-        self._paper = paper
         self._connected = False
 
     @property

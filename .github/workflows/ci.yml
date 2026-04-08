@@ -16,6 +16,41 @@ env:
   MERID_ENV: "test"
 
 jobs:
+  # ── Kalshi live-mode spec gate ───────────────────────────────────────
+  live-mode-spec-gate:
+    name: Kalshi Live-Mode Spec Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install minimal dependencies
+        run: |
+          pip install --upgrade pip
+
+      - name: Run live-mode spec enforcement gate
+        run: |
+          mkdir -p reports
+          python scripts/enforce_live_mode_spec.py \
+            --strict \
+            --output-json reports/live-mode-spec.json
+
+      - name: Upload live-mode spec report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-mode-spec-report
+          path: reports/live-mode-spec.json
+
   # ── Kalshi audit-spec policy gate ────────────────────────────────────
   kalshi-audit-gate:
     name: Kalshi Audit-Spec Gate

@@ -2,6 +2,16 @@
 
 Each venue can independently be in SIM, PAPER, or LIVE mode.
 Domains (prediction, crypto, equity) can be enabled/disabled independently.
+
+Kalshi mode is driven by the ``KALSHI_ENV`` environment variable:
+    live  → TradingMode.LIVE  (real-money Kalshi production API)
+    demo  → TradingMode.SIM   (Kalshi sandbox/demo API)
+    <unset> → TradingMode.SIM with a WARNING log
+
+Alpaca and IBKR entries in _DEFAULT_CONFIGS are LEGACY — they are
+included only for compatibility with shared infrastructure that iterates
+over venue configs.  They are NOT used in the production Kalshi path and
+produce no live orders in a pure Kalshi deployment.
 """
 
 from __future__ import annotations
@@ -54,12 +64,38 @@ class VenueConfig:
         }
 
 
+def _kalshi_default_mode() -> TradingMode:
+    """Resolve Kalshi's default TradingMode from environment variables.
+
+    This function is called at **module load time** when ``_DEFAULT_CONFIGS`` is
+    constructed.  The ``KALSHI_ENV`` env var must therefore be set before the
+    module is first imported (or before ``importlib.reload()`` is called in
+    tests).  Runtime changes to ``KALSHI_ENV`` after import have no effect until
+    the module is reloaded or ``get_mode_manager()``'s singleton is reset.
+
+    Precedence:
+      1. ``KALSHI_ENV=live``                      → TradingMode.LIVE
+      2. ``KALSHI_ENV=demo|sandbox|staging``       → TradingMode.SIM  (explicit non-live)
+      3. ``KALSHI_ENV`` unset                      → TradingMode.SIM  + WARNING log
+    """
+    kalshi_env = os.getenv("KALSHI_ENV", "").lower().strip()
+    if kalshi_env == "live":
+        return TradingMode.LIVE
+    if kalshi_env in ("demo", "sandbox", "staging"):
+        return TradingMode.SIM
+    logger.warning(
+        "MERID_PIPELINE_MODE: KALSHI_ENV is not set — defaulting Kalshi venue to SIM. "
+        "Set KALSHI_ENV=live in production to enable live Kalshi trading via the unified pipeline."
+    )
+    return TradingMode.SIM
+
+
 # ── Default venue configs ────────────────────────────────────────────
 
 _DEFAULT_CONFIGS: List[VenueConfig] = [
-    # Prediction
+    # Prediction — Kalshi mode driven by KALSHI_ENV env var (live/demo/unset)
     VenueConfig(
-        venue="kalshi", domain="prediction", mode=TradingMode.SIM,
+        venue="kalshi", domain="prediction", mode=_kalshi_default_mode(),
         api_key_env="KALSHI_API_KEY_ID", api_secret_env="KALSHI_PRIVATE_KEY_PATH",
         api_url="https://api.elections.kalshi.com/trade-api/v2",
         max_order_size_usd=500.0,
@@ -88,17 +124,18 @@ _DEFAULT_CONFIGS: List[VenueConfig] = [
         api_url="https://www.okx.com",
         notes="Data/sim only for US residents unless legally cleared.",
     ),
-    # Equities
+    # LEGACY (Alpaca/IBKR) — not used in production Kalshi; equity domain only
     VenueConfig(
         venue="alpaca", domain="equity", mode=TradingMode.PAPER,
         api_key_env="ALPACA_API_KEY", api_secret_env="ALPACA_API_SECRET",
         api_url="https://paper-api.alpaca.markets",
+        notes="LEGACY — Alpaca equity venue; not used in production Kalshi deployment.",
     ),
     VenueConfig(
         venue="ibkr", domain="equity", mode=TradingMode.PAPER,
         api_key_env="IBKR_PAPER_TRADING_USERNAME",
         api_url="127.0.0.1:7497",
-        notes="Paper account via TWS/Gateway.",
+        notes="LEGACY — IBKR equity venue; not used in production Kalshi deployment.",
     ),
 ]
 
@@ -212,4 +249,19 @@ def get_mode_manager() -> ModeManager:
     global _manager
     if _manager is None:
         _manager = ModeManager()
+        # Log Kalshi mode so operators can verify the pipeline at startup.
+        _k = _manager.get_config("kalshi")
+        if _k is not None:
+            if _k.mode == TradingMode.LIVE:
+                logger.info(
+                    "MERID_PIPELINE_MODE: Kalshi venue initialised in LIVE mode "
+                    "(KALSHI_ENV=live). Real-money orders will be submitted via unified pipeline."
+                )
+            else:
+                logger.warning(
+                    "MERID_PIPELINE_MODE: Kalshi venue is in %s mode — "
+                    "unified pipeline trades will be SIMULATED. "
+                    "Set KALSHI_ENV=live for production Kalshi trading.",
+                    _k.mode.value.upper(),
+                )
     return _manager
