@@ -112,7 +112,6 @@ class TestTradeModeLive:
     def test_paper_when_env_missing(self):
         from config.trading_mode import TradeMode
         env = {k: v for k, v in PRODUCTION_ENVS.items() if k != "MERID_TRADE_MODE"}
-        env.pop("MERID_TRADE_MODE", None)
         mode = _fresh_trade_mode(env)
         assert mode == TradeMode.PAPER
 
@@ -302,7 +301,6 @@ class TestPipelineModeManagerKalshi:
         """ModeManager has Kalshi in SIM when KALSHI_ENV is absent."""
         from merid.pipeline.mode_manager import TradingMode
         env_no_kalshi = {k: v for k, v in PRODUCTION_ENVS.items() if k != "KALSHI_ENV"}
-        env_no_kalshi["KALSHI_ENV"] = ""
         with patch.dict(os.environ, env_no_kalshi, clear=False):
             os.environ.pop("KALSHI_ENV", None)
             import merid.pipeline.mode_manager as mm_mod
@@ -348,17 +346,18 @@ class TestPipelineModeManagerKalshi:
 
     def test_no_silent_downgrade_warning_in_live(self):
         """No silent-downgrade pattern exists in mode_manager source when live."""
-        import os as _os, re
+        import os as _os
+        import re as _re
         src_path = _os.path.join(
             _os.path.dirname(_os.path.dirname(__file__)),
             "merid", "pipeline", "mode_manager.py",
         )
         with open(src_path, encoding="utf-8") as f:
             content = f.read()
-        # Confirm there is no silent "paper" default in getenv calls
+        # Confirm there is no silent "live" default in getenv calls (would bypass the warning)
         bad_lines = [
             ln for ln in content.splitlines()
-            if re.search(r'getenv\s*\(.*KALSHI_ENV.*,\s*["\']live["\']', ln)
+            if _re.search(r'getenv\s*\(.*KALSHI_ENV.*,\s*["\']live["\']', ln)
             and not ln.lstrip().startswith("#")
         ]
         assert not bad_lines, (
@@ -375,14 +374,14 @@ class TestPipelineModeManagerKalshi:
             mm = mm_mod.get_mode_manager()
             alpaca = mm.get_config("alpaca")
             ibkr = mm.get_config("ibkr")
+            # Neither should be in the prediction domain
+            prediction_venues = [
+                v.venue for v in mm.venues_by_domain("prediction")
+                if v.venue in ("alpaca", "ibkr")
+            ]
             mm_mod._manager = None
         assert alpaca is not None and alpaca.domain == "equity"
         assert ibkr is not None and ibkr.domain == "equity"
-        # Neither should be in the prediction domain
-        prediction_venues = [
-            v.venue for v in mm.venues_by_domain("prediction")
-            if v.venue in ("alpaca", "ibkr")
-        ]
         assert prediction_venues == [], f"Alpaca/IBKR in prediction domain: {prediction_venues}"
 
 

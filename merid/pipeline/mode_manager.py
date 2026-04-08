@@ -67,6 +67,12 @@ class VenueConfig:
 def _kalshi_default_mode() -> TradingMode:
     """Resolve Kalshi's default TradingMode from environment variables.
 
+    This function is called at **module load time** when ``_DEFAULT_CONFIGS`` is
+    constructed.  The ``KALSHI_ENV`` env var must therefore be set before the
+    module is first imported (or before ``importlib.reload()`` is called in
+    tests).  Runtime changes to ``KALSHI_ENV`` after import have no effect until
+    the module is reloaded or ``get_mode_manager()``'s singleton is reset.
+
     Precedence:
       1. ``KALSHI_ENV=live``                      → TradingMode.LIVE
       2. ``KALSHI_ENV=demo|sandbox|staging``       → TradingMode.SIM  (explicit non-live)
