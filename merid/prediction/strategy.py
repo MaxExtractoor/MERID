@@ -55,6 +55,15 @@ class StrategyConfig:
     min_edge_terminal: Decimal = Decimal("0.02")
     min_arb_edge: Decimal = Decimal("0.005")        # 0.5 % for pure arb
 
+    # Shadow thresholds for observability (not enforced, logged only)
+    shadow_edge_early: Optional[Decimal] = Decimal("0.00")    # 0% shadow floor
+    shadow_edge_mid: Optional[Decimal] = Decimal("0.00")
+    shadow_edge_late: Optional[Decimal] = Decimal("0.00")
+    shadow_edge_terminal: Optional[Decimal] = Decimal("0.00")
+
+    # Edge floor profile: strict (current), medium (relaxed 1 notch), relaxed (relaxed 2 notches)
+    edge_floor_profile: str = "strict"  # Options: strict, medium, relaxed
+
     # Position sizing
     max_contracts_per_market: int = 100
     max_contracts_per_order: int = 25
@@ -75,6 +84,10 @@ class StrategyConfig:
     mm_target_spread_cents: Decimal = Decimal("2")   # Try to quote 2c spread
     mm_inventory_limit: int = 50                     # Max contracts to hold per side
     mm_skew_factor: Decimal = Decimal("0.5")         # How much to lean based on inventory
+    mm_consensus_mode: str = "full"  # Options: full, soft, bypass
+
+    # Consensus behavior
+    consensus_wait_timeout_ms: int = 500  # Max ms to wait for FORMING → READY
 
     # Confidence
     min_confidence: Decimal = Decimal("0.5")
@@ -154,11 +167,40 @@ class KalshiStrategy:
         return ExpiryPhase.TERMINAL
 
     def _min_edge_for_phase(self, phase: ExpiryPhase) -> Decimal:
-        return {
+        """Get minimum edge threshold for a phase based on edge_floor_profile.
+
+        Profiles:
+        - strict: Current thresholds (5%/4%/3%/2%)
+        - medium: Relaxed 1 notch (3%/3%/2%/1%)
+        - relaxed: Relaxed 2 notches (2%/2%/1%/0.5%)
+        """
+        base_thresholds = {
             ExpiryPhase.EARLY: self.config.min_edge_early,
             ExpiryPhase.MID: self.config.min_edge_mid,
             ExpiryPhase.LATE: self.config.min_edge_late,
             ExpiryPhase.TERMINAL: self.config.min_edge_terminal,
+        }
+
+        base = base_thresholds[phase]
+
+        # Apply profile adjustments
+        if self.config.edge_floor_profile == "medium":
+            # Relax by ~40%
+            return max(Decimal("0.01"), base * Decimal("0.6"))
+        elif self.config.edge_floor_profile == "relaxed":
+            # Relax by ~60%
+            return max(Decimal("0.005"), base * Decimal("0.4"))
+
+        # Default: strict (no adjustment)
+        return base
+
+    def _shadow_edge_for_phase(self, phase: ExpiryPhase) -> Decimal:
+        """Get shadow edge threshold for observability (not enforced)."""
+        return {
+            ExpiryPhase.EARLY: self.config.shadow_edge_early or Decimal("0.00"),
+            ExpiryPhase.MID: self.config.shadow_edge_mid or Decimal("0.00"),
+            ExpiryPhase.LATE: self.config.shadow_edge_late or Decimal("0.00"),
+            ExpiryPhase.TERMINAL: self.config.shadow_edge_terminal or Decimal("0.00"),
         }[phase]
 
     # ------------------------------------------------------------------
@@ -362,8 +404,48 @@ class KalshiStrategy:
 
         best = max(spec_edges, key=lambda e: e.net_edge)
 
-        # 5. Edge threshold
+        # 5. Edge threshold with enhanced logging
         min_edge = self._min_edge_for_phase(phase)
+        shadow_edge = self._shadow_edge_for_phase(phase)
+
+        # Extract edge components for logging
+        raw_edge = getattr(best, 'raw_edge', best.net_edge)
+        fee_drag = getattr(best, 'fee_drag', Decimal("0.00"))
+        slippage_est = getattr(best, 'slippage_est', Decimal("0.00"))
+
+        # Log granular edge breakdown (sampled to avoid log flood)
+        import random
+        if random.random() < 0.1:  # Sample 10% of decisions
+            logger.info(
+                "[EDGE-GATE] market=%s phase=%s "
+                "raw_edge=%.4f fee_drag=%.4f slippage=%.4f net_edge=%.4f "
+                "threshold=%s(%.4f) shadow=%s(%.4f) profile=%s "
+                "verdict=%s",
+                snapshot.market_id,
+                phase.value,
+                float(raw_edge),
+                float(fee_drag),
+                float(slippage_est),
+                float(best.net_edge),
+                phase.value,
+                float(min_edge),
+                phase.value,
+                float(shadow_edge),
+                self.config.edge_floor_profile,
+                "PASS" if best.net_edge >= min_edge else "BLOCKED",
+            )
+
+        # Check shadow threshold for observability metrics
+        if shadow_edge > Decimal("0.00") and best.net_edge >= shadow_edge and best.net_edge < min_edge:
+            # Would have traded if floor was at shadow level
+            logger.info(
+                "[SHADOW-PASS] market=%s net_edge=%.4f would_trade_if_floor=%.4f current_floor=%.4f",
+                snapshot.market_id,
+                float(best.net_edge),
+                float(shadow_edge),
+                float(min_edge),
+            )
+
         if best.net_edge < min_edge:
             return StrategySignal(
                 market_id=snapshot.market_id,
@@ -372,7 +454,7 @@ class KalshiStrategy:
                 contracts=0,
                 edge=best,
                 phase=phase,
-                reason=f"Edge {best.net_edge:.4f} below {phase.value} threshold {min_edge}.",
+                reason=f"Edge {best.net_edge:.4f} below {phase.value} threshold {min_edge} (profile={self.config.edge_floor_profile}).",
             )
 
         # Confidence filter
