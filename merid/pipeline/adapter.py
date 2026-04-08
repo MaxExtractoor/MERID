@@ -108,7 +108,10 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
             _use_demo = _s.KALSHI_USE_DEMO
             _rate_tier = os.getenv("KALSHI_RATE_TIER", "basic")
         except Exception as _se:
-            logger.debug("KalshiPipelineAdapter: settings unavailable, falling back to env: %s", _se)
+            logger.warning(
+                "KalshiPipelineAdapter: merid.settings unavailable, falling back to raw env vars — "
+                "verify KALSHI_API_KEY_ID and KALSHI_USE_DEMO are set correctly. Error: %s", _se
+            )
             _api_key = os.getenv("KALSHI_API_KEY_ID")
             _key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
             _key_pem = None
