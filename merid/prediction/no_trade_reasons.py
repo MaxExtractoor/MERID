@@ -100,6 +100,34 @@ class NoTradeDecisionTracker:
             additional_context or {},
         )
 
+    def observe(
+        self,
+        agent_name: str,
+        market_id: str,
+        asset: str,
+        timeframe: str,
+        reason: "NoTradeReason",
+        net_edge: Optional[float] = None,
+        threshold: Optional[float] = None,
+        consensus_status: Optional[str] = None,
+        additional_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Alias for :meth:`record` — preferred name for hot-path call sites.
+
+        All parameters and semantics are identical to :meth:`record`.
+        """
+        self.record(
+            agent_name=agent_name,
+            market_id=market_id,
+            asset=asset,
+            timeframe=timeframe,
+            reason=reason,
+            net_edge=net_edge,
+            threshold=threshold,
+            consensus_status=consensus_status,
+            additional_context=additional_context,
+        )
+
     def get_counts(self) -> Dict[str, int]:
         """Get current counts of all no-trade reasons."""
         return dict(self._decision_counts)

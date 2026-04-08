@@ -943,7 +943,7 @@ class AgentGrid:
         # Category PnL breakdown
         pnl_by_category: Dict[str, float] = {}
         for agent in self._agents:
-            cat = agent.config.category
+            cat = agent.config.resolve_category()
             pnl = float(agent.state.to_dict().get("pnl", 0))
             pnl_by_category[cat] = pnl_by_category.get(cat, 0.0) + pnl
 
@@ -1042,7 +1042,7 @@ class AgentGrid:
                 # An agent covers it if it matches category 'crypto' and timeframe 'tf'
                 covering_agent = None
                 for agent in self._agents:
-                    if agent.config.category == "crypto" and tf in agent.config.timeframes:
+                    if agent.config.resolve_category() == "crypto" and tf in agent.config.timeframes:
                         covering_agent = agent
                         break
                 

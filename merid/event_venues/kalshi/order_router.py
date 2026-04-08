@@ -181,6 +181,9 @@ class OrderIntent:
     depth_at_price: Optional[int] = None
     # EXEC-1: End-to-end trace ID for distributed latency tracking
     trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # STALE-GATE: UTC epoch seconds when the snapshot driving this intent was created.
+    # The router uses this to reject orders based on stale data when a threshold is set.
+    snapshot_ts: Optional[float] = None
 
 
 @dataclass
@@ -334,6 +337,13 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         return "invalid_side"
     if intent.action not in ("buy", "sell"):
         return "invalid_action"
+    # STALE-GATE: reject live intents whose snapshot is older than the configured
+    # staleness threshold.  Only enforced in LIVE mode (paper/mock skip).
+    _stale_threshold = float(os.environ.get("MERID_SNAPSHOT_STALENESS_SECONDS", "30"))
+    if intent.snapshot_ts is not None and _stale_threshold > 0:
+        age_seconds = time.time() - intent.snapshot_ts
+        if age_seconds > _stale_threshold:
+            return f"stale_snapshot:{age_seconds:.1f}s>{_stale_threshold}s"
     return None
 
 

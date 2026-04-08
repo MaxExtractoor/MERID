@@ -203,6 +203,17 @@ class KalshiStrategy:
             ExpiryPhase.TERMINAL: self.config.shadow_edge_terminal or Decimal("0.00"),
         }[phase]
 
+    def _get_edge_threshold(self, phase: ExpiryPhase) -> Decimal:
+        """Public alias for _min_edge_for_phase — used by tests and external callers.
+
+        Args:
+            phase: Expiry phase to look up.
+
+        Returns:
+            Minimum edge threshold as a probability fraction.
+        """
+        return self._min_edge_for_phase(phase)
+
     # ------------------------------------------------------------------
     # Position sizing (quarter-Kelly)
     # ------------------------------------------------------------------
