@@ -171,9 +171,20 @@ def _enrich_from_ticker(ticker: str) -> Dict[str, Any]:
             return {"category": getattr(entry, "category", None), "asset": getattr(entry, "asset", None), "timeframe": None}
     except Exception as _e:
         logger.debug("_classify_ticker catalog lookup skipped for %s: %s", ticker, _e)
+
+    try:
+        from merid.event_venues.kalshi.crypto_markets import SERIES_TO_CRYPTO, normalize_series_ticker
+        series = normalize_series_ticker(ticker)
+        asset = SERIES_TO_CRYPTO.get(series)
+        if asset:
+            return {"category": "crypto", "asset": asset, "timeframe": None}
+    except Exception as _e:
+        logger.debug("crypto series normalization failed for %s: %s", ticker, _e)
+
     # Inline prefix-based fallback
     _PREFIX_MAP = {
         "KXBTC": ("crypto", "BTC"), "KXETH": ("crypto", "ETH"), "KXSOL": ("crypto", "SOL"),
+        "KXXRP": ("crypto", "XRP"), "KXDOGE": ("crypto", "DOGE"),
         "KXAVAX": ("crypto", "AVAX"), "INXD": ("equity", "SPX"), "NASDAQ": ("equity", "NDX"),
         "FED": ("macro", "FED"), "CPI": ("macro", "CPI"), "GDP": ("macro", "GDP"),
         "PRES": ("politics", "PRES"), "HOUSE": ("politics", "HOUSE"), "SENATE": ("politics", "SENATE"),
@@ -5094,5 +5105,4 @@ async def get_twitter_stream_rolling(
     except Exception as exc:
         logger.warning("twitter/stream/rolling/%s failed: %s", asset, exc)
         return {"asset": asset, "count": 0, "rolling_compound": 0.0, "error": str(exc)}
-
 
