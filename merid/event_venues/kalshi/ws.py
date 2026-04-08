@@ -124,13 +124,22 @@ class KalshiWebSocket(EventVenueStream):
         try:
             import websockets
 
+            ws_url = self.config.ws_url
+            env_name = "demo" if self.config.use_demo else "live"
+            logger.info(
+                "Connecting to Kalshi WebSocket: url=%s env=%s auth=%s",
+                ws_url,
+                env_name,
+                "rsa_key" if (self.config.api_key or self.config.private_key_path or self.config.private_key_pem) else "none",
+            )
+
             headers = {}
             if self._auth_token:
                 headers["Authorization"] = f"Bearer {self._auth_token}"
 
             self._ws = await asyncio.wait_for(
                 websockets.connect(
-                    self.config.ws_url,
+                    ws_url,
                     extra_headers=headers if headers else None,
                     ping_interval=30,   # Extended from 20s: allows for moderate loop lag
                     ping_timeout=20,    # Extended from 10s: tolerates up to ~20s loop lag
@@ -141,10 +150,18 @@ class KalshiWebSocket(EventVenueStream):
             self._running = True
             self._reconnect_delay = 1.0
             self._connect_ts = time.monotonic()
-            logger.info("Connected to Kalshi WebSocket")
+            logger.info(
+                "Kalshi WebSocket connected: url=%s env=%s",
+                ws_url,
+                env_name,
+            )
 
         except (ConnectionError, RuntimeError, ValueError, TimeoutError, asyncio.TimeoutError) as e:
-            logger.error(f"Failed to connect to Kalshi WebSocket: {e}")
+            logger.error(
+                "Failed to connect to Kalshi WebSocket: url=%s error=%s",
+                self.config.ws_url,
+                e,
+            )
             raise
     
     async def close(self) -> None:
