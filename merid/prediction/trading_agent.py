@@ -30,6 +30,7 @@ from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.model import PredictionMarketModel, MarketSnapshot, ContractState, ImpliedProbability
 from merid.prediction.strategy import KalshiStrategy, StrategySignal, SignalAction, StrategyConfig
 from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig, PreTradeCheck
+from merid.prediction.no_trade_reasons import get_no_trade_tracker, NoTradeReason
 from merid.event_venues.base import EventMarket
 from merid.event_venues.kalshi.stop_loss import StopLossRules, TrackedPosition
 import os
@@ -400,6 +401,21 @@ class KalshiTradingAgent:
                         # Check if consensus direction matches our signal
                         signal_dir = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
                         if consensus.consensus_direction != signal_dir:
+                            tracker = get_no_trade_tracker()
+                            tracker.record(
+                                agent_name=self.config.name,
+                                market_id=market.market_id,
+                                asset=asset,
+                                timeframe=timeframe,
+                                reason=NoTradeReason.CONSENSUS_MISMATCH,
+                                net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                                consensus_status="ready",
+                                additional_context={
+                                    "signal_dir": signal_dir,
+                                    "consensus_dir": consensus.consensus_direction,
+                                },
+                            )
+
                             self.logger.info(
                                 "[AGENT-VETO] consensus_mismatch | agent=%s market=%s signal=%s consensus=%s",
                                 self.config.name, market.market_id, signal_dir, consensus.consensus_direction
@@ -417,6 +433,20 @@ class KalshiTradingAgent:
                             f"(size={consensus.size_band})"
                         )
                     elif consensus and consensus.status.value == "conflicted":
+                        tracker = get_no_trade_tracker()
+                        tracker.record(
+                            agent_name=self.config.name,
+                            market_id=market.market_id,
+                            asset=asset,
+                            timeframe=timeframe,
+                            reason=NoTradeReason.CONSENSUS_CONFLICTED,
+                            net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                            consensus_status="conflicted",
+                            additional_context={
+                                "disagreement_flags": consensus.disagreement_flags,
+                            },
+                        )
+
                         self.logger.info(
                             "[AGENT-VETO] consensus_conflicted | agent=%s market=%s flags=%s",
                             self.config.name, market.market_id, consensus.disagreement_flags
@@ -462,6 +492,17 @@ class KalshiTradingAgent:
                                         cycle_stats["veto_degraded_pause"] += 1
                                         continue
                                 else:
+                                    tracker = get_no_trade_tracker()
+                                    tracker.record(
+                                        agent_name=self.config.name,
+                                        market_id=market.market_id,
+                                        asset=asset,
+                                        timeframe=timeframe,
+                                        reason=NoTradeReason.CONSENSUS_FORMING,
+                                        net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                                        consensus_status="forming",
+                                    )
+
                                     self.logger.info(
                                         "[AGENT-VETO] consensus_forming | agent=%s market=%s",
                                         self.config.name, market.market_id
@@ -496,6 +537,17 @@ class KalshiTradingAgent:
                                     cycle_stats["veto_degraded_pause"] += 1
                                     continue
                             else:
+                                tracker = get_no_trade_tracker()
+                                tracker.record(
+                                    agent_name=self.config.name,
+                                    market_id=market.market_id,
+                                    asset=asset,
+                                    timeframe=timeframe,
+                                    reason=NoTradeReason.CONSENSUS_FORMING,
+                                    net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                                    consensus_status="forming",
+                                )
+
                                 self.logger.info(
                                     "[AGENT-VETO] consensus_forming | agent=%s market=%s",
                                     self.config.name, market.market_id
@@ -507,6 +559,34 @@ class KalshiTradingAgent:
                 continue
 
             if signal.action == SignalAction.NO_ACTION or signal.action == SignalAction.HOLD:
+                # Track reason for no-action
+                tracker = get_no_trade_tracker()
+
+                # Determine specific reason from signal.reason field
+                reason_text = signal.reason.lower() if hasattr(signal, 'reason') else ""
+                if "edge" in reason_text and "below" in reason_text:
+                    reason_enum = NoTradeReason.EDGE_BELOW_THRESHOLD
+                elif "confidence" in reason_text:
+                    reason_enum = NoTradeReason.CONFIDENCE_BELOW_THRESHOLD
+                elif "kelly" in reason_text:
+                    reason_enum = NoTradeReason.KELLY_SIZE_ZERO
+                elif "liquidity" in reason_text or "volume" in reason_text or "oi" in reason_text:
+                    reason_enum = NoTradeReason.LIQUIDITY_INSUFFICIENT
+                elif "state" in reason_text or "tradeable" in reason_text:
+                    reason_enum = NoTradeReason.MARKET_NOT_TRADEABLE
+                else:
+                    reason_enum = NoTradeReason.NO_ACTIONABLE_EDGE
+
+                tracker.record(
+                    agent_name=self.config.name,
+                    market_id=market.market_id,
+                    asset=asset,
+                    timeframe=timeframe,
+                    reason=reason_enum,
+                    net_edge=float(signal.edge.net_edge) if signal.edge else None,
+                    additional_context={"signal_reason": signal.reason},
+                )
+
                 cycle_stats["veto_no_action"] += 1
                 continue
 
