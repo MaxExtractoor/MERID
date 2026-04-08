@@ -80,6 +80,15 @@ class KillSwitchReason(str, Enum):
     CIRCUIT_BREAKER = "circuit_breaker"  # All venues circuit-broken
 
 
+# Ordered from least to most severe — used by _evaluate_tier for promotion logic.
+_TIER_ORDER: list = [
+    KillSwitchState.ACTIVE,
+    KillSwitchState.WARNING,
+    KillSwitchState.LIMITED,
+    KillSwitchState.TRIGGERED,
+]
+
+
 @dataclass
 class KillSwitchEvent:
     """Record of a kill switch state change."""
@@ -207,7 +216,9 @@ class RiskController:
         if metric == "error":
             return self._error_count / max(self.error_threshold, 1)
         if metric == "daily_loss":
-            return (abs(self._daily_pnl) / self.daily_loss_limit) if self._daily_pnl < 0 and self.daily_loss_limit > 0 else 0.0
+            if self._daily_pnl < 0 and self.daily_loss_limit > 0:
+                return abs(self._daily_pnl) / self.daily_loss_limit
+            return 0.0
         if metric == "position":
             return (self._total_position_value / self.max_position_value) if self.max_position_value > 0 else 0.0
         return 0.0
@@ -250,10 +261,9 @@ class RiskController:
             else:
                 desired = KillSwitchState.ACTIVE  # still within warn grace period
 
-        # Only promote tier state, never demote here (demotion handled in can_trade)
-        tier_order = [KillSwitchState.ACTIVE, KillSwitchState.WARNING, KillSwitchState.LIMITED, KillSwitchState.TRIGGERED]
-        current_idx = tier_order.index(self._tier_state)
-        desired_idx = tier_order.index(desired)
+        # Only promote tier state, never demote here (demotion handled in _maybe_demote_tier)
+        current_idx = _TIER_ORDER.index(self._tier_state)
+        desired_idx = _TIER_ORDER.index(desired)
         if desired_idx > current_idx:
             self._promote_tier(desired, metric, fraction)
 
@@ -281,7 +291,7 @@ class RiskController:
                 metric, fraction * 100,
             )
             self._send_telegram_alert(
-                f"⚠️ [RISK WARNING] <b>{metric.upper()}</b> at {fraction*100:.0f}% of threshold"
+                f"⚠️ [RISK WARNING] <b>{metric.upper()}</b> at {fraction * 100:.0f}% of threshold"
             )
         elif new_state == KillSwitchState.LIMITED:
             logger.warning(
@@ -290,8 +300,8 @@ class RiskController:
                 metric, fraction * 100, self.limit_size_multiplier * 100,
             )
             self._send_telegram_alert(
-                f"🔶 [RISK LIMITED] <b>{metric.upper()}</b> at {fraction*100:.0f}% — "
-                f"sizes reduced to {self.limit_size_multiplier*100:.0f}%"
+                f"🔶 [RISK LIMITED] <b>{metric.upper()}</b> at {fraction * 100:.0f}% — "
+                f"sizes reduced to {self.limit_size_multiplier * 100:.0f}%"
             )
             try:
                 from core.session_log import record_event
