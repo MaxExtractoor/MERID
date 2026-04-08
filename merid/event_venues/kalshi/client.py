@@ -231,9 +231,13 @@ class KalshiVenueClient(EventVenueClient):
         self._auth_token: Optional[str] = None
         self._member_id: Optional[str] = None
 
-        # Resilience: one circuit breaker per venue instance
+        # Resilience: stable-named circuit breaker so the reset endpoint
+        # POST /api/v1/resilience/breakers/kalshi_live/reset (or kalshi_demo)
+        # works without knowing the object's memory address.
+        _env_suffix = "demo" if self.config.use_demo else "live"
+        self._circuit_breaker_name = f"kalshi_{_env_suffix}"
         self._circuit_breaker = get_circuit_breaker(
-            f"kalshi_{id(self)}",
+            self._circuit_breaker_name,
             failure_threshold=KALSHI_CIRCUIT_FAILURE_THRESHOLD,
             recovery_timeout=KALSHI_CIRCUIT_RECOVERY_TIMEOUT,
         )
@@ -429,6 +433,16 @@ class KalshiVenueClient(EventVenueClient):
 
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             try:
+                # Log exact URL on first attempt so operators can verify the host.
+                # On retries, log at debug to avoid flooding.
+                if attempt == 0:
+                    logger.debug(
+                        "[kalshi] %s %s (circuit=%s)",
+                        method.upper(), url, self._circuit_breaker_name,
+                    )
+                else:
+                    logger.debug("[kalshi] %s %s (attempt %d)", method.upper(), url, attempt + 1)
+
                 # Token bucket: self-limit before hitting 429s
                 is_write = method.upper() in ("POST", "PUT", "DELETE", "PATCH")
                 await self._rate_limiter.acquire(is_write=is_write)
@@ -584,9 +598,12 @@ class KalshiVenueClient(EventVenueClient):
                     )
                     
             except CircuitOpenError as e:
-                # Circuit is open - fail fast
+                # Circuit is open - fail fast.  Log URL so ops can see which host is blocked.
                 latency_ms = (time.time() - start_time) * 1000
-                logger.warning(f"[kalshi] Circuit open for {operation_name}: {e}")
+                logger.warning(
+                    "[kalshi] Circuit '%s' OPEN — %s blocked. URL=%s error=%s",
+                    self._circuit_breaker_name, operation_name, url, e,
+                )
                 return OperationResult.fail(
                     e,
                     latency_ms=latency_ms,
@@ -600,27 +617,50 @@ class KalshiVenueClient(EventVenueClient):
                 if attempt < KALSHI_MAX_RETRIES:
                     wait_time = KALSHI_BACKOFF_BASE ** attempt
                     logger.warning(
-                        f"[kalshi] {operation_name} timeout, retrying in {wait_time}s "
-                        f"(attempt {attempt + 1})"
+                        "[kalshi] %s TIMEOUT url=%s retry=%d/%d wait=%.1fs exc=%s",
+                        operation_name, url, attempt + 1, KALSHI_MAX_RETRIES,
+                        wait_time, type(e).__name__,
                     )
                     await asyncio.sleep(wait_time)
                     continue
+                else:
+                    logger.error(
+                        "[kalshi] %s TIMEOUT url=%s all retries exhausted exc=%s",
+                        operation_name, url, type(e).__name__,
+                    )
                     
             except (httpx.ConnectError, httpx.ReadError) as e:
                 last_error = e
+                # Classify DNS vs TCP connect failure for actionable log messages
+                error_str = str(e)
+                if "Name or service not known" in error_str or "getaddrinfo" in error_str or "nodename nor servname" in error_str:
+                    exc_kind = "DNS_FAILURE"
+                elif "Connection refused" in error_str:
+                    exc_kind = "CONNECTION_REFUSED"
+                else:
+                    exc_kind = type(e).__name__
                 if attempt < KALSHI_MAX_RETRIES:
                     wait_time = KALSHI_BACKOFF_BASE ** attempt
                     logger.warning(
-                        f"[kalshi] {operation_name} connection error, retrying in {wait_time}s "
-                        f"(attempt {attempt + 1}): {e}"
+                        "[kalshi] %s %s url=%s retry=%d/%d wait=%.1fs detail=%s",
+                        operation_name, exc_kind, url, attempt + 1, KALSHI_MAX_RETRIES,
+                        wait_time, error_str[:120],
                     )
                     await asyncio.sleep(wait_time)
                     continue
+                else:
+                    logger.error(
+                        "[kalshi] %s %s url=%s all retries exhausted detail=%s",
+                        operation_name, exc_kind, url, error_str[:200],
+                    )
                     
             except Exception as e:
                 # Unexpected error - don't retry
                 latency_ms = (time.time() - start_time) * 1000
-                logger.error(f"[kalshi] Unexpected error in {operation_name}: {e}")
+                logger.error(
+                    "[kalshi] Unexpected error in %s url=%s exc=%s: %s",
+                    operation_name, url, type(e).__name__, e,
+                )
                 return OperationResult.fail(
                     e,
                     latency_ms=latency_ms,
@@ -639,8 +679,16 @@ class KalshiVenueClient(EventVenueClient):
         )
     
     def get_circuit_status(self) -> Dict[str, Any]:
-        """Get circuit breaker status for monitoring."""
-        return self._circuit_breaker.get_stats()
+        """Get circuit breaker status for monitoring.
+
+        The circuit breaker is registered under a stable name so it can be
+        reset via:
+            POST /api/v1/resilience/breakers/{name}/reset
+        where ``name`` is the value returned in the ``name`` key here.
+        """
+        stats = self._circuit_breaker.get_stats()
+        stats["reset_endpoint"] = f"/api/v1/resilience/breakers/{self._circuit_breaker_name}/reset"
+        return stats
     
     # ------------------------------------------------------------------------
     # Market Data

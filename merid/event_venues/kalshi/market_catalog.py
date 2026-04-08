@@ -284,9 +284,13 @@ class KalshiMarketCatalog:
                 )
                 if not result.success:
                     logger.warning(
-                        "Failed to fetch markets: %s (status=%s, retries=%s, circuit_open=%s)",
-                        result.error, getattr(result, 'status_code', None),
-                        result.retries, getattr(result, 'circuit_open', False),
+                        "Catalog fetch failed: %s "
+                        "(url=%s status=%s retries=%s circuit_open=%s)",
+                        result.error,
+                        self._client.config.base_url,
+                        getattr(result, 'status_code', None),
+                        result.retries,
+                        getattr(result, 'circuit_open', False),
                     )
                     return len(self._markets)
                 raw_markets = result.data
