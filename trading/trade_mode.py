@@ -33,7 +33,14 @@ _current_mode: Optional[TradeMode] = None
 
 
 def _resolve_initial_mode() -> TradeMode:
-    raw = os.getenv("MERID_TRADE_MODE", "paper").lower().strip()
+    env_val = os.getenv("MERID_TRADE_MODE")
+    if env_val is None:
+        logger.warning(
+            "MERID_TRADE_MODE is not set — defaulting to PAPER. "
+            "Set MERID_TRADE_MODE=live in production to enable live trading."
+        )
+        return TradeMode.PAPER
+    raw = env_val.lower().strip()
     try:
         return TradeMode(raw)
     except ValueError:
