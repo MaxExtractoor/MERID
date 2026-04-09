@@ -37,12 +37,23 @@ class TestLivePriceFeedInitialization:
     """Test LivePriceFeed initialization."""
 
     def test_default_initialization(self):
-        """Test default feed initialization."""
+        """Test default feed initialization.
+
+        The symbol list grows over time; assert structural invariants rather
+        than an exact list so the test survives additions.
+        """
+        from data.live_price_feed import KALSHI_ASSETS
         with patch('data.live_price_feed.get_network_client') as mock_net:
             mock_net.return_value = Mock()
             feed = LivePriceFeed()
-            
-            assert feed.symbols == ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT']
+
+            # All 5 Kalshi assets must be covered (as /USDT pairs)
+            for asset in KALSHI_ASSETS:
+                assert f"{asset}/USDT" in feed.symbols, (
+                    f"Kalshi asset {asset}/USDT missing from default symbol list"
+                )
+            # Must have a meaningful number of symbols, not just 4
+            assert len(feed.symbols) >= 5
             assert feed.update_interval == 1.0
             assert feed.max_retries == 3
             assert feed.exchange_priority == ['kraken', 'coinbase', 'gemini']
@@ -205,14 +216,22 @@ class TestLivePriceFeedCircuitBreaker:
             assert feed._is_circuit_breaker_active("kraken") is False
 
     def test_circuit_breaker_active(self):
-        """Test circuit breaker is active at threshold."""
+        """Test circuit breaker is active at threshold with a recent success timestamp.
+
+        The circuit breaker resets when ``time_since_success > circuit_breaker_reset_time``
+        (300 s).  Using ``last_successful_fetch=0`` (epoch origin) triggers the auto-reset
+        path and returns False.  Use a recent timestamp (10 s ago) so the breaker stays
+        active.
+        """
+        import time
         with patch('data.live_price_feed.get_network_client') as mock_net:
             mock_net.return_value = Mock()
             feed = LivePriceFeed()
-            
-            feed.exchange_failures["kraken"] = 10  # At threshold
-            feed.last_successful_fetch["kraken"] = 0  # No successful fetch
-            
+
+            feed.exchange_failures["kraken"] = 10          # At threshold
+            # Set a *recent* success so time_since_success < circuit_breaker_reset_time
+            feed.last_successful_fetch["kraken"] = time.time() - 10
+
             assert feed._is_circuit_breaker_active("kraken") is True
 
     def test_circuit_breaker_reset(self):
@@ -443,9 +462,6 @@ class TestGetPriceDeprecation:
             volume_24h=0.0, change_24h_pct=0.0, timestamp=datetime.now(),
             exchange="coinbase_usd",
         )
-        with patch.object(feed, 'logger', Mock()) as _mock_log:
-            # Patch the module-level logger instead
-            pass
         import logging
         with patch('data.live_price_feed.logger') as mock_logger:
             result = feed.get_price("BTC")

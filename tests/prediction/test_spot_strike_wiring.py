@@ -310,16 +310,98 @@ class TestStopLossClosePrice:
     """PATCH-4: stop-loss close orders must use price_cents=1 not 0."""
 
     def test_stop_loss_does_not_use_zero_price(self):
-        """Verify that the stop-loss code path does not call _kalshi_place_order
-        with price_cents=0, which is rejected as invalid_price.
+        """_check_stop_losses must call _kalshi_place_order with price_cents=1.
+
+        Verified via AST inspection of the actual keyword argument passed to the
+        order routing call — not a source-text scan — to avoid false positives
+        from comments explaining the fix.
         """
-        import inspect, ast, textwrap
+        import ast
+        import inspect
+        import textwrap
         import merid.prediction.trading_agent as ta
+
         src = inspect.getsource(ta.KalshiTradingAgent._check_stop_losses)
-        # Look for the price_cents kwarg in the place_order call within _check_stop_losses
-        assert "price_cents=0" not in src, (
-            "stop-loss close must NOT use price_cents=0 — it is rejected "
-            "by _check_intent_risk. Use price_cents=1 as a market-proxy sell."
+        tree = ast.parse(textwrap.dedent(src))
+
+        price_cents_values = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                fname = (
+                    func.attr if isinstance(func, ast.Attribute)
+                    else func.id if isinstance(func, ast.Name)
+                    else ""
+                )
+                if "place_order" in fname:
+                    for kw in node.keywords:
+                        if kw.arg == "price_cents" and isinstance(kw.value, ast.Constant):
+                            price_cents_values.append(kw.value.value)
+
+        assert price_cents_values, (
+            "No _kalshi_place_order(price_cents=<literal>) call found in _check_stop_losses"
+        )
+        assert all(v != 0 for v in price_cents_values), (
+            f"stop-loss close must NOT use price_cents=0 — it is rejected by "
+            f"_check_intent_risk.  Found: {price_cents_values}"
+        )
+        assert any(v == 1 for v in price_cents_values), (
+            f"stop-loss close should use price_cents=1 as a market-proxy sell.  "
+            f"Found: {price_cents_values}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_loss_close_calls_place_order_with_price_cents_1(self):
+        """Behavioral test: _check_stop_losses triggers a close and passes price_cents=1."""
+        import time
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from decimal import Decimal
+        from merid.prediction.trading_agent import KalshiTradingAgent
+        from merid.prediction.agent_grid_config import AgentConfig, AgentRiskLimits
+        from merid.event_venues.kalshi.stop_loss import TrackedPosition
+
+        cfg = AgentConfig(
+            name="BTC_15M",
+            assets=["BTC"],
+            timeframes=["15m"],
+            risk_limits=AgentRiskLimits(max_notional_usd=Decimal("1000")),
+            enabled=True,
+        )
+        agent = KalshiTradingAgent(cfg)
+
+        # Inject a position that triggers stop-loss immediately (entry=90, current=1 → deep loss)
+        now = time.time()
+        pos = TrackedPosition(
+            position_id="KXBTC-TEST::yes",
+            ticker="KXBTC-TEST",
+            side="yes",
+            entry_price_cents=90,
+            contracts=5,
+            entry_ts=now - 600,
+            contract_expiry_ts=now + 300,
+            current_price_cents=1,       # 98% loss — any stop-loss rule fires
+            session_equity_cents=100_000.0,
+        )
+        agent._tracked_positions["KXBTC-TEST::yes"] = pos
+
+        # Mock _kalshi_place_order to capture args and return success
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.payload = {"order_id": "test-order"}
+        mock_result.error_message = None
+
+        with patch(
+            "merid.prediction.kalshi_tools._kalshi_place_order",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ) as mock_place:
+            await agent._check_stop_losses()
+
+        # Must have called _kalshi_place_order with price_cents=1
+        assert mock_place.called, "_kalshi_place_order was not called — stop-loss did not fire"
+        call_kwargs = mock_place.call_args.kwargs
+        assert call_kwargs.get("price_cents") == 1, (
+            f"stop-loss close must use price_cents=1; got {call_kwargs.get('price_cents')}"
         )
 
 

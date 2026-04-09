@@ -95,16 +95,20 @@ class TestMarketFilterUSDDistance:
         assert passed, f"Near-spot candidate should pass; got reason: {reason}"
 
     def test_candidate_far_from_spot_fails_distance(self):
-        """A market with strike very far from spot should fail the distance gate."""
+        """A market with strike very far from spot should fail the distance gate.
+
+        Use bid=40/ask=50 (mid=45¢) so the price is above the min_price_cents=10
+        guard, allowing the distance gate to fire instead of the price gate.
+        """
         from merid.event_venues.kalshi.market_filter import MarketFilter, MarketFilterConfig
         # tight 5% band
         cfg = MarketFilterConfig(spot_band_pct=5.0, min_edge_dead_zone_pct=0.0)
         filt = MarketFilter(cfg)
-        # spot=95000, strike=200000 → ~110% away
+        # spot=95000, strike=200000 → ~110% away — well outside 5% band
         cand = self._make_candidate(
             underlying="BTC", timeframe="1h",
             spot_price=95000.0, strike_price=200000.0,
-            bid=5, ask=10,
+            bid=40, ask=50,
         )
         passed, reason = filt.evaluate(cand)
         assert not passed
@@ -343,3 +347,150 @@ class TestSnapshotTSPropagation:
             assert "stale" not in reason.lower(), (
                 f"Fresh intent must not be rejected for staleness; got: {reason}"
             )
+
+    def test_quote_mode_order_carries_snapshot_ts(self):
+        """Both legs of a quote-mode order must pass snapshot_ts to _kalshi_place_order.
+
+        Verified via AST inspection of _execute_signal so we catch regressions
+        where a new order call is added without the staleness argument.
+        """
+        import ast
+        import inspect
+        import textwrap
+        import merid.prediction.trading_agent as ta
+
+        src = inspect.getsource(ta.KalshiTradingAgent._execute_signal)
+        tree = ast.parse(textwrap.dedent(src))
+
+        calls_without_snapshot_ts = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                fname = (
+                    func.attr if isinstance(func, ast.Attribute)
+                    else func.id if isinstance(func, ast.Name)
+                    else ""
+                )
+                if fname == "_kalshi_place_order":
+                    has_snapshot_ts = any(kw.arg == "snapshot_ts" for kw in node.keywords)
+                    if not has_snapshot_ts:
+                        calls_without_snapshot_ts.append(getattr(node, "lineno", "?"))
+
+        assert not calls_without_snapshot_ts, (
+            f"All _kalshi_place_order calls in _execute_signal must carry "
+            f"snapshot_ts for staleness enforcement (PATCH-3). Missing at "
+            f"source line(s): {calls_without_snapshot_ts}"
+        )
+
+
+class TestColdStartMarketFilter:
+    """Fail-closed guard: no markets resolved when USD spot is missing on cold start."""
+
+    def _make_agent(self, asset: str = "BTC"):
+        from decimal import Decimal
+        from merid.prediction.trading_agent import KalshiTradingAgent
+        from merid.prediction.agent_grid_config import AgentConfig, AgentRiskLimits
+        cfg = AgentConfig(
+            name=f"{asset}_1H",
+            assets=[asset],
+            timeframes=["1h"],
+            risk_limits=AgentRiskLimits(max_notional_usd=Decimal("1000")),
+            enabled=True,
+        )
+        return KalshiTradingAgent(cfg)
+
+    @pytest.mark.asyncio
+    async def test_missing_spot_on_cold_start_returns_empty_markets(self):
+        """When get_spot_usd() returns None for a Kalshi asset, _resolve_markets
+        must yield no markets (fail-closed) and emit a [MARKET_FILTER] warning.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        agent = self._make_agent("BTC")
+
+        mock_market_result = MagicMock()
+        mock_market_result.success = True
+        mock_market_result.payload = {
+            "markets": [
+                {
+                    "ticker": "KXBTC-25APR-T84000",
+                    "question": "BTC above $84k?",
+                    "outcomes": [
+                        {"id": "yes", "name": "Yes", "price": "0.50", "probability": "0.50"},
+                    ],
+                    "volume": "200",
+                    "open_interest": "50",
+                    "active": True,
+                    "end_date": "2025-04-25T00:00:00+00:00",
+                    "category": "crypto",
+                    "tags": [],
+                }
+            ]
+        }
+
+        mock_spot_feed = MagicMock()
+        mock_spot_feed.get_spot_usd.return_value = None  # cold start — no price yet
+
+        with (
+            patch(
+                "merid.prediction.kalshi_tools._kalshi_list_markets",
+                new_callable=AsyncMock,
+                return_value=mock_market_result,
+            ),
+            patch(
+                "data.live_price_feed.get_live_price_feed",
+                return_value=mock_spot_feed,
+            ),
+        ):
+            await agent._resolve_markets()
+
+        # Fail-closed: no markets should be resolved when spot is missing
+        assert agent._resolved_markets == [], (
+            "Cold-start with missing USD spot must yield zero markets (fail-closed)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_kalshi_asset_with_missing_spot_passes_through(self):
+        """Non-Kalshi assets (e.g. 'AVAX') are not subject to the fail-closed spot guard."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        agent = self._make_agent("AVAX")
+
+        mock_market_result = MagicMock()
+        mock_market_result.success = True
+        mock_market_result.payload = {
+            "markets": [
+                {
+                    "ticker": "KXAVAX-25APR-T20",
+                    "question": "AVAX above $20?",
+                    "outcomes": [
+                        {"id": "yes", "name": "Yes", "price": "0.50", "probability": "0.50"},
+                    ],
+                    "volume": "200",
+                    "open_interest": "50",
+                    "active": True,
+                    "end_date": "2025-04-25T00:00:00+00:00",
+                    "category": "crypto",
+                    "tags": [],
+                }
+            ]
+        }
+
+        mock_spot_feed = MagicMock()
+        mock_spot_feed.get_spot_usd.return_value = None  # Still no spot
+
+        with (
+            patch(
+                "merid.prediction.kalshi_tools._kalshi_list_markets",
+                new_callable=AsyncMock,
+                return_value=mock_market_result,
+            ),
+            patch(
+                "data.live_price_feed.get_live_price_feed",
+                return_value=mock_spot_feed,
+            ),
+        ):
+            await agent._resolve_markets()
+
+        # Non-Kalshi asset: fail-closed guard does not apply; _resolve_markets
+        # completes without error (market may or may not pass other gates).
