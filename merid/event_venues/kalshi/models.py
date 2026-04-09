@@ -125,7 +125,8 @@ class KalshiBalance:
 class KalshiConfig:
     """Configuration for Kalshi client."""
     
-    # API endpoints
+    # API endpoints — api.elections.kalshi.com is Kalshi's production trade API
+    # for ALL markets (crypto, FX, etc.), not just elections.
     rest_api_url: str = "https://api.elections.kalshi.com/trade-api/v2"
     ws_api_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
     demo_rest_api_url: str = "https://demo-api.kalshi.co/trade-api/v2"
@@ -179,9 +180,22 @@ class KalshiConfig:
             self.private_key_pem = _key_pem
         if not self.use_demo:
             self.use_demo = _use_demo
-        # Override rest_api_url if KALSHI_API_HOST is set (e.g. elections endpoint)
+        # Override rest_api_url if KALSHI_API_HOST is set.
         if _api_host and not self.use_demo:
             self.rest_api_url = _api_host
+
+        # ── Startup invariant check ────────────────────────────────────────
+        # Warn on misconfiguration so operators know immediately, rather than
+        # silently degrading into LIMITED (reduce-only) mode later.
+        try:
+            import os as _os
+            from merid.event_venues.kalshi.invariants import validate_config_env_match
+            _kalshi_env = _os.getenv("KALSHI_ENV", "")
+            _issues = validate_config_env_match(self, _kalshi_env)
+            for _issue in _issues:
+                logger.warning("KalshiConfig startup warning: %s", _issue)
+        except Exception as _inv_exc:
+            logger.debug("KalshiConfig: invariant check skipped: %s", _inv_exc)
     
     @property
     def base_url(self) -> str:

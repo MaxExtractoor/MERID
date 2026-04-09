@@ -74,6 +74,7 @@ class KalshiWebSocketBridge:
         self._events_dropped: int = 0
         self._forward_errors: int = 0
         self._start_ts: float = 0.0
+        self._first_message_ts: float = 0.0  # monotonic time of first message received
 
         # G1: subscription state protected by a lock — swapped atomically on reconnect
         self._subscription_lock: asyncio.Lock = asyncio.Lock()
@@ -118,7 +119,11 @@ class KalshiWebSocketBridge:
         try:
             await self._ws.connect()
         except Exception as exc:
-            logger.error(f"WS bridge failed to connect: {exc}")
+            logger.error(
+                "WS bridge failed to connect: url=%s error=%s",
+                getattr(getattr(self._ws, "config", None), "ws_url", "unknown"),
+                exc,
+            )
             return
 
         if tickers:
@@ -276,8 +281,19 @@ class KalshiWebSocketBridge:
 
     async def _enqueue_event(self, event: Any) -> None:
         """Put event into bounded queue; drop oldest if full."""
+        now = time.monotonic()
         # G2: record arrival time for gap detection
-        self._last_message_ts = time.monotonic()
+        self._last_message_ts = now
+
+        # Log the first message received after connect
+        if self._first_message_ts == 0.0 and self._start_ts > 0.0:
+            self._first_message_ts = now
+            latency = now - self._start_ts
+            logger.info(
+                "WS bridge first message received: latency_from_start=%.2fs url=%s",
+                latency,
+                getattr(getattr(self._ws, "config", None), "ws_url", "unknown"),
+            )
 
         try:
             self._queue.put_nowait(event)
