@@ -698,7 +698,7 @@ def generate_promotion_report(gauntlet_cycles: int = 10) -> PromotionReport:
 
 _cached_report: Optional[PromotionReport] = None
 _cached_at: float = 0.0
-_CACHE_TTL_S = 60.0  # 1 minute
+_CACHE_TTL_S = 300.0  # 5 minutes
 
 
 def get_cached_promotion_report(gauntlet_cycles: int = 5) -> PromotionReport:

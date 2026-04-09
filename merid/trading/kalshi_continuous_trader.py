@@ -639,6 +639,33 @@ class SizingResult:
 
 # ── Trader ────────────────────────────────────────────────────────────────
 
+# Per-asset portfolio exposure caps expressed as a fraction of bankroll.
+# These are upper bounds on how much of the bankroll can be at risk for a
+# single asset across all open positions at once.
+_PER_ASSET_EXPOSURE_PCTS: Dict[str, float] = {
+    "BTC": 0.30,
+    "ETH": 0.30,
+    "SOL": 0.30,
+    "XRP": 0.30,
+    "DOGE": 0.30,
+}
+
+# Global maximum portfolio exposure as a fraction of bankroll.
+# Caps total open risk across ALL crypto assets combined.
+_GLOBAL_MAX_EXPOSURE_PCT: float = 0.50
+
+# Per-timeframe scaling factors applied to per-asset exposure caps.
+# Shorter timeframes use a lower fraction because they settle quickly
+# and a new position can be opened again within the same hour/day.
+_TIMEFRAME_EXPOSURE_FACTORS: Dict[str, float] = {
+    "15m": 0.50,
+    "1h": 0.70,
+    "daily": 0.85,
+    "weekly": 1.00,
+    "monthly": 1.00,
+}
+
+
 class KalshiContinuousTrader:
     """Continuously discovers and trades Kalshi crypto prediction markets.
 
@@ -662,6 +689,10 @@ class KalshiContinuousTrader:
         this cap is dropped with a ``max_yes_price_cap`` rejection log.
         Configurable via ``MERID_MAX_YES_PRICE`` env var; default 0.50.
     """
+
+    # ── Class-level exposure constants (accessible without instance) ──────
+    PER_ASSET_EXPOSURE_PCTS: Dict[str, float] = _PER_ASSET_EXPOSURE_PCTS
+    GLOBAL_MAX_EXPOSURE_PCT: float = _GLOBAL_MAX_EXPOSURE_PCT
 
     def __init__(
         self,
@@ -804,6 +835,16 @@ class KalshiContinuousTrader:
         # Empty dict until the first cycle that supplies balance/portfolio data.
         self._last_invariant_status: Dict[str, Any] = {}
 
+        # ── Live API safety state ────────────────────────────────────────────
+        # Base URL of the Kalshi API endpoint in use.  Defaults to the demo
+        # endpoint so accidental live calls are safe; override for production.
+        self._base_url: str = os.getenv(
+            "KALSHI_API_BASE_URL", "https://demo-api.kalshi.co"
+        )
+        # Optional safety guardian.  When set, _live_api_orders_allowed() consults
+        # it; None means no guardian check (test/dry-run scenarios).
+        self._guardian: Optional[Any] = None
+
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -849,6 +890,75 @@ class KalshiContinuousTrader:
             except asyncio.CancelledError:
                 pass
         logger.info("KalshiContinuousTrader stopped")
+
+    # ── Live API safety gate ──────────────────────────────────────────────
+
+    def _live_api_orders_allowed(self) -> bool:
+        """Return True when all live-API safety preconditions are met.
+
+        Checks (in order):
+        1. Guardian object (if set) — must approve orders.
+        2. Base URL — demo/paper endpoints are always allowed without PM-live.
+        3. Trade mode — paper/mock mode never blocks execution.
+        4. Live mode — explicit live environment is allowed (that is the point).
+
+        Note: This method is intentionally permissive (fail-open) for all
+        modes *except* when the guardian actively blocks.  Orders that are
+        intended to execute should be allowed unless an explicit blocker fires.
+        Venue adapters and the VenueGate perform the actual live-vs-paper
+        routing at execution time.
+        """
+        if self._guardian is not None and hasattr(self._guardian, "allows_orders"):
+            if not self._guardian.allows_orders():
+                logger.warning("CT: live API orders blocked by guardian")
+                return False
+
+        # Demo / paper endpoints: always allow without requiring PM-live mode.
+        if self._base_url and "demo" in self._base_url.lower():
+            return True
+
+        # Paper / mock mode: no live API blocking.
+        trade_mode = os.getenv("MERID_TRADE_MODE", "paper").lower().strip()
+        pm_mode = os.getenv("MERID_PM_TRADING_MODE", "").lower().strip()
+        if trade_mode != "live" and pm_mode != "live":
+            return True
+
+        # Explicit live mode — orders are intended to reach the live API.
+        return True
+
+    # ── Portfolio exposure caps ───────────────────────────────────────────
+
+    def compute_exposure_cap_cents(
+        self, bankroll_cents: int, asset: str, timeframe: str = "1h"
+    ) -> int:
+        """Compute the exposure cap (cents) for *asset* at *timeframe*.
+
+        Cap = bankroll × per_asset_exposure_pct × timeframe_factor
+
+        Args:
+            bankroll_cents: Session bankroll in cents.
+            asset: Crypto asset symbol, e.g. "ETH".
+            timeframe: Timeframe string, e.g. "1h", "daily".
+
+        Returns:
+            Integer cap in cents (truncated, not rounded).
+        """
+        per_asset_pct = self.PER_ASSET_EXPOSURE_PCTS.get(asset.upper(), 0.30)
+        tf_factor = _TIMEFRAME_EXPOSURE_FACTORS.get(timeframe.lower(), 1.0)
+        return int(bankroll_cents * per_asset_pct * tf_factor)
+
+    def compute_global_max_cap_cents(self, bankroll_cents: int) -> int:
+        """Compute the global portfolio exposure cap in cents.
+
+        Cap = bankroll × GLOBAL_MAX_EXPOSURE_PCT
+
+        Args:
+            bankroll_cents: Session bankroll in cents.
+
+        Returns:
+            Integer cap in cents (truncated, not rounded).
+        """
+        return int(bankroll_cents * self.GLOBAL_MAX_EXPOSURE_PCT)
 
     # ── Candidate discovery ───────────────────────────────────────────────
 
@@ -1164,6 +1274,29 @@ class KalshiContinuousTrader:
         asset = candidate.underlying.upper()
         tf = candidate.timeframe.lower()
 
+        # Normalize non-canonical / legacy timeframe strings to the
+        # canonical forms used as EDGE_THRESHOLDS keys.
+        _TF_ALIASES: Dict[str, str] = {
+            "hourly": "1h",
+            "60min": "1h",
+            "60m": "1h",
+            "1hour": "1h",
+            "24h": "daily",
+            "d24h": "daily",
+            "eod": "daily",
+            "day": "daily",
+            "1d": "daily",
+            "week": "weekly",
+            "eow": "weekly",
+            "month": "monthly",
+            "eom": "monthly",
+            "1m": "monthly",
+            "scalp": "15m",
+            "intraday": "1h",
+            "swing": "daily",
+        }
+        tf = _TF_ALIASES.get(tf, tf)
+
         # AUDIT-09: env-var override takes highest priority
         env_key = f"KALSHI_CT_MIN_EDGE_{asset}_{tf.upper().replace('-', '_')}"
         env_raw = os.getenv(env_key)
@@ -1174,7 +1307,16 @@ class KalshiContinuousTrader:
                 logger.warning("Invalid %s=%r — using grid value", env_key, env_raw)
 
         key = (asset, tf)
-        return EDGE_THRESHOLDS.get(key, self._min_edge)
+        threshold = EDGE_THRESHOLDS.get(key)
+        if threshold is None:
+            if tf not in ("15m", "1h", "daily", "weekly", "monthly"):
+                logger.debug(
+                    "_get_min_edge: unrecognised timeframe %r for %s — "
+                    "using global fallback %.4f",
+                    candidate.timeframe, asset, self._min_edge,
+                )
+            return self._min_edge
+        return threshold
 
     def signal_to_sizing(
         self,
