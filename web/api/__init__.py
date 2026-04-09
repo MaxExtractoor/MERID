@@ -4,29 +4,30 @@ MERID API Layer - Institutional-Grade REST Endpoints
 Comprehensive API for system control, trading, monitoring, and data access.
 """
 
-from web.api.institutional import router as institutional_router
-from web.api.system_control import router as system_router
-from web.api.trading import router as trading_router
-from web.api.mining import router as mining_router
-from web.api.reflection import router as reflection_router
-from web.api.streams import router as streams_router
-from web.api.live_stream import router as live_stream_router
-from web.api.betting import router as betting_router
-from web.api.paper_trading import router as paper_trading_router
-from web.api.data_endpoints import router as data_router
-# Removed - trading_suite loads paper adapter which instantiates at module level
-# from web.api.trading_suite import router as trading_suite_router
+# Router names are imported lazily so that importing any single submodule
+# (e.g. web.api.missing_endpoints) does NOT trigger the full heavyweight
+# dependency chain of every other router at package-init time.
 
-__all__ = [
-    "institutional_router",
-    "system_router",
-    "trading_router",
-    "mining_router",
-    "reflection_router",
-    "streams_router",
-    "live_stream_router",
-    "betting_router",
-    "paper_trading_router",
-    "data_router",
-    # "trading_suite_router",  # Removed - causes crypto exchange init
-]
+_ROUTER_MAP = {
+    "institutional_router": ("web.api.institutional", "router"),
+    "system_router": ("web.api.system_control", "router"),
+    "trading_router": ("web.api.trading", "router"),
+    "mining_router": ("web.api.mining", "router"),
+    "reflection_router": ("web.api.reflection", "router"),
+    "streams_router": ("web.api.streams", "router"),
+    "live_stream_router": ("web.api.live_stream", "router"),
+    "betting_router": ("web.api.betting", "router"),
+    "paper_trading_router": ("web.api.paper_trading", "router"),
+    "data_router": ("web.api.data_endpoints", "router"),
+}
+
+__all__ = list(_ROUTER_MAP.keys())
+
+
+def __getattr__(name: str):
+    if name in _ROUTER_MAP:
+        import importlib
+        module_path, attr = _ROUTER_MAP[name]
+        mod = importlib.import_module(module_path)
+        return getattr(mod, attr)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
