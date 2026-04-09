@@ -457,4 +457,4 @@ class TestGetPriceDeprecation:
         assert result.price == pytest.approx(95000.0)
 
 
-import pytest
+
