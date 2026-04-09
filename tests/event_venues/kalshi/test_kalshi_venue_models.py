@@ -285,7 +285,7 @@ class TestKalshiConfig:
         config = KalshiConfig()
         
         assert config.rest_api_url == "https://api.elections.kalshi.com/trade-api/v2"
-        assert config.ws_api_url == "wss://ws.elections.kalshi.com/v2"
+        assert config.ws_api_url == "wss://api.elections.kalshi.com/trade-api/ws/v2"
         assert config.demo_rest_api_url == "https://demo-api.kalshi.co/trade-api/v2"
         assert config.demo_ws_api_url == "wss://demo-ws.kalshi.co/v2"
         assert config.use_demo is False
@@ -294,6 +294,9 @@ class TestKalshiConfig:
     
     def test_kalshi_config_post_init_with_env_vars(self):
         """Test KalshiConfig __post_init__ reads from environment."""
+        import sys
+        # Temporarily disable the cached settings singleton so __post_init__
+        # falls back to os.environ for credential resolution.
         with patch.dict(os.environ, {
             'KALSHI_EMAIL': 'test@example.com',
             'KALSHI_PASSWORD': 'secret',
@@ -301,7 +304,8 @@ class TestKalshiConfig:
             'KALSHI_PRIVATE_KEY_PATH': '/path/to/key',
             'KALSHI_USE_DEMO': 'true'
         }):
-            config = KalshiConfig()
+            with patch.dict(sys.modules, {'merid.settings': None}):
+                config = KalshiConfig()
             
             assert config.email == 'test@example.com'
             assert config.password == 'secret'

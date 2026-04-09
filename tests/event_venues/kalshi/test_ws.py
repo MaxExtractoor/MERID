@@ -300,7 +300,8 @@ class TestKalshiWebSocketReconnect:
         ws_client._running = True
         ws_client._reconnect_delay = 40.0  # Close to max
         
-        with patch.object(ws_client, 'connect', new_callable=AsyncMock):
+        with patch('asyncio.sleep', new_callable=AsyncMock), \
+             patch.object(ws_client, 'connect', new_callable=AsyncMock):
             await ws_client._reconnect()
             
             # Should be capped at 60
