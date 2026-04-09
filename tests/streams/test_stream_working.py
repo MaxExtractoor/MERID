@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import pytest
+pytest.importorskip("feedparser", reason="feedparser is an optional dependency")
 import asyncio
 import sys
 import os

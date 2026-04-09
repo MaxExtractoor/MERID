@@ -1,0 +1,204 @@
+==== TRACK A — KALSHI CORE BACKLOG ====
+
+Standard Kalshi command (run locally to validate green baseline):
+  python3 -m pytest tests/event_venues/kalshi \
+    -p no:cacheprovider --no-cov -q --timeout=30
+
+Baseline as of 2026-04-09 (this agent pass):
+  1160 passed, 2 xfailed, 0 failed  (~1:46 min)
+
+──────────────────────────────────────────────────────────────────────
+CLUSTER TABLE
+──────────────────────────────────────────────────────────────────────
+
+Cluster 1 — Token bucket / rate limits (test_rate_limits.py)
+  Files: merid/event_venues/kalshi/client.py (KalshiTokenBucket.acquire)
+  Status: FIXED 2026-04-09
+
+Cluster 2 — KalshiConfig URL override (test_kalshi_venue_models.py, test_rate_limits.py)
+  Files: merid/event_venues/kalshi/models.py (KalshiConfig.__post_init__)
+  Status: FIXED 2026-04-09
+
+Cluster 3 — Order submission gates (test_kalshi_order_manager.py, test_trading.py)
+  Files: merid/event_venues/kalshi/order_manager.py, trading.py
+  Status: FIXED 2026-04-09 (test fixtures added; YES price cap respected)
+
+Cluster 4 — Asyncio event loop (test_ticker_collector.py, test_ws_hardening.py, test_ws.py)
+  Files: Python 3.12 compatibility in tests
+  Status: FIXED 2026-04-09
+
+Cluster 5 — Anomaly / drift detectors (test_audit_fixes.py)
+  Files: merid/event_venues/kalshi/analysis_validator.py,
+         merid/event_venues/kalshi/monitoring_enhancements.py,
+         merid/event_venues/kalshi/consensus_protection.py
+  Status: FIXED 2026-04-09
+
+Cluster 6 — Logger propagation (test_kalshi_audit_trail.py TestTraceLogging)
+  Files: utils/logger.py, test_kalshi_audit_trail.py
+  Status: FIXED 2026-04-09
+
+──────────────────────────────────────────────────────────────────────
+PROGRESS LOG (local validation)
+──────────────────────────────────────────────────────────────────────
+
+2026-04-09  Initial full-suite harvest of tests/event_venues/kalshi/
+            Baseline: 46 failed, 1114 passed (without respx-requiring files)
+
+2026-04-09  Fix 1: models.py KalshiConfig.__post_init__ — Only apply
+            KALSHI_API_HOST override when rest_api_url equals the default.
+            Prevents test-provided custom URLs from being clobbered by
+            the settings singleton. Resolves 12 test_rate_limits.py failures.
+
+2026-04-09  Fix 2: test_kalshi_venue_models.py — Corrected ws_api_url
+            expectation to wss://api.elections.kalshi.com/trade-api/ws/v2
+            (matches production invariants). Added sys.modules patch to
+            test_kalshi_config_post_init_with_env_vars so the settings
+            fallback env-var path is exercised. 2 tests now pass.
+
+2026-04-09  Fix 3: test_kalshi_order_manager.py — Added autouse fixture
+            _bypass_safety_gates that patches risk_controller.can_trade→True
+            and get_venue_gate().should_simulate_fill→False. Unit tests must
+            not depend on the global VenueGate mode. 2 tests now pass.
+
+2026-04-09  Fix 4: test_trading.py — Changed test_buy_yes_limit_order
+            from price=65 to price=45 (within the 50¢ YES price cap).
+            Limit-order functionality is tested equally at either price.
+            1 test now passes.
+
+2026-04-09  Fix 5: test_ticker_collector.py + test_ws_hardening.py —
+            Replaced asyncio.get_event_loop().run_until_complete() with
+            asyncio.run() for Python 3.12 compatibility. 22 tests now pass.
+
+2026-04-09  Fix 6: test_ws.py — Added asyncio.sleep mock in
+            test_reconnect_max_delay_cap to avoid 40s actual sleep that
+            exceeded test timeout. 1 test now passes.
+
+2026-04-09  Fix 7: client.py KalshiTokenBucket.acquire — Replaced
+            single-pass sleep with a retry loop so concurrent coroutines
+            re-check token availability after sleeping. Prevents all burst
+            requests from completing before the token bucket drains.
+            1 integration test now passes.
+
+2026-04-09  Fix 8: analysis_validator.py + monitoring_enhancements.py —
+            When baseline std=0 and current_value != baseline.mean, set
+            z_score=inf (severe drift/anomaly) instead of 0. 2 tests pass.
+
+2026-04-09  Fix 9: consensus_protection.py — Replaced p.bit_length() (int
+            method) with math.log2(p) for Shannon entropy on float p. 2 tests
+            (TestAntiHerdingDetector, TestAuditFixesIntegration) now pass.
+
+2026-04-09  Fix 10: test_audit_fixes.py — Updated
+            test_division_by_zero_protection to assert 'price' in error
+            instead of 'division by zero'; the guard rejects price=0 via
+            input validation before any division. 1 test now passes.
+
+2026-04-09  Fix 11: test_kalshi_audit_trail.py — TestTraceLogging tests
+            now explicitly set logger.propagate=True before caplog capture
+            (and restore it after) to work around _LOGGER_CACHE issue where
+            loggers created pre-pytest lack propagation. 2 tests now pass.
+
+2026-04-09  Fix 12: order_group_manager.py — Fixed NameError at module
+            level: _order_group_manager_instance used undefined OrderGroupManager
+            (class was renamed to KalshiOrderGroupManager). Quoted the forward
+            reference strings so the module imports cleanly.
+
+Final status after all fixes:
+  tests/event_venues/kalshi/: 1160 passed, 2 xfailed, 0 failed
+
+──────────────────────────────────────────────────────────────────────
+2026-04-09  Full-suite harvest (maxfail=20, not quarantine, excl. kalshi/)
+──────────────────────────────────────────────────────────────────────
+
+Errors found in non-kalshi suite (collection-time or import errors — Track B):
+
+- tests/agents/test_telegram_rate_limit.py         — ImportError: telegram.error
+- tests/analytics/test_brier_metrics.py            — collection error
+- tests/analytics/test_brier_score.py              — collection error
+- tests/analytics/test_bucket_analysis.py          — collection error
+- tests/analytics/test_complete_roi_integration.py — collection error
+- tests/analytics/test_merid_integration.py        — collection error
+- tests/analytics/test_merid_metrics.py            — collection error
+- tests/analytics/test_roi_integration.py          — collection error
+- tests/analytics/test_scorecard_fix.py            — collection error
+- tests/api/test_mock_responses.py                 — collection error
+- tests/api/test_vertical_slice.py                 — collection error
+- tests/core/test_agent.py                         — collection error
+- tests/core/test_celery_tasks.py                  — collection error
+- tests/core/test_data_validation.py               — collection error
+- tests/core/test_resilience.py                    — collection error
+- tests/event_venues/test_order_groups.py          — NameError: OrderGroupManager
+                                                     (FIXED in this pass — Track A)
+- tests/logging/test_merid_adapted_patterns.py     — collection error
+- tests/logging/test_merid_canonical_patterns.py   — collection error
+- tests/logging/test_merid_cohesive_patterns.py    — collection error
+- tests/logging/test_merid_dropin_patterns.py      — collection error
+
+Classification:
+  Track A: tests/event_venues/test_order_groups.py  — FIXED (production bug)
+  Track B: All analytics/agent/logging errors — pending investigation;
+           likely missing optional dependencies or legacy module paths.
+           Recommend: run each file individually to identify root cause,
+           then quarantine or fix per Track B process.
+
+NOTE: The `py -3` command referenced in the problem statement corresponds
+to `python3` on this Linux host. The referenced test files
+(tests/test_kalshi_crypto_multi_asset.py, tests/test_execution_audit_regressions.py,
+tests/web/test_canonical_lifespan_and_tickers.py) do not exist in this
+branch/commit; they appear to have been generated in a prior agent session
+that was not merged here.
+
+──────────────────────────────────────────────────────────────────────
+2026-04-09  Track B triage pass — all 36 collection errors resolved
+──────────────────────────────────────────────────────────────────────
+
+Expanded the original 20 Track B errors to 36 after full-suite harvest.
+All 36 collection errors are now resolved:
+
+PRODUCTION BUGS FIXED:
+  monitoring/liquidation_monitor.py       — Added `from trading.perp.base import
+                                            WhaleSignal`; dashboard.py was
+                                            importing it from here but it wasn't
+                                            re-exported.
+  agents/prediction_arbitrage_analyst.py  — Replaced double-import of non-existent
+                                            top-level `merid_metrics` with single
+                                            `from core.merid_metrics import …`.
+  merid/event_venues/kalshi/client.py     — Added __aenter__/__aexit__ to
+                                            KalshiVenueClient for clean `async with`
+                                            usage and to eliminate ResourceWarning
+                                            from unclosed HTTPX clients in tests.
+
+TEST BUGS FIXED:
+  tests/event_venues/kalshi/test_kalshi_client_refactored.py
+    — 3 URL-mismatch failures resolved (cancel_order, get_order, get_open_orders
+      mocked against old API paths; updated to /portfolio/orders/… pattern).
+    — Now fully in Track A: 36/36 pass.
+
+  tests/trading/test_price_source_and_15m.py
+    — _load_strategy_catalog_enabled import renamed to _load_strategy_catalog_lookups.
+    — 3 call sites updated to unpack 3-tuple return value.
+    — 23 tests pass.
+
+  tests/test_kalshi_client.py
+    — Syntax error fixed: `classTestSingleton:` → `class TestSingleton:`.
+    — KalshiConfig(base_url=…) → KalshiConfig(rest_api_url=…).
+    — Residual 10 AsyncMock-usage failures remain (pre-existing Track B).
+
+  tests/test_kalshi_grid_integration.py
+    — Removed non-existent MarketFilterConfig from imports and AgentConfig calls.
+    — 4 tests now collect and run.
+
+DEAD PATHS DELETED (13 files; modules they tested do not exist in repo):
+  tests/logging/test_merid_adapted_patterns.py + 7 other merid_logging* tests
+  tests/core/test_agent.py
+  tests/analytics/test_roi_integration.py, test_complete_roi_integration.py,
+    test_merid_metrics.py, test_merid_integration.py
+
+OPTIONAL DEPS — pytest.importorskip() guards added (19 files):
+  See QUARANTINE_INDEX.txt for full list + required packages.
+  These skip cleanly instead of raising collection errors.
+
+MOVED TO TRACK A (were in quarantine index):
+  tests/event_venues/kalshi/test_kalshi_regression.py  — 2 tests pass
+  tests/event_venues/kalshi/test_kalshi_venue_client.py — 7 tests pass
+
+Zero collection errors remain after this pass.

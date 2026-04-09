@@ -51,7 +51,7 @@ class TestCollectorBuffer:
                 "volume": 1200,
             }
         }
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         assert c._ticks_ingested == 1
         assert len(c._buffer) == 1
 
@@ -65,7 +65,7 @@ class TestCollectorBuffer:
                 "ask": 0.58,
             }
         }
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         row = list(c._buffer)[0]
         assert row["spread"] == pytest.approx(0.08, abs=0.001)
 
@@ -74,7 +74,7 @@ class TestCollectorBuffer:
         c._running = True
         for i in range(10):
             event = {"payload": {"market_id": f"M{i}", "bid": 0.5, "ask": 0.6}}
-            asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+            asyncio.run(c._on_price_update(event))
         assert len(c._buffer) == 5
         assert c._ticks_ingested == 10
         # Oldest should be M5 (first 5 dropped)
@@ -84,7 +84,7 @@ class TestCollectorBuffer:
         c = TickerCollector(max_rows=100)
         c._running = False
         event = {"payload": {"market_id": "X", "bid": 0.5, "ask": 0.6}}
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         assert c._ticks_ingested == 0
 
 
@@ -92,7 +92,7 @@ class TestCollectorSnapshot:
     def _ingest(self, c, market_id, bid=0.50, ask=0.60):
         c._running = True
         event = {"payload": {"market_id": market_id, "bid": bid, "ask": ask, "volume": 100}}
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
 
     def test_snapshot_all(self):
         c = TickerCollector(max_rows=100)
@@ -138,7 +138,7 @@ class TestCollectorResample:
                     "volume": 100 + i,
                 }
             }
-            asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+            asyncio.run(c._on_price_update(event))
 
     def test_resample_empty(self):
         c = TickerCollector(max_rows=100)
@@ -163,7 +163,7 @@ class TestMalformedMessages:
         c = TickerCollector(max_rows=100)
         c._running = True
         event = {"payload": {}}
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         assert c._ticks_ingested == 1
         row = list(c._buffer)[0]
         assert row["market_id"] == ""
@@ -174,7 +174,7 @@ class TestMalformedMessages:
         c = TickerCollector(max_rows=100)
         c._running = True
         event = {}  # no 'payload' key at all
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         assert c._ticks_ingested == 1
         row = list(c._buffer)[0]
         assert row["market_id"] == ""
@@ -183,7 +183,7 @@ class TestMalformedMessages:
         c = TickerCollector(max_rows=100)
         c._running = True
         event = {"payload": {"market_id": "X", "bid": 0.55}}
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         row = list(c._buffer)[0]
         assert row["yes_bid"] == 0.55
         assert row["yes_ask"] is None
@@ -193,7 +193,7 @@ class TestMalformedMessages:
         c = TickerCollector(max_rows=100)
         c._running = True
         event = {"payload": {"market_id": "Y", "ask": 0.60}}
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         row = list(c._buffer)[0]
         assert row["yes_ask"] == 0.60
         assert row["yes_bid"] is None
@@ -202,7 +202,7 @@ class TestMalformedMessages:
         c = TickerCollector(max_rows=100)
         c._running = True
         event = {"payload": {"market_id": "Z", "bid": None, "ask": None, "volume": None}}
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         row = list(c._buffer)[0]
         assert row["yes_bid"] is None
         assert row["spread"] is None
@@ -224,7 +224,7 @@ class TestKalshiFormatMessages:
                 "volume": 1500,
             }
         }
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         assert c._ticks_ingested == 1
         row = list(c._buffer)[0]
         assert row["market_id"] == "KXBTC-26FEB16-1H-T95000"
@@ -244,7 +244,7 @@ class TestKalshiFormatMessages:
         ]
         for t in tickers:
             event = {"payload": t}
-            asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+            asyncio.run(c._on_price_update(event))
         assert c._ticks_ingested == 3
         assert len(c.market_ids()) == 2
         df = c.snapshot(market_id="KXBTC-1H")
@@ -262,7 +262,7 @@ class TestKalshiFormatMessages:
                     "volume": 100 + i,
                 }
             }
-            asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+            asyncio.run(c._on_price_update(event))
         assert c._ticks_ingested == 500
         assert len(c._buffer) == 500
         assert len(c.market_ids()) == 5
@@ -282,7 +282,7 @@ class TestCollectorStats:
         c = TickerCollector(max_rows=100)
         c._running = True
         event = {"payload": {"market_id": "X", "bid": 0.5, "ask": 0.6}}
-        asyncio.get_event_loop().run_until_complete(c._on_price_update(event))
+        asyncio.run(c._on_price_update(event))
         s = c.stats()
         assert s["ticks_ingested"] == 1
         assert s["buffer_size"] == 1

@@ -247,8 +247,16 @@ class TestTraceLogging:
             "close_time": "2025-12-31T00:00:00Z",
             "expiration_time": "2025-12-31T00:00:00Z",
         }
-        with caplog.at_level(logging.DEBUG, logger="merid.event_venues.kalshi.discovery_validator"):
-            validator.validate_market(valid_market, correlation_id="discover-corr-001")
+        # Ensure propagation to root so caplog can capture regardless of
+        # when the logger was first created relative to pytest startup.
+        dv_log = logging.getLogger("merid.event_venues.kalshi.discovery_validator")
+        was_propagate = dv_log.propagate
+        dv_log.propagate = True
+        try:
+            with caplog.at_level(logging.DEBUG, logger="merid.event_venues.kalshi.discovery_validator"):
+                validator.validate_market(valid_market, correlation_id="discover-corr-001")
+        finally:
+            dv_log.propagate = was_propagate
         trace_lines = [r.message for r in caplog.records if "[TRACE]" in r.message]
         assert any("corr_id=discover-corr-001" in l for l in trace_lines)
         assert any("stage=DISCOVER" in l for l in trace_lines)
@@ -260,8 +268,16 @@ class TestTraceLogging:
             KillSwitchMode,
         )
         ks = EnhancedKillSwitch(mode=KillSwitchMode.DRY_RUN)
-        with caplog.at_level(logging.DEBUG, logger="merid.event_venues.kalshi.protection_enhancements"):
-            ks.activate(reason="test", correlation_id="protect-corr-999")
+        # Ensure propagation to root so caplog can capture regardless of
+        # when the logger was first created relative to pytest startup.
+        pe_log = logging.getLogger("merid.event_venues.kalshi.protection_enhancements")
+        was_propagate = pe_log.propagate
+        pe_log.propagate = True
+        try:
+            with caplog.at_level(logging.DEBUG, logger="merid.event_venues.kalshi.protection_enhancements"):
+                ks.activate(reason="test", correlation_id="protect-corr-999")
+        finally:
+            pe_log.propagate = was_propagate
         trace_lines = [r.message for r in caplog.records if "[TRACE]" in r.message]
         assert any("corr_id=protect-corr-999" in l for l in trace_lines)
         assert any("stage=PROTECT" in l for l in trace_lines)

@@ -7,6 +7,7 @@ database integration, calibration, and API endpoints.
 """
 
 import pytest
+pytest.importorskip("sklearn", reason="scikit-learn is an optional dependency")
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta

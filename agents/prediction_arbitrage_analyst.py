@@ -14,12 +14,7 @@ from pathlib import Path
 from agents.base_agent import BaseAgent
 from monitoring.prediction_analytics import get_arbitrage_opportunities, ArbitrageOpportunity
 from monitoring.prediction_markets import get_prediction_aggregator
-from merid_metrics import compute_brier, compute_bss, brier_decomposition
-from core.merid_metrics import get_merid_metrics, BrierResult
-from core.brier_metrics_db import get_brier_db
-from core.event_bus import event_stream
-from merid_metrics import compute_brier, compute_bss, brier_decomposition
-from core.merid_metrics import get_merid_metrics, BrierResult
+from core.merid_metrics import compute_brier, compute_bss, brier_decomposition, get_merid_metrics, BrierResult
 from core.brier_metrics_db import get_brier_db
 from core.event_bus import event_stream
 from utils.logger import get_logger

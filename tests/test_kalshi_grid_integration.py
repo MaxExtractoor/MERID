@@ -8,7 +8,7 @@ from httpx import Response
 
 from merid.pipeline.adapter import get_adapter_registry, KalshiUnifiedAdapter
 from merid.prediction.agent_grid import AgentGrid
-from merid.prediction.agent_grid_config import AgentGridConfig, VenueConfig, SessionConfig, PortfolioRiskConfig, AgentConfig, MarketFilterConfig, AgentRiskLimits, EntryWindowConfig
+from merid.prediction.agent_grid_config import AgentGridConfig, VenueConfig, SessionConfig, PortfolioRiskConfig, AgentConfig, AgentRiskLimits, EntryWindowConfig
 from merid.event_venues.kalshi.market_catalog import get_market_catalog
 
 @pytest.fixture
@@ -104,7 +104,6 @@ async def test_agent_grid_discovery_integration(mock_kalshi_api):
                 category="crypto",
                 assets=["BTC"],
                 timeframes=["1h"],
-                market_filter=MarketFilterConfig(category="crypto"),
                 risk_limits=AgentRiskLimits(),
                 entry_window=EntryWindowConfig(),
                 archetype="directional"
@@ -160,7 +159,6 @@ async def test_agent_grid_archetypes_integration(mock_kalshi_api):
                 category="crypto",
                 assets=["BTC"],
                 timeframes=["15m"],
-                market_filter=MarketFilterConfig(category="crypto"),
                 risk_limits=AgentRiskLimits(max_orders_per_window=100),
                 entry_window=EntryWindowConfig(minutes_before_expiry=entry_window_mins, cutoff_minutes_before_expiry=0),
                 archetype="market_maker"

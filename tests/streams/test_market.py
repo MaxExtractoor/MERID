@@ -1,5 +1,6 @@
 """Tests for streams/market.py."""
 import pytest
+pytest.importorskip("feedparser", reason="feedparser is an optional dependency")
 import asyncio
 import time
 from unittest.mock import Mock, patch, AsyncMock

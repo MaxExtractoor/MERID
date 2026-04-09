@@ -3,6 +3,8 @@
 Test script to verify the governance scorecard fix
 """
 
+import pytest
+pytest.importorskip("sklearn", reason="scikit-learn is an optional dependency")
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))

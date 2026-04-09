@@ -130,7 +130,8 @@ class FillQualityAnomalyDetector:
 
         # Calculate z-score
         if baseline_std == 0:
-            z_score = 0.0
+            # Perfect baseline consistency: any deviation is extreme anomaly
+            z_score = 0.0 if current_value == baseline_mean else float("inf")
         else:
             z_score = abs((current_value - baseline_mean) / baseline_std)
 
