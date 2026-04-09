@@ -24,6 +24,7 @@ Endpoints:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -32,6 +33,9 @@ from utils.logger import get_logger
 
 router = APIRouter(prefix="/api/v1/kalshi-grid", tags=["kalshi-grid"])
 logger = get_logger("web.api.kalshi_grid")
+
+CATALOG_STALE_THRESHOLD_S = 300
+WS_MIN_EVENTS_FOR_HEALTHY = 1
 
 
 def _get_grid():
@@ -158,6 +162,8 @@ async def grid_health() -> Dict[str, Any]:
     portfolio = summary.get("portfolio_risk", {})
 
     issues: List[str] = []
+    dependencies: Dict[str, Dict[str, Any]] = {}
+    dependency_summary = {"total": 0, "healthy": 0, "degraded": 0, "down": 0}
 
     # Venue connectivity
     if not venue_health.get("connected", False):
@@ -179,6 +185,7 @@ async def grid_health() -> Dict[str, Any]:
 
     # Catalog
     catalog_info: Dict[str, Any] = {"market_count": 0, "last_refresh": None, "categories": 0}
+    catalog_error: str | None = None
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         cat = get_market_catalog()
@@ -187,15 +194,15 @@ async def grid_health() -> Dict[str, Any]:
             "market_count": cat_s.get("market_count", 0),
             "last_refresh": cat_s.get("last_refresh"),
             "categories": len(cat_s.get("categories", {})),
+            "running": cat_s.get("running"),
         }
-        if catalog_info["market_count"] == 0:
-            issues.append("Market catalog is empty — agents have no markets to trade")
     except Exception as _e:
+        catalog_error = str(_e)
         logger.debug("catalog health probe skipped: %s", _e)
-        issues.append("Market catalog unavailable")
 
     # WebSocket feed
     ws_info: Dict[str, Any] = {"running": False, "events_forwarded": 0, "subscribed_tickers": 0}
+    ws_error: str | None = None
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
         bridge = get_ws_bridge()
@@ -205,10 +212,76 @@ async def grid_health() -> Dict[str, Any]:
             "events_forwarded": bridge_s.get("events_forwarded", 0),
             "subscribed_tickers": bridge_s.get("subscribed_tickers", 0),
         }
-        if not ws_info["running"]:
-            issues.append("WebSocket feed is not running — real-time data unavailable")
     except Exception as _e:
+        ws_error = str(_e)
         logger.debug("ws_feed health probe skipped: %s", _e)
+
+    # Dependency classification (market catalog + websocket bridge)
+    def _add_dependency(name: str, status: str, detail: Dict[str, Any]) -> None:
+        dependencies[name] = {"status": status, **detail}
+        dependency_summary["total"] += 1
+        if status in dependency_summary:
+            dependency_summary[status] += 1
+
+    # Catalog health
+    catalog_status = "healthy"
+    catalog_age_s = None
+    last_refresh_raw = catalog_info.get("last_refresh")
+    if catalog_error:
+        catalog_status = "down"
+        issues.append("Market catalog unavailable")
+    else:
+        if last_refresh_raw:
+            try:
+                last_dt = datetime.fromisoformat(last_refresh_raw.replace("Z", "+00:00"))
+                catalog_age_s = (datetime.now(timezone.utc) - last_dt).total_seconds()
+            except Exception as _e:  # pragma: no cover - defensive
+                logger.debug("catalog last_refresh parse failed: %s", _e)
+                catalog_status = "degraded"
+        else:
+            catalog_status = "degraded"
+
+        if catalog_info.get("market_count", 0) == 0:
+            catalog_status = "degraded"
+            issues.append("Market catalog is empty — agents have no markets to trade")
+        elif catalog_age_s is not None and catalog_age_s > CATALOG_STALE_THRESHOLD_S:
+            catalog_status = "degraded"
+            issues.append(f"Market catalog stale ({int(catalog_age_s)}s old)")
+
+    _add_dependency(
+        "market_catalog",
+        catalog_status,
+        {
+            "market_count": catalog_info.get("market_count", 0),
+            "last_refresh": last_refresh_raw,
+            "age_seconds": catalog_age_s,
+            "running": catalog_info.get("running"),
+            "error": catalog_error,
+        },
+    )
+
+    # Websocket bridge health
+    ws_status = "healthy"
+    if ws_error:
+        ws_status = "down"
+        issues.append("WebSocket feed unavailable")
+    elif not ws_info.get("running", False):
+        ws_status = "down"
+        issues.append("WebSocket feed is not running — real-time data unavailable")
+    elif ws_info.get("events_forwarded", 0) < WS_MIN_EVENTS_FOR_HEALTHY:
+        ws_status = "degraded"
+        issues.append("WebSocket feed running but no events forwarded yet")
+
+    _add_dependency(
+        "kalshi_websocket",
+        ws_status,
+        {
+            "running": ws_info.get("running", False),
+            "events_forwarded": ws_info.get("events_forwarded", 0),
+            "subscribed_tickers": ws_info.get("subscribed_tickers", 0),
+            "error": ws_error,
+        },
+    )
 
     # Rate limits (from venue_health if available, else defaults)
     rate_limits_raw = venue_health.get("rate_limits", {})
@@ -252,9 +325,18 @@ async def grid_health() -> Dict[str, Any]:
         "drawdown_pct": _drawdown,
     }
 
+    has_down_dependency = any(dep.get("status") == "down" for dep in dependencies.values())
+    overall_status = "healthy"
+    if has_down_dependency:
+        overall_status = "critical"
+    elif issues:
+        overall_status = "degraded" if len(issues) < 3 else "critical"
+
     return {
-        "status": "healthy" if not issues else ("degraded" if len(issues) < 3 else "critical"),
+        "status": overall_status,
         "issues": issues,
+        "dependencies": dependencies,
+        "dependency_summary": dependency_summary,
         "catalog": catalog_info,
         "ws": ws_info,
         "rate_limits": rate_limits,
