@@ -217,8 +217,15 @@ async def _kalshi_place_order(
     price_cents: int = 0,
     count: int = 1,
     agent_name: str = "",
+    snapshot_ts: Optional[float] = None,
 ) -> ToolResult:
-    """Place a YES/NO order on Kalshi."""
+    """Place a YES/NO order on Kalshi.
+
+    Args:
+        snapshot_ts: POSIX epoch seconds of the MarketSnapshot that drove
+            this intent (PATCH-3).  Threaded into ``OrderIntent.snapshot_ts``
+            so the router can enforce ``MERID_SNAPSHOT_STALENESS_SECONDS``.
+    """
     t0 = time.time()
 
     if not ticker:
@@ -371,6 +378,7 @@ async def _kalshi_place_order(
             action=action,   # "buy" or "sell"
             price_cents=price_cents,
             count=count,
+            snapshot_ts=snapshot_ts,  # PATCH-3: thread staleness gate
         )
 
         result = await route_order_async(intent)
@@ -441,11 +449,22 @@ async def _kalshi_place_paper_order(
     action: str = "buy",
     price_cents: int = 0,
     count: int = 1,
+    forced_paper_reason: str = "",
 ) -> ToolResult:
     """Force-paper order — always simulated, bypasses venue gate.
 
-    Called by trading_agent._execute_signal when the BTC 15m risk layer
-    returns TradeMode.PAPER regardless of the global venue gate setting.
+    PATCH-9 / BYPASS-AUDIT: This function is intentionally a simulation
+    bypass.  It MUST NOT be called on the live trading path.  It is called
+    exclusively by ``trading_agent._execute_signal`` when:
+    - ``CryptoSwarmRiskBTC15m.evaluate_proposal`` returns ``TradeMode.PAPER``
+    - The BTC-15m risk layer raises an exception (fail-closed, PATCH-2)
+
+    A ``SessionGuard`` check is still enforced here so that force-paper
+    orders respect maintenance windows (an error in the risk layer should not
+    allow trading when the session is explicitly halted).
+
+    Callers MUST populate ``forced_paper_reason`` for operator auditability;
+    the reason is included in the structured log line produced by this function.
     """
     t0 = time.time()
     if not ticker:
@@ -453,6 +472,29 @@ async def _kalshi_place_paper_order(
             ToolErrorCode.INVALID_INPUT, "ticker is required",
             tool_name="kalshi_place_paper_order",
         )
+
+    # PATCH-9: Session guard — respect maintenance windows even for paper orders
+    _session = get_session_guard()
+    if not _session.is_trading_allowed():
+        _block_reason = _session.block_reason() or "session_blocked"
+        logger.warning(
+            "[FORCE_PAPER_BLOCKED] ticker=%s session_blocked reason=%s",
+            ticker, _block_reason,
+        )
+        return ToolResult.fail(
+            ToolErrorCode.VENUE_DOWN,
+            _block_reason,
+            tool_name="kalshi_place_paper_order",
+        )
+
+    # PATCH-9: Explicit operator-visible log for every force-paper bypass
+    logger.warning(
+        "[FORCE_PAPER] ticker=%s side=%s action=%s count=%d price=%dc "
+        "forced_paper=true reason=%s",
+        ticker, side, action, count, price_cents,
+        forced_paper_reason or "unspecified",
+    )
+
     payload = {
         "order_id": f"paper_{ticker}_{int(time.time() * 1000)}",
         "ticker": ticker,
@@ -463,6 +505,7 @@ async def _kalshi_place_paper_order(
         "status": "simulated",
         "simulated": True,
         "source": "force_paper",
+        "forced_paper_reason": forced_paper_reason or "unspecified",
     }
     return ToolResult(
         success=True,

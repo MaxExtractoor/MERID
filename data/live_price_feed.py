@@ -3,14 +3,21 @@ Live Price Feed for MERID.
 
 Real-time cryptocurrency price data from multiple exchanges.
 Production-grade implementation using CCXT and WebSocket connections.
+
+INVARIANT (PATCH-1 / EGG-1): For the five Kalshi crypto assets (BTC, ETH,
+SOL, XRP, DOGE) the *canonical spot* used for strike-distance checks, risk
+sizing, and PnL attribution is always USD-denominated and stored under bare
+asset keys ("BTC", not "BTC/USDT").  Kalshi contracts pay 1.00 USD per
+contract; mixing USDT prices would introduce silent drift on any USDT depeg.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import httpx
@@ -25,6 +32,55 @@ from core.environment import get_environment_flags
 from core.network_client import RoutingProfile, get_network_client
 
 logger = get_logger("data.live_price_feed")
+
+# ── Kalshi-specific constants ────────────────────────────────────────────
+# These are the five assets traded on Kalshi whose spot prices must be in USD.
+KALSHI_ASSETS = frozenset({"BTC", "ETH", "SOL", "XRP", "DOGE"})
+
+# USDT depeg guard — env-configurable (PATCH-1 / EGG-1)
+_USDT_DEPEG_THRESHOLD_PCT = float(os.getenv("MERID_USDT_DEPEG_THRESHOLD_PCT", "0.50"))
+_USDT_DEPEG_BLOCK_TRADES = os.getenv("MERID_USDT_DEPEG_BLOCK_TRADES", "true").lower() != "false"
+# Maximum age (seconds) for a Kalshi spot price to be considered fresh
+_SPOT_MAX_STALENESS_SECONDS = float(os.getenv("MERID_SPOT_MAX_STALENESS_SECONDS", "60"))
+
+# CoinGecko IDs for all five Kalshi assets (PATCH-8 / EGG-9: adds XRP and DOGE)
+_COINGECKO_IDS: Dict[str, str] = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "SOL": "solana",
+    "XRP": "ripple",
+    "DOGE": "dogecoin",
+}
+
+
+@dataclass
+class SpotUSDData:
+    """USD-denominated spot price for a single Kalshi asset.
+
+    INVARIANT: ``price_usd`` is always in US dollars, never USDT.
+    When the upstream source is USDT-quoted, the conversion factor and
+    depeg status are recorded in ``spot_source`` so operators can audit
+    any drift against Kalshi's USD-settled contracts.
+
+    Attributes:
+        asset:        Bare asset key, e.g. "BTC".
+        price_usd:    USD price, or None if unavailable / depegged.
+        timestamp:    POSIX epoch seconds when the price was fetched.
+        spot_source:  Provenance tag, one of:
+                        "coinbase_usd"       – Coinbase BTC/USD direct quote
+                        "kraken_usd"         – Kraken BTC/USD direct quote
+                        "gemini_usd"         – Gemini BTC/USD direct quote
+                        "binance_usdt_normalized" – Binance BTCUSDT × USDT/USD
+                        "coingecko_usd"      – CoinGecko public API (fallback)
+                        "usdt_depegged"      – Binance only, USDT peg exceeded
+                                               threshold; price_usd is None
+                        "stale"              – Cached price exceeds staleness
+                                               threshold; price_usd is None
+    """
+    asset: str
+    price_usd: Optional[float]
+    timestamp: float
+    spot_source: str
 
 
 @dataclass
@@ -238,7 +294,15 @@ class LivePriceFeed:
                 await asyncio.sleep(0)
     
     async def _fetch_price_with_retry(self, symbol: str):
-        """Fetch price with retry logic and circuit breaker."""
+        """Fetch price with retry logic and circuit breaker.
+
+        PATCH-1 / EGG-1: For the five Kalshi assets, prices fetched from USD
+        exchanges (Kraken, Coinbase, Gemini) are stored under *both* the
+        original symbol key and the bare asset key so that get_spot_usd()
+        can look them up directly.  For Binance (USDT-denominated), the USDT
+        peg is checked before the price is stored; if it depegs by more than
+        MERID_USDT_DEPEG_THRESHOLD_PCT the Binance price is discarded.
+        """
         fetched = False
         for exchange_name in self.exchange_priority:
             if exchange_name not in self.exchanges:
@@ -258,9 +322,11 @@ class LivePriceFeed:
                     except RuntimeError:
                         break  # Network guard blocked — skip this exchange
                     
-                    # Adjust symbol format for different exchanges
+                    # Adjust symbol format for different exchanges.
+                    # USD-native exchanges: rewrite /USDT → /USD
                     fetch_symbol = symbol
-                    if exchange_name in ['kraken', 'coinbase', 'gemini']:
+                    _is_usd_exchange = exchange_name in ['kraken', 'coinbase', 'gemini']
+                    if _is_usd_exchange:
                         fetch_symbol = symbol.replace('/USDT', '/USD')
                     
                     # Load markets if not yet loaded, then skip unlisted symbols
@@ -273,20 +339,75 @@ class LivePriceFeed:
                         break
                     
                     ticker = await asyncio.to_thread(exchange.fetch_ticker, fetch_symbol)
-                    
+                    raw_price = ticker['last']
+
+                    # ── Binance USDT depeg guard (PATCH-1 / EGG-1) ──────────
+                    # Binance quotes are USDT-denominated.  Before using the
+                    # price we check the USDT/USD peg; if it has moved beyond
+                    # the configured threshold the price is unusable for Kalshi.
+                    if exchange_name == 'binance' and symbol.endswith('/USDT'):
+                        asset_key = symbol.split("/")[0].upper()
+                        if asset_key in KALSHI_ASSETS:
+                            peg = await self._fetch_usdt_usd_peg(exchange)
+                            if peg is None:
+                                # Cannot determine peg — skip this price
+                                logger.warning(
+                                    "binance_depeg_check: unable to fetch USDT/USD peg "
+                                    "for %s — skipping price", symbol
+                                )
+                                break
+                            depeg_pct = abs(1.0 - peg) * 100.0
+                            if depeg_pct > _USDT_DEPEG_THRESHOLD_PCT:
+                                logger.critical(
+                                    "USDT DEPEG DETECTED: asset=%s peg=%.6f depeg_pct=%.4f%% "
+                                    "threshold=%.2f%% — discarding Binance price for Kalshi path",
+                                    asset_key, peg, depeg_pct, _USDT_DEPEG_THRESHOLD_PCT,
+                                )
+                                # Store sentinel so get_spot_usd() knows price is unavailable
+                                self.price_cache[asset_key] = PriceData(
+                                    symbol=asset_key,
+                                    price=0.0,
+                                    bid=0.0,
+                                    ask=0.0,
+                                    volume_24h=0.0,
+                                    change_24h_pct=0.0,
+                                    timestamp=datetime.now(),
+                                    exchange="usdt_depegged",
+                                )
+                                break
+                            # Peg within threshold — normalise to USD
+                            raw_price = raw_price * peg
+
                     price_data = PriceData(
                         symbol=symbol,
-                        price=ticker['last'],
-                        bid=ticker['bid'] or ticker['last'],
-                        ask=ticker['ask'] or ticker['last'],
+                        price=raw_price,
+                        bid=ticker['bid'] or raw_price,
+                        ask=ticker['ask'] or raw_price,
                         volume_24h=ticker['quoteVolume'] or 0,
                         change_24h_pct=ticker['percentage'] or 0,
                         timestamp=datetime.now(),
                         exchange=exchange_name
                     )
                     
-                    # Update cache
+                    # Update cache under the original symbol key
                     self.price_cache[symbol] = price_data
+
+                    # For Kalshi assets fetched from USD-native exchanges, also
+                    # store under the bare asset key with a clear source tag.
+                    asset_key = symbol.split("/")[0].upper() if "/" in symbol else symbol.upper()
+                    if asset_key in KALSHI_ASSETS and (_is_usd_exchange or
+                            (exchange_name == 'binance' and symbol.endswith('/USDT'))):
+                        _src = f"{exchange_name}_usd" if _is_usd_exchange else "binance_usdt_normalized"
+                        self.price_cache[asset_key] = PriceData(
+                            symbol=asset_key,
+                            price=raw_price,
+                            bid=price_data.bid,
+                            ask=price_data.ask,
+                            volume_24h=price_data.volume_24h,
+                            change_24h_pct=price_data.change_24h_pct,
+                            timestamp=price_data.timestamp,
+                            exchange=_src,
+                        )
                     
                     # Register price assertion with Reality Registry
                     self._register_price_assertion(price_data, exchange_name)
@@ -382,11 +503,6 @@ class LivePriceFeed:
     def get_current_price(self, symbol: str) -> Optional[PriceData]:
         """Get current cached price for a symbol."""
         return self.price_cache.get(symbol)
-    
-    # Legacy compatibility
-    def get_price(self, symbol: str) -> Optional[PriceData]:
-        """Alias for older callers expecting get_price."""
-        return self.get_current_price(symbol)
     
     def get_all_prices(self) -> Dict[str, PriceData]:
         """Get all current cached prices."""
@@ -529,14 +645,16 @@ class LivePriceFeed:
         self._network_client.resolve_endpoint(self._module_name, f"{action}:{endpoint}")
 
     async def _fetch_from_coingecko(self, symbol: str) -> bool:
-        """Fallback to CoinGecko public API (US-accessible)."""
-        mapping = {
-            'BTC/USDT': 'bitcoin',
-            'ETH/USDT': 'ethereum',
-            'SOL/USDT': 'solana',
-            'AVAX/USDT': 'avalanche-2',
-        }
-        asset_id = mapping.get(symbol)
+        """Fallback to CoinGecko public API (US-accessible).
+
+        PATCH-1 / EGG-9: mapping extended to cover all five Kalshi assets
+        (BTC, ETH, SOL, XRP, DOGE) using bare asset keys.  Prices are fetched
+        in USD ("vs_currency": "usd") and stored under bare keys so that
+        get_spot_usd() finds them directly.
+        """
+        # Support both bare keys ("BTC") and legacy /USDT keys ("BTC/USDT")
+        asset_key = symbol.split("/")[0] if "/" in symbol else symbol.upper()
+        asset_id = _COINGECKO_IDS.get(asset_key)
         if not asset_id:
             return False
         try:
@@ -571,7 +689,20 @@ class LivePriceFeed:
             timestamp=timestamp,
             exchange="coingecko",
         )
+        # Store under both the original symbol key AND the bare asset key so
+        # get_spot_usd() finds the price without knowing the /USDT suffix.
         self.price_cache[symbol] = price_data
+        if asset_key in KALSHI_ASSETS:
+            self.price_cache[asset_key] = PriceData(
+                symbol=asset_key,
+                price=price,
+                bid=price_data.bid,
+                ask=price_data.ask,
+                volume_24h=price_data.volume_24h,
+                change_24h_pct=price_data.change_24h_pct,
+                timestamp=timestamp,
+                exchange="coingecko_usd",
+            )
         await self._broadcast_update(price_data)
         return True
 
@@ -587,6 +718,105 @@ class LivePriceFeed:
                 "volume_24h": getattr(price_data, "volume_24h", 0.0),
             }
         return prices
+
+    # ── Kalshi USD spot accessor ──────────────────────────────────────────
+
+    def get_spot_usd(self, asset: str) -> Optional[SpotUSDData]:
+        """Return the canonical USD spot price for a Kalshi asset.
+
+        INVARIANT (PATCH-1 / EGG-1): The returned ``SpotUSDData.price_usd``
+        is always denominated in US dollars, never USDT.  Callers in the
+        Kalshi trading path MUST use this accessor instead of
+        ``get_price("BTC/USDT")``.
+
+        Staleness is checked against ``MERID_SPOT_MAX_STALENESS_SECONDS``
+        (default 60 s).  Stale prices return ``price_usd=None`` and
+        ``spot_source="stale"``.
+
+        If the cached entry was produced by the Binance depeg sentinel
+        (``exchange=="usdt_depegged"``) the method returns
+        ``price_usd=None, spot_source="usdt_depegged"``.
+
+        Args:
+            asset: Bare asset key, e.g. "BTC".  Case-insensitive.
+
+        Returns:
+            SpotUSDData or None if no data has ever been fetched.
+        """
+        asset_up = asset.upper()
+        cached = self.price_cache.get(asset_up)
+        if cached is None:
+            return None
+
+        # Depeg sentinel — price is unusable
+        if cached.exchange == "usdt_depegged":
+            return SpotUSDData(
+                asset=asset_up,
+                price_usd=None,
+                timestamp=cached.timestamp.timestamp(),
+                spot_source="usdt_depegged",
+            )
+
+        age_s = (datetime.now() - cached.timestamp).total_seconds()
+        if age_s > _SPOT_MAX_STALENESS_SECONDS:
+            logger.warning(
+                "get_spot_usd: %s price is stale (age=%.1fs > %.0fs threshold)",
+                asset_up, age_s, _SPOT_MAX_STALENESS_SECONDS,
+            )
+            return SpotUSDData(
+                asset=asset_up,
+                price_usd=None,
+                timestamp=cached.timestamp.timestamp(),
+                spot_source="stale",
+            )
+
+        return SpotUSDData(
+            asset=asset_up,
+            price_usd=cached.price if cached.price > 0 else None,
+            timestamp=cached.timestamp.timestamp(),
+            spot_source=cached.exchange,
+        )
+
+    def get_price(self, symbol: str) -> Optional[PriceData]:
+        """Alias for older callers expecting get_price.
+
+        .. deprecated::
+            For the Kalshi trading path (BTC/ETH/SOL/XRP/DOGE), use
+            :meth:`get_spot_usd` instead.  This shim still works but logs a
+            deprecation warning when the caller passes a bare Kalshi asset key
+            without a /USDT suffix, which is the new convention.
+        """
+        # Detect callers that have been migrated to bare keys
+        asset_up = symbol.upper()
+        if asset_up in KALSHI_ASSETS:
+            logger.warning(
+                "get_price('%s'): DEPRECATED for Kalshi path — use get_spot_usd('%s') instead",
+                symbol, asset_up,
+            )
+            return self.get_current_price(asset_up)
+        return self.get_current_price(symbol)
+
+    async def _fetch_usdt_usd_peg(self, exchange) -> Optional[float]:
+        """Fetch the USDT/USD exchange rate from a Binance exchange instance.
+
+        PATCH-1 / EGG-1: Used to normalise Binance USDT prices to USD before
+        storing them in the Kalshi spot cache.  Returns None on failure.
+        """
+        try:
+            # Try USDT/USD directly
+            for pair in ("USDT/USD", "USDC/USDT"):
+                try:
+                    ticker = await asyncio.to_thread(exchange.fetch_ticker, pair)
+                    price = ticker.get("last")
+                    if price and price > 0:
+                        # USDC/USDT gives the inverse rate
+                        return float(price) if pair == "USDT/USD" else 1.0 / float(price)
+                except Exception:
+                    continue
+            return None
+        except Exception as exc:
+            logger.debug("_fetch_usdt_usd_peg failed: %s", exc)
+            return None
 
 
 # Global singleton

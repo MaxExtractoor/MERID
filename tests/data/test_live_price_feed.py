@@ -285,3 +285,176 @@ class TestGetLivePriceFeed:
             feed2 = get_live_price_feed()
             
             assert feed1 is feed2
+
+
+# ── PATCH-1 / EGG-1 tests: get_spot_usd() ────────────────────────────────
+
+class TestGetSpotUSD:
+    """Unit tests for get_spot_usd() — the canonical Kalshi USD spot accessor.
+
+    PATCH-1 / EGG-1: All prices used in the Kalshi trading path must be in
+    USD, stored under bare asset keys.
+    """
+
+    def _make_feed(self):
+        with patch('data.live_price_feed.get_network_client') as mock_net:
+            mock_net.return_value = Mock()
+            return LivePriceFeed()
+
+    def test_get_spot_usd_returns_none_when_not_cached(self):
+        """get_spot_usd returns None when no price has ever been fetched."""
+        feed = self._make_feed()
+        result = feed.get_spot_usd("BTC")
+        assert result is None
+
+    def test_get_spot_usd_returns_spot_data_from_coinbase(self):
+        """get_spot_usd returns SpotUSDData for a fresh Coinbase USD price."""
+        feed = self._make_feed()
+        feed.price_cache["BTC"] = PriceData(
+            symbol="BTC",
+            price=95000.0,
+            bid=94990.0,
+            ask=95010.0,
+            volume_24h=1_000_000.0,
+            change_24h_pct=2.5,
+            timestamp=datetime.now(),
+            exchange="coinbase_usd",
+        )
+        result = feed.get_spot_usd("BTC")
+        assert result is not None
+        assert result.price_usd == pytest.approx(95000.0)
+        assert result.spot_source == "coinbase_usd"
+        assert result.asset == "BTC"
+
+    def test_get_spot_usd_case_insensitive(self):
+        """get_spot_usd accepts lowercase asset keys."""
+        feed = self._make_feed()
+        feed.price_cache["BTC"] = PriceData(
+            symbol="BTC", price=95000.0, bid=94990.0, ask=95010.0,
+            volume_24h=0.0, change_24h_pct=0.0, timestamp=datetime.now(),
+            exchange="coinbase_usd",
+        )
+        result = feed.get_spot_usd("btc")
+        assert result is not None
+        assert result.asset == "BTC"
+
+    def test_get_spot_usd_returns_none_for_depegged_usdt(self):
+        """get_spot_usd returns price_usd=None and spot_source='usdt_depegged'."""
+        feed = self._make_feed()
+        # Sentinel written by depeg guard
+        feed.price_cache["BTC"] = PriceData(
+            symbol="BTC", price=0.0, bid=0.0, ask=0.0,
+            volume_24h=0.0, change_24h_pct=0.0,
+            timestamp=datetime.now(), exchange="usdt_depegged",
+        )
+        result = feed.get_spot_usd("BTC")
+        assert result is not None
+        assert result.price_usd is None
+        assert result.spot_source == "usdt_depegged"
+
+    def test_get_spot_usd_returns_stale_when_price_too_old(self):
+        """get_spot_usd returns price_usd=None and spot_source='stale' for old prices."""
+        import time as _time
+        from datetime import timedelta
+        feed = self._make_feed()
+        old_ts = datetime.now() - timedelta(seconds=120)  # 2 min old > 60s threshold
+        feed.price_cache["ETH"] = PriceData(
+            symbol="ETH", price=3500.0, bid=3490.0, ask=3510.0,
+            volume_24h=0.0, change_24h_pct=0.0, timestamp=old_ts,
+            exchange="coinbase_usd",
+        )
+        result = feed.get_spot_usd("ETH")
+        assert result is not None
+        assert result.price_usd is None
+        assert result.spot_source == "stale"
+
+    def test_get_spot_usd_fresh_price_within_threshold(self):
+        """get_spot_usd returns live price when timestamp is recent."""
+        feed = self._make_feed()
+        feed.price_cache["SOL"] = PriceData(
+            symbol="SOL", price=155.0, bid=154.9, ask=155.1,
+            volume_24h=0.0, change_24h_pct=0.0,
+            timestamp=datetime.now(),
+            exchange="kraken_usd",
+        )
+        result = feed.get_spot_usd("SOL")
+        assert result is not None
+        assert result.price_usd == pytest.approx(155.0)
+        assert result.spot_source == "kraken_usd"
+
+    def test_get_spot_usd_all_five_kalshi_assets(self):
+        """get_spot_usd works for all five Kalshi assets."""
+        feed = self._make_feed()
+        assets_prices = {
+            "BTC": 95000.0, "ETH": 3500.0, "SOL": 155.0,
+            "XRP": 0.52, "DOGE": 0.105,
+        }
+        for asset, price in assets_prices.items():
+            feed.price_cache[asset] = PriceData(
+                symbol=asset, price=price, bid=price * 0.999, ask=price * 1.001,
+                volume_24h=0.0, change_24h_pct=0.0, timestamp=datetime.now(),
+                exchange="coingecko_usd",
+            )
+        for asset, expected_price in assets_prices.items():
+            result = feed.get_spot_usd(asset)
+            assert result is not None, f"Expected SpotUSDData for {asset}"
+            assert result.price_usd == pytest.approx(expected_price), f"Price mismatch for {asset}"
+            assert result.spot_source == "coingecko_usd"
+
+
+class TestKalshiAssetConstants:
+    """Verify KALSHI_ASSETS constant and CoinGecko mapping completeness."""
+
+    def test_kalshi_assets_contains_all_five(self):
+        """KALSHI_ASSETS must contain exactly BTC, ETH, SOL, XRP, DOGE."""
+        from data.live_price_feed import KALSHI_ASSETS
+        assert KALSHI_ASSETS == frozenset({"BTC", "ETH", "SOL", "XRP", "DOGE"})
+
+    def test_coingecko_ids_cover_all_kalshi_assets(self):
+        """_COINGECKO_IDS must have entries for all five Kalshi assets."""
+        from data.live_price_feed import _COINGECKO_IDS, KALSHI_ASSETS
+        for asset in KALSHI_ASSETS:
+            assert asset in _COINGECKO_IDS, f"Missing CoinGecko ID for {asset}"
+
+    def test_coingecko_xrp_mapping(self):
+        """PATCH-8: XRP must map to 'ripple' in CoinGecko IDs."""
+        from data.live_price_feed import _COINGECKO_IDS
+        assert _COINGECKO_IDS["XRP"] == "ripple"
+
+    def test_coingecko_doge_mapping(self):
+        """PATCH-8: DOGE must map to 'dogecoin' in CoinGecko IDs."""
+        from data.live_price_feed import _COINGECKO_IDS
+        assert _COINGECKO_IDS["DOGE"] == "dogecoin"
+
+
+class TestGetPriceDeprecation:
+    """get_price() should log a deprecation warning for bare Kalshi asset keys."""
+
+    def _make_feed(self):
+        with patch('data.live_price_feed.get_network_client') as mock_net:
+            mock_net.return_value = Mock()
+            return LivePriceFeed()
+
+    def test_get_price_bare_key_logs_deprecation(self):
+        """get_price('BTC') must log a deprecation warning and delegate correctly."""
+        feed = self._make_feed()
+        feed.price_cache["BTC"] = PriceData(
+            symbol="BTC", price=95000.0, bid=0.0, ask=0.0,
+            volume_24h=0.0, change_24h_pct=0.0, timestamp=datetime.now(),
+            exchange="coinbase_usd",
+        )
+        with patch.object(feed, 'logger', Mock()) as _mock_log:
+            # Patch the module-level logger instead
+            pass
+        import logging
+        with patch('data.live_price_feed.logger') as mock_logger:
+            result = feed.get_price("BTC")
+            # Should have emitted a deprecation warning
+            mock_logger.warning.assert_called()
+            call_args = str(mock_logger.warning.call_args)
+            assert "DEPRECATED" in call_args or "get_spot_usd" in call_args
+        assert result is not None
+        assert result.price == pytest.approx(95000.0)
+
+
+import pytest
