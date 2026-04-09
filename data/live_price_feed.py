@@ -114,6 +114,8 @@ class LivePriceFeed:
         self.symbols = symbols or [
             # Major crypto
             'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT',
+            # Kalshi assets not in major list
+            'XRP/USDT',
             # Alt L1/L2
             'ADA/USDT', 'DOT/USDT', 'ATOM/USDT', 'NEAR/USDT',
             'APT/USDT', 'SUI/USDT', 'SEI/USDT',
@@ -764,7 +766,8 @@ class LivePriceFeed:
             if cached.timestamp.tzinfo is not None:
                 _ts_aware = cached.timestamp
             else:
-                # Naive timestamp — treat as local time, compare naively
+                # Naive timestamp — assume UTC (legacy path from exchanges that
+                # don't attach tzinfo), attach UTC so comparison works correctly
                 _ts_aware = cached.timestamp.replace(tzinfo=timezone.utc)
             age_s = (_now - _ts_aware).total_seconds()
         except Exception:

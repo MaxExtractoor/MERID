@@ -816,7 +816,7 @@ class KalshiTradingAgent:
             # using USD spot before accepting any market for strategy evaluation.
             try:
                 from merid.event_venues.kalshi.market_filter import MarketFilter, MarketCandidate
-                from data.live_price_feed import get_live_price_feed as _lpf
+                from data.live_price_feed import get_live_price_feed as _lpf, KALSHI_ASSETS as _KALSHI_ASSETS
                 _mf = MarketFilter()
                 _spot_feed = _lpf()
                 _asset_up = asset.upper() if asset else ""
@@ -825,6 +825,16 @@ class KalshiTradingAgent:
                     _spd = _spot_feed.get_spot_usd(_asset_up)
                     if _spd and _spd.price_usd:
                         _spot_usd_val = _spd.price_usd
+                # Fail-closed on cold start: if this is a Kalshi crypto asset and
+                # we have no USD spot yet, skip the entire cycle for this agent
+                # rather than allowing trades through without distance enforcement.
+                if _asset_up in _KALSHI_ASSETS and _spot_usd_val is None:
+                    self.logger.warning(
+                        "[MARKET_FILTER] cycle skipped for asset=%s reason=missing_spot"
+                        " — no USD spot price available; deferring until feed warms up",
+                        _asset_up,
+                    )
+                    return
             except Exception as _mfe:
                 _mf = None
                 _spot_usd_val = None
@@ -1505,6 +1515,10 @@ class KalshiTradingAgent:
                     price_cents=signal.bid_price_cents,
                     count=size,
                     agent_name=self.agent_id,
+                    snapshot_ts=(
+                        snapshot.snapshot_timestamp_utc_epoch_seconds
+                        if snapshot else None
+                    ),  # PATCH-3: staleness gate applies to quote legs too
                 )
             if signal.ask_price_cents:
                 _q_ask_result = await _kalshi_place_order(
@@ -1514,6 +1528,10 @@ class KalshiTradingAgent:
                     price_cents=signal.ask_price_cents,
                     count=size,
                     agent_name=self.agent_id,
+                    snapshot_ts=(
+                        snapshot.snapshot_timestamp_utc_epoch_seconds
+                        if snapshot else None
+                    ),  # PATCH-3: staleness gate applies to quote legs too
                 )
             # Record as a single "quote" event in logs
             _q_ok = ((_q_bid_result is None or _q_bid_result.success) and
