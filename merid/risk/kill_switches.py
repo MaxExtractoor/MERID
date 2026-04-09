@@ -131,8 +131,12 @@ class RiskController:
     # Error classes that are downgraded to warnings and do NOT count toward the
     # error budget.  One misconfigured asset/TF producing repeated identical
     # min_notional failures must not instantly trip the breaker.
+    # "gate_blocked" covers order failures that occur because the kill switch
+    # (or execution gate) is *already* engaged.  Counting these would create a
+    # self-amplifying feedback loop: kill switch fires → orders fail → failures
+    # are counted as new errors → kill switch re-fires → repeat.
     error_exempt_classes: Set[str] = field(
-        default_factory=lambda: {"min_notional", "ws_reconnect", "loop_lag"}
+        default_factory=lambda: {"min_notional", "ws_reconnect", "loop_lag", "gate_blocked"}
     )
 
     # ---- 3-tier configuration ------------------------------------------------

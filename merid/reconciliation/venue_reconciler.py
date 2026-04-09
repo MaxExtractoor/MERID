@@ -183,11 +183,26 @@ def has_critical_discrepancies() -> bool:
     """Check if the last reconciliation found any critical discrepancies.
 
     Returns True (fail-closed) if no reconciliation has ever completed.
+    Logs explicitly at WARNING when never run (so callers can distinguish
+    from an actual reconciliation that found issues) and at ERROR when
+    critical discrepancies are present.
     """
     with _recon_lock:
         if not _reconciliation_has_run:
+            logger.warning(
+                "has_critical_discrepancies: reconciliation has NEVER run — "
+                "returning True (fail-closed). Run reconcile_all_venues() first."
+            )
             return True
-        return any(d.severity == "critical" for d in _last_discrepancies)
+        critical = [d for d in _last_discrepancies if d.severity == "critical"]
+        if critical:
+            logger.error(
+                "has_critical_discrepancies: %d CRITICAL discrepancies found — "
+                "trading gate remains closed until resolved.",
+                len(critical),
+            )
+            return True
+        return False
 
 
 def get_last_reconciliation_ts() -> float:

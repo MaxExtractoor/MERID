@@ -1889,6 +1889,15 @@ class KalshiTradingAgent:
                 elif result_error and ("reconnect" in str(result_error).lower()
                                        or "ws_disconnect" in str(result_error).lower()):
                     _err_class = "ws_reconnect"
+                elif result_error and (
+                    "kill switch" in str(result_error).lower()
+                    or "execution gate" in str(result_error).lower()
+                    or "gate blocked" in str(result_error).lower()
+                ):
+                    # Order failed because the kill switch / execution gate is already
+                    # engaged.  Counting these as new errors creates a feedback loop
+                    # where the kill switch amplifies itself indefinitely.
+                    _err_class = "gate_blocked"
                 _rc.record_error(error_class=_err_class)
             except Exception as _kse:
                 self.logger.debug("kill_switch record_error skipped: %s", _kse)
