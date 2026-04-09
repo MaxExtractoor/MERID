@@ -147,7 +147,13 @@ def get_logger(name: str) -> logging.Logger:
     Console handler uses human-readable text format for dev ergonomics.
     Set MERID_JSON_LOGS=0 to use text format for both handlers.
     """
+    import os as _os
+    is_pytest = bool(_os.environ.get("PYTEST_CURRENT_TEST"))
+
     if name in _LOGGER_CACHE:
+        # Refresh propagation so pytest's caplog fixture can always capture,
+        # even if the logger was first created before PYTEST_CURRENT_TEST was set.
+        _LOGGER_CACHE[name].propagate = is_pytest
         return _LOGGER_CACHE[name]
 
     logger = logging.getLogger(name)
@@ -155,8 +161,7 @@ def get_logger(name: str) -> logging.Logger:
     # Propagate to the root logger when running under pytest so that
     # pytest's caplog fixture can capture log records.  In production the
     # root logger has no handlers, so propagation is a no-op there.
-    import os as _os
-    logger.propagate = _os.environ.get("PYTEST_CURRENT_TEST") is not None
+    logger.propagate = is_pytest
 
     if not logger.handlers:
         text_formatter = logging.Formatter(_TEXT_FORMAT, _TEXT_DATEFMT)

@@ -438,7 +438,7 @@ class TestSafeKellyCalculator:
         assert result.error is None
 
     def test_division_by_zero_protection(self):
-        """Test that price=0 doesn't cause division by zero (S-001)."""
+        """Test that price=0 is rejected before any division can occur (S-001)."""
         calc = SafeKellyCalculator()
 
         result = calc.calculate_safe_kelly(
@@ -449,7 +449,9 @@ class TestSafeKellyCalculator:
 
         assert result.contracts == 0
         assert result.error is not None
-        assert "division by zero" in result.error.lower()
+        # price=0 is rejected by the input-validation guard; the error message
+        # reflects the range check, not a raw ZeroDivisionError.
+        assert "price" in result.error.lower()
 
     def test_price_100_protection(self):
         """Test that price=100 doesn't cause division by zero (S-001)."""

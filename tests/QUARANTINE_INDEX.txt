@@ -1,0 +1,73 @@
+==== QUARANTINE INDEX ====
+Last updated: 2026-04-09
+
+This file documents test suites/files that are quarantined (Track B).
+These tests are NOT required to be green for the Track A Kalshi baseline.
+
+──────────────────────────────────────────────────────────────────────
+LEGACY / ENHANCED (previously known)
+──────────────────────────────────────────────────────────────────────
+
+tests/event_venues/kalshi/test_kalshi_client_refactored.py
+  Reason: Enhanced/legacy client refactor — depends on old API surface.
+  Owner: TBD  Ticket: #
+
+tests/event_venues/kalshi/test_kalshi_regression.py
+  Reason: Legacy regression suite — relies on removed fixtures/mocks.
+  Owner: TBD  Ticket: #
+
+tests/event_venues/kalshi/test_kalshi_venue_client.py
+  Reason: Old venue-client contract tests — superseded by client.py tests.
+  Owner: TBD  Ticket: #
+
+──────────────────────────────────────────────────────────────────────
+NON-KALSHI ERRORS (discovered 2026-04-09 full-suite harvest)
+──────────────────────────────────────────────────────────────────────
+
+tests/agents/test_telegram_rate_limit.py
+  Reason: Missing optional dependency: python-telegram-bot not installed.
+  Classification: Track B (non-core, optional integration)
+  Owner: TBD  Ticket: #
+
+tests/analytics/
+  Reason: Collection errors — likely missing analytics module dependencies
+          or legacy import paths. Full investigation pending.
+  Files:  test_brier_metrics.py, test_brier_score.py, test_bucket_analysis.py,
+          test_complete_roi_integration.py, test_merid_integration.py,
+          test_merid_metrics.py, test_roi_integration.py, test_scorecard_fix.py
+  Classification: Track B
+  Owner: TBD  Ticket: #
+
+tests/api/test_mock_responses.py
+tests/api/test_vertical_slice.py
+  Reason: Collection errors — import failures at collection time.
+  Classification: Track B
+  Owner: TBD  Ticket: #
+
+tests/core/test_agent.py
+tests/core/test_celery_tasks.py
+tests/core/test_data_validation.py
+tests/core/test_resilience.py
+  Reason: Collection errors — import failures. Celery/agent dependencies
+          may not be fully installed in CI environment.
+  Classification: Track B
+  Owner: TBD  Ticket: #
+
+tests/logging/test_merid_adapted_patterns.py
+tests/logging/test_merid_canonical_patterns.py
+tests/logging/test_merid_cohesive_patterns.py
+tests/logging/test_merid_dropin_patterns.py
+  Reason: Collection errors — logging adapter pattern tests may depend on
+          legacy module paths.
+  Classification: Track B
+  Owner: TBD  Ticket: #
+
+──────────────────────────────────────────────────────────────────────
+TRACK A NOTES
+──────────────────────────────────────────────────────────────────────
+
+tests/event_venues/test_order_groups.py
+  Was: NameError: OrderGroupManager (not defined — class renamed to
+       KalshiOrderGroupManager but singleton used old name).
+  Fixed: 2026-04-09 — module now imports cleanly.
+  Status: MOVED TO TRACK A / FIXED

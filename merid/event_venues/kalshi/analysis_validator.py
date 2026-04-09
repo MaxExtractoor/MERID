@@ -265,7 +265,8 @@ class FeatureDriftDetector:
 
         # Calculate z-score
         if baseline.std == 0:
-            z_score = 0.0
+            # Perfect baseline consistency: any deviation is extreme drift
+            z_score = 0.0 if current_value == baseline.mean else float("inf")
         else:
             z_score = abs((current_value - baseline.mean) / baseline.std)
 

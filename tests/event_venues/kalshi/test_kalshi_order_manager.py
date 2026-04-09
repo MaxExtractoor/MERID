@@ -3,7 +3,7 @@
 import asyncio
 import time
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -16,6 +16,28 @@ from merid.event_venues.kalshi.order_manager import (
     TrackedOrder,
     WaitResult,
 )
+
+
+# ── Module-level fixtures — bypass safety gates in unit tests ───────────────
+
+@pytest.fixture(autouse=True)
+def _bypass_safety_gates():
+    """Ensure kill switch and VenueGate do not block orders in unit tests.
+
+    Unit tests here exercise order-manager logic in isolation; integration
+    tests must cover the real gate behavior separately.
+    """
+    mock_gate = MagicMock()
+    mock_gate.should_simulate_fill.return_value = False
+    mock_gate.mode.value = "live"
+
+    mock_rc = MagicMock()
+    mock_rc.can_trade.return_value = True
+    mock_rc.get_kill_reason.return_value = None
+
+    with patch("merid.risk.kill_switches.risk_controller", mock_rc), \
+         patch("merid.prediction.venue_gate.get_venue_gate", return_value=mock_gate):
+        yield
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
