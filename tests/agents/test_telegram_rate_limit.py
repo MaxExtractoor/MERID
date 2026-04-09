@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+pytest.importorskip("telegram", reason="telegram is an optional dependency")
 from telegram.error import TelegramError
 
 # Import telegram_agent directly to avoid loading the full agents package

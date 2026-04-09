@@ -389,7 +389,16 @@ class KalshiVenueClient(EventVenueClient):
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
-    
+
+    async def __aenter__(self) -> "KalshiVenueClient":
+        """Support ``async with KalshiVenueClient(...) as client:`` usage."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        """Ensure the underlying HTTPX client is closed on context exit."""
+        await self.close()
+
     # ------------------------------------------------------------------------
     # Resilient Request Infrastructure
     # ------------------------------------------------------------------------

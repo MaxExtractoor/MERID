@@ -146,3 +146,59 @@ to `python3` on this Linux host. The referenced test files
 tests/web/test_canonical_lifespan_and_tickers.py) do not exist in this
 branch/commit; they appear to have been generated in a prior agent session
 that was not merged here.
+
+──────────────────────────────────────────────────────────────────────
+2026-04-09  Track B triage pass — all 36 collection errors resolved
+──────────────────────────────────────────────────────────────────────
+
+Expanded the original 20 Track B errors to 36 after full-suite harvest.
+All 36 collection errors are now resolved:
+
+PRODUCTION BUGS FIXED:
+  monitoring/liquidation_monitor.py       — Added `from trading.perp.base import
+                                            WhaleSignal`; dashboard.py was
+                                            importing it from here but it wasn't
+                                            re-exported.
+  agents/prediction_arbitrage_analyst.py  — Replaced double-import of non-existent
+                                            top-level `merid_metrics` with single
+                                            `from core.merid_metrics import …`.
+  merid/event_venues/kalshi/client.py     — Added __aenter__/__aexit__ to
+                                            KalshiVenueClient for clean `async with`
+                                            usage and to eliminate ResourceWarning
+                                            from unclosed HTTPX clients in tests.
+
+TEST BUGS FIXED:
+  tests/event_venues/kalshi/test_kalshi_client_refactored.py
+    — 3 URL-mismatch failures resolved (cancel_order, get_order, get_open_orders
+      mocked against old API paths; updated to /portfolio/orders/… pattern).
+    — Now fully in Track A: 36/36 pass.
+
+  tests/trading/test_price_source_and_15m.py
+    — _load_strategy_catalog_enabled import renamed to _load_strategy_catalog_lookups.
+    — 3 call sites updated to unpack 3-tuple return value.
+    — 23 tests pass.
+
+  tests/test_kalshi_client.py
+    — Syntax error fixed: `classTestSingleton:` → `class TestSingleton:`.
+    — KalshiConfig(base_url=…) → KalshiConfig(rest_api_url=…).
+    — Residual 10 AsyncMock-usage failures remain (pre-existing Track B).
+
+  tests/test_kalshi_grid_integration.py
+    — Removed non-existent MarketFilterConfig from imports and AgentConfig calls.
+    — 4 tests now collect and run.
+
+DEAD PATHS DELETED (13 files; modules they tested do not exist in repo):
+  tests/logging/test_merid_adapted_patterns.py + 7 other merid_logging* tests
+  tests/core/test_agent.py
+  tests/analytics/test_roi_integration.py, test_complete_roi_integration.py,
+    test_merid_metrics.py, test_merid_integration.py
+
+OPTIONAL DEPS — pytest.importorskip() guards added (19 files):
+  See QUARANTINE_INDEX.txt for full list + required packages.
+  These skip cleanly instead of raising collection errors.
+
+MOVED TO TRACK A (were in quarantine index):
+  tests/event_venues/kalshi/test_kalshi_regression.py  — 2 tests pass
+  tests/event_venues/kalshi/test_kalshi_venue_client.py — 7 tests pass
+
+Zero collection errors remain after this pass.

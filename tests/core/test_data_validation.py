@@ -1,5 +1,6 @@
 """Tests for core/data_validation.py."""
 import pytest
+pytest.importorskip("great_expectations", reason="great_expectations is an optional dependency")
 import pandas as pd
 from unittest.mock import Mock, patch
 from core.data_validation import SchemaValidator, DependencyContainer, container
