@@ -453,7 +453,7 @@ class LivePriceFeed:
                     if cached_age < 60:
                         logger.info(f"Using cached price for {symbol} (age: {cached_age:.1f}s)")
                     else:
-                        logger.error(f"Cached price for {symbol} too old ({cached_age:.1f}s)")
+                        logger.warning(f"Cached price for {symbol} too old ({cached_age:.1f}s)")
     
     async def _broadcast_update(self, price_data: PriceData):
         """Broadcast price update to all subscribers, validating against data contracts."""
@@ -680,7 +680,7 @@ class LivePriceFeed:
         price = float(market.get("current_price") or 0)
         if price <= 0:
             return False
-        timestamp = datetime.utcnow()
+        timestamp = datetime.now(timezone.utc)
         price_data = PriceData(
             symbol=symbol,
             price=price,
