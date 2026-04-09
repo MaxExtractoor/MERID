@@ -264,6 +264,108 @@ class TestKillSwitchEvent:
         assert event.reason == KillSwitchReason.DAILY_LOSS
 
 
+class TestGateBlockedExemption:
+    """Tests for the gate_blocked error exemption (kill-switch feedback-loop fix).
+
+    Before the fix, order failures caused by an engaged kill switch were classified
+    as "generic" errors and counted toward the error budget.  This created a
+    self-amplifying loop: kill switch fires → every downstream order fails →
+    error counter climbs → kill switch stays triggered / escalates further.
+
+    The fix classifies such failures as "gate_blocked", which is in
+    ``error_exempt_classes``, so they do NOT consume the error budget.
+    """
+
+    @pytest.fixture
+    def controller(self):
+        """Fresh controller with a low error threshold for concise tests."""
+        return RiskController(
+            daily_loss_limit=1000.0,
+            max_position_value=10000.0,
+            error_threshold=5,
+        )
+
+    def test_gate_blocked_is_in_exempt_classes(self, controller):
+        """'gate_blocked' must be present in error_exempt_classes."""
+        assert "gate_blocked" in controller.error_exempt_classes
+
+    def test_gate_blocked_errors_not_counted(self, controller):
+        """Repeated gate_blocked errors do not increment the error counter."""
+        for _ in range(20):
+            controller.record_error(error_class="gate_blocked")
+
+        status = controller.get_status()
+        assert status["error_count"] == 0, (
+            f"gate_blocked errors must not count; got error_count={status['error_count']}"
+        )
+
+    def test_gate_blocked_does_not_trigger_kill(self, controller):
+        """Firing 3× the error threshold with gate_blocked errors must not kill."""
+        for _ in range(controller.error_threshold * 3):
+            controller.record_error(error_class="gate_blocked")
+
+        assert controller.can_trade() is True
+        assert controller.get_state() == KillSwitchState.ACTIVE
+
+    def test_gate_blocked_does_not_prevent_genuine_errors_from_counting(self, controller):
+        """Genuine generic errors still count even when gate_blocked errors are mixed in."""
+        # First, simulate many gate_blocked errors (e.g., from a triggered kill switch)
+        for _ in range(10):
+            controller.record_error(error_class="gate_blocked")
+
+        # Then record enough real generic errors to breach threshold at runaway (≥150 %)
+        # threshold=5, runaway at ≥8 (ceil(5 * 1.5))
+        for _ in range(8):
+            controller.record_error(error_class="generic")
+
+        # Should have been killed by the genuine errors alone
+        assert controller.can_trade() is False
+        assert controller.get_state() == KillSwitchState.TRIGGERED
+        assert controller.get_status()["kill_reason"] == "error_threshold"
+
+    def test_gate_blocked_error_count_stays_zero_after_many(self, controller):
+        """error_count remains 0 after any number of gate_blocked calls."""
+        for _ in range(50):
+            controller.record_error(error_class="gate_blocked")
+
+        assert controller.get_status()["error_count"] == 0
+
+    def test_no_feedback_loop_after_manual_kill(self, controller):
+        """After emergency_stop, subsequent gate_blocked records do not change state."""
+        controller.emergency_stop("test manual stop")
+        assert controller.get_state() == KillSwitchState.TRIGGERED
+
+        # Simulate 20 order failures caused by the already-triggered switch
+        for _ in range(20):
+            controller.record_error(error_class="gate_blocked")
+
+        # State and reason must remain unchanged
+        status = controller.get_status()
+        assert status["kill_reason"] == "manual"
+        assert controller.get_state() == KillSwitchState.TRIGGERED
+        # error_count must still be 0 (gate_blocked is exempt)
+        assert status["error_count"] == 0
+
+    def test_min_notional_also_exempt(self, controller):
+        """min_notional errors are also exempt (pre-existing behaviour, not broken)."""
+        assert "min_notional" in controller.error_exempt_classes
+        for _ in range(20):
+            controller.record_error(error_class="min_notional")
+        assert controller.get_status()["error_count"] == 0
+        assert controller.can_trade() is True
+
+    def test_exempt_set_is_immutable_across_instances(self):
+        """Two separate controllers each have their own exempt set."""
+        c1 = RiskController(daily_loss_limit=100.0, max_position_value=1000.0)
+        c2 = RiskController(daily_loss_limit=100.0, max_position_value=1000.0)
+        assert "gate_blocked" in c1.error_exempt_classes
+        assert "gate_blocked" in c2.error_exempt_classes
+        # Mutating one should not affect the other
+        c1.error_exempt_classes.discard("gate_blocked")
+        assert "gate_blocked" not in c1.error_exempt_classes
+        assert "gate_blocked" in c2.error_exempt_classes
+
+
 class TestConvenienceFunctions:
     """Tests for module-level convenience functions."""
 

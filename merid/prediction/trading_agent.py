@@ -742,13 +742,16 @@ class KalshiTradingAgent:
                     pos.ticker, action.rule, action.reason, action.urgency,
                 )
 
-                # Place closing order (sell the side we hold)
+                # Place closing order (sell the side we hold).
+                # PATCH-4: price_cents=0 is rejected by _check_intent_risk
+                # as "invalid_price".  Use price_cents=1 (1¢) as a
+                # market-proxy sell — worst-case fill but always submittable.
                 close_action = "sell"
                 result = await _kalshi_place_order(
                     ticker=pos.ticker,
                     side=pos.side,
                     action=close_action,
-                    price_cents=0,  # market order
+                    price_cents=1,
                     count=pos.contracts,
                 )
 
@@ -809,6 +812,34 @@ class KalshiTradingAgent:
 
             # Convert tool result back to EventMarket-like objects for strategy
             self._resolved_markets = []
+            # PATCH-6 / EGG-5: Apply MarketFilter distance/spread/volume checks
+            # using USD spot before accepting any market for strategy evaluation.
+            try:
+                from merid.event_venues.kalshi.market_filter import MarketFilter, MarketCandidate
+                from data.live_price_feed import get_live_price_feed as _lpf, KALSHI_ASSETS as _KALSHI_ASSETS
+                _mf = MarketFilter()
+                _spot_feed = _lpf()
+                _asset_up = asset.upper() if asset else ""
+                _spot_usd_val = None
+                if _asset_up:
+                    _spd = _spot_feed.get_spot_usd(_asset_up)
+                    if _spd and _spd.price_usd:
+                        _spot_usd_val = _spd.price_usd
+                # Fail-closed on cold start: if this is a Kalshi crypto asset and
+                # we have no USD spot yet, skip the entire cycle for this agent
+                # rather than allowing trades through without distance enforcement.
+                if _asset_up in _KALSHI_ASSETS and _spot_usd_val is None:
+                    self.logger.warning(
+                        "[MARKET_FILTER] cycle skipped for asset=%s reason=missing_spot"
+                        " — no USD spot price available; deferring until feed warms up",
+                        _asset_up,
+                    )
+                    return
+            except Exception as _mfe:
+                _mf = None
+                _spot_usd_val = None
+                self.logger.debug("MarketFilter init skipped: %s", _mfe)
+
             for m in result.payload.get("markets", []):
                 from merid.event_venues.base import EventMarket, EventOutcome
                 outcomes = [
@@ -833,6 +864,50 @@ class KalshiTradingAgent:
                     volume=Decimal(m.get("volume", "0")),
                     open_interest=Decimal(m.get("open_interest", "0")),
                 )
+
+                # ── PATCH-6: MarketFilter quality gate ────────────────────
+                if _mf is not None:
+                    # Derive mid-price from YES/NO outcomes
+                    _mid = 50
+                    _bid = 0
+                    _ask = 100
+                    for _o in outcomes:
+                        if _o.outcome_id == "yes":
+                            _mid = int(float(_o.price) * 100)
+                            _bid = max(1, _mid - 1)
+                            _ask = min(99, _mid + 1)
+                            break
+                    # Attempt strike lookup from catalog
+                    _strike_val = None
+                    try:
+                        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                        _cat = get_market_catalog()
+                        _cm = _cat.get_market(m["ticker"])
+                        if _cm and _cm.strike_price:
+                            _strike_val = float(_cm.strike_price)
+                    except Exception:
+                        pass
+
+                    _candidate = MarketCandidate(
+                        ticker=m["ticker"],
+                        underlying=asset.upper() if asset else m.get("category", ""),
+                        timeframe=timeframe,
+                        volume=int(float(m.get("volume", "0"))),
+                        open_interest=int(float(m.get("open_interest", "0"))),
+                        best_bid_cents=_bid,
+                        best_ask_cents=_ask,
+                        mid_price_cents=_mid,
+                        spot_price=_spot_usd_val,
+                        strike_price=_strike_val,
+                    )
+                    _passed, _reason = _mf.evaluate(_candidate)
+                    if not _passed:
+                        self.logger.debug(
+                            "MarketFilter VETO ticker=%s reason=%s",
+                            m["ticker"], _reason,
+                        )
+                        continue
+
                 self._resolved_markets.append(em)
 
             tickers = [m.market_id for m in self._resolved_markets]
@@ -949,8 +1024,13 @@ class KalshiTradingAgent:
         # Compute the fractional distance between the current spot price and the
         # contract strike.  This drives [PM_SIGNAL] logging and is available to
         # downstream consumers (risk, sizing, logging) via snapshot fields.
+        # PATCH-1 / EGG-1: Use get_spot_usd() for a clean USD-only price; the
+        # old get_price("BTC/USDT") path introduced USDT drift against Kalshi's
+        # USD-settled contracts.
         snapshot.strike_price = float(strike) if strike is not None else None
         _basis_note: str = "ok"
+        _spot_source: str = "unknown"
+        _snapshot_age_s: Optional[float] = None
         try:
             if asset is None:
                 _basis_note = "missing_asset_for_spot"
@@ -961,23 +1041,62 @@ class KalshiTradingAgent:
             else:
                 from data.live_price_feed import get_live_price_feed
                 _feed = get_live_price_feed()
-                _price_data = _feed.get_price(asset)
-                if _price_data is None:
+                _spot_data = _feed.get_spot_usd(asset)
+                if _spot_data is None:
                     _basis_note = "missing_spot"
+                elif _spot_data.spot_source == "usdt_depegged":
+                    _basis_note = "missing_spot"
+                    _spot_source = "usdt_depegged"
+                    self.logger.warning(
+                        "[SPOT_DEPEG] agent=%s market=%s asset=%s — USDT depegged, "
+                        "no safe USD price available; veto_reason=usdt_depegged",
+                        self.config.name, market.market_id, asset,
+                    )
+                elif _spot_data.price_usd is None:
+                    # Stale or otherwise unavailable
+                    _basis_note = "missing_spot"
+                    _spot_source = _spot_data.spot_source
                 else:
-                    _spot = float(_price_data.price)
+                    _spot = _spot_data.price_usd
+                    _spot_source = _spot_data.spot_source
+                    _snapshot_age_s = time.time() - _spot_data.timestamp
                     snapshot.spot_price = _spot
                     snapshot.dist_frac = (_spot - strike) / strike
+                    # PATCH-7: StrikeSpotTracker staleness check
+                    try:
+                        from merid.event_venues.kalshi.strike_spot_tracker import (
+                            get_strike_spot_tracker,
+                        )
+                        _sst = get_strike_spot_tracker()
+                        _asset_up = asset.upper()
+                        _tf = self.config.timeframes[0] if self.config.timeframes else ""
+                        from merid.event_venues.kalshi.market_filter import get_spot_band
+                        _max_dev = get_spot_band(_asset_up, _tf, default=30.0)
+                        _is_stale, _stale_reason = _sst.check_staleness(
+                            _spot, float(strike), max_pct_deviation=_max_dev,
+                        )
+                        if _is_stale:
+                            _basis_note = "stale_distance"
+                            self.logger.warning(
+                                "[STALE_DISTANCE] agent=%s market=%s asset=%s "
+                                "spot=%.2f strike=%.2f reason=%s; veto_reason=distance_violation",
+                                self.config.name, market.market_id, _asset_up,
+                                _spot, float(strike), _stale_reason,
+                            )
+                    except Exception as _sst_e:
+                        self.logger.debug("StrikeSpotTracker check skipped: %s", _sst_e)
         except Exception as _be:
             self.logger.debug("spot_strike_basis enrichment skipped: %s", _be)
             _basis_note = "missing_spot"
         snapshot.spot_strike_basis = _basis_note
+        snapshot.spot_source = _spot_source
 
         # ── [PM_SIGNAL] structured log ────────────────────────────────────────
         _tte_h = float(snapshot.time_to_expiry_hours) if snapshot.time_to_expiry_hours else None
         self.logger.info(
             "[PM_SIGNAL] agent=%s market=%s snapshot_ts=%.0f "
             "yes_prob=%.3f tte_h=%s spot=%s strike=%s dist_pct=%s basis=%s "
+            "spot_source=%s snapshot_age_s=%s "
             "sentiment_global=%s sentiment_regime=%s vol=%.0f oi=%.0f",
             self.config.name,
             market.market_id,
@@ -988,6 +1107,8 @@ class KalshiTradingAgent:
             f"{snapshot.strike_price:.2f}" if snapshot.strike_price is not None else "N/A",
             f"{snapshot.dist_frac * 100:.2f}%" if snapshot.dist_frac is not None else "N/A",
             _basis_note,
+            _spot_source,
+            f"{_snapshot_age_s:.1f}" if _snapshot_age_s is not None else "N/A",
             f"{snapshot.sentiment_global:.1f}" if snapshot.sentiment_global is not None else "N/A",
             snapshot.sentiment_regime or "N/A",
             float(snapshot.volume),
@@ -1207,7 +1328,8 @@ class KalshiTradingAgent:
         # === [PM_SIZE] structured log ===
         self.logger.info(
             "[PM_SIZE] agent=%s market=%s action=%s side=%s contracts=%d "
-            "price_cents=%d vol_band=%s vol_mult=%.2f dist_pct=%s basis=%s",
+            "price_cents=%d vol_band=%s vol_mult=%.2f dist_pct=%s basis=%s "
+            "spot_source=%s order_mode=%s",
             self.config.name,
             market.market_id,
             action,
@@ -1219,6 +1341,8 @@ class KalshiTradingAgent:
             (f"{snapshot.dist_frac * 100:.2f}%"
              if snapshot and snapshot.dist_frac is not None else "N/A"),
             (snapshot.spot_strike_basis or "N/A") if snapshot else "N/A",
+            (snapshot.spot_source or "N/A") if snapshot else "N/A",
+            "paper" if force_paper else "live",
         )
         
         # === BTC 15m Risk Layer Integration ===
@@ -1234,7 +1358,15 @@ class KalshiTradingAgent:
                     RiskPhase,
                 )
                 
-                # Build trade proposal for risk evaluation
+                # PATCH-5 / EGG-7: convert raw contract volume to USD notional
+                # before passing to CryptoSwarmRiskBTC15m.  The BTC-15m USD
+                # thresholds compare against dollar amounts; passing raw
+                # contract counts would undercount by ~price_cents/100.
+                _vol_usd = (
+                    float(market.volume) * (price_cents / 100.0)
+                    if (market.volume and price_cents > 0)
+                    else None
+                )
                 proposal = TradeProposal(
                     asset=asset,
                     timeframe=timeframe,
@@ -1245,7 +1377,7 @@ class KalshiTradingAgent:
                     fear_greed=int(getattr(snapshot, 'sentiment_global', 0.5) * 100)
                     if getattr(snapshot, 'sentiment_global', None) is not None else None,
                     spread_ticks=self._estimate_spread_ticks(snapshot),
-                    volume_24h=float(market.volume) if market.volume else None,
+                    volume_24h=_vol_usd,
                     minutes_to_expiry=int(snapshot.time_to_expiry_hours * 60) if snapshot.time_to_expiry_hours else None,
                     session_stable=getattr(snapshot, 'sentiment_regime', 'normal') != 'extreme_volatility',
                 )
@@ -1335,9 +1467,14 @@ class KalshiTradingAgent:
                 force_paper = decision.mode == TradeMode.PAPER
                 
             except Exception as exc:
-                # Risk layer failed - log and continue with normal execution
-                self.logger.warning(f"BTC 15m risk evaluation failed: {exc}")
-                force_paper = False
+                # PATCH-2: Risk layer exception must be FAIL-CLOSED.
+                # Never silently route to live when risk evaluation failed.
+                # Force paper mode so the order is simulated, not executed live.
+                self.logger.error(
+                    "BTC 15m risk evaluation FAILED (forced paper): %s", exc,
+                    exc_info=True,
+                )
+                force_paper = True
         else:
             # Non-BTC-15m: route through existing paper/live gate
             force_paper = False
@@ -1378,6 +1515,10 @@ class KalshiTradingAgent:
                     price_cents=signal.bid_price_cents,
                     count=size,
                     agent_name=self.agent_id,
+                    snapshot_ts=(
+                        snapshot.snapshot_timestamp_utc_epoch_seconds
+                        if snapshot else None
+                    ),  # PATCH-3: staleness gate applies to quote legs too
                 )
             if signal.ask_price_cents:
                 _q_ask_result = await _kalshi_place_order(
@@ -1387,6 +1528,10 @@ class KalshiTradingAgent:
                     price_cents=signal.ask_price_cents,
                     count=size,
                     agent_name=self.agent_id,
+                    snapshot_ts=(
+                        snapshot.snapshot_timestamp_utc_epoch_seconds
+                        if snapshot else None
+                    ),  # PATCH-3: staleness gate applies to quote legs too
                 )
             # Record as a single "quote" event in logs
             _q_ok = ((_q_bid_result is None or _q_bid_result.success) and
@@ -1403,12 +1548,16 @@ class KalshiTradingAgent:
             if force_paper:
                 # Force paper simulation by using the paper tool
                 from merid.prediction.kalshi_tools import _kalshi_place_paper_order
+                _fp_reason = (
+                    "btc15m_risk_paper" if is_btc_15m else "risk_layer_paper"
+                )
                 result = await _kalshi_place_paper_order(
                     ticker=market.market_id,
                     side=side,
                     action=action,
                     price_cents=price_cents,
                     count=size,
+                    forced_paper_reason=_fp_reason,  # PATCH-9: audit trail
                 )
             else:
                 result = await _kalshi_place_order(
@@ -1418,6 +1567,10 @@ class KalshiTradingAgent:
                     price_cents=price_cents,
                     count=size,
                     agent_name=self.agent_id,
+                    snapshot_ts=(
+                        snapshot.snapshot_timestamp_utc_epoch_seconds
+                        if snapshot else None
+                    ),  # PATCH-3: staleness enforcement in order router
                 )
             result_success = result.success
             result_payload = result.payload
@@ -1736,6 +1889,15 @@ class KalshiTradingAgent:
                 elif result_error and ("reconnect" in str(result_error).lower()
                                        or "ws_disconnect" in str(result_error).lower()):
                     _err_class = "ws_reconnect"
+                elif result_error and (
+                    "kill switch" in str(result_error).lower()
+                    or "execution gate" in str(result_error).lower()
+                    or "gate blocked" in str(result_error).lower()
+                ):
+                    # Order failed because the kill switch / execution gate is already
+                    # engaged.  Counting these as new errors creates a feedback loop
+                    # where the kill switch amplifies itself indefinitely.
+                    _err_class = "gate_blocked"
                 _rc.record_error(error_class=_err_class)
             except Exception as _kse:
                 self.logger.debug("kill_switch record_error skipped: %s", _kse)
