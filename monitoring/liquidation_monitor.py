@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from trading.perp.base import WhaleSignal  # noqa: F401  (re-exported for importers)
 from utils.logger import get_logger
 
 logger = get_logger("monitoring.liquidation")

@@ -3,6 +3,8 @@
 Test script to verify the record_weekly_decision fix
 """
 
+import pytest
+pytest.importorskip("sklearn", reason="sklearn is an optional dependency")
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))

@@ -3,6 +3,8 @@
 Quick test to verify Brier score calculation.
 """
 
+import pytest
+pytest.importorskip("sklearn", reason="scikit-learn is an optional dependency")
 import asyncio
 import json
 from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent

@@ -23,7 +23,7 @@ from merid.trading.kalshi_continuous_trader import (
     _CRYPTO_ASSETS,
     _CRYPTO_TIMEFRAMES,
     _fetch_spot_prices_with_fallback,
-    _load_strategy_catalog_enabled,
+    _load_strategy_catalog_lookups,
     KalshiContinuousTrader,
     TradingCandidate,
 )
@@ -213,14 +213,14 @@ class TestCatalogEnabledGating:
         assert enabled is True, "XRP 15m should be enabled in strategy_catalog.yaml"
 
     def test_load_strategy_catalog_enabled_returns_dict(self):
-        """_load_strategy_catalog_enabled returns a non-empty dict."""
-        result = _load_strategy_catalog_enabled()
+        """_load_strategy_catalog_lookups returns a non-empty enabled dict."""
+        result, _, _ = _load_strategy_catalog_lookups()
         assert isinstance(result, dict)
         assert len(result) > 0, "Catalog should have at least one entry"
 
     def test_load_strategy_catalog_enabled_keys_are_tuples(self):
         """All keys are (asset, timeframe) tuples."""
-        result = _load_strategy_catalog_enabled()
+        result, _, _ = _load_strategy_catalog_lookups()
         for key in result:
             assert isinstance(key, tuple) and len(key) == 2, (
                 f"Key {key!r} is not a (asset, timeframe) tuple"
@@ -238,7 +238,7 @@ class TestCatalogEnabledGating:
             "__truediv__",
             return_value=tmp_path / "nonexistent_catalog.yaml",
         ):
-            result = _load_strategy_catalog_enabled()
+            result, _, _ = _load_strategy_catalog_lookups()
         assert isinstance(result, dict)
 
     @pytest.mark.asyncio

@@ -381,7 +381,7 @@ async def test_cancel_order_success(client):
     )
     await client.connect()
     
-    respx.delete("https://demo-api.kalshi.co/trade-api/v2/orders/ord_123").mock(
+    respx.post("https://demo-api.kalshi.co/trade-api/v2/portfolio/orders/ord_123/cancel").mock(
         return_value=Response(200, json={"status": "cancelled"})
     )
     
@@ -398,7 +398,7 @@ async def test_cancel_order_failure(client):
     )
     await client.connect()
     
-    respx.delete("https://demo-api.kalshi.co/trade-api/v2/orders/ord_123").mock(
+    respx.post("https://demo-api.kalshi.co/trade-api/v2/portfolio/orders/ord_123/cancel").mock(
         return_value=Response(404, json={"error": "Order not found"})
     )
     
@@ -420,7 +420,7 @@ async def test_get_order_success(client):
     )
     await client.connect()
     
-    respx.get("https://demo-api.kalshi.co/trade-api/v2/orders/ord_123").mock(
+    respx.get("https://demo-api.kalshi.co/trade-api/v2/portfolio/orders/ord_123").mock(
         return_value=Response(200, json={
             "order": {
                 "order_id": "ord_123",
@@ -448,12 +448,13 @@ async def test_get_open_orders(client):
     )
     await client.connect()
     
-    respx.get("https://demo-api.kalshi.co/trade-api/v2/orders").mock(
+    respx.get("https://demo-api.kalshi.co/trade-api/v2/portfolio/orders").mock(
         return_value=Response(200, json={
             "orders": [
                 {"order_id": "ord_1", "ticker": "FED-25DEC", "action": "buy", "count": 10},
                 {"order_id": "ord_2", "ticker": "FED-25DEC", "action": "sell", "count": 5}
-            ]
+            ],
+            "cursor": ""
         })
     )
     
