@@ -87,8 +87,8 @@ def has_critical_discrepancies() -> bool:
                 "returning True (fail-closed). Run reconcile_all_venues() first."
             )
             return True
-        critical = [d for d in _last_discrepancies if d.severity == "critical" or True]
-        if _last_discrepancies:
+        critical = [d for d in _last_discrepancies if d.severity == "critical"]
+        if critical:
             logger.error(
                 "has_critical_discrepancies: %d CRITICAL discrepancies found — "
                 "trading gate remains closed until resolved.",
