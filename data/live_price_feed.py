@@ -990,6 +990,9 @@ class LivePriceFeed:
                     fails = self._pm_consecutive_failures.get(asset_up, 0) + 1
                     self._pm_consecutive_failures[asset_up] = fails
                     if fails >= _CB_BACKOFF_THRESHOLD:
+                        # Exponential back-off: at threshold+0 → 2× interval,
+                        # threshold+1 → 4×, threshold+2 → 8×, …, capped at max.
+                        # exponent = fails - _CB_BACKOFF_THRESHOLD + 1
                         sleep_s = min(
                             _CB_POLL_INTERVAL_S * (2 ** (fails - _CB_BACKOFF_THRESHOLD + 1)),
                             _CB_BACKOFF_MAX_S,
@@ -1115,7 +1118,7 @@ class LivePriceFeed:
                 "tick_age_s": round(tick_age_s, 2) if tick_age_s is not None else None,
                 "cache_age_s": round(cache_age_s, 2) if cache_age_s is not None else None,
                 "consecutive_failures": fails,
-                "feed_ok": status not in ("live_price_feed_unhealthy",),
+                "feed_ok": status != "live_price_feed_unhealthy",
                 "price_usd": cached.price if cached is not None else None,
             }
 
