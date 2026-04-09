@@ -275,6 +275,8 @@ class TestConsensusTradeIntegration:
         engine.portfolios = {"operator": PaperPortfolio(user_id="operator", starting_balance=100000.0, current_balance=100000.0)}
         engine.order_counter = 0
         engine.position_counter = 0
+        engine.fee_bps = dict(PaperTradingEngine.DEFAULT_FEE_BPS)
+        engine.total_fees_paid = 0.0
         engine.current_prices = {"BTC-USD": 68000.0, "BTC/USDT": 68000.0}
         engine.price_feed = None
         engine._listeners = {"trade": set(), "summary": set(), "position": set()}
@@ -679,6 +681,8 @@ class TestNotificationEnrichment:
         engine.portfolios = {"operator": PaperPortfolio(user_id="operator", starting_balance=100000.0, current_balance=100000.0)}
         engine.order_counter = 0
         engine.position_counter = 0
+        engine.fee_bps = dict(PaperTradingEngine.DEFAULT_FEE_BPS)
+        engine.total_fees_paid = 0.0
         engine.current_prices = {"BTC-USD": 68000.0, "BTC/USDT": 68000.0}
         engine.price_feed = None
         engine._listeners = {"trade": set(), "summary": set(), "position": set()}
