@@ -18,7 +18,7 @@ import os
 import time
 from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 
@@ -757,7 +757,19 @@ class LivePriceFeed:
                 spot_source="usdt_depegged",
             )
 
-        age_s = (datetime.now() - cached.timestamp).total_seconds()
+        # Use timezone-aware now() when comparing with potentially tz-aware timestamps.
+        # Fall back to naive comparison if timestamp is naive (legacy path).
+        _now = datetime.now(timezone.utc)
+        try:
+            if cached.timestamp.tzinfo is not None:
+                _ts_aware = cached.timestamp
+            else:
+                # Naive timestamp — treat as local time, compare naively
+                _ts_aware = cached.timestamp.replace(tzinfo=timezone.utc)
+            age_s = (_now - _ts_aware).total_seconds()
+        except Exception:
+            # Safety fallback: treat price as stale if we can't compute age
+            age_s = _SPOT_MAX_STALENESS_SECONDS + 1
         if age_s > _SPOT_MAX_STALENESS_SECONDS:
             logger.warning(
                 "get_spot_usd: %s price is stale (age=%.1fs > %.0fs threshold)",
