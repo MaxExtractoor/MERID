@@ -99,11 +99,14 @@ class MarketSnapshot:
 
     # Spot/strike basis context — populated when a crypto spot price is available
     # basis: "ok" | "missing_spot" | "missing_strike" | "missing_strike_and_spot"
-    #        | "missing_asset_for_spot" | "invalid_strike_zero"
+    #        | "missing_asset_for_spot" | "invalid_strike_zero" | "stale_distance"
     spot_price: Optional[float] = None
     strike_price: Optional[float] = None
     dist_frac: Optional[float] = None          # (spot - strike) / strike; positive = OTM for YES
     spot_strike_basis: Optional[str] = None    # human-readable basis note (see above)
+    # PATCH-1 / EGG-1: USD spot price provenance (e.g. "coinbase_usd", "coingecko_usd",
+    # "binance_usdt_normalized", "usdt_depegged", "stale", "coingecko").
+    spot_source: Optional[str] = None
 
     @property
     def snapshot_timestamp_utc_epoch_seconds(self) -> float:

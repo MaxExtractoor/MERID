@@ -20,16 +20,24 @@ class Asset:
 
 
 ASSET_UNIVERSE: Dict[str, Asset] = {
-    # Layer 1 Blockchains / Primary listings
-    'BTC': Asset('BTC/USDT', 'Bitcoin', 'Layer1', 'bitcoin', 1, is_layer1=True),
+    # ── Kalshi-path assets (bare symbol, USD-denominated) ─────────────────
+    # PATCH-1 / EGG-1: The five Kalshi crypto assets are keyed with bare
+    # symbols ("BTC", not "BTC/USDT") so that the live_price_feed Kalshi
+    # spot cache and asset_universe agree on the canonical key.
+    'BTC': Asset('BTC', 'Bitcoin', 'Layer1', 'bitcoin', 1, is_layer1=True),
+    'ETH': Asset('ETH', 'Ethereum', 'Layer1', 'ethereum', 2, is_layer1=True),
+    'SOL': Asset('SOL', 'Solana', 'Layer1', 'solana', 5, is_layer1=True),
+    'XRP': Asset('XRP', 'Ripple', 'Layer1', 'ripple', 6, is_layer1=True),
+    'DOGE': Asset('DOGE', 'Dogecoin', 'Meme', 'dogecoin', 8, is_layer1=True),
+
+    # ── Perp / USDT-quoted entries (non-Kalshi uses) ────────────────────
     'BTC-PERP': Asset('BTC/USDT:USDT', 'Bitcoin Perp', 'Perp', 'bitcoin', 1, is_layer1=True),
-    'ETH': Asset('ETH/USDT', 'Ethereum', 'Layer1', 'ethereum', 2, is_layer1=True),
     'ETH-PERP': Asset('ETH/USDT:USDT', 'Ethereum Perp', 'Perp', 'ethereum', 2, is_layer1=True),
+    'SOL-PERP': Asset('SOL/USDT:USDT', 'Solana Perp', 'Perp', 'solana', 5, is_layer1=True),
+
+    # ── Other Layer 1 assets (not on Kalshi) ────────────────────────────
     'BNB': Asset('BNB/USDT', 'BNB', 'Layer1', 'binancecoin', 4, is_layer1=True),
     'BNBUS': Asset('BNB/USD', 'BNB (US Spot)', 'Layer1', 'binancecoin', 4, is_layer1=True),
-    'SOL': Asset('SOL/USDT', 'Solana', 'Layer1', 'solana', 5, is_layer1=True),
-    'SOL-PERP': Asset('SOL/USDT:USDT', 'Solana Perp', 'Perp', 'solana', 5, is_layer1=True),
-    'XRP': Asset('XRP/USDT', 'Ripple', 'Layer1', 'ripple', 6, is_layer1=True),
     'ADA': Asset('ADA/USDT', 'Cardano', 'Layer1', 'cardano', 9, is_layer1=True),
     'AVAX': Asset('AVAX/USDT', 'Avalanche', 'Layer1', 'avalanche-2', 10, is_layer1=True),
     'DOT': Asset('DOT/USDT', 'Polkadot', 'Layer1', 'polkadot', 13, is_layer1=True),
@@ -71,8 +79,7 @@ ASSET_UNIVERSE: Dict[str, Asset] = {
     'GMX': Asset('GMX/USDT', 'GMX', 'DeFi', 'gmx', 43, is_defi=True),
     'DYDX': Asset('DYDX/USDT', 'dYdX', 'DeFi', 'dydx', 34, is_defi=True),
 
-    # Meme Coins
-    'DOGE': Asset('DOGE/USDT', 'Dogecoin', 'Meme', 'dogecoin', 8, is_layer1=True),
+    # Meme Coins (non-Kalshi)
     'SHIB': Asset('SHIB/USDT', 'Shiba Inu', 'Meme', 'shiba-inu', 11),
     'PEPE': Asset('PEPE/USDT', 'Pepe', 'Meme', 'pepe', 25),
     'FLOKI': Asset('FLOKI/USDT', 'Floki', 'Meme', 'floki', 48),
