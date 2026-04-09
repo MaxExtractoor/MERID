@@ -180,26 +180,23 @@ class KalshiTokenBucket:
         self._last_refill = now
 
     async def acquire(self, is_write: bool = False) -> float:
-        """Acquire a token, sleeping if necessary. Returns wait time in seconds."""
-        self._refill()
-        tokens = self._write_tokens if is_write else self._read_tokens
-        if tokens >= 1.0:
-            if is_write:
-                self._write_tokens -= 1.0
-            else:
-                self._read_tokens -= 1.0
-            return 0.0
-
-        # Need to wait for a token
+        """Acquire a token, sleeping if necessary. Returns total wait time in seconds."""
+        total_wait = 0.0
         rate = self.write_rate if is_write else self.read_rate
-        wait = (1.0 - tokens) / rate if rate > 0 else 1.0
-        await asyncio.sleep(wait)
-        self._refill()
-        if is_write:
-            self._write_tokens = max(0, self._write_tokens - 1.0)
-        else:
-            self._read_tokens = max(0, self._read_tokens - 1.0)
-        return wait
+        while True:
+            self._refill()
+            tokens = self._write_tokens if is_write else self._read_tokens
+            if tokens >= 1.0:
+                if is_write:
+                    self._write_tokens -= 1.0
+                else:
+                    self._read_tokens -= 1.0
+                return total_wait
+
+            # Not enough tokens — sleep until approximately 1 token is available
+            wait = (1.0 - tokens) / rate if rate > 0 else 1.0
+            await asyncio.sleep(wait)
+            total_wait += wait
 
     @property
     def read_tokens_available(self) -> float:
@@ -392,7 +389,16 @@ class KalshiVenueClient(EventVenueClient):
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
-    
+
+    async def __aenter__(self) -> "KalshiVenueClient":
+        """Support ``async with KalshiVenueClient(...) as client:`` usage."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        """Ensure the underlying HTTPX client is closed on context exit."""
+        await self.close()
+
     # ------------------------------------------------------------------------
     # Resilient Request Infrastructure
     # ------------------------------------------------------------------------

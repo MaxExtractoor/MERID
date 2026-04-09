@@ -1,0 +1,127 @@
+==== QUARANTINE INDEX ====
+Last updated: 2026-04-09 (updated 2026-04-09 Track B triage pass)
+
+This file documents test suites/files that are quarantined (Track B).
+These tests are NOT required to be green for the Track A Kalshi baseline.
+
+──────────────────────────────────────────────────────────────────────
+TRACK A — UPGRADED FROM QUARANTINE (2026-04-09 triage pass)
+──────────────────────────────────────────────────────────────────────
+
+tests/event_venues/kalshi/test_kalshi_regression.py
+  Was: Quarantined (legacy regression suite).
+  Status: MOVED TO TRACK A — all 2 tests pass after 2026-04-09 validation.
+
+tests/event_venues/kalshi/test_kalshi_venue_client.py
+  Was: Quarantined (old venue-client contract tests).
+  Status: MOVED TO TRACK A — all 7 tests pass after 2026-04-09 validation.
+
+──────────────────────────────────────────────────────────────────────
+TRACK B — FIXED, NOW PART OF BROADER SUITE (not quarantined)
+──────────────────────────────────────────────────────────────────────
+
+tests/event_venues/kalshi/test_kalshi_client_refactored.py
+  Was: 3 URL-mismatch failures (old DELETE/GET paths vs new POST .../cancel,
+       GET /portfolio/orders/<id>, GET /portfolio/orders).
+  Fixed: 2026-04-09 — URL mocks updated to match production API paths.
+  Status: ALL 36 TESTS PASS — no longer quarantined.
+
+tests/trading/test_price_source_and_15m.py
+  Was: Collection error — imported removed private name
+       _load_strategy_catalog_enabled (renamed to _load_strategy_catalog_lookups).
+  Fixed: 2026-04-09 — import + 3 call sites updated; tuple unpacking corrected.
+  Status: 23 TESTS PASS
+
+tests/test_kalshi_grid_integration.py
+  Was: Collection error — imported non-existent MarketFilterConfig.
+  Fixed: 2026-04-09 — removed non-existent class from import + AgentConfig calls.
+  Status: 4 TESTS COLLECTED (may fail at runtime — complex integration tests)
+
+──────────────────────────────────────────────────────────────────────
+TRACK B — PRODUCTION BUGS FIXED (monitoring / agents)
+──────────────────────────────────────────────────────────────────────
+
+monitoring/liquidation_monitor.py + tests/monitoring/test_monitoring_system.py
+  Was: ImportError — dashboard.py tried to import WhaleSignal from
+       monitoring.liquidation_monitor but it wasn't defined there.
+  Fixed: 2026-04-09 — added `from trading.perp.base import WhaleSignal` to
+         liquidation_monitor.py (re-exported for importers).
+  Status: MONITORING TESTS NOW COLLECT CLEANLY
+
+agents/prediction_arbitrage_analyst.py
+  Was: Double-import of non-existent `merid_metrics` (top-level) module.
+  Fixed: 2026-04-09 — consolidated to single `from core.merid_metrics import ...`
+  Status: PRODUCTION BUG FIXED
+
+──────────────────────────────────────────────────────────────────────
+TRACK B — DELETED (dead legacy paths, non-existent modules)
+──────────────────────────────────────────────────────────────────────
+
+Deleted 2026-04-09 — these files imported modules that do not exist in the
+repo (archived or never implemented). They could never pass regardless of
+dependencies and tested no real production code.
+
+  tests/logging/test_merid_adapted_patterns.py     — merid_logging_queue (archived)
+  tests/logging/test_merid_canonical_patterns.py   — merid_logging (archived)
+  tests/logging/test_merid_cohesive_patterns.py    — merid_logging (archived)
+  tests/logging/test_merid_dropin_patterns.py      — merid_logging_config (DNE)
+  tests/logging/test_merid_end_to_end_patterns.py  — merid_logging (archived)
+  tests/logging/test_merid_focused_patterns.py     — merid_logging (archived)
+  tests/logging/test_merid_logging.py              — merid_logging (archived)
+  tests/logging/test_merid_production_patterns.py  — merid_logging (archived)
+  tests/core/test_agent.py                         — core.agent.MeridAgent (DNE)
+  tests/analytics/test_roi_integration.py          — integrate_task_runner_roi (DNE)
+  tests/analytics/test_complete_roi_integration.py — integrate_task_runner_roi (DNE)
+  tests/analytics/test_merid_metrics.py            — merid_metrics top-level functions
+                                                     not present in core.merid_metrics
+  tests/analytics/test_merid_integration.py        — same (load_and_evaluate_csv DNE)
+
+──────────────────────────────────────────────────────────────────────
+TRACK B — OPTIONAL DEPENDENCY (importorskip guard added)
+──────────────────────────────────────────────────────────────────────
+
+These files have a pytest.importorskip() guard at module level.
+They will SKIP cleanly (not ERROR) when the optional dep is absent.
+Install the noted package to make them runnable.
+
+  tests/agents/test_telegram_rate_limit.py       → requires: python-telegram-bot
+  tests/analytics/test_brier_metrics.py          → requires: scikit-learn
+  tests/analytics/test_brier_score.py            → requires: scikit-learn
+  tests/analytics/test_bucket_analysis.py        → requires: scikit-learn
+  tests/analytics/test_scorecard_fix.py          → requires: scikit-learn
+  tests/api/test_mock_responses.py               → requires: scikit-learn
+  tests/api/test_vertical_slice.py               → requires: feedparser
+  tests/core/test_celery_tasks.py                → requires: celery
+  tests/core/test_data_validation.py             → requires: great-expectations
+  tests/core/test_resilience.py                  → requires: pybreaker
+  tests/logging/test_run_logging.py              → requires: scikit-learn
+  tests/logging/test_structured_logging.py       → requires: scikit-learn
+  tests/monitoring/test_record_decision_fix.py   → requires: scikit-learn
+  tests/streams/test_advanced_streams.py         → requires: feedparser
+  tests/streams/test_base_stream.py              → requires: feedparser
+  tests/streams/test_market.py                   → requires: feedparser
+  tests/streams/test_market_stream.py            → requires: feedparser
+  tests/streams/test_stream_simple.py            → requires: feedparser
+  tests/streams/test_stream_working.py           → requires: feedparser
+
+──────────────────────────────────────────────────────────────────────
+TRACK B — REMAINING (test/API mismatches, investigate later)
+──────────────────────────────────────────────────────────────────────
+
+tests/test_kalshi_client.py
+  Reason: Syntax error fixed (classTestSingleton → class TestSingleton).
+          Remaining failures: KalshiConfig(base_url=...) now rest_api_url fixed,
+          but further AsyncMock usage mismatches remain (10 failures, 7 pass).
+          Pre-existing test infrastructure issues, not production bugs.
+  Classification: Track B
+  Owner: TBD  Ticket: #
+
+──────────────────────────────────────────────────────────────────────
+TRACK A NOTES
+──────────────────────────────────────────────────────────────────────
+
+tests/event_venues/test_order_groups.py
+  Was: NameError: OrderGroupManager (not defined — class renamed to
+       KalshiOrderGroupManager but singleton used old name).
+  Fixed: 2026-04-09 — module now imports cleanly.
+  Status: MOVED TO TRACK A / FIXED

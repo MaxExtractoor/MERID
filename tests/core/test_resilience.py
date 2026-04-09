@@ -1,5 +1,6 @@
 """Tests for core/resilience.py."""
 import pytest
+pytest.importorskip("pybreaker", reason="pybreaker is an optional dependency")
 import asyncio
 from unittest.mock import Mock, AsyncMock, patch
 from core.resilience import (

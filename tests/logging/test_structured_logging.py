@@ -3,6 +3,8 @@
 Test script to verify structured JSON logging functionality.
 """
 
+import pytest
+pytest.importorskip("sklearn", reason="sklearn is an optional dependency")
 import asyncio
 import json
 import time

@@ -141,13 +141,14 @@ class AntiHerdingDetector:
         for d in directions:
             direction_counts[d] += 1
 
-        # Calculate entropy
+        # Calculate Shannon entropy (bits) over direction distribution
+        import math as _math
         total = len(directions)
         opinion_entropy = 0.0
         for count in direction_counts.values():
             p = count / total
             if p > 0:
-                opinion_entropy -= p * (p.bit_length() - 1) / 2  # Rough entropy
+                opinion_entropy -= p * _math.log2(p)
 
         # Check unanimity
         max_direction_ratio = max(direction_counts.values()) / total

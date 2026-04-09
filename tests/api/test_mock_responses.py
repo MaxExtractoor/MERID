@@ -1,6 +1,7 @@
 """Unit test for mock response structural consistency."""
 
 import pytest
+pytest.importorskip("sklearn", reason="scikit-learn is an optional dependency")
 import json
 from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent
 from agents.base_agent import BaseAgent

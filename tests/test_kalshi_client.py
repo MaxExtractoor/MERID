@@ -44,7 +44,7 @@ F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z0IfwIX
 AAL8U2zCkGqM3mLwP+5F1z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9
 z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z0=
 -----END RSA PRIVATE KEY-----""",
-        base_url="https://api.elections.kalshi.com/trade-api/v2",
+        rest_api_url="https://api.elections.kalshi.com/trade-api/v2",
     )
     client = KalshiVenueClient(config)
     
@@ -401,7 +401,7 @@ class TestSubaccountOperations:
         assert result.data["5"]["event_exposure"] == Decimal("1000")
 
 
-classTestSingleton:
+class TestSingleton:
     """Tests for singleton pattern."""
 
     def test_get_kalshi_client_returns_same_instance(self):

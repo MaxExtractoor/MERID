@@ -112,12 +112,13 @@ class TestKalshiTraderBuyOperations:
         )
         mock_client.place_order.return_value = expected_order
 
-        result = await trader.buy_yes("FED-25DEC-T3.00", 5, price=65)
+        # Use price=45 which is within the default 50¢ YES price cap
+        result = await trader.buy_yes("FED-25DEC-T3.00", 5, price=45)
 
         assert result == expected_order
         call_args = mock_client.place_order.call_args[0][0]
         assert call_args.order_type == "limit"
-        assert call_args.price == Decimal("0.65")
+        assert call_args.price == Decimal("0.45")
 
     @pytest.mark.asyncio
     async def test_buy_no_market_order(self, trader, mock_client):

@@ -217,7 +217,7 @@ class TestReconnect:
         ws.subscribe_trades = AsyncMock()
         ws.subscribe_orderbook = AsyncMock()
 
-        asyncio.get_event_loop().run_until_complete(ws._reconnect())
+        asyncio.run(ws._reconnect())
         assert ws._reconnect_count == 1
 
     def test_reconnect_clears_state(self, ws):
@@ -236,14 +236,14 @@ class TestReconnect:
         ws.subscribe_trades = AsyncMock()
         ws.subscribe_orderbook = AsyncMock()
 
-        asyncio.get_event_loop().run_until_complete(ws._reconnect())
+        asyncio.run(ws._reconnect())
         assert len(ws._ob_initialised) == 0
         assert len(ws._ob_snapshots) == 0
         assert len(ws._last_seq) == 0
 
     def test_not_running_skips_reconnect(self, ws):
         ws._running = False
-        asyncio.get_event_loop().run_until_complete(ws._reconnect())
+        asyncio.run(ws._reconnect())
         assert ws._reconnect_count == 0
 
 

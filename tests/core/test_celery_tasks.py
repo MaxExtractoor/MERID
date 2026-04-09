@@ -1,5 +1,6 @@
 """Tests for core/celery_tasks.py."""
 import pytest
+pytest.importorskip("celery", reason="celery is an optional dependency")
 from unittest.mock import Mock, patch
 from core.celery_tasks import (
     celery_app, run_backtest, calculate_risk_metrics,

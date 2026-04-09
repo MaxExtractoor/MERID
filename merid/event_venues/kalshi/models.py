@@ -179,8 +179,10 @@ class KalshiConfig:
             self.private_key_pem = _key_pem
         if not self.use_demo:
             self.use_demo = _use_demo
-        # Override rest_api_url if KALSHI_API_HOST is set (e.g. elections endpoint)
-        if _api_host and not self.use_demo:
+        # Override rest_api_url if KALSHI_API_HOST is set AND the caller did not
+        # explicitly provide a custom URL (i.e. rest_api_url still equals the default).
+        _default_rest_url = "https://api.elections.kalshi.com/trade-api/v2"
+        if _api_host and not self.use_demo and self.rest_api_url == _default_rest_url:
             self.rest_api_url = _api_host
     
     @property
