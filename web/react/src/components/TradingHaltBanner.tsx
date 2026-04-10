@@ -43,8 +43,10 @@ export default function TradingHaltBanner() {
   const [loading, setLoading] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** GAP-B3: inline confirm state replaces window.confirm() */
+  const [pendingAction, setPendingAction] = useState<'halt' | 'resume' | null>(null);
 
-  const { data: haltStatus, error: haltError, refetch: refetchHalt } = useApiData<HaltStatus>(
+  const { data: haltStatus, error: haltError, refetch: refetchHalt, lastUpdated } = useApiData<HaltStatus>(
     API_ENDPOINTS.RISK_HALT_STATUS,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
@@ -57,8 +59,8 @@ export default function TradingHaltBanner() {
     return <ErrorBar label="Halt status unavailable" error={haltError} onRetry={refetchHalt} />;
   }
 
-  const handleHalt = async () => {
-    if (!confirm('Are you sure you want to HALT all trading?')) return;
+  const executeHalt = async () => {
+    setPendingAction(null);
     setLoading(true);
     setActionError(null);
     try {
@@ -76,8 +78,8 @@ export default function TradingHaltBanner() {
     }
   };
 
-  const handleResume = async () => {
-    if (!confirm('Are you sure you want to RESUME trading?')) return;
+  const executeResume = async () => {
+    setPendingAction(null);
     setLoading(true);
     setActionError(null);
     try {
@@ -108,6 +110,38 @@ export default function TradingHaltBanner() {
           <button type="button" onClick={() => setActionError(null)} className="ml-auto shrink-0 text-slate-400 hover:text-white" aria-label="Dismiss error">&times;</button>
         </div>
       )}
+
+      {/* GAP-B3: Inline confirmation replaces window.confirm() */}
+      {pendingAction && (
+        <div className={`flex items-center justify-between px-4 py-2 rounded-lg border ${
+          pendingAction === 'halt'
+            ? 'bg-red-950/60 border-red-700 text-red-200'
+            : 'bg-emerald-950/60 border-emerald-700 text-emerald-200'
+        }`}>
+          <span className="text-sm font-medium">
+            {pendingAction === 'halt'
+              ? '⚠️ Confirm HALT — this will stop all trading immediately.'
+              : '✓ Confirm RESUME — this will re-enable trading.'}
+          </span>
+          <div className="flex items-center gap-2 ml-4">
+            <button type="button"
+              onClick={pendingAction === 'halt' ? executeHalt : executeResume}
+              className={`text-xs font-bold px-3 py-1 rounded ${
+                pendingAction === 'halt'
+                  ? 'bg-red-600 hover:bg-red-500 text-white'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+              }`}>
+              Confirm
+            </button>
+            <button type="button"
+              onClick={() => setPendingAction(null)}
+              className="text-xs px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main halt banner */}
       <div
         className={`flex items-center justify-between px-4 py-2 rounded-lg border ${
@@ -135,6 +169,13 @@ export default function TradingHaltBanner() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* GAP-D4: last-updated timestamp */}
+          {lastUpdated && (
+            <span className="text-[10px] text-slate-500" title="Last polled">
+              {lastUpdated.toLocaleTimeString()}
+            </span>
+          )}
+
           {/* Staleness badge */}
           {staleCount > 0 && (
             <span className="flex items-center gap-1 text-xs bg-amber-900/40 text-amber-300 px-2 py-0.5 rounded">
@@ -154,11 +195,11 @@ export default function TradingHaltBanner() {
             </button>
           )}
 
-          {/* Halt / Resume button */}
+          {/* Halt / Resume button — triggers inline confirm (GAP-B3) */}
           {isHalted ? (
             <button type="button"
-              onClick={handleResume}
-              disabled={loading}
+              onClick={() => setPendingAction('resume')}
+              disabled={loading || pendingAction !== null}
               className="flex items-center gap-1 text-xs font-medium bg-emerald-700 hover:bg-emerald-600 text-white px-3 py-1 rounded disabled:opacity-50"
              title="Resume">
               <Play className="w-3 h-3" />
@@ -166,8 +207,8 @@ export default function TradingHaltBanner() {
             </button>
           ) : (
             <button type="button"
-              onClick={handleHalt}
-              disabled={loading}
+              onClick={() => setPendingAction('halt')}
+              disabled={loading || pendingAction !== null}
               className="flex items-center gap-1 text-xs font-medium bg-red-700 hover:bg-red-600 text-white px-3 py-1 rounded disabled:opacity-50"
              title="Halt">
               <Pause className="w-3 h-3" />

@@ -113,6 +113,9 @@ export default function OperatorDashboard() {
       {/* Trading Halt Banner */}
       <TradingHaltBanner />
 
+      {/* Mode Safety — kept above the fold so feed/kill-switch issues are immediately visible (GAP-D3) */}
+      <ModeSafetyPanel />
+
       {/* Status Bar */}
       <OperatorStatusBar summary={data} lastUpdated={lastUpdated} />
 
@@ -159,9 +162,6 @@ export default function OperatorDashboard() {
           }
         />
       </div>
-
-      {/* Mode Safety */}
-      <ModeSafetyPanel />
 
       {/* Risk State + Agent Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

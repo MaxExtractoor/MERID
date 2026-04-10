@@ -462,28 +462,32 @@ async def get_explainability_decisions(limit: int = 20, agent: Optional[str] = N
 # ============================================
 @router.get("/api/v1/risk/halt-status")
 async def get_risk_halt_status() -> Dict[str, Any]:
-    """Get trading halt status from the real GlobalRiskManager."""
+    """Get trading halt status.
+
+    GAP-B1 fix: synthesises state from BOTH GlobalRiskManager (domain-level,
+    in-memory) AND risk_controller (global kill, persisted).  Either source
+    blocking trading causes halted=True so TradingHaltBanner and KillSwitchView
+    always show a consistent "can we trade?" answer.
+    """
+    # --- GlobalRiskManager (domain-level) ---
+    halted_domains: Dict[str, str] = {}
+    history: list = []
     try:
         from merid.pipeline.risk_manager import get_global_risk_manager
         rm = get_global_risk_manager()
-        # Use public API if available, fall back to private attrs
         if hasattr(rm, 'get_halted_domains'):
             halted_domains = dict(rm.get_halted_domains())
         elif hasattr(rm, 'halted_domains'):
             halted_domains = dict(rm.halted_domains)
         else:
             halted_domains = dict(getattr(rm, '_halted_domains', {}))
-        any_halted = len(halted_domains) > 0
-        reason = ", ".join(f"{d}: {r}" for d, r in halted_domains.items()) if any_halted else None
-        # Build history from proposal log (recent rejections)
-        history = []
         proposal_log = []
         if hasattr(rm, 'get_proposal_log'):
             proposal_log = rm.get_proposal_log(20)
         elif hasattr(rm, 'proposal_log'):
-            proposal_log = rm.proposal_log[-20:]
+            proposal_log = list(rm.proposal_log[-20:])
         else:
-            proposal_log = getattr(rm, '_proposal_log', [])[-20:]
+            proposal_log = list(getattr(rm, '_proposal_log', [])[-20:])
         for entry in proposal_log:
             if not entry.get("approved"):
                 history.append({
@@ -491,25 +495,54 @@ async def get_risk_halt_status() -> Dict[str, Any]:
                     "reason": entry.get("reason", "risk check failed"),
                     "timestamp": entry.get("timestamp", time.time()),
                 })
-        return {
-            "can_trade": not any_halted,
-            "halted": any_halted,
-            "reason": reason,
-            "halt_time": time.time() if any_halted else None,
-            "history_count": len(history),
-            "history": history[-10:],
-            "limits": {
-                "max_daily_loss_pct": 5.0,
-                "max_drawdown_pct": 10.0,
-                "circuit_breaker_halt_threshold": 3,
-            },
-        }
     except Exception:
-        return {
-            "can_trade": True, "halted": False, "reason": None,
-            "halt_time": None, "history_count": 0, "history": [],
-            "limits": {"max_daily_loss_pct": 5.0, "max_drawdown_pct": 10.0, "circuit_breaker_halt_threshold": 3},
-        }
+        pass
+
+    # --- risk_controller (global kill, canonical persisted source) ---
+    rc_blocked = False
+    rc_reason: str | None = None
+    rc_kill_time: float | None = None
+    try:
+        from merid.risk.kill_switches import risk_controller
+        rc_blocked = not risk_controller.can_trade()
+        if rc_blocked:
+            rc_reason = risk_controller.get_kill_reason()
+            rc_st = risk_controller.get_status()
+            rc_kill_time = rc_st.get("kill_timestamp")
+            if rc_reason and not any(h.get("reason") == rc_reason for h in history):
+                history.append({
+                    "action": "halt",
+                    "reason": rc_reason,
+                    "timestamp": rc_kill_time if rc_kill_time else time.time(),
+                })
+    except Exception:
+        pass
+
+    any_halted = len(halted_domains) > 0 or rc_blocked
+
+    # Build combined reason string
+    reasons = []
+    if halted_domains:
+        reasons.append(", ".join(f"{d}: {r}" for d, r in halted_domains.items()))
+    if rc_blocked and rc_reason:
+        reasons.append(f"kill_switch: {rc_reason}")
+    combined_reason = "; ".join(reasons) if reasons else None
+
+    halt_time = rc_kill_time or (time.time() if any_halted else None)
+
+    return {
+        "can_trade": not any_halted,
+        "halted": any_halted,
+        "reason": combined_reason,
+        "halt_time": halt_time,
+        "history_count": len(history),
+        "history": history[-10:],
+        "limits": {
+            "max_daily_loss_pct": 5.0,
+            "max_drawdown_pct": 10.0,
+            "circuit_breaker_halt_threshold": 3,
+        },
+    }
 
 
 @router.get("/api/v1/risk/staleness")
@@ -555,26 +588,70 @@ async def get_risk_staleness() -> Dict[str, Any]:
 
 @router.post("/api/v1/risk/halt")
 async def halt_trading() -> Dict[str, Any]:
-    """Halt all trading domains via GlobalRiskManager."""
+    """Halt all trading.
+
+    GAP-B1 fix: calls BOTH GlobalRiskManager.halt_domain() (domain-level,
+    in-memory) AND risk_controller.emergency_stop() (global kill, persisted)
+    so TradingHaltBanner and KillSwitchView always agree after a manual halt.
+    """
+    ts = datetime.now(timezone.utc).isoformat() + "Z"
+    rm_ok = False
+    rc_ok = False
+
     try:
         rm = get_global_risk_manager()
         for domain in ("prediction", "crypto", "equity"):
             rm.halt_domain(domain, "operator_manual_halt")
-        return {"success": True, "halted": True, "timestamp": datetime.now(timezone.utc).isoformat() + "Z"}
+        rm_ok = True
     except Exception:
-        return {"success": False, "halted": False, "error": "risk manager unavailable"}
+        pass
+
+    try:
+        from merid.risk.kill_switches import risk_controller
+        risk_controller.emergency_stop("operator_manual_halt")
+        rc_ok = True
+    except Exception:
+        pass
+
+    if rm_ok or rc_ok:
+        return {"success": True, "halted": True, "timestamp": ts}
+    return {"success": False, "halted": False, "error": "halt failed — both risk systems unavailable"}
 
 
 @router.post("/api/v1/risk/resume")
 async def resume_trading() -> Dict[str, Any]:
-    """Resume all trading domains via GlobalRiskManager."""
+    """Resume trading.
+
+    GAP-B1 fix: calls BOTH GlobalRiskManager.resume_domain() and
+    risk_controller.reset() so TradingHaltBanner and KillSwitchView
+    always agree after a manual resume.
+    """
+    ts = datetime.now(timezone.utc).isoformat() + "Z"
+    rm_ok = False
+    rc_ok = False
+
     try:
         rm = get_global_risk_manager()
         for domain in ("prediction", "crypto", "equity"):
             rm.resume_domain(domain)
-        return {"success": True, "halted": False, "timestamp": datetime.now(timezone.utc).isoformat() + "Z"}
+        rm_ok = True
     except Exception:
-        return {"success": False, "halted": True, "error": "risk manager unavailable"}
+        pass
+
+    try:
+        from merid.risk.kill_switches import risk_controller
+        # Only reset if the kill was set by an operator halt to avoid
+        # clearing autonomous kill-switch triggers on a manual resume.
+        kill_reason = risk_controller.get_kill_reason() or ""
+        if "operator" in kill_reason.lower() or "manual" in kill_reason.lower():
+            risk_controller.reset()
+            rc_ok = True
+    except Exception:
+        pass
+
+    if rm_ok or rc_ok:
+        return {"success": True, "halted": False, "timestamp": ts}
+    return {"success": False, "halted": True, "error": "resume failed — both risk systems unavailable"}
 
 
 @router.get("/api/v1/risk-metrics/agents")

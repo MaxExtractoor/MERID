@@ -644,12 +644,13 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                     <th className="text-right p-3">Price</th>
                     <th className="text-right p-3">Filled</th>
                     <th className="text-left p-3">Status</th>
+                    <th className="text-left p-3" title="Agent or signal source that placed the order">Agent</th>
                     <th className="p-3" />
                   </tr>
                 </thead>
                 <tbody>
                   {orders.length === 0 ? (
-                    <tr><td colSpan={8} className="text-center py-8 text-gray-500">No open orders</td></tr>
+                    <tr><td colSpan={9} className="text-center py-8 text-gray-500">No open orders</td></tr>
                   ) : (
                     orders.map((o) => (
                       <React.Fragment key={o.order_id}>
@@ -668,6 +669,9 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                           <td className="p-3 text-right text-gray-300">{o.filled}/{o.size}</td>
                           <td className="p-3">
                             <span className="px-2 py-0.5 rounded text-xs text-yellow-400 bg-yellow-400/10">{o.status}</span>
+                          </td>
+                          <td className="p-3 font-mono text-slate-400 text-xs max-w-[100px] truncate" title={o.source || undefined}>
+                            {o.source ? o.source : <span className="text-slate-600">—</span>}
                           </td>
                           <td className="p-3 text-right">
                             {o.status === 'resting' && (
@@ -695,7 +699,7 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
                         </tr>
                         {amendOrderId === o.order_id && (
                           <tr className="bg-blue-500/5 border-b border-slate-800">
-                            <td colSpan={8} className="px-3 py-2">
+                            <td colSpan={9} className="px-3 py-2">
                               <div className="flex items-center gap-2">
                                 <span className="text-xs text-gray-400">New price (1–99¢):</span>
                                 <input
