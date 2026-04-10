@@ -804,6 +804,13 @@ portfolio_risk:
   max_daily_loss_usd: 15000            # 15% of bankroll daily loss tolerance
   max_margin_utilization_pct: 50       # Conservative 50% margin cap
   rebalance_check_interval_seconds: 30
+  # Policy fractions: define limits as % of bankroll so the startup check
+  # can validate that max_daily_loss_usd and the scalar max_notional_per_asset_usd
+  # agree with bankroll × fraction.  Update both values together when changing risk posture.
+  # To confirm: max_daily_loss = 100000 × 0.15 = 15000 ✓
+  #             max_notional_per_asset (BTC, scalar max) = 100000 × 0.10 = 10000 ✓
+  policy_daily_loss_pct: 0.15          # Daily loss limit as fraction of bankroll
+  policy_per_asset_pct: 0.10          # Per-asset cap (scalar fallback) as fraction of bankroll
 
 # ── Monitoring and operational settings ────────────────────────────────
 monitoring:

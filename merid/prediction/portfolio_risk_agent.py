@@ -85,6 +85,8 @@ class PortfolioRiskAgent:
         self._max_snapshots = 200
         self._kill_switch_active = False
         self._paused_agents: List[str] = []
+        self._halted = False
+        self._halt_reason = ""
 
     def set_agents(self, agents: List["KalshiTradingAgent"]) -> None:
         """Update the list of trading agents to monitor."""
@@ -92,10 +94,119 @@ class PortfolioRiskAgent:
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
+    def _check_risk_limit_policy(self) -> None:
+        """Validate runtime risk limits against bankroll-derived policy expectations.
+
+        Policy fractions (policy_daily_loss_pct / policy_per_asset_pct) define
+        what the limits *should* be as a fraction of the starting bankroll.
+        If the configured absolute limits deviate from those expectations the
+        agent refuses to start unless the operator sets
+        ``MERID_RISK_LIMIT_OVERRIDE=1`` to explicitly acknowledge the mismatch.
+
+        Procedure for safe limit changes:
+          1. Update policy fractions AND absolute limits together in
+             config/kalshi_agent_grid.yaml (or env) so they stay in agreement.
+          2. Restart the agent grid.
+          3. Confirm no "RISK LIMIT POLICY VIOLATION" in startup logs.
+
+        The override env-var is a temporary, operator-logged lever — never leave
+        it permanently enabled.
+        """
+        import os as _os
+
+        bankroll = self._config.starting_bankroll_usd
+        mismatches: list[str] = []
+
+        # ── Log current configuration ────────────────────────────────────
+        logger.info(
+            "[RiskPolicy] Bankroll=$%s | runtime limits: max_daily_loss=$%s, "
+            "max_per_asset=$%s | policy fractions: daily_loss_pct=%s, per_asset_pct=%s",
+            bankroll,
+            self._config.max_daily_loss_usd,
+            self._config.max_notional_per_asset_usd,
+            self._config.policy_daily_loss_pct,
+            self._config.policy_per_asset_pct,
+        )
+        if self._config.notional_per_asset_caps:
+            logger.info("[RiskPolicy] Per-asset caps: %s", self._config.notional_per_asset_caps)
+
+        # ── max_daily_loss check ─────────────────────────────────────────
+        if self._config.policy_daily_loss_pct is not None:
+            expected_daily = (bankroll * self._config.policy_daily_loss_pct).quantize(
+                Decimal("0.01")
+            )
+            actual_daily = self._config.max_daily_loss_usd
+            logger.info(
+                "[RiskPolicy] Daily loss — formula: $%s × %s = expected $%s, "
+                "actual runtime $%s",
+                bankroll,
+                self._config.policy_daily_loss_pct,
+                expected_daily,
+                actual_daily,
+            )
+            if actual_daily != expected_daily:
+                mismatches.append(
+                    f"max_daily_loss: actual {actual_daily} vs expected {expected_daily} "
+                    f"(bankroll ${bankroll} × {self._config.policy_daily_loss_pct})"
+                )
+
+        # ── max_per_asset check ──────────────────────────────────────────
+        if self._config.policy_per_asset_pct is not None:
+            expected_per_asset = (bankroll * self._config.policy_per_asset_pct).quantize(
+                Decimal("0.01")
+            )
+            actual_per_asset = self._config.max_notional_per_asset_usd
+            logger.info(
+                "[RiskPolicy] Per-asset cap — formula: $%s × %s = expected $%s, "
+                "actual runtime $%s",
+                bankroll,
+                self._config.policy_per_asset_pct,
+                expected_per_asset,
+                actual_per_asset,
+            )
+            if actual_per_asset != expected_per_asset:
+                mismatches.append(
+                    f"max_per_asset: actual {actual_per_asset} vs expected {expected_per_asset} "
+                    f"(bankroll ${bankroll} × {self._config.policy_per_asset_pct})"
+                )
+
+        if not mismatches:
+            logger.info("[RiskPolicy] ✅ Risk limits consistent with bankroll policy.")
+            return
+
+        # ── Mismatch found ───────────────────────────────────────────────
+        mismatch_detail = "; ".join(mismatches)
+        logger.error(
+            "[RiskPolicy] ❌ RISK LIMIT POLICY VIOLATION — mismatches found: %s",
+            mismatch_detail,
+        )
+
+        override_raw = _os.getenv("MERID_RISK_LIMIT_OVERRIDE", "").strip()
+        if override_raw == "1":
+            import datetime as _dt
+            operator_note = _os.getenv("MERID_RISK_OVERRIDE_REASON", "<no reason provided>")
+            logger.critical(
+                "[RiskPolicy] ⚠️  MERID_RISK_LIMIT_OVERRIDE=1 — policy check bypassed by operator. "
+                "Mismatches: %s | Reason: %s | Timestamp: %s",
+                mismatch_detail,
+                operator_note,
+                _dt.datetime.utcnow().isoformat(),
+            )
+            return
+
+        raise RuntimeError(
+            f"RISK LIMIT POLICY VIOLATION - Live trading blocked. "
+            f"Mismatches: {mismatch_detail}. "
+            "Fix: align config/kalshi_agent_grid.yaml limits with policy fractions, "
+            "then restart. To acknowledge intentionally, set MERID_RISK_LIMIT_OVERRIDE=1 "
+            "(also set MERID_RISK_OVERRIDE_REASON for audit log)."
+        )
+
     async def start(self) -> None:
         """Start the portfolio risk monitoring loop."""
         if self._running:
             return
+        self._check_risk_limit_policy()
         self._shutdown.clear()
         self._running = True
         self._task = asyncio.create_task(
@@ -230,10 +341,13 @@ class PortfolioRiskAgent:
 
         # Per-asset notional (with correlation-adjusted caps)
         for asset, notional in snapshot.notional_per_asset.items():
-            if notional > self._config.max_notional_per_asset_usd:
+            asset_cap = self._config.notional_per_asset_caps.get(
+                asset.upper(), self._config.max_notional_per_asset_usd
+            )
+            if notional > asset_cap:
                 breaches.append(
                     f"{asset} notional ${notional} > "
-                    f"limit ${self._config.max_notional_per_asset_usd}"
+                    f"limit ${asset_cap}"
                 )
 
         # Sprint D: Correlation-adjusted combined exposure check

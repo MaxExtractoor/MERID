@@ -106,14 +106,27 @@ class AgentConfig:
 
 @dataclass
 class PortfolioRiskConfig:
-    """Portfolio-level risk limits across all agents."""
+    """Portfolio-level risk limits across all agents.
+
+    Limits may be specified as absolute USD values or derived from
+    bankroll fractions (policy_daily_loss_pct / policy_per_asset_pct).
+    When both are present the absolute values are validated against the
+    bankroll-derived expected values at startup; any mismatch triggers a
+    RISK LIMIT POLICY VIOLATION unless MERID_RISK_LIMIT_OVERRIDE=1.
+    """
     starting_bankroll_usd: Decimal = Decimal("100000")
     max_total_notional_usd: Decimal = Decimal("25000")
     max_notional_per_asset_usd: Decimal = Decimal("8000")
+    # Per-asset caps (populated from YAML dict; overrides scalar for named assets)
+    notional_per_asset_caps: Dict[str, Decimal] = field(default_factory=dict)
     max_open_markets: int = 50
     max_daily_loss_usd: Decimal = Decimal("2000")
     max_margin_utilization_pct: Decimal = Decimal("75")
     rebalance_check_interval_seconds: int = 30
+    # Policy fractions (fraction of starting_bankroll_usd).  When set, the
+    # agent validates that the absolute limits agree with bankroll × fraction.
+    policy_daily_loss_pct: Optional[Decimal] = None
+    policy_per_asset_pct: Optional[Decimal] = None
 
 
 @dataclass
@@ -284,14 +297,33 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
 
     # Portfolio risk
     pr = raw.get("portfolio_risk", {})
+    _per_asset_raw = pr.get("max_notional_per_asset_usd", 8000)
+    if isinstance(_per_asset_raw, dict):
+        # Per-asset caps keyed by asset symbol (e.g. BTC, ETH)
+        _notional_per_asset_caps = {
+            k.upper(): Decimal(str(v)) for k, v in _per_asset_raw.items()
+        }
+        # Scalar fallback: use the maximum of the per-asset caps (most permissive default)
+        _max_notional_per_asset = max(_notional_per_asset_caps.values(), default=Decimal("8000"))
+    else:
+        _notional_per_asset_caps = {}
+        _max_notional_per_asset = Decimal(str(_per_asset_raw))
+
     portfolio_risk = PortfolioRiskConfig(
         starting_bankroll_usd=Decimal(str(pr.get("starting_bankroll_usd", 100000))),
         max_total_notional_usd=Decimal(str(pr.get("max_total_notional_usd", 25000))),
-        max_notional_per_asset_usd=Decimal(str(pr.get("max_notional_per_asset_usd", 8000))),
+        max_notional_per_asset_usd=_max_notional_per_asset,
+        notional_per_asset_caps=_notional_per_asset_caps,
         max_open_markets=pr.get("max_open_markets", 50),
         max_daily_loss_usd=Decimal(str(pr.get("max_daily_loss_usd", 2000))),
         max_margin_utilization_pct=Decimal(str(pr.get("max_margin_utilization_pct", 75))),
         rebalance_check_interval_seconds=pr.get("rebalance_check_interval_seconds", 30),
+        policy_daily_loss_pct=(
+            Decimal(str(pr["policy_daily_loss_pct"])) if "policy_daily_loss_pct" in pr else None
+        ),
+        policy_per_asset_pct=(
+            Decimal(str(pr["policy_per_asset_pct"])) if "policy_per_asset_pct" in pr else None
+        ),
     )
 
     # Monitoring
