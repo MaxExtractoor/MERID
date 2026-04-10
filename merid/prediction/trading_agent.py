@@ -1343,6 +1343,9 @@ class KalshiTradingAgent:
         side, action = action_map[signal.action]
         size = check.adjusted_size if check.adjusted_size else signal.contracts
         price_cents = signal.limit_price_cents or 0
+        # Initialize force_paper before the [PM_SIZE] log (line ~1400 uses it).
+        # The BTC-15m risk block below may override this; non-BTC-15m stays False.
+        force_paper: bool = False
 
         # === Vol-band size adjustment ===
         # For crypto agents apply the vol-band size multiplier before sizing is
