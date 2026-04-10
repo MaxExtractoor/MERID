@@ -26,6 +26,7 @@ import { StubRegistryProvider } from "./components/GlobalStubBanner";
 import { KalshiModeProvider } from "./context/KalshiModeContext";
 import { RealtimeDisconnectedBanner } from "./components/RealtimeDisconnectedBanner";
 import { ExecutionBlockedBanner } from "./components/ExecutionBlockedBanner";
+import SystemServicesBanner from "./components/SystemServicesBanner";
 import { GateChangeToast } from "./components/GateChangeToast";
 import { ThemeProvider } from "./theme";
 import ToastProvider from "./components/ToastProvider";
@@ -99,6 +100,8 @@ export default function App() {
         {/* Main content area */}
         <div className="flex flex-1 flex-col overflow-hidden relative z-10">
           <TopBar onMenuClick={() => setSidebarOpen(true)} />
+          {/* GAP-D1: alert when critical backend services stop */}
+          <SystemServicesBanner />
           <RealtimeDisconnectedBanner />
           <ExecutionBlockedBanner />
           

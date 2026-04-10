@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useOperatorSummary } from '../hooks/useOperatorSummary';
 import { OperatorStatusBar } from './OperatorStatusBar';
 import { OperatorControlPlane } from './OperatorControlPlane';
@@ -31,6 +32,8 @@ export default function OperatorDashboard() {
     switchMode,
     toggleKillSwitch,
   } = useOperatorSummary(15000);
+
+  const [killConfirm, setKillConfirm] = useState<'idle' | 'kill' | 'unkill'>('idle');
 
   const { data: kalshiBalance } = useApiData<any>(
     API_ENDPOINTS.KALSHI_BALANCE,
@@ -113,6 +116,9 @@ export default function OperatorDashboard() {
       {/* Trading Halt Banner */}
       <TradingHaltBanner />
 
+      {/* Mode Safety — kept above the fold so feed/kill-switch issues are immediately visible (GAP-D3) */}
+      <ModeSafetyPanel />
+
       {/* Status Bar */}
       <OperatorStatusBar summary={data} lastUpdated={lastUpdated} />
 
@@ -159,9 +165,6 @@ export default function OperatorDashboard() {
           }
         />
       </div>
-
-      {/* Mode Safety */}
-      <ModeSafetyPanel />
 
       {/* Risk State + Agent Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -250,30 +253,51 @@ export default function OperatorDashboard() {
         )}
       </div>
 
-      {/* Execution Guard */}
+      {/* Execution Guard — read-only gate status + unified kill/reset */}
       <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-slate-300">Execution Guard</h3>
-          <button
-            type="button"
-            onClick={() => {
-              const next = !data?.guard?.kill_switch_active;
-              const msg = next
-                ? 'Activate KILL SWITCH? This will halt ALL execution immediately.'
-                : 'Deactivate kill switch and resume execution?';
-              if (window.confirm(msg)) toggleKillSwitch(next);
-            }}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-              data?.guard?.kill_switch_active
-                ? 'bg-red-600 hover:bg-red-500 text-white'
-                : 'bg-green-600/20 hover:bg-green-600/40 text-green-400 border border-green-500/30'
-            }`}
-          >
-            {data?.guard?.kill_switch_active ? 'KILL SWITCH ON — Click to Deactivate' : 'Execution Enabled'}
-          </button>
+          {killConfirm === 'idle' ? (
+            <button
+              type="button"
+              onClick={() => setKillConfirm(data?.guard?.kill_switch_active ? 'unkill' : 'kill')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                data?.guard?.kill_switch_active
+                  ? 'bg-red-600 hover:bg-red-500 text-white'
+                  : 'bg-green-600/20 hover:bg-green-600/40 text-green-400 border border-green-500/30'
+              }`}
+            >
+              {data?.guard?.kill_switch_active ? 'KILL SWITCH ON' : 'Execution Enabled'}
+            </button>
+          ) : (
+            <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs">
+              <span className="text-slate-300">
+                {killConfirm === 'kill'
+                  ? 'Activate kill switch and halt ALL execution?'
+                  : 'Reset kill switch and resume execution?'}
+              </span>
+              <button
+                type="button"
+                onClick={async () => {
+                  await toggleKillSwitch(killConfirm === 'kill');
+                  setKillConfirm('idle');
+                }}
+                className={`px-2 py-0.5 rounded font-semibold ${killConfirm === 'kill' ? 'bg-red-600 text-white hover:bg-red-500' : 'bg-emerald-600/30 text-emerald-300 hover:bg-emerald-600/50 border border-emerald-500/30'}`}
+              >
+                {killConfirm === 'kill' ? 'Halt' : 'Resume'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setKillConfirm('idle')}
+                className="px-2 py-0.5 rounded text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
         </div>
         {data?.guard && (
-          <p className="text-xs text-slate-500">{data.guard.recent_verdicts_count} recent verdicts</p>
+          <p className="text-xs text-slate-500">{data.guard.recent_verdicts_count} recent verdicts · global kill = {String(data.guard.kill_switch_active)}</p>
         )}
       </div>
 

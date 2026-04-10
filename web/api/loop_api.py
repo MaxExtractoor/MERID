@@ -155,10 +155,21 @@ class KillSwitchRequest(BaseModel):
 
 @loop_api_router.post("/guard/kill")
 def activate_kill_switch(req: KillSwitchRequest) -> Dict[str, Any]:
-    """Activate the global kill switch — blocks ALL trade execution."""
+    """Activate the global kill switch — blocks ALL trade execution.
+
+    Calls risk_controller.emergency_stop() as the single authoritative path,
+    then mirrors through ExecutionGuard for legacy MeridLoop compatibility.
+    """
     try:
+        from merid.risk.kill_switches import risk_controller
+        risk_controller.emergency_stop(req.reason)
         guard = _guard()
-        guard.activate_kill_switch(req.reason)
+        # Mirror to guard (guard.activate_kill_switch also calls risk_controller,
+        # but the local flag and disk persistence are still useful).
+        guard._global_kill_switch = True
+        guard._global_kill_reason = req.reason
+        guard._persist_kill_switch()
+        logger.warning(f"loop_api: KILL SWITCH ACTIVATED — reason: {req.reason}")
         return {"success": True, "kill_switch_active": True, "reason": req.reason}
     except Exception as e:
         logger.error(f"kill_switch_activate_error: {e}")
@@ -167,10 +178,18 @@ def activate_kill_switch(req: KillSwitchRequest) -> Dict[str, Any]:
 
 @loop_api_router.post("/guard/unkill")
 def deactivate_kill_switch() -> Dict[str, Any]:
-    """Deactivate the global kill switch — re-enables execution."""
+    """Deactivate the global kill switch — re-enables execution.
+
+    Calls risk_controller.reset() as the single authoritative path.
+    """
     try:
+        from merid.risk.kill_switches import risk_controller
+        risk_controller.reset(operator="loop_api")
         guard = _guard()
-        guard.deactivate_kill_switch()
+        guard._global_kill_switch = False
+        guard._global_kill_reason = ""
+        guard._persist_kill_switch()
+        logger.info("loop_api: Kill switch deactivated")
         return {"success": True, "kill_switch_active": False}
     except Exception as e:
         logger.error(f"kill_switch_deactivate_error: {e}")
