@@ -263,6 +263,25 @@ async def _kalshi_place_order(
         except Exception as _dce:
             logger.debug("deployment_controller check skipped: %s", _dce)
 
+    # Direct kill switch hard gate — mirrors _route_live's kill-switch-first ordering.
+    # Checked before check_execution_gate() to avoid the heavier reconciliation/feed
+    # reload when the kill switch is already engaged.
+    if not gate.should_simulate_fill():
+        try:
+            from merid.risk.kill_switches import risk_controller
+            if not risk_controller.can_trade():
+                _ks_reason = risk_controller.get_kill_reason() or "kill_switch_active"
+                logger.warning(
+                    "[kalshi_place_order] Live order blocked by kill switch: %s", _ks_reason
+                )
+                return ToolResult.fail(
+                    ToolErrorCode.POLICY_BLOCKED,
+                    f"Execution gate blocked: Kill switch is engaged",
+                    tool_name="kalshi_place_order",
+                )
+        except ImportError:
+            pass  # risk_controller unavailable — fall through to execution gate check
+
     # Unified execution gate — block live orders when safety checks fail
     if not gate.should_simulate_fill():
         try:
