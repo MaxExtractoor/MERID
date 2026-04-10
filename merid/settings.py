@@ -183,6 +183,26 @@ class Settings(BaseSettings):
     MERID_PM_MAX_NOTIONAL_PER_MARKET: float = Field(default=500.0, description="Max notional per PM market (USD)")
     MERID_PM_MAX_DAILY_LOSS: float = Field(default=250.0, description="Max daily loss for prediction markets (USD)")
     MERID_PM_MAX_TOTAL_NOTIONAL: float = Field(default=5000.0, description="Max total PM portfolio notional (USD)")
+
+    # PM spot feed freshness constants
+    # Invariant: 0 < MERID_PM_MAX_SPOT_AGE_SECONDS ≤ MERID_LIVE_FEED_HEALTH_MAX_AGE_SECONDS
+    # If a tick is older than MERID_PM_MAX_SPOT_AGE_SECONDS → status=pm_max_age_exceeded (gate blocks trades).
+    # If a tick is older than MERID_LIVE_FEED_HEALTH_MAX_AGE_SECONDS → status=live_price_feed_unhealthy.
+    # 90s PM gate gives ample headroom above the typical ~5s Coinbase poll cadence while
+    # still being well below the 120s health-dead threshold, so transient ETH/SOL stalls
+    # don't immediately kill trading.
+    MERID_PM_MAX_SPOT_AGE_SECONDS: float = Field(
+        default=90.0,
+        description="Max age (s) of a PM asset spot price before blocking trades (pm_max_age_exceeded)",
+    )
+    MERID_LIVE_FEED_HEALTH_MAX_AGE_SECONDS: float = Field(
+        default=120.0,
+        description="Max age (s) before declaring live_price_feed_unhealthy for a PM asset",
+    )
+    MERID_PM_WARMUP_GRACE_SECONDS: float = Field(
+        default=30.0,
+        description="Grace period (s) after startup before health checks apply; status=warming_up during this window",
+    )
     KALSHI_USE_DEMO: bool = Field(default=False, description="Use Kalshi demo/sandbox API")
     KALSHI_EMAIL: Optional[str] = Field(default=None, description="Kalshi account email")
     KALSHI_PASSWORD: Optional[str] = Field(default=None, description="Kalshi account password")

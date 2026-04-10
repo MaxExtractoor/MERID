@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -37,11 +37,40 @@ logger = get_logger("data.live_price_feed")
 # These are the five assets traded on Kalshi whose spot prices must be in USD.
 KALSHI_ASSETS = frozenset({"BTC", "ETH", "SOL", "XRP", "DOGE"})
 
+# Coinbase REST product IDs for each Kalshi asset (USD-quoted).
+# These map bare asset keys → Coinbase Advanced Trade product IDs.
+KALSHI_COINBASE_PAIRS: Dict[str, str] = {
+    "BTC": "BTC-USD",
+    "ETH": "ETH-USD",
+    "SOL": "SOL-USD",
+    "XRP": "XRP-USD",
+    "DOGE": "DOGE-USD",
+}
+
 # USDT depeg guard — env-configurable (PATCH-1 / EGG-1)
 _USDT_DEPEG_THRESHOLD_PCT = float(os.getenv("MERID_USDT_DEPEG_THRESHOLD_PCT", "0.50"))
 _USDT_DEPEG_BLOCK_TRADES = os.getenv("MERID_USDT_DEPEG_BLOCK_TRADES", "true").lower() != "false"
 # Maximum age (seconds) for a Kalshi spot price to be considered fresh
 _SPOT_MAX_STALENESS_SECONDS = float(os.getenv("MERID_SPOT_MAX_STALENESS_SECONDS", "60"))
+
+# ── PM spot-feed freshness thresholds (see merid/settings.py for canonical docs) ──
+# Read once at import; can be overridden via environment variables or settings.
+# Invariant: 0 < PM_MAX_SPOT_AGE_S ≤ LIVE_FEED_HEALTH_MAX_AGE_S
+#   • tick_age > LIVE_FEED_HEALTH_MAX_AGE_S  → live_price_feed_unhealthy
+#   • LIVE_FEED_HEALTH_MAX_AGE_S >= tick_age > PM_MAX_SPOT_AGE_S → pm_max_age_exceeded
+#   • tick_age ≤ PM_MAX_SPOT_AGE_S           → ok
+PM_MAX_SPOT_AGE_S: float = float(os.getenv("MERID_PM_MAX_SPOT_AGE_SECONDS", "90"))
+LIVE_FEED_HEALTH_MAX_AGE_S: float = float(os.getenv("MERID_LIVE_FEED_HEALTH_MAX_AGE_SECONDS", "120"))
+PM_WARMUP_GRACE_S: float = float(os.getenv("MERID_PM_WARMUP_GRACE_SECONDS", "30"))
+
+# Coinbase ticker poll interval (seconds, normal cadence)
+_CB_POLL_INTERVAL_S: float = float(os.getenv("MERID_CB_POLL_INTERVAL_SECONDS", "5"))
+# Stagger delay between per-asset ticker task startups (seconds)
+_CB_STAGGER_S: float = float(os.getenv("MERID_CB_STAGGER_SECONDS", "1.0"))
+# After this many consecutive Coinbase failures, apply exponential back-off
+_CB_BACKOFF_THRESHOLD: int = int(os.getenv("MERID_CB_BACKOFF_THRESHOLD", "3"))
+# Maximum back-off interval (seconds)
+_CB_BACKOFF_MAX_S: float = float(os.getenv("MERID_CB_BACKOFF_MAX_SECONDS", "60"))
 
 # CoinGecko IDs for all five Kalshi assets (PATCH-8 / EGG-9: adds XRP and DOGE)
 _COINGECKO_IDS: Dict[str, str] = {
@@ -149,10 +178,28 @@ class LivePriceFeed:
         self._network_client = get_network_client()
         self._module_name = "data.live_price_feed"
         self._network_client.register_module_profile(self._module_name, RoutingProfile.VPN_A)
-        
+
+        # ── PM Coinbase ticker state ──────────────────────────────────────────
+        # Per-asset monotonic timestamps of the last successful Coinbase tick.
+        # Key: bare asset ("BTC"), value: time.monotonic() of last success.
+        # None means the ticker task has never succeeded for that asset.
+        self._pm_last_tick_mono: Dict[str, Optional[float]] = {
+            a: None for a in KALSHI_ASSETS
+        }
+        # Consecutive failure counts per asset for exponential back-off.
+        self._pm_consecutive_failures: Dict[str, int] = {
+            a: 0 for a in KALSHI_ASSETS
+        }
+        # Monotonic time when the PM ticker subsystem started (for warmup grace).
+        self._pm_start_mono: Optional[float] = None
+        # Asyncio tasks for the per-asset Coinbase ticker loops.
+        self._pm_ticker_tasks: Dict[str, Optional[asyncio.Task]] = {
+            a: None for a in KALSHI_ASSETS
+        }
+
         # Initialize exchanges
         self._initialize_exchanges()
-        
+
         logger.info(f"Live price feed initialized for {len(self.symbols)} symbols with error recovery")
     
     def _initialize_exchanges(self):
@@ -832,6 +879,257 @@ class LivePriceFeed:
         except Exception as exc:
             logger.debug("_fetch_usdt_usd_peg failed: %s", exc)
             return None
+
+    # ── PM Coinbase ticker subsystem ─────────────────────────────────────────
+
+    async def _fetch_coinbase_ticker(self, asset: str) -> Optional[float]:
+        """Fetch the latest USD spot price for a Kalshi PM asset from Coinbase.
+
+        Uses the Coinbase Advanced Trade public REST endpoint (no auth required
+        for best-bid-ask / ticker data).
+
+        Args:
+            asset: Bare asset key, e.g. "BTC".
+
+        Returns:
+            USD price float on success, None on any error.
+        """
+        product_id = KALSHI_COINBASE_PAIRS.get(asset.upper())
+        if not product_id:
+            logger.warning("_fetch_coinbase_ticker: unknown asset=%s", asset)
+            return None
+        url = f"https://api.coinbase.com/api/v3/brokerage/best_bid_ask?product_ids={product_id}"
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(url)
+            if resp.status_code != 200:
+                body_excerpt = resp.text[:200]
+                logger.warning(
+                    "_fetch_coinbase_ticker: asset=%s HTTP %d — %s",
+                    asset, resp.status_code, body_excerpt,
+                )
+                return None
+            data = resp.json()
+            # Response shape: {"pricebooks": [{"product_id": "BTC-USD", "bids": [...], "asks": [...]}]}
+            pricebooks = data.get("pricebooks") or []
+            for book in pricebooks:
+                if book.get("product_id") == product_id:
+                    bids = book.get("bids") or []
+                    asks = book.get("asks") or []
+                    if bids and asks:
+                        mid = (float(bids[0]["price"]) + float(asks[0]["price"])) / 2.0
+                        if mid > 0:
+                            return mid
+                    # Fall back to a single price field if present
+                    price = book.get("price") or book.get("last")
+                    if price:
+                        p = float(price)
+                        if p > 0:
+                            return p
+            logger.warning(
+                "_fetch_coinbase_ticker: asset=%s — no usable price in response: %s",
+                asset, str(data)[:200],
+            )
+            return None
+        except Exception as exc:
+            logger.warning("_fetch_coinbase_ticker: asset=%s exception: %s", asset, exc)
+            return None
+
+    def _pm_record_tick(self, asset: str, price_usd: float) -> None:
+        """Record a successful PM Coinbase tick: update price_cache and tick clock."""
+        asset_up = asset.upper()
+        now_dt = datetime.now(timezone.utc)
+        self.price_cache[asset_up] = PriceData(
+            symbol=asset_up,
+            price=price_usd,
+            bid=price_usd * 0.9998,
+            ask=price_usd * 1.0002,
+            volume_24h=0.0,
+            change_24h_pct=0.0,
+            timestamp=now_dt,
+            exchange="coinbase_usd",
+        )
+        self._pm_last_tick_mono[asset_up] = time.monotonic()
+        self._pm_consecutive_failures[asset_up] = 0
+
+    async def _coinbase_ticker_loop(self, asset: str, startup_delay: float = 0.0) -> None:
+        """Long-running async loop that polls Coinbase for one PM asset.
+
+        Design invariants:
+        - ``startup_delay`` staggers the five asset loops so they don't hit
+          Coinbase simultaneously on start.
+        - On consecutive failures ≥ _CB_BACKOFF_THRESHOLD the sleep doubles
+          (capped at _CB_BACKOFF_MAX_S) to avoid hammering a rate-limited API.
+        - On success the failure counter resets and normal cadence resumes.
+        - The loop exits cleanly when the task is cancelled (asyncio.CancelledError).
+
+        Args:
+            asset:         Bare asset key, e.g. "BTC".
+            startup_delay: Extra seconds to sleep before the first poll.
+        """
+        asset_up = asset.upper()
+        if startup_delay > 0:
+            logger.debug("PM ticker %s: startup delay %.1fs", asset_up, startup_delay)
+            try:
+                await asyncio.sleep(startup_delay)
+            except asyncio.CancelledError:
+                logger.info("PM Coinbase ticker cancelled during startup for %s", asset_up)
+                return
+
+        logger.info("PM Coinbase ticker started for %s", asset_up)
+        while True:
+            try:
+                price = await self._fetch_coinbase_ticker(asset_up)
+                if price is not None:
+                    self._pm_record_tick(asset_up, price)
+                    logger.debug(
+                        "PM ticker %s: price=%.6f tick_ok", asset_up, price
+                    )
+                    sleep_s = _CB_POLL_INTERVAL_S
+                else:
+                    fails = self._pm_consecutive_failures.get(asset_up, 0) + 1
+                    self._pm_consecutive_failures[asset_up] = fails
+                    if fails >= _CB_BACKOFF_THRESHOLD:
+                        # Exponential back-off: at threshold+0 → 2× interval,
+                        # threshold+1 → 4×, threshold+2 → 8×, …, capped at max.
+                        # exponent = fails - _CB_BACKOFF_THRESHOLD + 1
+                        sleep_s = min(
+                            _CB_POLL_INTERVAL_S * (2 ** (fails - _CB_BACKOFF_THRESHOLD + 1)),
+                            _CB_BACKOFF_MAX_S,
+                        )
+                        logger.warning(
+                            "PM ticker %s: %d consecutive failures — backing off %.1fs",
+                            asset_up, fails, sleep_s,
+                        )
+                    else:
+                        sleep_s = _CB_POLL_INTERVAL_S
+                await asyncio.sleep(sleep_s)
+            except asyncio.CancelledError:
+                logger.info("PM Coinbase ticker cancelled for %s", asset_up)
+                return
+            except Exception as exc:
+                logger.error("PM ticker %s: unexpected error %s", asset_up, exc)
+                await asyncio.sleep(_CB_POLL_INTERVAL_S)
+
+    def start_pm_coinbase_streaming(self) -> None:
+        """Launch per-asset Coinbase ticker tasks with staggered startup.
+
+        Spawns one asyncio Task per Kalshi asset (BTC, ETH, SOL, XRP, DOGE).
+        Each task is delayed by ``index * _CB_STAGGER_S`` seconds so the five
+        products don't hammer the Coinbase API at the same instant.
+
+        Records ``_pm_start_mono`` for the warmup-grace window.
+
+        This method is idempotent: calling it again skips assets that already
+        have a live (non-done) task.
+        """
+        self._pm_start_mono = time.monotonic()
+        loop = asyncio.get_event_loop()
+        assets_sorted = sorted(KALSHI_ASSETS)  # deterministic order
+        started = 0
+        for idx, asset in enumerate(assets_sorted):
+            existing = self._pm_ticker_tasks.get(asset)
+            if existing is not None and not existing.done():
+                logger.debug("PM ticker %s already running — skipping", asset)
+                continue
+            delay = idx * _CB_STAGGER_S
+            task = loop.create_task(
+                self._coinbase_ticker_loop(asset, startup_delay=delay),
+                name=f"pm_coinbase_ticker_{asset}",
+            )
+            self._pm_ticker_tasks[asset] = task
+            started += 1
+            logger.info(
+                "PM Coinbase ticker scheduled: asset=%s startup_delay=%.1fs", asset, delay
+            )
+        logger.info("start_pm_coinbase_streaming: started %d ticker task(s)", started)
+
+    def stop_pm_coinbase_streaming(self) -> None:
+        """Cancel all running PM Coinbase ticker tasks."""
+        for asset, task in self._pm_ticker_tasks.items():
+            if task is not None and not task.done():
+                task.cancel()
+                logger.info("PM Coinbase ticker cancelled: %s", asset)
+        self._pm_ticker_tasks = {a: None for a in KALSHI_ASSETS}
+
+    def get_pm_feed_health_snapshot(self) -> Dict[str, Any]:
+        """Return a per-asset PM spot health snapshot.
+
+        Health status per asset (``status`` field):
+            ``ok``                    — tick is within PM_MAX_SPOT_AGE_S.
+            ``pm_max_age_exceeded``   — feed alive but tick too old for PM trading.
+            ``live_price_feed_unhealthy`` — no tick ever, or tick beyond LIVE_FEED_HEALTH_MAX_AGE_S.
+            ``warming_up``            — within the PM_WARMUP_GRACE_S window after start.
+
+        Returns a dict with:
+            ``assets``          — per-asset detail dict.
+            ``all_ok``          — True only if every asset status == "ok".
+            ``pm_spot_hard_gate_open`` — True when all_ok (safe to trade).
+            ``snapshot_mono``   — time.monotonic() when snapshot was taken.
+
+        Symbol-key invariant: all keys in ``assets`` are bare uppercase asset
+        names ("BTC", "ETH", …) matching KALSHI_ASSETS.  PM callers must use
+        the same bare keys when looking up health.
+        """
+        now_mono = time.monotonic()
+        in_warmup = (
+            self._pm_start_mono is not None
+            and (now_mono - self._pm_start_mono) < PM_WARMUP_GRACE_S
+        )
+        assets_health: Dict[str, Any] = {}
+        all_ok = True
+
+        for asset in sorted(KALSHI_ASSETS):
+            last_tick = self._pm_last_tick_mono.get(asset)
+            fails = self._pm_consecutive_failures.get(asset, 0)
+            cached = self.price_cache.get(asset)
+            cache_age_s: Optional[float] = None
+            if cached is not None:
+                try:
+                    ts = cached.timestamp
+                    if ts.tzinfo is not None:
+                        cache_age_s = (datetime.now(timezone.utc) - ts).total_seconds()
+                    else:
+                        cache_age_s = (
+                            datetime.now(timezone.utc) - ts.replace(tzinfo=timezone.utc)
+                        ).total_seconds()
+                except Exception:
+                    cache_age_s = None
+
+            if last_tick is None:
+                tick_age_s = None
+            else:
+                tick_age_s = now_mono - last_tick
+
+            # Determine status
+            if in_warmup and last_tick is None:
+                status = "warming_up"
+            elif last_tick is None or (tick_age_s is not None and tick_age_s > LIVE_FEED_HEALTH_MAX_AGE_S):
+                status = "live_price_feed_unhealthy"
+                all_ok = False
+            elif tick_age_s is not None and tick_age_s > PM_MAX_SPOT_AGE_S:
+                status = "pm_max_age_exceeded"
+                all_ok = False
+            else:
+                status = "ok"
+
+            assets_health[asset] = {
+                "status": status,
+                "tick_age_s": round(tick_age_s, 2) if tick_age_s is not None else None,
+                "cache_age_s": round(cache_age_s, 2) if cache_age_s is not None else None,
+                "consecutive_failures": fails,
+                "feed_ok": status != "live_price_feed_unhealthy",
+                "price_usd": cached.price if cached is not None else None,
+            }
+
+        return {
+            "assets": assets_health,
+            "all_ok": all_ok,
+            "pm_spot_hard_gate_open": all_ok,
+            "snapshot_mono": now_mono,
+            "pm_max_spot_age_s": PM_MAX_SPOT_AGE_S,
+            "live_feed_health_max_age_s": LIVE_FEED_HEALTH_MAX_AGE_S,
+        }
 
 
 # Global singleton
