@@ -276,11 +276,11 @@ async def _kalshi_place_order(
                 )
                 return ToolResult.fail(
                     ToolErrorCode.POLICY_BLOCKED,
-                    f"Execution gate blocked: Kill switch is engaged",
+                    f"Execution gate blocked: Kill switch is engaged ({_ks_reason})",
                     tool_name="kalshi_place_order",
                 )
-        except ImportError:
-            pass  # risk_controller unavailable — fall through to execution gate check
+        except ImportError as _ks_import_err:
+            logger.debug("kill_switch check skipped (ImportError): %s", _ks_import_err)
 
     # Unified execution gate — block live orders when safety checks fail
     if not gate.should_simulate_fill():
