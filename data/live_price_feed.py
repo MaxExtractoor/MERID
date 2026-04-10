@@ -33,6 +33,16 @@ from core.network_client import RoutingProfile, get_network_client
 
 logger = get_logger("data.live_price_feed")
 
+
+# ── Internal sentinel for Coinbase HTTP 429 ──────────────────────────────
+class _CoinbaseRateLimited(Exception):
+    """Raised by _fetch_coinbase_ticker when Coinbase returns HTTP 429.
+
+    Caught by _coinbase_ticker_loop to apply an immediate maximum back-off
+    instead of waiting for the graduated failure-count threshold.
+    """
+
+
 # ── Kalshi-specific constants ────────────────────────────────────────────
 # These are the five assets traded on Kalshi whose spot prices must be in USD.
 KALSHI_ASSETS = frozenset({"BTC", "ETH", "SOL", "XRP", "DOGE"})
@@ -716,6 +726,13 @@ class LivePriceFeed:
                         "price_change_percentage": "24h",
                     },
                 )
+                if response.status_code == 429:
+                    logger.warning(
+                        "[PMSPOT_COINGECKO_429] asset=%s — CoinGecko rate-limited "
+                        "(HTTP 429); skipping fallback this cycle",
+                        symbol,
+                    )
+                    return False
                 response.raise_for_status()
                 data = response.json()
         except Exception as exc:
@@ -902,6 +919,13 @@ class LivePriceFeed:
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 resp = await client.get(url)
+            if resp.status_code == 429:
+                logger.warning(
+                    "[PMSPOT_COINBASE_429] asset=%s — Coinbase rate-limited (HTTP 429); "
+                    "max back-off will be applied",
+                    asset,
+                )
+                raise _CoinbaseRateLimited(asset)
             if resp.status_code != 200:
                 body_excerpt = resp.text[:200]
                 logger.warning(
@@ -1004,6 +1028,22 @@ class LivePriceFeed:
                     else:
                         sleep_s = _CB_POLL_INTERVAL_S
                 await asyncio.sleep(sleep_s)
+            except _CoinbaseRateLimited:
+                # Coinbase returned HTTP 429 — skip the graduated threshold
+                # and jump straight to the maximum back-off to avoid further
+                # hammering a rate-limited API.
+                fails = self._pm_consecutive_failures.get(asset_up, 0) + 1
+                self._pm_consecutive_failures[asset_up] = fails
+                logger.warning(
+                    "[PMSPOT_COINBASE_429] asset=%s — applying max back-off %.1fs "
+                    "(consecutive_failures=%d)",
+                    asset_up, _CB_BACKOFF_MAX_S, fails,
+                )
+                try:
+                    await asyncio.sleep(_CB_BACKOFF_MAX_S)
+                except asyncio.CancelledError:
+                    logger.info("PM Coinbase ticker cancelled during 429 back-off for %s", asset_up)
+                    return
             except asyncio.CancelledError:
                 logger.info("PM Coinbase ticker cancelled for %s", asset_up)
                 return
