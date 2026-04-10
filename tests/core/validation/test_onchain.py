@@ -1,6 +1,6 @@
 """Tests for core/validation/onchain.py."""
 import pytest
-import respx
+respx = pytest.importorskip("respx")
 from httpx import Response
 from core.validation.onchain import OnChainPriceValidator
 

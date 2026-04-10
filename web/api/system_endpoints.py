@@ -1071,6 +1071,45 @@ async def get_execution_gate() -> Dict[str, Any]:
     return check_execution_gate().to_dict()
 
 
+@router.get("/api/v1/system/pm-spot-gate")
+async def get_pm_spot_gate() -> Dict[str, Any]:
+    """Per-asset PM spot health gate — mirrors the gate agents check at step 1.5.
+
+    Returns the same flags read by ``pm_spot_hard_gate_open_for_asset()`` so
+    operators can snapshot the exact blocker state around a failed execution
+    window (e.g. 10:21:46–10:21:50).
+
+    Each asset entry includes:
+      - status: ok | warming_up | pm_max_age_exceeded | live_price_feed_unhealthy
+      - blocks_trading: whether this asset is currently halting its agent
+      - tick_age_s: seconds since last price tick
+      - consecutive_failures: Coinbase fetch failure streak
+      - price_usd: last known spot price
+      - error: human-readable error detail (when unhealthy)
+    """
+    import time as _time
+    from merid.event_venues.kalshi.pm_spot_health import get_pm_spot_health_all
+    health = get_pm_spot_health_all()
+    gate_open = not any(h.blocks_pm_trading() for h in health.values())
+    return {
+        "gate_open": gate_open,
+        "checked_at": _time.time(),
+        "assets": {
+            asset: {
+                "status": h.status.value,
+                "blocks_trading": h.blocks_pm_trading(),
+                "feed_ok": h.feed_ok,
+                "tick_age_s": h.tick_age_s,
+                "cache_age_s": h.cache_age_s,
+                "consecutive_failures": h.consecutive_failures,
+                "price_usd": h.price_usd,
+                "error": h.error,
+            }
+            for asset, h in health.items()
+        },
+    }
+
+
 @router.get("/api/v1/system/price-feed-staleness")
 async def get_price_feed_staleness() -> Dict[str, Any]:
     """Per-symbol price feed staleness with safe_to_trade flag."""
