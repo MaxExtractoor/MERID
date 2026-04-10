@@ -92,17 +92,26 @@ def _kalshi_pnl() -> Dict[str, Any]:
 
 
 def _get_daily_loss_limit() -> float:
-    """Return the configured daily loss limit from KalshiRiskConfig or risk_controller."""
+    """Return the configured daily loss limit.
+
+    GAP-C1 fix: risk_controller.daily_loss_limit is the canonical persisted
+    source that actually gates trades, so it is tried first.  KalshiRiskConfig
+    is a secondary cross-check.  Both panels (RiskProtectionsPanel and
+    KillSwitchView / operator-risk-state) now read the same value.
+    """
+    try:
+        from merid.risk.kill_switches import risk_controller
+        limit = float(risk_controller.daily_loss_limit)
+        if limit > 0:
+            return limit
+    except Exception as _e:
+        logger.debug("_get_daily_loss_limit risk_controller skipped: %s", _e)
     try:
         from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
         return float(get_kalshi_risk().config.max_daily_loss_usd)
     except Exception as _e:
         logger.debug("_get_daily_loss_limit kalshi_risk skipped: %s", _e)
-    try:
-        from merid.risk.kill_switches import risk_controller
-        return float(risk_controller.daily_loss_limit)
-    except Exception:
-        return 1000.0  # conservative safe default
+    return 500.0  # conservative safe default (matches MERID_MAX_DAILY_LOSS_USD)
 
 
 def _real_pnl() -> Dict[str, Any]:

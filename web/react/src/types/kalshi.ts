@@ -29,6 +29,8 @@ export interface KalshiOrder {
   remaining: number | null;
   status: string;
   created_at: string | null;
+  /** GAP-E1: agent/source that placed the order (agent ID or client_order_id prefix) */
+  source?: string;
 }
 
 export interface KalshiFill {

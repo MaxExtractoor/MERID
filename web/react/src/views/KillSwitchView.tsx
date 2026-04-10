@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from 'react';
-import { ShieldAlert, ShieldCheck, AlertTriangle, Zap, Eye, Ban } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, AlertTriangle, Zap, Eye, Ban, AlertOctagon } from 'lucide-react';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import PnLConsistencyWidget from '../components/PnLConsistencyWidget';
 import SessionLogPanel from '../components/SessionLogPanel';
@@ -87,6 +87,10 @@ export default function KillSwitchView() {
   );
   const [saving, setSaving] = useState(false);
   const [catError, setCatError] = useState<string | null>(null);
+  /** GAP-B3: inline confirm states replace window.confirm() / window.prompt() */
+  const [pendingStop, setPendingStop] = useState(false);
+  const [pendingReset, setPendingReset] = useState(false);
+  const [stopReason, setStopReason] = useState('Manual operator intervention');
 
   const blocked = killSwitch?.global_kill ?? false;
   const gateState = blocked ? 'blocked' : (riskState?.errors.near_limit ? 'limited' : 'clear');
@@ -137,31 +141,24 @@ export default function KillSwitchView() {
   }, []);
 
   const handleEmergencyStop = useCallback(async () => {
-    if (!confirm('⚠️ EMERGENCY STOP - This will immediately halt ALL trading. Continue?')) {
-      return;
-    }
-    const reason = prompt('Reason for emergency stop:', 'Manual operator intervention') || 'Manual stop';
+    setPendingStop(false);
     setSaving(true);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.OPERATOR_EMERGENCY_STOP}`, {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({ reason: stopReason }),
       });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       refetchKillSwitch();
     } catch (err) {
       alert(`Failed to trigger emergency stop: ${err}`);
     }
     setSaving(false);
-  }, [authHeaders, refetchKillSwitch]);
+  }, [authHeaders, refetchKillSwitch, stopReason]);
 
   const handleResetKillSwitch = useCallback(async () => {
-    if (!confirm('Reset kill switch and re-enable trading? Ensure all issues are resolved first.')) {
-      return;
-    }
+    setPendingReset(false);
     setSaving(true);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.OPERATOR_RESET_KILL_SWITCH}`, {
@@ -169,9 +166,7 @@ export default function KillSwitchView() {
         headers: authHeaders(),
         body: JSON.stringify({ confirm: true }),
       });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       refetchKillSwitch();
     } catch (err) {
       alert(`Failed to reset kill switch: ${err}`);

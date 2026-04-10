@@ -1004,6 +1004,7 @@ async def get_orders() -> Dict[str, Any]:
                     "remaining": o.get("remaining_count", None),
                     "status": o.get("status", ""),
                     "created_at": o.get("created_time", None),
+                    "source": o.get("source", o.get("client_order_id", "")),
                 }
                 for o in raw
             ]
@@ -1029,6 +1030,7 @@ async def get_orders() -> Dict[str, Any]:
                         "remaining": o.get("remaining_count", 0),
                         "status": o.get("status", ""),
                         "created_at": o.get("created_time", None),
+                        "source": o.get("source", o.get("client_order_id", "")),
                     }
                     for o in orders
                 ],
