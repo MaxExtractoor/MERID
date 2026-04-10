@@ -273,6 +273,7 @@ class KalshiTradingAgent:
         cycle_stats = {
             "candidates_total": 0,
             "veto_session_guard": 0,
+            "veto_spot_gate": 0,
             "veto_no_markets": 0,
             "veto_entry_window": 0,
             "veto_order_limit": 0,
@@ -281,6 +282,8 @@ class KalshiTradingAgent:
             "veto_consensus_forming": 0,
             "veto_degraded_pause": 0,
             "veto_risk": 0,
+            "actionable": 0,
+            "exec_dispatched": 0,
             "orders_attempted": 0,
             "orders_succeeded": 0,
         }
@@ -315,7 +318,7 @@ class KalshiTradingAgent:
                         self.config.name, _agent_asset,
                         _asset_health.status.value if _asset_health else "unknown",
                     )
-                    cycle_stats["veto_session_guard"] = 1
+                    cycle_stats["veto_spot_gate"] = 1
                     self._log_cycle_summary(cycle_stats)
                     return
             else:
@@ -327,7 +330,7 @@ class KalshiTradingAgent:
                         "[AGENT-VETO] pm_spot_hard_gate | agent=%s blocked_assets=%s",
                         self.config.name, _blocked,
                     )
-                    cycle_stats["veto_session_guard"] = 1
+                    cycle_stats["veto_spot_gate"] = 1
                     self._log_cycle_summary(cycle_stats)
                     return
         except Exception as _gate_exc:
@@ -638,6 +641,7 @@ class KalshiTradingAgent:
                 continue
 
             # Pre-trade risk check
+            cycle_stats["actionable"] += 1
             side_str = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
             price_cents = Decimal(str(signal.limit_price_cents)) if signal.limit_price_cents else Decimal("50")
             event_id = market.market_id.rsplit("-", 1)[0] if "-" in market.market_id else market.market_id
@@ -685,6 +689,7 @@ class KalshiTradingAgent:
 
                 # Place order via tool
                 cycle_stats["orders_attempted"] += 1
+                cycle_stats["exec_dispatched"] += 1
                 await self._execute_signal(market, signal, check, snapshot)
                 cycle_stats["orders_succeeded"] += 1
 
@@ -1216,13 +1221,14 @@ class KalshiTradingAgent:
         # Build compact summary
         self.logger.info(
             "[AGENT-CYCLE] agent=%s candidates=%d orders=%d vetoes=%d "
-            "(session_guard=%d no_markets=%d entry_window=%d order_limit=%d "
+            "(session_guard=%d spot_gate=%d no_markets=%d entry_window=%d order_limit=%d "
             "no_action=%d consensus=%d risk=%d degraded=%d)",
             self.config.name,
             stats["candidates_total"],
             stats["orders_succeeded"],
             total_vetoes,
             stats["veto_session_guard"],
+            stats.get("veto_spot_gate", 0),
             stats["veto_no_markets"],
             stats["veto_entry_window"],
             stats["veto_order_limit"],
@@ -1230,6 +1236,21 @@ class KalshiTradingAgent:
             stats["veto_consensus_conflicted"] + stats["veto_consensus_forming"],
             stats["veto_risk"],
             stats["veto_degraded_pause"],
+        )
+
+        # [PM_CYCLE_TRACE] — structured diagnostic line that pinpoints the
+        # "actionable but exec_dispatched=0" gap: if actionable>0 and
+        # exec_dispatched=0, look at consensus/risk/spot_gate vetoes above.
+        self.logger.info(
+            "[PM_CYCLE_TRACE] agent=%s actionable=%d exec_dispatched=%d "
+            "orders_placed_total=%d veto_spot_gate=%d veto_consensus=%d veto_risk=%d",
+            self.config.name,
+            stats.get("actionable", 0),
+            stats.get("exec_dispatched", 0),
+            self.state.orders_placed,
+            stats.get("veto_spot_gate", 0),
+            stats["veto_consensus_conflicted"] + stats["veto_consensus_forming"],
+            stats["veto_risk"],
         )
 
         # NOTE: calibration (record_forecast) and forecaster registry (predict_all)
@@ -1536,6 +1557,65 @@ class KalshiTradingAgent:
                     _notional, _MIN_NOTIONAL_USD, _min_size,
                 )
                 size = _min_size
+
+        # === [PM_EXEC_INTENT] — gate-state snapshot at dispatch boundary ===
+        # Emitted once per _execute_signal call, right before any order is sent.
+        # Lets operators confirm which gates are open/closed at execution time.
+        try:
+            _exec_gate_state = "N/A"
+            _exec_gate_reasons: list = []
+            _kill_switch_ok = True
+            _kill_switch_reason = "N/A"
+            _pm_spot_gate_open = True
+            _pm_spot_status = "N/A"
+            _agent_deploy_mode = "N/A"
+            try:
+                from core.execution_gate import check_execution_gate as _ceg
+                _eg = _ceg()
+                _exec_gate_state = _eg.gate_state
+                _exec_gate_reasons = [r.source for r in _eg.reasons]
+            except Exception as _ege:
+                _exec_gate_state = f"check_error:{_ege}"
+            try:
+                from merid.risk.kill_switches import risk_controller as _rc
+                _kill_switch_ok = _rc.can_trade()
+                if not _kill_switch_ok:
+                    _kill_switch_reason = _rc.get_kill_reason() or "active"
+            except Exception as _kse:
+                _kill_switch_reason = f"check_error:{_kse}"
+            try:
+                from merid.event_venues.kalshi.pm_spot_health import pm_spot_hard_gate_open_for_asset as _psgfa
+                if asset:
+                    _pm_spot_gate_open, _pm_spot_h = _psgfa(asset)
+                    _pm_spot_status = _pm_spot_h.status.value if _pm_spot_h else "unknown"
+            except Exception as _pse:
+                _pm_spot_status = f"check_error:{_pse}"
+            try:
+                from merid.event_venues.kalshi.deployment import get_deployment_controller as _gdc
+                _dep = _gdc()._agents.get(self.agent_id)
+                _agent_deploy_mode = _dep.mode.value if _dep else "not_registered"
+            except Exception as _dme:
+                _agent_deploy_mode = f"check_error:{_dme}"
+            _snap_age = "N/A"
+            if snapshot and hasattr(snapshot, "snapshot_timestamp_utc_epoch_seconds"):
+                import time as _time
+                _snap_age = f"{_time.time() - float(snapshot.snapshot_timestamp_utc_epoch_seconds or 0):.1f}s"
+            self.logger.info(
+                "[PM_EXEC_INTENT] agent=%s market=%s action=%s side=%s "
+                "contracts=%d price_cents=%d force_paper=%s "
+                "exec_gate=%s exec_gate_reasons=%s "
+                "kill_switch_ok=%s kill_switch_reason=%s "
+                "pm_spot_gate_open=%s pm_spot_status=%s "
+                "deploy_mode=%s snap_age=%s",
+                self.config.name, market.market_id, action, side,
+                size, price_cents, force_paper,
+                _exec_gate_state, _exec_gate_reasons,
+                _kill_switch_ok, _kill_switch_reason,
+                _pm_spot_gate_open, _pm_spot_status,
+                _agent_deploy_mode, _snap_age,
+            )
+        except Exception as _ei_exc:
+            self.logger.debug("[PM_EXEC_INTENT] log failed (non-fatal): %s", _ei_exc)
 
         if action == "quote":
             # For quotes, place a buy and sell limit order pair
