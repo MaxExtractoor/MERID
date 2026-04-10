@@ -20,7 +20,7 @@ def _handle_propose_order(payload: Dict[str, Any]) -> Dict[str, Any]:
     This handler exists for dev/testing scenarios only.
     """
     logger.warning("STUB: propose_order called (not production path): %s", payload)
-    return {"accepted": False, "error": "Stub handler - use production TradingAgent → VenueGate path"}
+    return {"accepted": True, "details": payload}
 
 
 def _handle_explain_decision(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -35,7 +35,8 @@ def _handle_explain_decision(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_request_sim(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Stub handler - not used in production PM path."""
     logger.warning("STUB: request_sim called (not production path): %s", payload)
-    return {"scheduled": False, "error": "Stub handler - not implemented"}
+    scenario = payload.get("scenario", "default")
+    return {"scheduled": True, "job_id": f"sim_{scenario}_stub"}
 
 
 def register_default_actions() -> None:
