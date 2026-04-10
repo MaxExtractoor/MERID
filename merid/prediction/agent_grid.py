@@ -1078,6 +1078,35 @@ class AgentGrid:
             "timeframes": timeframes,
         }
 
+    def agent_health_dump(self) -> List[Dict[str, Any]]:
+        """Return per-agent runtime identity and health for debugging.
+
+        Each entry confirms: asset, timeframe, category, risk limits,
+        active contracts, and current state — making it trivial to verify
+        that an agent is trading the intended markets with the right config.
+        """
+        dump: List[Dict[str, Any]] = []
+        for agent in self._agents:
+            cfg = agent.config
+            dump.append({
+                "name": cfg.name,
+                "agent_id": cfg.agent_id,
+                "assets": cfg.assets,
+                "timeframes": cfg.timeframes,
+                "archetype": cfg.archetype,
+                "category": cfg.resolve_category(),
+                "enabled": agent.state.enabled,
+                "running": agent.state.running,
+                "cycles_run": agent.state.cycles_run,
+                "orders_placed": getattr(agent.state, "orders_placed", 0),
+                "active_tickers": agent.state.active_tickers[:10],
+                "max_notional_usd": str(cfg.risk_limits.max_notional_usd),
+                "max_orders_per_window": cfg.risk_limits.max_orders_per_window,
+                "entry_window_min": cfg.entry_window.minutes_before_expiry,
+                "last_error": agent.state.last_error,
+            })
+        return dump
+
 
 # ── Singleton ──────────────────────────────────────────────────────────
 

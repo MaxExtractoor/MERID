@@ -45,16 +45,69 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.risk.kill_switches")
+
+
+# ── Error Severity Classification ──────────────────────────────────────
+
+
+class ErrorSeverity(str, Enum):
+    """Severity levels for trading errors.
+
+    CRITICAL — Must halt trading (risk violation, position accounting,
+               mispriced contracts).
+    HIGH     — Potentially dangerous, counts toward error budget.
+    MEDIUM   — Transient issues that may self-resolve; logged as warnings,
+               do NOT count toward error budget.
+    LOW      — Expected operational noise; logged at INFO/DEBUG only.
+    """
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+# Mapping of error_class → severity.  Classes at MEDIUM or LOW
+# are automatically treated as exempt (do not consume error budget).
+_ERROR_CLASS_SEVERITY: Dict[str, ErrorSeverity] = {
+    # CRITICAL — always counted, can trigger halt
+    "risk_violation": ErrorSeverity.CRITICAL,
+    "position_accounting": ErrorSeverity.CRITICAL,
+    "mispriced_contract": ErrorSeverity.CRITICAL,
+    # HIGH — counted toward error budget
+    "generic": ErrorSeverity.HIGH,
+    "order_rejected": ErrorSeverity.HIGH,
+    "api_error": ErrorSeverity.HIGH,
+    # MEDIUM — transient, NOT counted
+    "rate_limit": ErrorSeverity.MEDIUM,
+    "stale_cache": ErrorSeverity.MEDIUM,
+    "feed_timeout": ErrorSeverity.MEDIUM,
+    "consensus_timeout": ErrorSeverity.MEDIUM,
+    "spot_stale": ErrorSeverity.MEDIUM,
+    # LOW — operational noise, NOT counted
+    "min_notional": ErrorSeverity.LOW,
+    "ws_reconnect": ErrorSeverity.LOW,
+    "loop_lag": ErrorSeverity.LOW,
+    "gate_blocked": ErrorSeverity.LOW,
+}
+
+
+def classify_error_severity(error_class: str) -> ErrorSeverity:
+    """Return the severity for a given error class.
+
+    Unknown classes default to HIGH so they count toward the budget.
+    """
+    return _ERROR_CLASS_SEVERITY.get(error_class, ErrorSeverity.HIGH)
 
 
 class KillSwitchState(str, Enum):
@@ -135,9 +188,21 @@ class RiskController:
     # (or execution gate) is *already* engaged.  Counting these would create a
     # self-amplifying feedback loop: kill switch fires → orders fail → failures
     # are counted as new errors → kill switch re-fires → repeat.
+    # "rate_limit" / "stale_cache" / "feed_timeout" / "consensus_timeout" /
+    # "spot_stale" are transient, non-dangerous conditions that should never
+    # exhaust the error budget.
     error_exempt_classes: Set[str] = field(
-        default_factory=lambda: {"min_notional", "ws_reconnect", "loop_lag", "gate_blocked"}
+        default_factory=lambda: {
+            "min_notional", "ws_reconnect", "loop_lag", "gate_blocked",
+            "rate_limit", "stale_cache", "feed_timeout", "consensus_timeout",
+            "spot_stale",
+        }
     )
+    # ---- Deduplication -------------------------------------------------------
+    # Window (seconds) within which repeated identical errors (same class)
+    # are deduplicated.  Prevents one misconfigured agent firing the same
+    # error every cycle from burning through the budget.
+    dedup_window_secs: float = 60.0
 
     # ---- 3-tier configuration ------------------------------------------------
     # Fraction of the hard limit at which each tier activates.
@@ -183,6 +248,14 @@ class RiskController:
         self._tier_entry_time: Dict[str, float] = {}
         # Set of metrics currently in breach (for multi-signal check).
         self._active_breaches: Set[str] = set()
+
+        # ---- Error deduplication tracking ------------------------------------
+        # Maps error_class → timestamp of last counted occurrence.
+        # If the same class fires again within ``dedup_window_secs`` only the
+        # first occurrence consumes the error budget; repeats are logged as
+        # warnings and tracked via ``_dedup_suppressed_counts``.
+        self._dedup_last_seen: Dict[str, float] = {}
+        self._dedup_suppressed_counts: Counter = Counter()
 
         # Load from settings if available
         self._load_from_settings()
@@ -439,10 +512,35 @@ class RiskController:
             "error_threshold": self.error_threshold,
             "error_class_counts": dict(self._error_class_counts),
             "error_exempt_classes": list(self.error_exempt_classes),
+            "dedup_suppressed_counts": dict(self._dedup_suppressed_counts),
             "events_count": len(self._events),
             "active_breaches": list(self._active_breaches),
             "warn_pct": self.warn_pct,
             "limit_pct": self.limit_pct,
+        }
+
+    def get_error_budget_metrics(self) -> dict:
+        """Return error-budget metrics suitable for dashboards and export.
+
+        Provides a snapshot of:
+        - Current error count vs threshold (budget usage percentage)
+        - Class distribution within the sliding window
+        - Dedup-suppressed counts (errors that fired but were deduplicated)
+        - Exempt class list
+        - Current tier and breach info
+        """
+        threshold = max(self.error_threshold, 1)
+        return {
+            "error_count": self._error_count,
+            "error_threshold": self.error_threshold,
+            "budget_used_pct": round(self._error_count / threshold * 100, 1),
+            "budget_remaining": max(0, self.error_threshold - self._error_count),
+            "error_class_counts": dict(self._error_class_counts),
+            "dedup_suppressed_counts": dict(self._dedup_suppressed_counts),
+            "exempt_classes": sorted(self.error_exempt_classes),
+            "tier": self.get_state().value,
+            "active_breaches": list(self._active_breaches),
+            "sliding_window_seconds": 3600,
         }
 
     # -------------------------------------------------------------------------
@@ -551,6 +649,8 @@ class RiskController:
         self._error_log.clear()
         self._error_class_counts.clear()
         self._error_count = 0
+        self._dedup_last_seen.clear()
+        self._dedup_suppressed_counts.clear()
 
         # Clear tier state and breach tracking
         self._tier_state = KillSwitchState.ACTIVE
@@ -685,6 +785,14 @@ class RiskController:
         ``min_notional``, ``ws_reconnect``) are logged at WARNING but do **not**
         contribute to the kill-switch budget.
 
+        Severity-based exemption: errors classified as MEDIUM or LOW via the
+        ``ErrorSeverity`` taxonomy are automatically exempt regardless of
+        whether they appear in ``error_exempt_classes``.
+
+        Deduplication: if the same ``error_class`` fires again within
+        ``dedup_window_secs`` seconds, the duplicate is logged but does NOT
+        consume an additional budget slot.
+
         The 3-tier system means errors escalate to WARNING → LIMITED → TRIGGERED
         based on breach fraction and persistence rather than a single hard threshold.
         Full kill also requires multi-signal confirmation unless the error count
@@ -692,7 +800,8 @@ class RiskController:
 
         Args:
             error_class: Short descriptor for the error category.  Classes in
-                ``error_exempt_classes`` are downgraded to warnings only.
+                ``error_exempt_classes`` or with severity MEDIUM/LOW are
+                downgraded to warnings only.
 
         Returns:
             True if trading can continue, False if kill switch was triggered.
@@ -700,14 +809,33 @@ class RiskController:
         now = time.time()
         window_start = now - 3600.0  # 1-hour sliding window
 
-        if error_class in self.error_exempt_classes:
+        # ── Severity-based exemption ──────────────────────────────────────
+        severity = classify_error_severity(error_class)
+        is_exempt = (
+            error_class in self.error_exempt_classes
+            or severity in (ErrorSeverity.MEDIUM, ErrorSeverity.LOW)
+        )
+
+        if is_exempt:
             # Exempt class — warn but don't count
             logger.warning(
-                "[risk] Exempt error recorded (class=%s, not counted toward budget). "
-                "Threshold %d/hr, current budget errors: %d",
-                error_class, self.error_threshold, self._error_count,
+                "[risk] Exempt error recorded (class=%s, severity=%s, not counted "
+                "toward budget). Threshold %d/hr, current budget errors: %d",
+                error_class, severity.value, self.error_threshold, self._error_count,
             )
             return not self._global_kill
+
+        # ── Deduplication check ───────────────────────────────────────────
+        last_seen = self._dedup_last_seen.get(error_class)
+        if last_seen is not None and (now - last_seen) < self.dedup_window_secs:
+            self._dedup_suppressed_counts[error_class] += 1
+            logger.info(
+                "[risk] Deduplicated error (class=%s, suppressed=%d in window). "
+                "Not consuming additional budget slot.",
+                error_class, self._dedup_suppressed_counts[error_class],
+            )
+            return not self._global_kill
+        self._dedup_last_seen[error_class] = now
 
         # Append to sliding log
         self._error_log.append((now, error_class))
@@ -734,15 +862,18 @@ class RiskController:
                 detail = (
                     f"{self._error_count} errors in last hour exceeds threshold "
                     f"{self.error_threshold}; top classes: {top_classes}; "
-                    f"breaches={list(self._active_breaches)}"
+                    f"breaches={list(self._active_breaches)}; "
+                    f"dedup_suppressed={dict(self._dedup_suppressed_counts)}"
                 )
                 self._trigger_kill(KillSwitchReason.ERROR_THRESHOLD, detail)
                 logger.critical(
-                    "[risk] ERROR THRESHOLD KILL: %d errors/hr (top classes: %s, signals: %s). "
-                    "To auto-reopen: reset() after error rate drops below %d/hr and "
-                    "root cause is resolved.",
-                    self._error_count, top_classes, list(self._active_breaches),
-                    self.error_threshold,
+                    "[risk] HALT TRANSITION → TRIGGERED | reason=ERROR_THRESHOLD | "
+                    "errors=%d threshold=%d | top_classes=%s | signals=%s | "
+                    "dedup_suppressed=%s | action=all_trading_blocked. "
+                    "To re-open: reset() after root cause is resolved.",
+                    self._error_count, self.error_threshold,
+                    top_classes, list(self._active_breaches),
+                    dict(self._dedup_suppressed_counts),
                 )
                 return False
             else:
@@ -773,6 +904,8 @@ class RiskController:
         self._error_log.clear()
         self._error_class_counts.clear()
         self._error_count = 0
+        self._dedup_last_seen.clear()
+        self._dedup_suppressed_counts.clear()
         self._events.clear()
         # Clear tier tracking (counters are gone; tier state is no longer valid)
         if not self._global_kill:

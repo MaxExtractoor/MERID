@@ -21,6 +21,7 @@ class TestRiskController:
             daily_loss_limit=100.0,
             max_position_value=1000.0,
             error_threshold=3,
+            dedup_window_secs=0,  # disable dedup for unit tests
         )
 
     def test_initial_state_allows_trading(self, controller):
@@ -161,6 +162,7 @@ class TestRiskController:
             daily_loss_limit=100.0,
             max_position_value=1000.0,
             error_threshold=3,
+            dedup_window_secs=0,
         )
         # Build daily-loss breach via record_pnl (incremental, not single-step)
         # Note: this requires two breach signals; we use position + error
@@ -283,6 +285,7 @@ class TestGateBlockedExemption:
             daily_loss_limit=1000.0,
             max_position_value=10000.0,
             error_threshold=5,
+            dedup_window_secs=0,
         )
 
     def test_gate_blocked_is_in_exempt_classes(self, controller):
