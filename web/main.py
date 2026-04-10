@@ -1784,6 +1784,16 @@ async def _app_lifespan(application: FastAPI):
         logger.warning("⚠️  Direction semantics infrastructure failed to initialize: %s", e)
         _startup_state["services"]["direction_semantics"] = {"status": "failed", "error": str(e)}
 
+    # ── Phase 0.49: PM Coinbase spot ticker (hard gate feed) ───────────
+    try:
+        from data.live_price_feed import get_live_price_feed as _get_lpf
+        _get_lpf().start_pm_coinbase_streaming()
+        logger.info("✅ PM Coinbase spot ticker started (5 assets)")
+        _startup_state["services"]["pm_coinbase_ticker"] = {"status": "running", "started_at": time.time()}
+    except Exception as e:
+        logger.warning("PM Coinbase spot ticker start failed (non-fatal): %s", e)
+        _startup_state["services"]["pm_coinbase_ticker"] = {"status": "failed", "error": str(e)}
+
     # ── Phase 0.5: Kalshi Agent Grid ───────────────────────────────────
     logger.info("=" * 80)
     logger.info("🤖 Starting Kalshi Trading Agent Grid")
@@ -2707,6 +2717,14 @@ async def _app_lifespan(application: FastAPI):
         logger.info("✅ WSFeedManager stopped")
     except Exception as exc:
         logger.warning("WSFeedManager stop failed: %s", exc)
+
+    # Stop PM Coinbase spot ticker
+    try:
+        from data.live_price_feed import get_live_price_feed as _get_lpf_pm
+        _get_lpf_pm().stop_pm_coinbase_streaming()
+        logger.info("✅ PM Coinbase spot ticker stopped")
+    except Exception as exc:
+        logger.warning("PM Coinbase spot ticker stop failed: %s", exc)
 
     # Close LiveFeedManager httpx client
     try:
