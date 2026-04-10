@@ -345,6 +345,25 @@ def check_execution_gate() -> ExecutionGateStatus:
         except Exception as exc:
             _log_check_failure("kalshi_ws", exc)
 
+    # ── 6. Resilience circuit-breaker OPEN trips ────────────────────
+    # GAP-D2 fix: if any named circuit breaker in the merid resilience
+    # registry is OPEN (blocking calls), surface it immediately as a
+    # critical reason so the ExecutionBlockedBanner fires without
+    # requiring navigation to CircuitBreakerPanel.
+    try:
+        from merid.resilience.circuit_breaker import get_all_breakers
+        for _cb_name, _cb in get_all_breakers().items():
+            if _cb.is_open():
+                reasons.append(BlockReason(
+                    source="circuit_breaker",
+                    severity="critical",
+                    message=f"Circuit breaker OPEN: {_cb_name}",
+                    details=f"Service '{_cb_name}' is failing — calls are being blocked",
+                    hint="Check service health and wait for automatic recovery, or reset via Risk panel.",
+                ))
+    except Exception as exc:
+        _log_check_failure("circuit_breaker", exc)
+
     # ── Whitelist enforcement — determine gate_state ─────────────────
     # Only warnings from GATE_LIMITED_WHITELIST sources may set gate_state=limited.
     # Warnings from non-whitelisted sources are rejected with an error log and do
