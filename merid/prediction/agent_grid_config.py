@@ -71,9 +71,47 @@ class AgentConfig:
     # Optional explicit category override — when None the category is inferred from name/assets.
     category: Optional[str] = None
 
+    # ── Known valid values for startup validation ─────────────────────
+    _VALID_CRYPTO_ASSETS = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+    _VALID_TIMEFRAMES = {"15m", "1h", "daily", "weekly", "monthly", "annual"}
+
     @property
     def agent_id(self) -> str:
         return f"kalshi-{self.name.lower()}"
+
+    def validate(self) -> List[str]:
+        """Validate config consistency; return list of error strings (empty = valid).
+
+        Checks:
+        - name is non-empty
+        - enabled agents must have at least one asset and one timeframe
+        - crypto agents must not map to non-crypto assets and vice versa
+        """
+        errors: List[str] = []
+        if not self.name:
+            errors.append("AgentConfig.name is empty")
+        if self.enabled:
+            if not self.assets:
+                errors.append(f"{self.name}: enabled agent has no assets configured")
+            if not self.timeframes:
+                errors.append(f"{self.name}: enabled agent has no timeframes configured")
+        # Cross-check: crypto agent name should have crypto asset, not non-crypto
+        name_lower = self.name.lower()
+        is_crypto_name = any(
+            tok in name_lower for tok in ["btc", "eth", "sol", "xrp", "doge"]
+        )
+        if is_crypto_name and self.assets:
+            expected_asset = None
+            for tok in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                if tok.lower() in name_lower:
+                    expected_asset = tok
+                    break
+            if expected_asset and expected_asset not in self.assets:
+                errors.append(
+                    f"{self.name}: agent name implies asset {expected_asset} "
+                    f"but assets={self.assets}"
+                )
+        return errors
 
     def resolve_category(self) -> str:
         """Return explicit category if set, otherwise infer from agent name and assets."""

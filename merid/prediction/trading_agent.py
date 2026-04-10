@@ -182,9 +182,23 @@ class KalshiTradingAgent:
             )
             self._tracked_positions.clear()
         self._task = asyncio.create_task(self._run_loop(), name=f"kalshi-agent-{self.config.name}")
+        # ── Identity banner ───────────────────────────────────────────────
+        # Concise startup log confirming the agent's config matches intent.
         self.logger.info(
-            f"Started {self.config.name}: assets={self.config.assets}, "
-            f"timeframes={self.config.timeframes}"
+            "[AGENT_IDENTITY] name=%s agent_id=%s assets=%s timeframes=%s "
+            "archetype=%s category=%s venue=kalshi "
+            "max_notional_usd=%s max_orders_per_window=%d "
+            "entry_window=%dmin/%dmin",
+            self.config.name,
+            self.config.agent_id,
+            self.config.assets,
+            self.config.timeframes,
+            self.config.archetype,
+            self.config.resolve_category(),
+            self.config.risk_limits.max_notional_usd,
+            self.config.risk_limits.max_orders_per_window,
+            self.config.entry_window.minutes_before_expiry,
+            self.config.entry_window.cutoff_minutes_before_expiry,
         )
 
     async def stop(self) -> None:
@@ -2041,21 +2055,29 @@ class KalshiTradingAgent:
                 from merid.risk.kill_switches import risk_controller as _rc
                 # Classify the error so benign repeating failures (e.g., min_notional
                 # misconfig, WS reconnects) do not exhaust the error budget.
+                # New severity-based categories (rate_limit, stale_cache, feed_timeout,
+                # consensus_timeout, spot_stale) are automatically exempt via
+                # ErrorSeverity MEDIUM/LOW classification in kill_switches.
                 _err_class = "generic"
-                if result_error and "notional" in str(result_error).lower():
+                _err_str = str(result_error).lower() if result_error else ""
+                if "notional" in _err_str:
                     _err_class = "min_notional"
-                elif result_error and ("reconnect" in str(result_error).lower()
-                                       or "ws_disconnect" in str(result_error).lower()):
+                elif "reconnect" in _err_str or "ws_disconnect" in _err_str:
                     _err_class = "ws_reconnect"
-                elif result_error and (
-                    "kill switch" in str(result_error).lower()
-                    or "execution gate" in str(result_error).lower()
-                    or "gate blocked" in str(result_error).lower()
+                elif (
+                    "kill switch" in _err_str
+                    or "execution gate" in _err_str
+                    or "gate blocked" in _err_str
                 ):
-                    # Order failed because the kill switch / execution gate is already
-                    # engaged.  Counting these as new errors creates a feedback loop
-                    # where the kill switch amplifies itself indefinitely.
                     _err_class = "gate_blocked"
+                elif "429" in _err_str or "rate limit" in _err_str or "too many" in _err_str:
+                    _err_class = "rate_limit"
+                elif "stale" in _err_str and "cache" in _err_str:
+                    _err_class = "stale_cache"
+                elif "timeout" in _err_str and ("feed" in _err_str or "spot" in _err_str):
+                    _err_class = "feed_timeout"
+                elif "consensus" in _err_str and ("timeout" in _err_str or "unavailable" in _err_str):
+                    _err_class = "consensus_timeout"
                 _rc.record_error(error_class=_err_class)
             except Exception as _kse:
                 self.logger.debug("kill_switch record_error skipped: %s", _kse)
