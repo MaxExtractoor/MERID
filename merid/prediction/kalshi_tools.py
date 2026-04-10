@@ -234,6 +234,16 @@ async def _kalshi_place_order(
             tool_name="kalshi_place_order",
         )
 
+    # [PM_EXEC_GATE_CHECK] — one structured log at the entry of the order tool
+    # so every gate decision is visible even when the tool exits early.
+    logger.info(
+        "[PM_EXEC_GATE_CHECK] ticker=%s agent=%s side=%s action=%s "
+        "count=%d price_cents=%d snapshot_ts=%s",
+        ticker, agent_name or "anon", side, action,
+        count, price_cents,
+        f"{snapshot_ts:.3f}" if snapshot_ts is not None else "none",
+    )
+
     # Venue gate check
     gate = get_venue_gate()
     try:
