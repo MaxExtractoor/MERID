@@ -299,19 +299,37 @@ class KalshiTradingAgent:
             self._log_cycle_summary(cycle_stats)
             return
 
-        # 1.5. PM spot hard gate — block trading when Coinbase feed is stale/unhealthy
+        # 1.5. PM spot hard gate — block trading when Coinbase feed is stale/unhealthy.
+        # Check only the asset this agent is responsible for (per-asset gate) so
+        # a stale feed for one asset (e.g. DOGE) does not halt unrelated agents
+        # (e.g. BTC).  Fall back to the full five-asset gate when no specific
+        # asset is configured.
         try:
-            from merid.event_venues.kalshi.pm_spot_health import pm_spot_hard_gate_open_with_detail
-            _gate_open, _health = pm_spot_hard_gate_open_with_detail()
-            if not _gate_open:
-                _blocked = [a for a, h in _health.items() if h.blocks_pm_trading()]
-                self.logger.warning(
-                    "[AGENT-VETO] pm_spot_hard_gate | agent=%s blocked_assets=%s",
-                    self.config.name, _blocked,
-                )
-                cycle_stats["veto_session_guard"] = 1
-                self._log_cycle_summary(cycle_stats)
-                return
+            _agent_asset = self.config.assets[0] if self.config.assets else None
+            if _agent_asset:
+                from merid.event_venues.kalshi.pm_spot_health import pm_spot_hard_gate_open_for_asset
+                _gate_open, _asset_health = pm_spot_hard_gate_open_for_asset(_agent_asset)
+                if not _gate_open:
+                    self.logger.warning(
+                        "[AGENT-VETO] pm_spot_hard_gate | agent=%s asset=%s status=%s",
+                        self.config.name, _agent_asset,
+                        _asset_health.status.value if _asset_health else "unknown",
+                    )
+                    cycle_stats["veto_session_guard"] = 1
+                    self._log_cycle_summary(cycle_stats)
+                    return
+            else:
+                from merid.event_venues.kalshi.pm_spot_health import pm_spot_hard_gate_open_with_detail
+                _gate_open, _health = pm_spot_hard_gate_open_with_detail()
+                if not _gate_open:
+                    _blocked = [a for a, h in _health.items() if h.blocks_pm_trading()]
+                    self.logger.warning(
+                        "[AGENT-VETO] pm_spot_hard_gate | agent=%s blocked_assets=%s",
+                        self.config.name, _blocked,
+                    )
+                    cycle_stats["veto_session_guard"] = 1
+                    self._log_cycle_summary(cycle_stats)
+                    return
         except Exception as _gate_exc:
             self.logger.debug("pm_spot_hard_gate check failed (non-fatal): %s", _gate_exc)
 
