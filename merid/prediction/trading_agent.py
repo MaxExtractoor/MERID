@@ -299,6 +299,22 @@ class KalshiTradingAgent:
             self._log_cycle_summary(cycle_stats)
             return
 
+        # 1.5. PM spot hard gate — block trading when Coinbase feed is stale/unhealthy
+        try:
+            from merid.event_venues.kalshi.pm_spot_health import pm_spot_hard_gate_open_with_detail
+            _gate_open, _health = pm_spot_hard_gate_open_with_detail()
+            if not _gate_open:
+                _blocked = [a for a, h in _health.items() if h.blocks_pm_trading()]
+                self.logger.warning(
+                    "[AGENT-VETO] pm_spot_hard_gate | agent=%s blocked_assets=%s",
+                    self.config.name, _blocked,
+                )
+                cycle_stats["veto_session_guard"] = 1
+                self._log_cycle_summary(cycle_stats)
+                return
+        except Exception as _gate_exc:
+            self.logger.debug("pm_spot_hard_gate check failed (non-fatal): %s", _gate_exc)
+
         # 2. Resolve markets
         await self._resolve_markets()
         if not self._resolved_markets:
