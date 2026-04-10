@@ -280,7 +280,10 @@ async def _kalshi_place_order(
                     tool_name="kalshi_place_order",
                 )
         except ImportError as _ks_import_err:
-            logger.debug("kill_switch check skipped (ImportError): %s", _ks_import_err)
+            logger.debug(
+                "kill_switch check skipped (merid.risk.kill_switches ImportError): %s",
+                _ks_import_err,
+            )
 
     # Unified execution gate — block live orders when safety checks fail
     if not gate.should_simulate_fill():
