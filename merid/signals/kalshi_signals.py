@@ -476,14 +476,22 @@ class KalshiSignalGenerator:
         return signals
     
     def _extract_asset(self, ticker: str) -> str:
-        """Extract asset symbol from Kalshi ticker."""
-        # Simple heuristic: first word before dash
+        """Extract asset symbol from Kalshi ticker.
+
+        Handles both bare-asset tickers (``BTC-…``) and Kalshi series-prefix
+        tickers (``KXBTCD-…``, ``KXETH-…``, ``KXXRP-…``, etc.) by stripping
+        the leading ``KX`` series prefix before matching.
+        """
+        _KALSHI_ASSETS = ("BTC", "ETH", "SOL", "DOGE", "XRP", "ADA")
         parts = ticker.split("-")
         if parts:
-            asset = parts[0].upper()
-            # Map common assets
-            if asset in ("BTC", "ETH", "SOL", "DOGE", "XRP", "ADA"):
-                return asset
+            prefix = parts[0].upper()
+            # Strip Kalshi series prefix "KX" so KXBTCD → BTCD, KXETH → ETH
+            if prefix.startswith("KX"):
+                prefix = prefix[2:]
+            for asset in _KALSHI_ASSETS:
+                if prefix.startswith(asset):
+                    return asset
         return "UNKNOWN"
     
     def _extract_timeframe(self, ticker: str) -> str:

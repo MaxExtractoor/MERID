@@ -470,6 +470,11 @@ class KalshiTradingAgent:
                                 "[AGENT-VETO] consensus_mismatch | agent=%s market=%s signal=%s consensus=%s",
                                 self.config.name, market.market_id, signal_dir, consensus.consensus_direction
                             )
+                            self.logger.info(
+                                "[PM_SIGNAL_DISPOSITION] agent=%s market=%s blocked_by=consensus "
+                                "reason=consensus_mismatch signal_dir=%s consensus_dir=%s",
+                                self.config.name, market.market_id, signal_dir, consensus.consensus_direction,
+                            )
                             cycle_stats["veto_consensus_conflicted"] += 1
                             continue
 
@@ -500,6 +505,11 @@ class KalshiTradingAgent:
                         self.logger.info(
                             "[AGENT-VETO] consensus_conflicted | agent=%s market=%s flags=%s",
                             self.config.name, market.market_id, consensus.disagreement_flags
+                        )
+                        self.logger.info(
+                            "[PM_SIGNAL_DISPOSITION] agent=%s market=%s blocked_by=consensus "
+                            "reason=consensus_conflicted flags=%s",
+                            self.config.name, market.market_id, consensus.disagreement_flags,
                         )
                         cycle_stats["veto_consensus_conflicted"] += 1
                         continue
@@ -557,6 +567,11 @@ class KalshiTradingAgent:
                                         "[AGENT-VETO] consensus_forming | agent=%s market=%s",
                                         self.config.name, market.market_id
                                     )
+                                    self.logger.info(
+                                        "[PM_SIGNAL_DISPOSITION] agent=%s market=%s "
+                                        "blocked_by=consensus reason=consensus_forming",
+                                        self.config.name, market.market_id,
+                                    )
                                     cycle_stats["veto_consensus_forming"] += 1
                                     continue
                         else:
@@ -602,6 +617,11 @@ class KalshiTradingAgent:
                                     "[AGENT-VETO] consensus_forming | agent=%s market=%s",
                                     self.config.name, market.market_id
                                 )
+                                self.logger.info(
+                                    "[PM_SIGNAL_DISPOSITION] agent=%s market=%s "
+                                    "blocked_by=consensus reason=consensus_forming",
+                                    self.config.name, market.market_id,
+                                )
                                 cycle_stats["veto_consensus_forming"] += 1
                                 continue
             except Exception as exc:
@@ -638,6 +658,13 @@ class KalshiTradingAgent:
                 )
 
                 cycle_stats["veto_no_action"] += 1
+                self.logger.info(
+                    "[PM_SIGNAL_DISPOSITION] agent=%s market=%s blocked_by=edge "
+                    "signal_reason=%s net_edge=%s",
+                    self.config.name, market.market_id,
+                    getattr(signal, "reason", "N/A"),
+                    f"{float(signal.edge.net_edge):.4f}" if signal.edge else "N/A",
+                )
                 continue
 
             # Pre-trade risk check
@@ -675,6 +702,11 @@ class KalshiTradingAgent:
                         "[AGENT-VETO] risk | agent=%s market=%s reason=%s",
                         self.config.name, market.market_id, check.reason
                     )
+                    self.logger.info(
+                        "[PM_SIGNAL_DISPOSITION] agent=%s market=%s blocked_by=risk "
+                        "reason=%s",
+                        self.config.name, market.market_id, check.reason,
+                    )
                     cycle_stats["veto_risk"] += 1
                     continue
 
@@ -690,6 +722,15 @@ class KalshiTradingAgent:
                 # Place order via tool
                 cycle_stats["orders_attempted"] += 1
                 cycle_stats["exec_dispatched"] += 1
+                self.logger.info(
+                    "[PM_SIGNAL_DISPOSITION] agent=%s market=%s sent_to_router "
+                    "action=%s side=%s contracts=%d price_cents=%s",
+                    self.config.name, market.market_id,
+                    signal.action.value if hasattr(signal.action, "value") else str(signal.action),
+                    "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no",
+                    signal.contracts,
+                    signal.limit_price_cents or "N/A",
+                )
                 await self._execute_signal(market, signal, check, snapshot)
                 cycle_stats["orders_succeeded"] += 1
 
@@ -1343,6 +1384,9 @@ class KalshiTradingAgent:
         side, action = action_map[signal.action]
         size = check.adjusted_size if check.adjusted_size else signal.contracts
         price_cents = signal.limit_price_cents or 0
+        # Initialize force_paper before the [PM_SIZE] log (line ~1400 uses it).
+        # The BTC-15m risk block below may override this; non-BTC-15m stays False.
+        force_paper: bool = False
 
         # === Vol-band size adjustment ===
         # For crypto agents apply the vol-band size multiplier before sizing is
