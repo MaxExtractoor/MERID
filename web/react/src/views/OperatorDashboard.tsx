@@ -1,5 +1,5 @@
-import { useState } from 'react';
 import { useOperatorSummary } from '../hooks/useOperatorSummary';
+import { useExecutionGate } from '../hooks/useExecutionGate';
 import { OperatorStatusBar } from './OperatorStatusBar';
 import { OperatorControlPlane } from './OperatorControlPlane';
 import { OperatorActivityStream } from './OperatorActivityStream';
@@ -18,7 +18,7 @@ import SessionLogPanel from '../components/SessionLogPanel';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { formatCurrency } from '../utils/formatters';
-import { Monitor } from 'lucide-react';
+import { Monitor, ShieldCheck, ShieldAlert, ShieldOff, AlertTriangle } from 'lucide-react';
 
 export default function OperatorDashboard() {
   const {
@@ -30,10 +30,9 @@ export default function OperatorDashboard() {
     pauseSwarm,
     resumeSwarm,
     switchMode,
-    toggleKillSwitch,
   } = useOperatorSummary(15000);
 
-  const [killConfirm, setKillConfirm] = useState<'idle' | 'kill' | 'unkill'>('idle');
+  const gate = useExecutionGate();
 
   const { data: kalshiBalance } = useApiData<any>(
     API_ENDPOINTS.KALSHI_BALANCE,
@@ -253,51 +252,62 @@ export default function OperatorDashboard() {
         )}
       </div>
 
-      {/* Execution Guard — read-only gate status + unified kill/reset */}
-      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-slate-300">Execution Guard</h3>
-          {killConfirm === 'idle' ? (
-            <button
-              type="button"
-              onClick={() => setKillConfirm(data?.guard?.kill_switch_active ? 'unkill' : 'kill')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                data?.guard?.kill_switch_active
-                  ? 'bg-red-600 hover:bg-red-500 text-white'
-                  : 'bg-green-600/20 hover:bg-green-600/40 text-green-400 border border-green-500/30'
-              }`}
-            >
-              {data?.guard?.kill_switch_active ? 'KILL SWITCH ON' : 'Execution Enabled'}
-            </button>
+      {/* Execution Gate — read-only status card derived from global kill + feed/WS health */}
+      <div className={`bg-slate-900/60 border rounded-xl p-5 ${
+        gate.blocked
+          ? 'border-red-500/40'
+          : gate.gateState === 'limited'
+          ? 'border-amber-500/30'
+          : 'border-emerald-500/30'
+      }`}>
+        <div className="flex items-center gap-2 mb-3">
+          {gate.blocked ? (
+            <ShieldOff className="w-4 h-4 text-red-400" />
+          ) : gate.gateState === 'limited' ? (
+            <ShieldAlert className="w-4 h-4 text-amber-400" />
           ) : (
-            <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs">
-              <span className="text-slate-300">
-                {killConfirm === 'kill'
-                  ? 'Activate kill switch and halt ALL execution?'
-                  : 'Reset kill switch and resume execution?'}
-              </span>
-              <button
-                type="button"
-                onClick={async () => {
-                  await toggleKillSwitch(killConfirm === 'kill');
-                  setKillConfirm('idle');
-                }}
-                className={`px-2 py-0.5 rounded font-semibold ${killConfirm === 'kill' ? 'bg-red-600 text-white hover:bg-red-500' : 'bg-emerald-600/30 text-emerald-300 hover:bg-emerald-600/50 border border-emerald-500/30'}`}
-              >
-                {killConfirm === 'kill' ? 'Halt' : 'Resume'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setKillConfirm('idle')}
-                className="px-2 py-0.5 rounded text-slate-400 hover:text-slate-200"
-              >
-                Cancel
-              </button>
-            </div>
+            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+          )}
+          <h3 className="text-sm font-semibold text-slate-300">Execution Gate</h3>
+          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+            gate.blocked
+              ? 'bg-red-500/20 text-red-400'
+              : gate.gateState === 'limited'
+              ? 'bg-amber-500/20 text-amber-400'
+              : 'bg-emerald-500/20 text-emerald-400'
+          }`}>
+            {gate.blocked ? 'BLOCKED' : gate.gateState === 'limited' ? 'LIMITED' : 'CLEAR'}
+          </span>
+          {data?.guard && (
+            <span className="ml-auto text-[10px] text-slate-500">
+              {data.guard.recent_verdicts_count} recent verdicts
+            </span>
           )}
         </div>
-        {data?.guard && (
-          <p className="text-xs text-slate-500">{data.guard.recent_verdicts_count} recent verdicts · global kill = {String(data.guard.kill_switch_active)}</p>
+        {gate.reasons.length > 0 ? (
+          <div className="space-y-1">
+            {gate.reasons.map((r, i) => (
+              <div key={i} className="flex items-start gap-1.5 text-xs">
+                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1 ${
+                  r.severity === 'critical' ? 'bg-red-400' : 'bg-amber-400'
+                }`} />
+                <span className={r.severity === 'critical' ? 'text-red-300' : 'text-amber-300'}>
+                  {r.message}
+                </span>
+                {r.hint && <span className="text-slate-500 ml-1">— {r.hint}</span>}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-emerald-400/70">
+            All safety checks passed — trading permitted
+          </p>
+        )}
+        {gate.blocked && (
+          <div className="mt-3 flex items-center gap-1.5 text-[10px] text-slate-500">
+            <AlertTriangle className="w-3 h-3 text-amber-400" />
+            <span>Use the <strong className="text-slate-300">Kill Switch</strong> controls in Mode &amp; Safety panel above to reset the global kill switch.</span>
+          </div>
         )}
       </div>
 
