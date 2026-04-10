@@ -6,6 +6,7 @@ Covers:
 - get_pm_spot_health_all(): status mapping, error strings, snapshot error handling
 - pm_spot_hard_gate_open(): gate open/closed conditions
 - pm_spot_hard_gate_open_with_detail(): returns both flag and full dict
+- pm_spot_hard_gate_open_for_asset(): per-asset gate check
 - log_pm_spot_health(): emits correct log level and [PM_SPOT_HEALTH] tag
 - Multi-asset scenarios: ETH stale, SOL/XRP/DOGE unhealthy, all ok
 """
@@ -22,6 +23,7 @@ from merid.event_venues.kalshi.pm_spot_health import (
     get_pm_spot_health_all,
     log_pm_spot_health,
     pm_spot_hard_gate_open,
+    pm_spot_hard_gate_open_for_asset,
     pm_spot_hard_gate_open_with_detail,
 )
 from data.live_price_feed import KALSHI_ASSETS, PM_MAX_SPOT_AGE_S, LIVE_FEED_HEALTH_MAX_AGE_S
@@ -369,3 +371,89 @@ class TestPmSpotHealthTradingIntegration:
         assert gate_open is False
         for asset in ("SOL", "XRP", "DOGE"):
             assert health[asset].blocks_pm_trading() is True
+
+
+# ---------------------------------------------------------------------------
+# pm_spot_hard_gate_open_for_asset
+# ---------------------------------------------------------------------------
+
+
+class TestPmSpotHardGateOpenForAsset:
+    def test_open_when_asset_ok(self):
+        """Gate is open for a specific healthy asset."""
+        with _patch_snapshot(_all_ok_snapshot()):
+            gate_open, h = pm_spot_hard_gate_open_for_asset("BTC")
+
+        assert gate_open is True
+        assert h is not None
+        assert h.status == PmSpotStatus.OK
+
+    def test_closed_when_own_asset_unhealthy(self):
+        """Gate closed when the queried asset is stale."""
+        snap = _all_ok_snapshot()
+        snap["assets"]["ETH"] = _make_raw_asset("pm_max_age_exceeded", feed_ok=True)
+
+        with _patch_snapshot(snap):
+            gate_open, h = pm_spot_hard_gate_open_for_asset("ETH")
+
+        assert gate_open is False
+        assert h is not None
+        assert h.status == PmSpotStatus.PM_MAX_AGE_EXCEEDED
+
+    def test_open_when_other_asset_unhealthy(self):
+        """Key improvement: BTC gate stays open even when DOGE feed is down."""
+        snap = _all_ok_snapshot()
+        snap["assets"]["DOGE"] = _make_raw_asset(
+            "live_price_feed_unhealthy", feed_ok=False, tick_age_s=None, price_usd=None
+        )
+
+        with _patch_snapshot(snap):
+            btc_open, btc_h = pm_spot_hard_gate_open_for_asset("BTC")
+            doge_open, doge_h = pm_spot_hard_gate_open_for_asset("DOGE")
+
+        # BTC agent should NOT be blocked by DOGE's unhealthy feed
+        assert btc_open is True
+        assert btc_h is not None and btc_h.status == PmSpotStatus.OK
+
+        # DOGE agent IS blocked
+        assert doge_open is False
+        assert doge_h is not None and doge_h.status == PmSpotStatus.LIVE_PRICE_FEED_UNHEALTHY
+
+    def test_returns_false_for_unknown_asset(self):
+        """Unknown asset treated as blocked (safe default)."""
+        with _patch_snapshot(_all_ok_snapshot()):
+            gate_open, h = pm_spot_hard_gate_open_for_asset("UNKNOWN_COIN")
+
+        assert gate_open is False
+        assert h is None
+
+    def test_warming_up_does_not_block_asset(self):
+        """warming_up status does not block the per-asset gate."""
+        snap = _all_ok_snapshot()
+        snap["assets"]["SOL"] = _make_raw_asset("warming_up", tick_age_s=None, price_usd=None)
+
+        with _patch_snapshot(snap):
+            gate_open, h = pm_spot_hard_gate_open_for_asset("SOL")
+
+        assert gate_open is True
+        assert h is not None
+        assert h.status == PmSpotStatus.WARMING_UP
+
+    def test_each_asset_checked_independently(self):
+        """Mixed health: each asset's gate reflects only its own status."""
+        snap = _all_ok_snapshot()
+        snap["assets"]["XRP"] = _make_raw_asset("live_price_feed_unhealthy", feed_ok=False, tick_age_s=None)
+        snap["assets"]["SOL"] = _make_raw_asset("pm_max_age_exceeded", feed_ok=True)
+
+        with _patch_snapshot(snap):
+            results = {
+                asset: pm_spot_hard_gate_open_for_asset(asset)
+                for asset in ("BTC", "ETH", "SOL", "XRP", "DOGE")
+            }
+
+        assert results["BTC"][0] is True   # healthy
+        assert results["ETH"][0] is True   # healthy
+        assert results["SOL"][0] is False  # pm_max_age_exceeded
+        assert results["XRP"][0] is False  # live_price_feed_unhealthy
+        assert results["DOGE"][0] is True  # healthy
+

@@ -210,6 +210,43 @@ def pm_spot_hard_gate_open_with_detail() -> tuple[bool, Dict[str, PmAssetSpotHea
     return gate_open, health
 
 
+def pm_spot_hard_gate_open_for_asset(asset: str) -> tuple[bool, Optional[PmAssetSpotHealth]]:
+    """Check the PM hard gate for a single asset only.
+
+    Unlike ``pm_spot_hard_gate_open`` (which requires **all** five assets to be
+    healthy), this function only checks the asset that the calling agent is
+    actually trading.  A stale DOGE feed therefore no longer blocks a BTC agent.
+
+    Args:
+        asset: Bare uppercase asset key ("BTC", "ETH", "SOL", "XRP", "DOGE").
+
+    Returns:
+        ``(gate_open, health)`` where *gate_open* is True when the specific
+        asset is not blocking trades and *health* is the per-asset health
+        record (or None when the asset is not in the health snapshot).
+
+    Example::
+
+        gate_open, h = pm_spot_hard_gate_open_for_asset("BTC")
+        if not gate_open:
+            logger.warning("BTC spot feed unhealthy: %s", h)
+            return
+    """
+    health = get_pm_spot_health_all()
+    h = health.get(asset)
+    if h is None:
+        # Asset not tracked — treat as unhealthy to be safe.
+        logger.warning("[PM_SPOT_HEALTH] per_asset_gate: unknown asset=%s — treating as blocked", asset)
+        return False, None
+    gate_open = not h.blocks_pm_trading()
+    if not gate_open:
+        logger.warning(
+            "[PM_SPOT_HEALTH] per_asset_gate: asset=%s status=%s — blocking trade",
+            asset, h.status.value,
+        )
+    return gate_open, h
+
+
 def log_pm_spot_health() -> None:
     """Emit a structured [PM_SPOT_HEALTH] log line for every PM asset.
 
