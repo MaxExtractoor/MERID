@@ -229,8 +229,9 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Starting portfolio risk agent...")
         from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
-        from merid.prediction.agent_grid_config import PortfolioRiskConfig
-        portfolio_risk = PortfolioRiskAgent(config=PortfolioRiskConfig())
+        from merid.prediction.agent_grid_config import load_agent_grid_config
+        _grid_cfg = load_agent_grid_config()
+        portfolio_risk = PortfolioRiskAgent(config=_grid_cfg.portfolio_risk)
         await portfolio_risk.start()
         app.state.portfolio_risk_agent = portfolio_risk
         logger.info("✅ Portfolio risk agent started")
