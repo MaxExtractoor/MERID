@@ -273,14 +273,38 @@ class ExecutionGuard:
     # ── Kill switch ───────────────────────────────────────────────────
 
     def activate_kill_switch(self, reason: str = "manual"):
-        """Block ALL execution immediately."""
+        """Block ALL execution immediately.
+
+        Delegates to risk_controller.emergency_stop() so that
+        risk_controller._global_kill is the single authoritative kill flag.
+        The local _global_kill_switch mirror is kept for the legacy
+        MeridLoop pre_trade_check path only.
+        """
+        # Primary: sync the authoritative risk_controller flag.
+        try:
+            from merid.risk.kill_switches import risk_controller as _rc
+            _rc.emergency_stop(reason)
+        except Exception as _exc:
+            logger.error(f"ExecutionGuard: risk_controller.emergency_stop failed: {_exc}")
+        # Mirror: keep legacy flag in sync.
         self._global_kill_switch = True
         self._global_kill_reason = reason
         self._persist_kill_switch()
         logger.warning(f"KILL SWITCH ACTIVATED: {reason}")
 
     def deactivate_kill_switch(self):
-        """Re-enable execution."""
+        """Re-enable execution.
+
+        Delegates to risk_controller.reset() so that risk_controller._global_kill
+        remains the single authoritative kill flag.
+        """
+        # Primary: sync the authoritative risk_controller flag.
+        try:
+            from merid.risk.kill_switches import risk_controller as _rc
+            _rc.reset(operator="execution_guard")
+        except Exception as _exc:
+            logger.error(f"ExecutionGuard: risk_controller.reset failed: {_exc}")
+        # Mirror: keep legacy flag in sync.
         self._global_kill_switch = False
         self._global_kill_reason = ""
         self._persist_kill_switch()
@@ -327,7 +351,16 @@ class ExecutionGuard:
 
     @property
     def kill_switch_active(self) -> bool:
-        return self._global_kill_switch
+        """Read kill state from risk_controller as the single source of truth.
+
+        Falls back to the local mirror flag if risk_controller is unavailable
+        (e.g. during testing or early startup).
+        """
+        try:
+            from merid.risk.kill_switches import risk_controller as _rc
+            return _rc._global_kill
+        except Exception:
+            return self._global_kill_switch
 
     # ── Promotion enforcement ────────────────────────────────────────
 
