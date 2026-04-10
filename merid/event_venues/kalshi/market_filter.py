@@ -419,6 +419,14 @@ class MarketFilter:
                     )
                 # strike_price is None — skip distance check, let candidate through
             elif dist > spot_band:
+                logger.warning(
+                    "[CRYPTO-SPOT-OUT-OF-RANGE] asset=%s timeframe=%s ticker=%s "
+                    "dist_pct=%.1f band_pct=%.1f spot=%.4f strike=%.4f — "
+                    "rejected: strike too far from spot",
+                    market.underlying, market.timeframe, market.ticker,
+                    dist, spot_band,
+                    market.spot_price or 0.0, market.strike_price or 0.0,
+                )
                 return False, (
                     f"distance {dist:.1f}% from spot exceeds band ±{spot_band:.1f}%"
                 )
