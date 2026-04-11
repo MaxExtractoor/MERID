@@ -113,6 +113,12 @@ _ERROR_CLASS_SEVERITY: Dict[str, ErrorSeverity] = {
     "order_group_triggered": ErrorSeverity.LOW,     # group lifecycle: already triggered/resolved
     "paper_session_error": ErrorSeverity.LOW,       # paper-mode session bookkeeping
     "dry_run": ErrorSeverity.LOW,                   # diagnostic / dry-run mode signal
+    # ── LOW — risk-manager market-condition gates (expected during normal operation) ──
+    "low_edge": ErrorSeverity.LOW,                  # post-fee edge below configured minimum
+    "spread_too_wide": ErrorSeverity.LOW,           # orderbook spread exceeds configured max
+    "depth_insufficient": ErrorSeverity.LOW,        # orderbook depth below configured minimum
+    # ── MEDIUM — risk-manager position/notional/route rejections (transient) ─────────
+    "risk_check_blocked": ErrorSeverity.MEDIUM,     # KalshiRiskManager rejected order (non-critical)
 }
 
 
@@ -210,6 +216,11 @@ class RiskController:
     #
     # "no_open_orders", "no_position", "order_group_triggered",
     # "paper_session_error", "dry_run" are pure operational noise.
+    #
+    # "low_edge", "spread_too_wide", "depth_insufficient" are risk-manager
+    # market-condition gates that fire every cycle when conditions are unfavourable;
+    # they are expected and must not exhaust the budget.
+    # "risk_check_blocked" covers non-critical KalshiRiskManager rejections.
     error_exempt_classes: Set[str] = field(
         default_factory=lambda: {
             "min_notional", "ws_reconnect", "loop_lag", "gate_blocked",
@@ -221,6 +232,9 @@ class RiskController:
             # Operational noise
             "no_open_orders", "no_position", "order_group_triggered",
             "paper_session_error", "dry_run",
+            # Risk-manager market-condition gates (expected, non-critical)
+            "low_edge", "spread_too_wide", "depth_insufficient",
+            "risk_check_blocked",
         }
     )
     # ---- Deduplication -------------------------------------------------------
