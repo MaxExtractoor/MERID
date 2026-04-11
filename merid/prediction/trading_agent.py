@@ -2066,13 +2066,31 @@ class KalshiTradingAgent:
                     or "kill_switch" in _err_str
                 ):
                     _err_class = "gate_blocked"
+                # ── Deployment / halted-agent gate conditions (LOW) ───────
+                # NOTE: must precede no_open_orders / no_position because
+                # "Agent X is HALTED — no orders allowed" contains "no orders".
+                elif "is halted" in _err_str or (
+                    "halted" in _err_str and "agent" in _err_str
+                ):
+                    _err_class = "gate_blocked"
+                elif (
+                    "live_not_enabled" in _err_str
+                    or "live_requires_async" in _err_str
+                ):
+                    _err_class = "gate_blocked"
+                # ── Paper-session bookkeeping (LOW) ───────────────────────
+                elif "paper fill failed" in _err_str:
+                    _err_class = "paper_session_error"
                 # ── Order-group lifecycle noise (MEDIUM / LOW) ────────────
                 elif "order_group_not_found" in _err_str or (
                     "order group" in _err_str and "not found" in _err_str
                 ):
                     _err_class = "order_group_not_found"
-                elif "group_triggered" in _err_str or (
-                    "order group" in _err_str and "triggered" in _err_str
+                elif (
+                    "group_triggered" in _err_str
+                    or "order_group_not_active" in _err_str
+                    or "order_group_limit_exceeded" in _err_str
+                    or ("order group" in _err_str and "triggered" in _err_str)
                 ):
                     _err_class = "order_group_triggered"
                 # ── Market-closed / not-accepting-orders (MEDIUM) ─────────
@@ -2082,6 +2100,7 @@ class KalshiTradingAgent:
                     or "market is closed" in _err_str
                     or "market not accepting" in _err_str
                     or ("closed" in _err_str and "halted" in _err_str)
+                    or "quote legs failed" in _err_str
                 ):
                     _err_class = "market_closed"
                 # ── Stale snapshot (MEDIUM) ───────────────────────────────
@@ -2091,6 +2110,26 @@ class KalshiTradingAgent:
                     or ("stale" in _err_str and "snapshot" in _err_str)
                 ):
                     _err_class = "stale_snapshot"
+                # ── Risk-manager: critical financial state (CRITICAL) ──────
+                # Must precede risk_check_blocked / min_notional to avoid the
+                # "notional" keyword in a risk_check string being mis-classified.
+                elif "bankroll_zero" in _err_str:
+                    _err_class = "risk_violation"
+                elif "drawdown" in _err_str and "exceed" in _err_str:
+                    _err_class = "risk_violation"
+                # ── Risk-manager: market-condition gates (LOW) ────────────
+                # Must precede risk_check_blocked / min_notional.
+                elif "post-fee edge" in _err_str or "post_fee_edge" in _err_str:
+                    _err_class = "low_edge"
+                elif "spread" in _err_str and "exceeds" in _err_str:
+                    _err_class = "spread_too_wide"
+                elif "depth" in _err_str and "below minimum" in _err_str:
+                    _err_class = "depth_insufficient"
+                # ── Risk-manager: position/notional/route rejections (MEDIUM)
+                # Must precede min_notional so "risk_check:Order notional ..."
+                # is not incorrectly classified as min_notional.
+                elif "risk_check:" in _err_str or "risk_manager_unavailable" in _err_str:
+                    _err_class = "risk_check_blocked"
                 # ── Min-notional misconfig (LOW) ──────────────────────────
                 elif "notional" in _err_str:
                     _err_class = "min_notional"
