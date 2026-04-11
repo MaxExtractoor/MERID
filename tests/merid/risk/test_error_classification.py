@@ -41,12 +41,26 @@ def _classify_error_str(result_error) -> str:
         or "kill_switch" in _err_str
     ):
         _err_class = "gate_blocked"
+    elif "is halted" in _err_str or (
+        "halted" in _err_str and "agent" in _err_str
+    ):
+        _err_class = "gate_blocked"
+    elif (
+        "live_not_enabled" in _err_str
+        or "live_requires_async" in _err_str
+    ):
+        _err_class = "gate_blocked"
+    elif "paper fill failed" in _err_str:
+        _err_class = "paper_session_error"
     elif "order_group_not_found" in _err_str or (
         "order group" in _err_str and "not found" in _err_str
     ):
         _err_class = "order_group_not_found"
-    elif "group_triggered" in _err_str or (
-        "order group" in _err_str and "triggered" in _err_str
+    elif (
+        "group_triggered" in _err_str
+        or "order_group_not_active" in _err_str
+        or "order_group_limit_exceeded" in _err_str
+        or ("order group" in _err_str and "triggered" in _err_str)
     ):
         _err_class = "order_group_triggered"
     elif (
@@ -55,6 +69,7 @@ def _classify_error_str(result_error) -> str:
         or "market is closed" in _err_str
         or "market not accepting" in _err_str
         or ("closed" in _err_str and "halted" in _err_str)
+        or "quote legs failed" in _err_str
     ):
         _err_class = "market_closed"
     elif (
@@ -63,6 +78,18 @@ def _classify_error_str(result_error) -> str:
         or ("stale" in _err_str and "snapshot" in _err_str)
     ):
         _err_class = "stale_snapshot"
+    elif "bankroll_zero" in _err_str:
+        _err_class = "risk_violation"
+    elif "drawdown" in _err_str and "exceed" in _err_str:
+        _err_class = "risk_violation"
+    elif "post-fee edge" in _err_str or "post_fee_edge" in _err_str:
+        _err_class = "low_edge"
+    elif "spread" in _err_str and "exceeds" in _err_str:
+        _err_class = "spread_too_wide"
+    elif "depth" in _err_str and "below minimum" in _err_str:
+        _err_class = "depth_insufficient"
+    elif "risk_check:" in _err_str or "risk_manager_unavailable" in _err_str:
+        _err_class = "risk_check_blocked"
     elif "notional" in _err_str:
         _err_class = "min_notional"
     elif "reconnect" in _err_str or "ws_disconnect" in _err_str:
@@ -136,21 +163,45 @@ class TestErrorStringClassification:
         ("execution gate blocked", "gate_blocked"),
         ("gate blocked: risk check", "gate_blocked"),
         ("kill_switch triggered", "gate_blocked"),
+        # gate_blocked — halted-agent / deployment (LOW)
+        ("Agent BTC1H is halted — no orders allowed", "gate_blocked"),
+        ("halted agent cannot place orders", "gate_blocked"),
+        ("live_not_enabled for this session", "gate_blocked"),
+        ("live_requires_async context", "gate_blocked"),
+        # paper_session_error — LOW
+        ("paper fill failed: no fill price", "paper_session_error"),
         # order_group lifecycle — MEDIUM / LOW
         ("order_group_not_found:abc123", "order_group_not_found"),
         ("order group not found for id xyz", "order_group_not_found"),
         ("group_triggered, reset required", "order_group_triggered"),
         ("order group triggered before cancel", "order_group_triggered"),
+        ("order_group_not_active: group expired", "order_group_triggered"),
+        ("order_group_limit_exceeded for group g1", "order_group_triggered"),
         # market_closed — MEDIUM
         ("market_closed", "market_closed"),
         ("Market closed for trading", "market_closed"),
         ("market is closed", "market_closed"),
         ("market not accepting new orders", "market_closed"),
         ("closed and halted", "market_closed"),
+        ("quote legs failed: no fills", "market_closed"),
         # stale_snapshot — MEDIUM
         ("stale_snapshot detected", "stale_snapshot"),
         ("stale snapshot age=45s", "stale_snapshot"),
         ("snapshot is stale, skipping", "stale_snapshot"),
+        # risk_violation — CRITICAL
+        ("bankroll_zero: cannot size order", "risk_violation"),
+        ("drawdown exceeded hard limit", "risk_violation"),
+        # low_edge — LOW
+        ("post-fee edge 0.002 below minimum 0.005", "low_edge"),
+        ("post_fee_edge too small", "low_edge"),
+        # spread_too_wide — LOW
+        ("spread exceeds configured maximum", "spread_too_wide"),
+        # depth_insufficient — LOW
+        ("depth below minimum required", "depth_insufficient"),
+        # risk_check_blocked — MEDIUM
+        ("risk_check: position limit exceeded", "risk_check_blocked"),
+        ("risk_check:Order notional too large", "risk_check_blocked"),
+        ("risk_manager_unavailable: timeout", "risk_check_blocked"),
         # min_notional — LOW
         ("order below min notional", "min_notional"),
         ("notional too small", "min_notional"),
@@ -228,6 +279,14 @@ class TestErrorStringClassification:
             "429", "401", "500", "feed timeout", "network_timeout",
             "connection refused", "stale cache", "consensus timeout",
             "spot_stale", "insufficient_funds", "no open orders", "no position",
+            # new classes
+            "Agent X is halted", "paper fill failed: no price",
+            "order_group_not_active", "order_group_limit_exceeded",
+            "quote legs failed", "bankroll_zero", "drawdown exceeded hard limit",
+            "post-fee edge 0.001 below minimum", "spread exceeds configured maximum",
+            "depth below minimum required",
+            "risk_check: position limit exceeded",
+            "risk_manager_unavailable",
             "generic_unknown_error",
         ]
         for msg in test_messages:
@@ -253,6 +312,17 @@ class TestBenignClassificationDoesNotHalt:
         "order_group_not_found:abc",
         "group_triggered, reset required",
         "kill switch active",
+        # new benign classes
+        "Agent BTC1H is halted — no orders allowed",
+        "paper fill failed: no fill price",
+        "order_group_not_active: group expired",
+        "order_group_limit_exceeded for group g1",
+        "quote legs failed: no fills",
+        "post-fee edge 0.001 below minimum 0.005",
+        "spread exceeds configured maximum 0.10",
+        "depth below minimum required: only 2 contracts",
+        "risk_check: position limit exceeded",
+        "risk_manager_unavailable: timeout",
     ]
 
     @pytest.fixture
