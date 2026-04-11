@@ -219,6 +219,14 @@ class LivePriceFeed:
         self._cg_backoff_base = _CG_BACKOFF_BASE_S
         self._cg_backoff_max = _CG_BACKOFF_MAX_S
 
+        # ── Shared httpx clients ─────────────────────────────────────────────
+        # Reuse a single httpx.AsyncClient for Coinbase and CoinGecko instead
+        # of creating/tearing down a new client per request.  This avoids
+        # connection churn, TLS renegotiation overhead, and potential socket
+        # exhaustion under high polling rates.
+        self._coinbase_http: Optional[httpx.AsyncClient] = None
+        self._coingecko_http: Optional[httpx.AsyncClient] = None
+
         # Initialize exchanges
         self._initialize_exchanges()
 
@@ -739,31 +747,37 @@ class LivePriceFeed:
             return False
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    "https://api.coingecko.com/api/v3/coins/markets",
-                    params={
-                        "vs_currency": "usd",
-                        "ids": asset_id,
-                        "price_change_percentage": "24h",
-                    },
+            client = self._get_coingecko_http()
+            response = await client.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={
+                    "vs_currency": "usd",
+                    "ids": asset_id,
+                    "price_change_percentage": "24h",
+                },
+            )
+            if response.status_code == 429:
+                self._coingecko_429_count += 1
+                backoff = min(
+                    self._cg_backoff_base * (2 ** (self._coingecko_429_count - 1)),
+                    self._cg_backoff_max,
                 )
-                if response.status_code == 429:
-                    self._coingecko_429_count += 1
-                    backoff = min(
-                        self._cg_backoff_base * (2 ** (self._coingecko_429_count - 1)),
-                        self._cg_backoff_max,
-                    )
-                    self._coingecko_cooldown_until = time.monotonic() + backoff
-                    logger.warning(
-                        "[PMSPOT_COINGECKO_429] CoinGecko secondary feed rate-limited "
-                        "(count=%d); cooling down %.0fs. "
-                        "This does NOT affect the trading-halt error budget.",
-                        self._coingecko_429_count, backoff,
-                    )
-                    return False
-                response.raise_for_status()
-                data = response.json()
+                self._coingecko_cooldown_until = time.monotonic() + backoff
+                logger.warning(
+                    "[PMSPOT_COINGECKO_429] CoinGecko secondary feed rate-limited "
+                    "(count=%d); cooling down %.0fs. "
+                    "This does NOT affect the trading-halt error budget.",
+                    self._coingecko_429_count, backoff,
+                )
+                return False
+            if response.status_code >= 500:
+                logger.warning(
+                    "[PMSPOT_COINGECKO_5xx] CoinGecko server error for %s: HTTP %d",
+                    symbol, response.status_code,
+                )
+                return False
+            response.raise_for_status()
+            data = response.json()
         except Exception as exc:
             logger.error("CoinGecko fallback failed for %s: %s", symbol, exc)
             return False
@@ -933,6 +947,35 @@ class LivePriceFeed:
 
     # ── PM Coinbase ticker subsystem ─────────────────────────────────────────
 
+    def _get_coinbase_http(self) -> httpx.AsyncClient:
+        """Lazily create or return the shared Coinbase httpx.AsyncClient."""
+        if self._coinbase_http is None or self._coinbase_http.is_closed:
+            self._coinbase_http = httpx.AsyncClient(
+                timeout=8.0,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
+        return self._coinbase_http
+
+    def _get_coingecko_http(self) -> httpx.AsyncClient:
+        """Lazily create or return the shared CoinGecko httpx.AsyncClient."""
+        if self._coingecko_http is None or self._coingecko_http.is_closed:
+            self._coingecko_http = httpx.AsyncClient(
+                timeout=10.0,
+                limits=httpx.Limits(max_connections=5, max_keepalive_connections=3),
+            )
+        return self._coingecko_http
+
+    async def _close_http_clients(self) -> None:
+        """Close shared httpx clients on shutdown."""
+        for client in (self._coinbase_http, self._coingecko_http):
+            if client and not client.is_closed:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+        self._coinbase_http = None
+        self._coingecko_http = None
+
     async def _fetch_coinbase_ticker(self, asset: str) -> Optional[float]:
         """Fetch the latest USD spot price for a Kalshi PM asset from Coinbase.
 
@@ -951,8 +994,8 @@ class LivePriceFeed:
             return None
         url = f"https://api.coinbase.com/api/v3/brokerage/best_bid_ask?product_ids={product_id}"
         try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.get(url)
+            client = self._get_coinbase_http()
+            resp = await client.get(url)
             if resp.status_code == 429:
                 logger.warning(
                     "[PMSPOT_COINBASE_429] asset=%s — Coinbase rate-limited (HTTP 429); "
@@ -1119,12 +1162,18 @@ class LivePriceFeed:
         logger.info("start_pm_coinbase_streaming: started %d ticker task(s)", started)
 
     def stop_pm_coinbase_streaming(self) -> None:
-        """Cancel all running PM Coinbase ticker tasks."""
+        """Cancel all running PM Coinbase ticker tasks and close shared HTTP clients."""
         for asset, task in self._pm_ticker_tasks.items():
             if task is not None and not task.done():
                 task.cancel()
                 logger.info("PM Coinbase ticker cancelled: %s", asset)
         self._pm_ticker_tasks = {a: None for a in KALSHI_ASSETS}
+        # Schedule async client cleanup; safe to call from sync context
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._close_http_clients())
+        except RuntimeError:
+            pass  # No running loop — clients will be GC'd
 
     def get_pm_feed_health_snapshot(self) -> Dict[str, Any]:
         """Return a per-asset PM spot health snapshot.
