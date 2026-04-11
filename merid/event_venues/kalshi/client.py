@@ -692,7 +692,7 @@ class KalshiVenueClient(EventVenueClient):
         cursor: Optional[str] = None
         total_latency = 0.0
         total_retries = 0
-        max_pages = max(1, (desired + page_size - 1) // page_size)
+        max_pages = 1000  # safety cap; cursor logic below controls early exit
 
         for _ in range(max_pages):
             if cursor:
@@ -808,7 +808,7 @@ class KalshiVenueClient(EventVenueClient):
         total_latency = 0.0
         total_retries = 0
         page_size = min(limit, 200)  # Kalshi max per page
-        max_pages = max(1, (limit + page_size - 1) // page_size)
+        max_pages = 1000  # safety cap; cursor logic below controls early exit
 
         for _ in range(max_pages):
             params: Dict[str, Any] = {"limit": page_size}
@@ -867,7 +867,7 @@ class KalshiVenueClient(EventVenueClient):
         total_latency = 0.0
         total_retries = 0
         page_size = min(limit, 200)
-        max_pages = max(1, (limit + page_size - 1) // page_size)
+        max_pages = 1000  # safety cap; cursor logic below controls early exit
 
         for _ in range(max_pages):
             params: Dict[str, Any] = {"limit": page_size}
@@ -953,7 +953,7 @@ class KalshiVenueClient(EventVenueClient):
         total_latency = 0.0
         total_retries = 0
         page_size = min(limit, 200)
-        max_pages = max(1, (limit + page_size - 1) // page_size)
+        max_pages = 1000  # safety cap; cursor logic below controls early exit
 
         for _ in range(max_pages):
             params: Dict[str, Any] = {"limit": page_size}
