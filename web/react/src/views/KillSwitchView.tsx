@@ -54,6 +54,8 @@ interface RiskState {
     near_limit: boolean;
   };
 }
+
+interface CategoryConfig {
   categories: Record<string, string>;
   known: string[];
 }
