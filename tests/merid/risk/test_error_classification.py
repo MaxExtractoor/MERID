@@ -145,6 +145,12 @@ def _classify_error_str(result_error) -> str:
         _err_class = "no_open_orders"
     elif "no position" in _err_str or "position not found" in _err_str:
         _err_class = "no_position"
+    elif "post only cross" in _err_str or "post-only" in _err_str:
+        _err_class = "order_rejected"
+    elif "invalid_order_size" in _err_str or "invalid order size" in _err_str:
+        _err_class = "order_rejected"
+    elif "ticker_mismatch" in _err_str or "ticker mismatch" in _err_str:
+        _err_class = "order_rejected"
 
     return _err_class
 
@@ -256,6 +262,13 @@ class TestErrorStringClassification:
         # no_position — LOW
         ("no position for market", "no_position"),
         ("position not found", "no_position"),
+        # order_rejected — HIGH (exchange-level rejections from place/amend)
+        ("post only cross — order would match", "order_rejected"),
+        ("post-only order rejected at this price", "order_rejected"),
+        ("invalid_order_size: count must be > 0", "order_rejected"),
+        ("invalid order size: 0 not allowed", "order_rejected"),
+        ("ticker_mismatch in order routing", "order_rejected"),
+        ("ticker mismatch detected", "order_rejected"),
     ])
     def test_known_pattern_maps_correctly(self, msg, expected):
         assert _classify_error_str(msg) == expected, (
@@ -288,6 +301,13 @@ class TestErrorStringClassification:
             "risk_check: position limit exceeded",
             "risk_manager_unavailable",
             "generic_unknown_error",
+            # order_rejected patterns
+            "post only cross — order would match",
+            "post-only order rejected",
+            "invalid_order_size: count 0",
+            "invalid order size: 0",
+            "ticker_mismatch in routing",
+            "ticker mismatch detected",
         ]
         for msg in test_messages:
             cls = _classify_error_str(msg)
@@ -355,6 +375,10 @@ class TestSeriousClassificationCounts:
         ("401 unauthorized — bad API key", "auth_error", ErrorSeverity.CRITICAL),
         ("insufficient_funds for order size", "insufficient_funds", ErrorSeverity.HIGH),
         ("some_completely_unknown_error_xyz", "generic", ErrorSeverity.HIGH),
+        # order_rejected — HIGH (post-only cross, invalid size, ticker mismatch)
+        ("post only cross — order would match", "order_rejected", ErrorSeverity.HIGH),
+        ("invalid_order_size: count must be > 0", "order_rejected", ErrorSeverity.HIGH),
+        ("ticker_mismatch in order routing", "order_rejected", ErrorSeverity.HIGH),
     ]
 
     @pytest.fixture
