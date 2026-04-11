@@ -461,7 +461,7 @@ class KalshiMarketCatalog:
         # 2. Secondary detection: text-based patterns
         text = f"{mkt.market_id} {event_ticker} {mkt.question or ''} {mkt.description or ''} {mkt.category or ''}"
         text_asset = self._detect_asset(text)
-        timeframe = self._detect_timeframe(text, mkt.end_date, now)
+        timeframe = self._detect_timeframe(text, mkt.end_date, now, ticker=event_ticker or mkt.market_id)
         market_type = self._detect_type(text)
         strikes = self._detect_strikes(text)
 
@@ -574,11 +574,18 @@ class KalshiMarketCatalog:
         text: str,
         end_date: Optional[datetime],
         now: datetime,
+        ticker: str = "",
     ) -> Optional[str]:
         # First try text patterns
         for pat, tf in _TIMEFRAME_PATTERNS:
             if pat.search(text):
                 return tf
+
+        # Ticker-based 15m detection: "15M" in the ticker name OR ticker ends
+        # with an HH:MM time component (e.g. "KXBTC-1430" style markets).
+        is_15m = "15M" in ticker.upper() or re.search(r"\d{2}:\d{2}$", ticker) is not None
+        if is_15m:
+            return "15m"
 
         # Infer from time to expiry
         if end_date and end_date > now:
