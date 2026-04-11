@@ -422,6 +422,31 @@ class KalshiTradingAgent:
             # Build snapshot and evaluate
             try:
                 snapshot = self._build_snapshot(market, now)
+
+                # ── PATCH-10: Veto on degraded spot/strike basis ─────────────
+                # If the snapshot basis indicates the spot/strike data is
+                # unreliable, skip strategy evaluation for this market rather
+                # than trading on stale or missing information.
+                _VETO_BASIS_VALUES = frozenset({
+                    "missing_spot", "missing_strike", "missing_strike_and_spot",
+                    "missing_asset_for_spot", "invalid_strike_zero", "stale_distance",
+                })
+                if snapshot.spot_strike_basis in _VETO_BASIS_VALUES:
+                    tracker = get_no_trade_tracker()
+                    tracker.record(
+                        agent_name=self.config.name,
+                        market_id=market.market_id,
+                        asset=self.config.assets[0] if self.config.assets else "",
+                        timeframe=self.config.timeframes[0] if self.config.timeframes else "",
+                        reason=NoTradeReason.MARKET_NOT_TRADEABLE,
+                        additional_context={"basis": snapshot.spot_strike_basis},
+                    )
+                    self.logger.info(
+                        "[AGENT-VETO] spot_strike_basis | agent=%s market=%s basis=%s",
+                        self.config.name, market.market_id, snapshot.spot_strike_basis,
+                    )
+                    cycle_stats["veto_risk"] += 1
+                    continue
                 
                 # === Market Mood Bus Integration ===
                 # Get unified context from the mood bus
@@ -745,8 +770,9 @@ class KalshiTradingAgent:
                     signal.contracts,
                     signal.limit_price_cents or "N/A",
                 )
-                await self._execute_signal(market, signal, check, snapshot)
-                cycle_stats["orders_succeeded"] += 1
+                _order_dispatched = await self._execute_signal(market, signal, check, snapshot)
+                if _order_dispatched:
+                    cycle_stats["orders_succeeded"] += 1
 
             except Exception as exc:
                 self.logger.warning(f"Error executing {market.market_id}: {exc}")
@@ -1375,11 +1401,16 @@ class KalshiTradingAgent:
     async def _execute_signal(
         self, market: EventMarket, signal: StrategySignal, check: PreTradeCheck,
         snapshot: Optional[MarketSnapshot] = None,
-    ) -> None:
+    ) -> bool:
         """Execute a strategy signal by placing an order.
         
         Integrates with CryptoSwarmRiskBTC15m for single-lane risk management.
         BTC 15m proposals are evaluated for live vs paper routing.
+
+        Returns:
+            True if an order was actually dispatched (success or failure),
+            False if the order was suppressed before dispatch (risk blocked,
+            size=$0, notional floor, etc.).
         """
         from merid.prediction.kalshi_tools import _kalshi_place_order
         from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
@@ -1393,7 +1424,7 @@ class KalshiTradingAgent:
         }
 
         if signal.action not in action_map:
-            return
+            return False
 
         side, action = action_map[signal.action]
         size = check.adjusted_size if check.adjusted_size else signal.contracts
@@ -1555,7 +1586,7 @@ class KalshiTradingAgent:
                 if decision.mode == TradeMode.BLOCKED:
                     self.logger.info(f"BTC 15m risk BLOCKED: {decision.blocked_reason}")
                     await self._record_risk_blocked_order(market, signal, decision, snapshot)
-                    return
+                    return False
                 
                 # Adjust size based on risk decision
                 if decision.final_size < proposal.intent_risk:
@@ -1567,7 +1598,7 @@ class KalshiTradingAgent:
                             "BTC 15m risk size=$0.00 (adjustments: %s) — suppressing order",
                             list(decision.adjustments.keys()),
                         )
-                        return
+                        return False
                     # Recalculate contracts based on final dollar size
                     if price_cents > 0:
                         size = max(1, int(decision.final_size / (price_cents / 100.0)))
@@ -2234,6 +2265,19 @@ class KalshiTradingAgent:
                 market.market_id,
                 result_error,
             )
+
+        # ── [PM_EXEC_OUTCOME] — single log line correlating intent → result ──
+        self.logger.info(
+            "[PM_EXEC_OUTCOME] agent=%s market=%s action=%s side=%s "
+            "contracts=%d price_cents=%d success=%s simulated=%s "
+            "force_paper=%s error=%s",
+            self.config.name, market.market_id, action, side,
+            size, price_cents, result_success,
+            result_payload.get("simulated", False) if result_payload else "N/A",
+            force_paper,
+            result_error or "none",
+        )
+        return True
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serialisable agent summary."""
