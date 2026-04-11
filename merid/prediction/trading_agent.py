@@ -2053,31 +2053,110 @@ class KalshiTradingAgent:
             # Wire into global error-threshold kill switch
             try:
                 from merid.risk.kill_switches import risk_controller as _rc
-                # Classify the error so benign repeating failures (e.g., min_notional
-                # misconfig, WS reconnects) do not exhaust the error budget.
-                # New severity-based categories (rate_limit, stale_cache, feed_timeout,
-                # consensus_timeout, spot_stale) are automatically exempt via
-                # ErrorSeverity MEDIUM/LOW classification in kill_switches.
+                # Classify the error so benign repeating failures do not exhaust the
+                # error budget.  Classes mapping to MEDIUM or LOW severity are
+                # automatically exempt inside record_error().
                 _err_class = "generic"
                 _err_str = str(result_error).lower() if result_error else ""
-                if "notional" in _err_str:
-                    _err_class = "min_notional"
-                elif "reconnect" in _err_str or "ws_disconnect" in _err_str:
-                    _err_class = "ws_reconnect"
-                elif (
+                # ── Gate / kill-switch self-reference (LOW) ─────────────────
+                if (
                     "kill switch" in _err_str
                     or "execution gate" in _err_str
                     or "gate blocked" in _err_str
+                    or "kill_switch" in _err_str
                 ):
                     _err_class = "gate_blocked"
+                # ── Order-group lifecycle noise (MEDIUM / LOW) ────────────
+                elif "order_group_not_found" in _err_str or (
+                    "order group" in _err_str and "not found" in _err_str
+                ):
+                    _err_class = "order_group_not_found"
+                elif "group_triggered" in _err_str or (
+                    "order group" in _err_str and "triggered" in _err_str
+                ):
+                    _err_class = "order_group_triggered"
+                # ── Market-closed / not-accepting-orders (MEDIUM) ─────────
+                elif (
+                    "market_closed" in _err_str
+                    or "market closed" in _err_str
+                    or "market is closed" in _err_str
+                    or "market not accepting" in _err_str
+                    or ("closed" in _err_str and "halted" in _err_str)
+                ):
+                    _err_class = "market_closed"
+                # ── Stale snapshot (MEDIUM) ───────────────────────────────
+                elif (
+                    "stale_snapshot" in _err_str
+                    or "stale snapshot" in _err_str
+                    or ("stale" in _err_str and "snapshot" in _err_str)
+                ):
+                    _err_class = "stale_snapshot"
+                # ── Min-notional misconfig (LOW) ──────────────────────────
+                elif "notional" in _err_str:
+                    _err_class = "min_notional"
+                # ── WS reconnect noise (LOW) ──────────────────────────────
+                elif "reconnect" in _err_str or "ws_disconnect" in _err_str:
+                    _err_class = "ws_reconnect"
+                # ── Rate limiting (MEDIUM) ────────────────────────────────
                 elif "429" in _err_str or "rate limit" in _err_str or "too many" in _err_str:
                     _err_class = "rate_limit"
-                elif "stale" in _err_str and "cache" in _err_str:
-                    _err_class = "stale_cache"
+                # ── Auth failures (CRITICAL) ──────────────────────────────
+                elif (
+                    "401" in _err_str
+                    or "403" in _err_str
+                    or "unauthorized" in _err_str
+                    or "auth_error" in _err_str
+                    or "authentication" in _err_str
+                ):
+                    _err_class = "auth_error"
+                # ── Exchange / 5xx transient errors (MEDIUM) ─────────────
+                elif (
+                    "exchange_error" in _err_str
+                    or "500" in _err_str
+                    or "502" in _err_str
+                    or "503" in _err_str
+                    or "504" in _err_str
+                    or ("exchange" in _err_str and "error" in _err_str)
+                ):
+                    _err_class = "exchange_error"
+                # ── Network / connectivity timeouts (MEDIUM) ──────────────
                 elif "timeout" in _err_str and ("feed" in _err_str or "spot" in _err_str):
                     _err_class = "feed_timeout"
+                elif (
+                    "network_timeout" in _err_str
+                    or "connection timeout" in _err_str
+                    or "read timeout" in _err_str
+                    or "timed out" in _err_str
+                ):
+                    _err_class = "network_timeout"
+                elif (
+                    "connection_error" in _err_str
+                    or "connection refused" in _err_str
+                    or "connection reset" in _err_str
+                    or "connectionerror" in _err_str
+                ):
+                    _err_class = "connection_error"
+                # ── Stale cache (MEDIUM) ──────────────────────────────────
+                elif "stale" in _err_str and "cache" in _err_str:
+                    _err_class = "stale_cache"
+                # ── Consensus unavailable (MEDIUM) ────────────────────────
                 elif "consensus" in _err_str and ("timeout" in _err_str or "unavailable" in _err_str):
                     _err_class = "consensus_timeout"
+                # ── Spot data stale (MEDIUM) ──────────────────────────────
+                elif "spot_stale" in _err_str or ("spot" in _err_str and "stale" in _err_str):
+                    _err_class = "spot_stale"
+                # ── Insufficient funds (HIGH) ─────────────────────────────
+                elif (
+                    "insufficient_funds" in _err_str
+                    or "insufficient funds" in _err_str
+                    or "insufficient balance" in _err_str
+                ):
+                    _err_class = "insufficient_funds"
+                # ── No open orders / no position (LOW) ───────────────────
+                elif "no open orders" in _err_str or "no orders" in _err_str:
+                    _err_class = "no_open_orders"
+                elif "no position" in _err_str or "position not found" in _err_str:
+                    _err_class = "no_position"
                 _rc.record_error(error_class=_err_class)
             except Exception as _kse:
                 self.logger.debug("kill_switch record_error skipped: %s", _kse)

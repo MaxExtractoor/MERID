@@ -230,6 +230,12 @@ class Settings(BaseSettings):
     MERID_MAX_DAILY_LOSS_USD: float = Field(default=500.0, description="Maximum daily loss before halt")
     MERID_MAX_POSITION_SIZE_USD: float = Field(default=1000.0, description="Maximum position size per market")
     MERID_REQUIRE_CONFIRMATION: bool = Field(default=True, description="Require confirmation for live orders")
+
+    # Kill-switch error-budget knobs (all configurable via env vars)
+    MERID_ERROR_THRESHOLD: int = Field(default=50, description="Max HIGH/CRITICAL errors per hour before halt")
+    MERID_DEDUP_WINDOW_SECS: float = Field(default=60.0, description="Seconds within which identical errors are deduplicated")
+    MERID_WARN_PCT: float = Field(default=0.70, description="Fraction of error_threshold that triggers Tier-1 WARNING")
+    MERID_LIMIT_PCT: float = Field(default=0.90, description="Fraction of error_threshold that triggers Tier-2 LIMITED (reduced size)")
     
     # Live mode unlock (must be explicitly set to enable live trading)
     MERID_LIVE_TRADING_UNLOCKED: bool = Field(default=False, description="Explicit unlock for live trading")

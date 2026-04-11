@@ -80,25 +80,39 @@ class ErrorSeverity(str, Enum):
 # Mapping of error_class → severity.  Classes at MEDIUM or LOW
 # are automatically treated as exempt (do not consume error budget).
 _ERROR_CLASS_SEVERITY: Dict[str, ErrorSeverity] = {
-    # CRITICAL — always counted, can trigger halt
+    # ── CRITICAL — always counted, can trigger halt ────────────────────
     "risk_violation": ErrorSeverity.CRITICAL,
     "position_accounting": ErrorSeverity.CRITICAL,
     "mispriced_contract": ErrorSeverity.CRITICAL,
-    # HIGH — counted toward error budget
+    "auth_error": ErrorSeverity.CRITICAL,          # broken API credentials; can't trade safely
+    # ── HIGH — counted toward error budget ────────────────────────────
     "generic": ErrorSeverity.HIGH,
-    "order_rejected": ErrorSeverity.HIGH,
+    "order_rejected": ErrorSeverity.HIGH,          # exchange-rejected order (non-market-closed)
     "api_error": ErrorSeverity.HIGH,
-    # MEDIUM — transient, NOT counted
+    "insufficient_funds": ErrorSeverity.HIGH,       # real funds issue
+    "validation_error": ErrorSeverity.HIGH,         # malformed order (our bug or bad params)
+    # ── MEDIUM — transient, NOT counted ───────────────────────────────
     "rate_limit": ErrorSeverity.MEDIUM,
     "stale_cache": ErrorSeverity.MEDIUM,
     "feed_timeout": ErrorSeverity.MEDIUM,
     "consensus_timeout": ErrorSeverity.MEDIUM,
     "spot_stale": ErrorSeverity.MEDIUM,
-    # LOW — operational noise, NOT counted
+    "market_closed": ErrorSeverity.MEDIUM,          # market not accepting orders right now
+    "stale_snapshot": ErrorSeverity.MEDIUM,         # snapshot age guard (not permanent staleness)
+    "exchange_error": ErrorSeverity.MEDIUM,         # transient 5xx from exchange
+    "network_timeout": ErrorSeverity.MEDIUM,        # transient connection/read timeout
+    "connection_error": ErrorSeverity.MEDIUM,       # transient TCP-level connectivity
+    "order_group_not_found": ErrorSeverity.MEDIUM,  # lifecycle race (group expired before cancel)
+    # ── LOW — operational noise, NOT counted ──────────────────────────
     "min_notional": ErrorSeverity.LOW,
     "ws_reconnect": ErrorSeverity.LOW,
     "loop_lag": ErrorSeverity.LOW,
     "gate_blocked": ErrorSeverity.LOW,
+    "no_open_orders": ErrorSeverity.LOW,            # no orders to cancel (normal state)
+    "no_position": ErrorSeverity.LOW,              # no position found (normal state)
+    "order_group_triggered": ErrorSeverity.LOW,     # group lifecycle: already triggered/resolved
+    "paper_session_error": ErrorSeverity.LOW,       # paper-mode session bookkeeping
+    "dry_run": ErrorSeverity.LOW,                   # diagnostic / dry-run mode signal
 }
 
 
@@ -182,20 +196,31 @@ class RiskController:
     # WS reconnects) must not exhaust the budget before a human can investigate.
     error_threshold: int = 50
     # Error classes that are downgraded to warnings and do NOT count toward the
-    # error budget.  One misconfigured asset/TF producing repeated identical
-    # min_notional failures must not instantly trip the breaker.
+    # error budget.  This set is the *explicit* allow-list; additionally, any
+    # class whose severity is MEDIUM or LOW in _ERROR_CLASS_SEVERITY is also
+    # exempt automatically (see record_error()).
+    #
     # "gate_blocked" covers order failures that occur because the kill switch
     # (or execution gate) is *already* engaged.  Counting these would create a
-    # self-amplifying feedback loop: kill switch fires → orders fail → failures
-    # are counted as new errors → kill switch re-fires → repeat.
-    # "rate_limit" / "stale_cache" / "feed_timeout" / "consensus_timeout" /
-    # "spot_stale" are transient, non-dangerous conditions that should never
-    # exhaust the error budget.
+    # self-amplifying feedback loop.
+    #
+    # "market_closed", "stale_snapshot", "exchange_error", "network_timeout",
+    # "connection_error", "order_group_not_found" are transient, non-dangerous
+    # conditions that resolve on their own and must never exhaust the error budget.
+    #
+    # "no_open_orders", "no_position", "order_group_triggered",
+    # "paper_session_error", "dry_run" are pure operational noise.
     error_exempt_classes: Set[str] = field(
         default_factory=lambda: {
             "min_notional", "ws_reconnect", "loop_lag", "gate_blocked",
             "rate_limit", "stale_cache", "feed_timeout", "consensus_timeout",
             "spot_stale",
+            # Transient exchange / network conditions
+            "market_closed", "stale_snapshot", "exchange_error",
+            "network_timeout", "connection_error", "order_group_not_found",
+            # Operational noise
+            "no_open_orders", "no_position", "order_group_triggered",
+            "paper_session_error", "dry_run",
         }
     )
     # ---- Deduplication -------------------------------------------------------
@@ -261,15 +286,36 @@ class RiskController:
         self._load_from_settings()
     
     def _load_from_settings(self):
-        """Load limits from settings module if not explicitly set."""
-        # Only load from settings if using defaults
-        if self.daily_loss_limit == 500.0 and self.max_position_value == 10000.0:
-            try:
-                from merid.settings import settings
+        """Load limits from settings module if not explicitly set.
+
+        The following environment variables override the dataclass defaults,
+        **only when the dataclass field is still at its hardcoded default**:
+        - MERID_MAX_DAILY_LOSS_USD        → daily_loss_limit   (default 500.0)
+        - MERID_MAX_POSITION_SIZE_USD     → max_position_value (default 10000.0)
+        - MERID_ERROR_THRESHOLD           → error_threshold    (default 50)
+        - MERID_DEDUP_WINDOW_SECS         → dedup_window_secs  (default 60.0)
+        - MERID_WARN_PCT                  → warn_pct           (default 0.70)
+        - MERID_LIMIT_PCT                 → limit_pct          (default 0.90)
+
+        Callers that pass explicit values to the constructor are not affected.
+        """
+        try:
+            from merid.settings import settings
+            # Only override when still at the dataclass default — prevents test
+            # fixtures (and explicit constructor args) from being overwritten.
+            if self.daily_loss_limit == 500.0 and self.max_position_value == 10000.0:
                 self.daily_loss_limit = settings.MERID_MAX_DAILY_LOSS_USD
                 self.max_position_value = settings.MERID_MAX_POSITION_SIZE_USD * 10
-            except (ImportError, AttributeError):
-                pass
+            if self.error_threshold == 50 and hasattr(settings, "MERID_ERROR_THRESHOLD"):
+                self.error_threshold = settings.MERID_ERROR_THRESHOLD
+            if self.dedup_window_secs == 60.0 and hasattr(settings, "MERID_DEDUP_WINDOW_SECS"):
+                self.dedup_window_secs = settings.MERID_DEDUP_WINDOW_SECS
+            if self.warn_pct == 0.70 and hasattr(settings, "MERID_WARN_PCT"):
+                self.warn_pct = settings.MERID_WARN_PCT
+            if self.limit_pct == 0.90 and hasattr(settings, "MERID_LIMIT_PCT"):
+                self.limit_pct = settings.MERID_LIMIT_PCT
+        except (ImportError, AttributeError):
+            pass
     
     @staticmethod
     def _today() -> str:
@@ -525,17 +571,24 @@ class RiskController:
         Provides a snapshot of:
         - Current error count vs threshold (budget usage percentage)
         - Class distribution within the sliding window
+        - Per-severity count breakdown (critical, high, medium, low)
         - Dedup-suppressed counts (errors that fired but were deduplicated)
         - Exempt class list
         - Current tier and breach info
         """
         threshold = max(self.error_threshold, 1)
+        # Build per-severity breakdown from class counts
+        severity_counts: Dict[str, int] = {s.value: 0 for s in ErrorSeverity}
+        for cls, cnt in self._error_class_counts.items():
+            sev = classify_error_severity(cls)
+            severity_counts[sev.value] += cnt
         return {
             "error_count": self._error_count,
             "error_threshold": self.error_threshold,
             "budget_used_pct": round(self._error_count / threshold * 100, 1),
             "budget_remaining": max(0, self.error_threshold - self._error_count),
             "error_class_counts": dict(self._error_class_counts),
+            "severity_counts": severity_counts,
             "dedup_suppressed_counts": dict(self._dedup_suppressed_counts),
             "exempt_classes": sorted(self.error_exempt_classes),
             "tier": self.get_state().value,
