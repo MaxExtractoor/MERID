@@ -333,3 +333,162 @@ class TestErrorBudgetMetrics:
 
         metrics = c.get_error_budget_metrics()
         assert metrics["dedup_suppressed_counts"].get("generic", 0) == 4
+
+
+# ── New error classes added in hardening pass ─────────────────────────
+
+
+class TestNewErrorClassSeverities:
+    """New error classes introduced in the hardening pass have correct severities."""
+
+    def test_auth_error_is_critical(self):
+        assert classify_error_severity("auth_error") == ErrorSeverity.CRITICAL
+
+    def test_insufficient_funds_is_high(self):
+        assert classify_error_severity("insufficient_funds") == ErrorSeverity.HIGH
+
+    def test_validation_error_is_high(self):
+        assert classify_error_severity("validation_error") == ErrorSeverity.HIGH
+
+    def test_market_closed_is_medium(self):
+        assert classify_error_severity("market_closed") == ErrorSeverity.MEDIUM
+
+    def test_stale_snapshot_is_medium(self):
+        assert classify_error_severity("stale_snapshot") == ErrorSeverity.MEDIUM
+
+    def test_exchange_error_is_medium(self):
+        assert classify_error_severity("exchange_error") == ErrorSeverity.MEDIUM
+
+    def test_network_timeout_is_medium(self):
+        assert classify_error_severity("network_timeout") == ErrorSeverity.MEDIUM
+
+    def test_connection_error_is_medium(self):
+        assert classify_error_severity("connection_error") == ErrorSeverity.MEDIUM
+
+    def test_order_group_not_found_is_medium(self):
+        assert classify_error_severity("order_group_not_found") == ErrorSeverity.MEDIUM
+
+    def test_no_open_orders_is_low(self):
+        assert classify_error_severity("no_open_orders") == ErrorSeverity.LOW
+
+    def test_no_position_is_low(self):
+        assert classify_error_severity("no_position") == ErrorSeverity.LOW
+
+    def test_order_group_triggered_is_low(self):
+        assert classify_error_severity("order_group_triggered") == ErrorSeverity.LOW
+
+    def test_paper_session_error_is_low(self):
+        assert classify_error_severity("paper_session_error") == ErrorSeverity.LOW
+
+    def test_dry_run_is_low(self):
+        assert classify_error_severity("dry_run") == ErrorSeverity.LOW
+
+
+# ── New exempt classes don't count toward error budget ────────────────
+
+
+class TestNewExemptClassesDoNotHalt:
+    """New MEDIUM/LOW classes added in the hardening pass must not exhaust budget."""
+
+    NEW_EXEMPT_CLASSES = [
+        "market_closed",
+        "stale_snapshot",
+        "exchange_error",
+        "network_timeout",
+        "connection_error",
+        "order_group_not_found",
+        "no_open_orders",
+        "no_position",
+        "order_group_triggered",
+        "paper_session_error",
+        "dry_run",
+    ]
+
+    @pytest.fixture
+    def controller(self):
+        return RiskController(
+            daily_loss_limit=1000.0,
+            max_position_value=10000.0,
+            error_threshold=5,
+            dedup_window_secs=0,
+        )
+
+    @pytest.mark.parametrize("error_class", NEW_EXEMPT_CLASSES)
+    def test_100x_new_exempt_never_halts(self, controller, error_class):
+        """100 of any new exempt error class must not halt trading."""
+        for _ in range(100):
+            controller.record_error(error_class=error_class)
+
+        assert controller.can_trade() is True, (
+            f"Trading was halted after 100x '{error_class}' errors — "
+            "this class must be exempt from the error budget."
+        )
+        assert controller.get_status()["error_count"] == 0
+
+    def test_auth_error_counts_toward_budget(self, controller):
+        """auth_error is CRITICAL and must count toward the budget."""
+        controller.record_error(error_class="auth_error")
+        assert controller.get_status()["error_count"] == 1
+
+    def test_validation_error_counts_toward_budget(self, controller):
+        """validation_error is HIGH and must count toward the budget."""
+        controller.record_error(error_class="validation_error")
+        assert controller.get_status()["error_count"] == 1
+
+    def test_insufficient_funds_counts_toward_budget(self, controller):
+        """insufficient_funds is HIGH and must count toward the budget."""
+        controller.record_error(error_class="insufficient_funds")
+        assert controller.get_status()["error_count"] == 1
+
+
+# ── severity_counts in error budget metrics ───────────────────────────
+
+
+class TestSeverityCountsInMetrics:
+    """get_error_budget_metrics() includes per-severity breakdown."""
+
+    @pytest.fixture
+    def controller(self):
+        return RiskController(
+            daily_loss_limit=1000.0,
+            max_position_value=10000.0,
+            error_threshold=50,
+            dedup_window_secs=0,
+        )
+
+    def test_severity_counts_field_present(self, controller):
+        """severity_counts is present in metrics."""
+        metrics = controller.get_error_budget_metrics()
+        assert "severity_counts" in metrics
+
+    def test_severity_counts_has_all_levels(self, controller):
+        """severity_counts has a key for each ErrorSeverity level."""
+        metrics = controller.get_error_budget_metrics()
+        sc = metrics["severity_counts"]
+        for level in ("critical", "high", "medium", "low"):
+            assert level in sc, f"Missing severity level: {level}"
+
+    def test_severity_counts_reflect_errors(self, controller):
+        """severity_counts correctly aggregates by severity level."""
+        controller.record_error(error_class="generic")           # HIGH
+        controller.record_error(error_class="order_rejected")    # HIGH
+        # auth_error is CRITICAL but also HIGH-budget — should be counted
+        controller.record_error(error_class="auth_error")        # CRITICAL
+
+        metrics = controller.get_error_budget_metrics()
+        sc = metrics["severity_counts"]
+        assert sc["high"] == 2
+        assert sc["critical"] == 1
+        assert sc["medium"] == 0
+        assert sc["low"] == 0
+
+    def test_exempt_errors_absent_from_severity_counts(self, controller):
+        """Exempt (not-counted) errors do not appear in severity_counts."""
+        for _ in range(10):
+            controller.record_error(error_class="market_closed")
+            controller.record_error(error_class="no_open_orders")
+
+        metrics = controller.get_error_budget_metrics()
+        sc = metrics["severity_counts"]
+        # All zeroes — exempt errors never enter _error_class_counts
+        assert all(v == 0 for v in sc.values())
