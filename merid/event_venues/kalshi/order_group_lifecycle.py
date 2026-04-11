@@ -285,7 +285,7 @@ class OrderGroupLifecycleManager:
             except Exception as e:
                 logger.error(f"Health check error: {e}")
 
-            await asyncio.sleep(self.config.health_check_interval_interval_seconds)
+            await asyncio.sleep(self.config.health_check_interval_seconds)
 
     async def _check_health(self) -> None:
         """Check order group health."""

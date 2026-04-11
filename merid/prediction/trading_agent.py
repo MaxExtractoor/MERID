@@ -2196,6 +2196,15 @@ class KalshiTradingAgent:
                     _err_class = "no_open_orders"
                 elif "no position" in _err_str or "position not found" in _err_str:
                     _err_class = "no_position"
+                # ── Exchange-level order rejections (HIGH) ────────────────
+                # post-only cross: order would cross the spread; counted so
+                # repeated price-logic bugs don't silently accumulate.
+                elif "post only cross" in _err_str or "post-only" in _err_str:
+                    _err_class = "order_rejected"
+                elif "invalid_order_size" in _err_str or "invalid order size" in _err_str:
+                    _err_class = "order_rejected"
+                elif "ticker_mismatch" in _err_str or "ticker mismatch" in _err_str:
+                    _err_class = "order_rejected"
                 _rc.record_error(error_class=_err_class)
             except Exception as _kse:
                 self.logger.debug("kill_switch record_error skipped: %s", _kse)
