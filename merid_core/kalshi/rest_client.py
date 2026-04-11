@@ -25,6 +25,36 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Kalshi-specific order error types
+# ---------------------------------------------------------------------------
+
+class KalshiAPIError(Exception):
+    """Base class for Kalshi API errors."""
+    def __init__(self, message: str, status_code: int, response_body: str = "") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
+
+
+class KalshiInvalidParametersError(KalshiAPIError):
+    """HTTP 400 invalid_parameters — payload rejected by Kalshi.
+
+    This is a *non-retryable* mapping bug: the order payload does not match
+    the contract's expected schema (price range, allowed sides, count limits,
+    etc.).  The caller must quarantine the ticker and must NOT retry.
+    """
+
+
+class KalshiTickerNotFoundError(KalshiAPIError):
+    """HTTP 404 — ticker does not exist in the current Kalshi catalog.
+
+    This is a *non-retryable* mapping bug: the selected ticker was not found
+    on the exchange.  The caller must quarantine the ticker and stop all
+    orders for it until the catalog is re-synced.
+    """
+
+
 class KalshiRestClient:
     """
     Kalshi REST API Client
@@ -169,18 +199,27 @@ class KalshiRestClient:
     ) -> Dict[str, Any]:
         """
         Make authenticated request to Kalshi API with retry/backoff.
-        
+
         Retries on 429 (rate limit) and transient 5xx errors with
         exponential backoff + jitter. Respects Retry-After header.
-        
+
+        400 (invalid_parameters) and 404 (not found) are non-retryable
+        mapping bugs — raises KalshiInvalidParametersError or
+        KalshiTickerNotFoundError immediately without any retry.
+
         Args:
             method: HTTP method
             path: API path (e.g., "/portfolio/balance")
             json_data: Request body (for POST/PUT)
             params: Query parameters
-        
+
         Returns:
             Response JSON
+
+        Raises:
+            KalshiInvalidParametersError: on HTTP 400
+            KalshiTickerNotFoundError: on HTTP 404
+            requests.exceptions.HTTPError: on other non-retryable HTTP errors
         """
         import random
 
@@ -201,6 +240,33 @@ class KalshiRestClient:
                     params=params,
                     timeout=10
                 )
+
+                # Non-retryable client errors — raise specific types immediately.
+                if response.status_code == 400:
+                    body = response.text
+                    logger.error(
+                        "Kalshi 400 invalid_parameters on %s %s — payload rejected "
+                        "(non-retryable mapping bug). body=%s",
+                        method, path, body[:500],
+                    )
+                    raise KalshiInvalidParametersError(
+                        f"Kalshi 400 invalid_parameters: {method} {path}",
+                        status_code=400,
+                        response_body=body,
+                    )
+
+                if response.status_code == 404:
+                    body = response.text
+                    logger.error(
+                        "Kalshi 404 not found on %s %s — ticker absent from catalog "
+                        "(non-retryable mapping bug). body=%s",
+                        method, path, body[:500],
+                    )
+                    raise KalshiTickerNotFoundError(
+                        f"Kalshi 404 not found: {method} {path}",
+                        status_code=404,
+                        response_body=body,
+                    )
 
                 if response.status_code not in self.RETRYABLE_STATUS_CODES:
                     response.raise_for_status()
@@ -224,11 +290,14 @@ class KalshiRestClient:
                 wait = delay + jitter
 
                 logger.warning(
-                    f"Kalshi API {response.status_code} on {method} {path} "
-                    f"(attempt {attempt + 1}/{self.MAX_RETRIES + 1}), "
-                    f"retrying in {wait:.1f}s"
+                    "Kalshi API %d on %s %s (attempt %d/%d), retrying in %.1fs",
+                    response.status_code, method, path,
+                    attempt + 1, self.MAX_RETRIES + 1, wait,
                 )
                 time.sleep(wait)
+
+            except (KalshiInvalidParametersError, KalshiTickerNotFoundError):
+                raise  # never retry non-retryable mapping bugs
 
             except requests.exceptions.HTTPError as e:
                 last_exc = e
@@ -237,15 +306,15 @@ class KalshiRestClient:
                     jitter = random.uniform(0, delay * 0.25)
                     wait = min(delay + jitter, self.RETRY_MAX_DELAY)
                     logger.warning(
-                        f"Kalshi API HTTP error {e.response.status_code} on {method} {path} "
-                        f"(attempt {attempt + 1}/{self.MAX_RETRIES + 1}), "
-                        f"retrying in {wait:.1f}s"
+                        "Kalshi API HTTP error %d on %s %s (attempt %d/%d), retrying in %.1fs",
+                        e.response.status_code, method, path,
+                        attempt + 1, self.MAX_RETRIES + 1, wait,
                     )
                     time.sleep(wait)
                     continue
-                logger.error(f"HTTP error: {e}")
+                logger.error("HTTP error: %s", e)
                 if e.response is not None:
-                    logger.error(f"Response: {e.response.text}")
+                    logger.error("Response: %s", e.response.text)
                 raise
             except requests.exceptions.RequestException as e:
                 last_exc = e
@@ -254,13 +323,12 @@ class KalshiRestClient:
                     jitter = random.uniform(0, delay * 0.25)
                     wait = min(delay + jitter, self.RETRY_MAX_DELAY)
                     logger.warning(
-                        f"Kalshi API request error on {method} {path} "
-                        f"(attempt {attempt + 1}/{self.MAX_RETRIES + 1}): {e}, "
-                        f"retrying in {wait:.1f}s"
+                        "Kalshi API request error on %s %s (attempt %d/%d): %s, retrying in %.1fs",
+                        method, path, attempt + 1, self.MAX_RETRIES + 1, e, wait,
                     )
                     time.sleep(wait)
                     continue
-                logger.error(f"Request error: {e}")
+                logger.error("Request error: %s", e)
                 raise
 
         # Should not reach here, but safety net

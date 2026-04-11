@@ -123,7 +123,7 @@ class TestPagination:
         responses = [
             MagicMock(
                 status_code=200,
-                json=AsyncMock(return_value={
+                json=MagicMock(return_value={
                     "markets": [{"ticker": f"M{i}", "title": f"Market {i}"} for i in range(5)],
                     "cursor": "cursor_1"
                 }),
@@ -132,7 +132,7 @@ class TestPagination:
             ),
             MagicMock(
                 status_code=200,
-                json=AsyncMock(return_value={
+                json=MagicMock(return_value={
                     "markets": [{"ticker": f"M{i+5}", "title": f"Market {i+5}"} for i in range(5)],
                     "cursor": None  # End of pagination
                 }),
@@ -156,7 +156,7 @@ class TestPagination:
         responses = [
             MagicMock(
                 status_code=200,
-                json=AsyncMock(return_value={
+                json=MagicMock(return_value={
                     "market_positions": [
                         {"ticker": "A", "side": "yes", "count": 10, "avg_price": 50}
                     ],
@@ -170,7 +170,7 @@ class TestPagination:
             ),
             MagicMock(
                 status_code=200,
-                json=AsyncMock(return_value={
+                json=MagicMock(return_value={
                     "market_positions": [],
                     "event_positions": [],
                     "cursor": None
@@ -196,7 +196,7 @@ class TestFilters:
         """Test event_ticker filter is passed correctly."""
         response = MagicMock(
             status_code=200,
-            json=AsyncMock(return_value={"markets": [], "cursor": None}),
+            json=MagicMock(return_value={"markets": [], "cursor": None}),
             headers={},
             text="",
         )
@@ -214,7 +214,7 @@ class TestFilters:
         """Test position filtering by nonzero flag."""
         response = MagicMock(
             status_code=200,
-            json=AsyncMock(return_value={
+            json=MagicMock(return_value={
                 "market_positions": [{"ticker": "A", "side": "yes", "count": 10}],
                 "event_positions": []
             }),
@@ -240,7 +240,7 @@ class TestRiskCalculations:
         """Test VaR calculation with mock positions."""
         response = MagicMock(
             status_code=200,
-            json=AsyncMock(return_value={
+            json=MagicMock(return_value={
                 "market_positions": [],
                 "event_positions": [
                     {"event_ticker": "EVT-1", "event_exposure": 1000},
@@ -265,7 +265,7 @@ class TestRiskCalculations:
         """Test portfolio risk aggregation."""
         response = MagicMock(
             status_code=200,
-            json=AsyncMock(return_value={
+            json=MagicMock(return_value={
                 "market_positions": [],
                 "event_positions": [
                     {
@@ -298,7 +298,7 @@ class TestOrderOperations:
         """Verify cancel uses POST /portfolio/orders/{id}/cancel."""
         response = MagicMock(
             status_code=200,
-            json=AsyncMock(return_value={"order_id": "123", "status": "canceled"}),
+            json=MagicMock(return_value={"order_id": "123", "status": "canceled"}),
             headers={},
             text="",
         )
@@ -308,7 +308,7 @@ class TestOrderOperations:
         
         assert result.success is True
         call_args = client._http_client.request.call_args
-        assert call_args.args[0] == "POST"
+        assert call_args.kwargs["method"] == "POST"
         assert "/portfolio/orders/order_123/cancel" in call_args.kwargs["url"]
 
     @pytest.mark.asyncio
@@ -316,7 +316,7 @@ class TestOrderOperations:
         """Verify batch cancel enforces 20 order limit."""
         response = MagicMock(
             status_code=200,
-            json=AsyncMock(return_value={"canceled": ["o1", "o2"], "failed": [], "not_found": []}),
+            json=MagicMock(return_value={"canceled": ["o1", "o2"], "failed": [], "not_found": []}),
             headers={},
             text="",
         )
@@ -336,7 +336,7 @@ class TestOrderOperations:
         """Verify price is converted from dollars to cents."""
         response = MagicMock(
             status_code=201,
-            json=AsyncMock(return_value={
+            json=MagicMock(return_value={
                 "order": {
                     "order_id": "o1",
                     "ticker": "MKT",
@@ -373,7 +373,7 @@ class TestSubaccountOperations:
         # Mock empty responses for most subaccounts
         empty_response = MagicMock(
             status_code=200,
-            json=AsyncMock(return_value={"market_positions": [], "event_positions": []}),
+            json=MagicMock(return_value={"market_positions": [], "event_positions": []}),
             headers={},
             text="",
         )
@@ -381,7 +381,7 @@ class TestSubaccountOperations:
         # One subaccount with positions
         populated_response = MagicMock(
             status_code=200,
-            json=AsyncMock(return_value={
+            json=MagicMock(return_value={
                 "market_positions": [{"ticker": "A", "total_cost": 500}],
                 "event_positions": [{"event_ticker": "EVT", "event_exposure": 1000}]
             }),
