@@ -207,6 +207,18 @@ class LivePriceFeed:
             a: None for a in KALSHI_ASSETS
         }
 
+        # ── CoinGecko 429 back-off state ─────────────────────────────────────
+        # Monotonic time when CoinGecko will be usable again after a 429.
+        # 0.0 means no active cooldown.
+        self._coingecko_cooldown_until: float = 0.0
+        # Number of consecutive 429s received (resets on success).
+        self._coingecko_429_count: int = 0
+        # Base backoff for CoinGecko 429 (seconds); doubles with each failure up to max.
+        _CG_BACKOFF_BASE_S: float = 60.0
+        _CG_BACKOFF_MAX_S: float = 600.0
+        self._cg_backoff_base = _CG_BACKOFF_BASE_S
+        self._cg_backoff_max = _CG_BACKOFF_MAX_S
+
         # Initialize exchanges
         self._initialize_exchanges()
 
@@ -710,12 +722,22 @@ class LivePriceFeed:
         (BTC, ETH, SOL, XRP, DOGE) using bare asset keys.  Prices are fetched
         in USD ("vs_currency": "usd") and stored under bare keys so that
         get_spot_usd() finds them directly.
+
+        On HTTP 429 the method applies exponential back-off and logs a single
+        aggregated warning rather than spamming one line per tick.  The 429
+        counter is not forwarded to the global trading-halt error budget.
         """
         # Support both bare keys ("BTC") and legacy /USDT keys ("BTC/USDT")
         asset_key = symbol.split("/")[0] if "/" in symbol else symbol.upper()
         asset_id = _COINGECKO_IDS.get(asset_key)
         if not asset_id:
             return False
+
+        # Respect active cooldown — skip without logging (already logged on 429)
+        now_mono = time.monotonic()
+        if now_mono < self._coingecko_cooldown_until:
+            return False
+
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
@@ -727,17 +749,29 @@ class LivePriceFeed:
                     },
                 )
                 if response.status_code == 429:
+                    self._coingecko_429_count += 1
+                    backoff = min(
+                        self._cg_backoff_base * (2 ** (self._coingecko_429_count - 1)),
+                        self._cg_backoff_max,
+                    )
+                    self._coingecko_cooldown_until = time.monotonic() + backoff
                     logger.warning(
-                        "[PMSPOT_COINGECKO_429] asset=%s — CoinGecko rate-limited "
-                        "(HTTP 429); skipping fallback this cycle",
-                        symbol,
+                        "[PMSPOT_COINGECKO_429] CoinGecko secondary feed rate-limited "
+                        "(count=%d); cooling down %.0fs. "
+                        "This does NOT affect the trading-halt error budget.",
+                        self._coingecko_429_count, backoff,
                     )
                     return False
                 response.raise_for_status()
                 data = response.json()
         except Exception as exc:
-            logger.error(f"CoinGecko fallback failed for {symbol}: {exc}")
+            logger.error("CoinGecko fallback failed for %s: %s", symbol, exc)
             return False
+
+        # Successful call — reset 429 counter and cooldown
+        self._coingecko_429_count = 0
+        self._coingecko_cooldown_until = 0.0
+
         if not data:
             return False
         market = data[0]

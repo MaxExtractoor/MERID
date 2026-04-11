@@ -21,6 +21,8 @@ class OrderStatus(Enum):
     SUBMITTED = "submitted"
     REJECTED_RISK = "rejected_risk"
     REJECTED_RATE_LIMIT = "rejected_rate_limit"
+    REJECTED_TICKER_QUARANTINED = "rejected_ticker_quarantined"
+    REJECTED_TICKER_NOT_IN_CATALOG = "rejected_ticker_not_in_catalog"
     ERROR = "error"
 
 
@@ -233,11 +235,12 @@ class ExecutionPipeline:
         self.intents_executed = 0
         self.intents_rejected_risk = 0
         self.intents_rejected_rate = 0
+        self.intents_rejected_catalog = 0
         
-        logger.info("ExecutionPipeline initialized")
-        logger.info(f"  Live trading: {enable_live_trading}")
-        logger.info(f"  Read rate limit: {read_rate_limit}/s")
-        logger.info(f"  Write rate limit: {write_rate_limit}/s")
+        logger.info(
+            "ExecutionPipeline initialized — live=%s read_rate=%d/s write_rate=%d/s",
+            enable_live_trading, read_rate_limit, write_rate_limit,
+        )
     
     async def start(self) -> None:
         """Start consuming OrderIntents"""
@@ -263,9 +266,37 @@ class ExecutionPipeline:
             
             # Idempotency: skip if already processed
             if intent.client_tag in self.processed_intents:
-                logger.debug(f"Skipping duplicate intent: {intent.client_tag}")
+                logger.debug("Skipping duplicate intent: %s", intent.client_tag)
                 return
-            
+
+            # Pre-flight: validate ticker against catalog (quarantine + catalog check)
+            catalog = self._get_catalog()
+            catalog_valid, catalog_reason = catalog.validate_ticker(intent.market_ticker)
+            if not catalog_valid:
+                if catalog_reason.startswith("ticker_quarantined"):
+                    # Already quarantined — suppress per-cycle noise (logged once on quarantine)
+                    logger.debug(
+                        "Skipping quarantined ticker %s (%s)",
+                        intent.market_ticker, catalog_reason,
+                    )
+                    await self._publish_outcome(
+                        intent,
+                        OrderStatus.REJECTED_TICKER_QUARANTINED,
+                        error=catalog_reason,
+                    )
+                else:
+                    logger.warning(
+                        "Ticker %s failed catalog validation: %s — skipping order",
+                        intent.market_ticker, catalog_reason,
+                    )
+                    await self._publish_outcome(
+                        intent,
+                        OrderStatus.REJECTED_TICKER_NOT_IN_CATALOG,
+                        error=catalog_reason,
+                    )
+                self.intents_rejected_catalog = getattr(self, "intents_rejected_catalog", 0) + 1
+                return
+
             # Risk checks
             risk_decision = self._check_risk(intent)
             
@@ -278,7 +309,7 @@ class ExecutionPipeline:
             if not self.write_limiter.consume():
                 wait_time = self.write_limiter.wait_time()
                 logger.warning(
-                    f"Rate limited: {intent.client_tag}, wait {wait_time:.2f}s"
+                    "Rate limited: %s, wait %.2fs", intent.client_tag, wait_time
                 )
                 
                 await self._publish_outcome(
@@ -294,8 +325,9 @@ class ExecutionPipeline:
                 await self._execute_order(intent)
             else:
                 logger.info(
-                    f"[PAPER] Order: {intent.side} {intent.qty}x {intent.market_ticker} "
-                    f"@ {intent.price:.3f} (agent={intent.agent_id})"
+                    "[PAPER] Order: %s %dx %s @ %.3f (agent=%s)",
+                    intent.side, intent.qty, intent.market_ticker,
+                    intent.price, intent.agent_id,
                 )
                 
                 await self._publish_outcome(
@@ -309,7 +341,7 @@ class ExecutionPipeline:
             self.intents_executed += 1
             
         except Exception as e:
-            logger.error(f"Error handling intent: {e}", exc_info=True)
+            logger.error("Error handling intent: %s", e, exc_info=True)
     
     def _parse_intent(self, data: Dict[str, Any]) -> OrderIntent:
         """Parse OrderIntent from event data"""
@@ -423,6 +455,11 @@ class ExecutionPipeline:
             return "climate"
         return None  # unknown — defaults to allowed
 
+    def _get_catalog(self):
+        """Return the module-level TickerCatalog singleton."""
+        from merid_core.kalshi.ticker_catalog import get_ticker_catalog
+        return get_ticker_catalog()
+
     def _check_daily_reset(self) -> None:
         """Reset daily PnL if new day"""
         now = time.time()
@@ -434,19 +471,24 @@ class ExecutionPipeline:
             logger.info("Daily PnL reset")
     
     async def _execute_order(self, intent: OrderIntent) -> None:
-        """
-        Execute order via Kalshi REST API
-        
-        Uses the Kalshi REST client to place actual orders
+        """Execute order via Kalshi REST API.
+
+        Handles 400 (invalid_parameters) and 404 (not found) as non-retryable
+        mapping bugs: quarantines the ticker and logs exactly once.
         """
         logger.info(
-            f"[LIVE] Executing: {intent.side} {intent.qty}x {intent.market_ticker} "
-            f"@ {intent.price:.3f} (client_tag={intent.client_tag})"
+            "[LIVE] Executing: %s %dx %s @ %.3f (client_tag=%s)",
+            intent.side, intent.qty, intent.market_ticker,
+            intent.price, intent.client_tag,
         )
         
         try:
             # Import REST client (lazy to avoid circular imports)
-            from merid_core.kalshi.rest_client import get_rest_client
+            from merid_core.kalshi.rest_client import (
+                get_rest_client,
+                KalshiInvalidParametersError,
+                KalshiTickerNotFoundError,
+            )
             import os
             
             # Get REST client (will reuse singleton)
@@ -460,6 +502,11 @@ class ExecutionPipeline:
             # intent.side format: "buy_yes", "sell_yes", "buy_no", "sell_no"
             # Kalshi API: action = "buy"/"sell", side = "yes"/"no"
             parts = intent.side.split("_")
+            if len(parts) != 2 or parts[0] not in ("buy", "sell") or parts[1] not in ("yes", "no"):
+                raise ValueError(
+                    f"Invalid intent.side format '{intent.side}'; "
+                    "expected one of: buy_yes, sell_yes, buy_no, sell_no"
+                )
             action = parts[0]    # "buy" or "sell"
             side = parts[1]      # "yes" or "no"
             
@@ -467,6 +514,13 @@ class ExecutionPipeline:
             price_cents = int(intent.price * 100)
             price_cents = max(1, min(99, price_cents))
             
+            # Validate count is a positive integer
+            if not isinstance(intent.qty, int) or intent.qty < 1:
+                raise ValueError(
+                    f"Invalid order quantity {intent.qty!r} for ticker {intent.market_ticker}; "
+                    "must be a positive integer"
+                )
+
             # Create order via REST API
             response = client.create_order(
                 ticker=intent.market_ticker,
@@ -492,10 +546,36 @@ class ExecutionPipeline:
             delta = intent.qty if "buy" in intent.side else -intent.qty
             self.positions[intent.market_ticker] = self.positions.get(intent.market_ticker, 0) + delta
             
-            logger.info(f"Order submitted successfully: {order_id}")
+            logger.info("Order submitted successfully: %s", order_id)
+
+        except KalshiInvalidParametersError as e:
+            # 400 invalid_parameters — quarantine ticker, do not retry
+            self._get_catalog().quarantine(
+                intent.market_ticker,
+                "400_invalid_parameters",
+                error_body=e.response_body,
+            )
+            await self._publish_outcome(
+                intent,
+                OrderStatus.ERROR,
+                error=f"400_invalid_parameters:{intent.market_ticker}",
+            )
+
+        except KalshiTickerNotFoundError as e:
+            # 404 not found — quarantine ticker, do not retry
+            self._get_catalog().quarantine(
+                intent.market_ticker,
+                "404_not_found",
+                error_body=e.response_body,
+            )
+            await self._publish_outcome(
+                intent,
+                OrderStatus.ERROR,
+                error=f"404_not_found:{intent.market_ticker}",
+            )
             
         except Exception as e:
-            logger.error(f"Failed to execute order: {e}", exc_info=True)
+            logger.error("Failed to execute order for %s: %s", intent.market_ticker, e, exc_info=True)
             await self._publish_outcome(
                 intent,
                 OrderStatus.ERROR,
@@ -513,7 +593,7 @@ class ExecutionPipeline:
         })
         
         logger.info(
-            f"Rejected intent {intent.client_tag}: {risk_decision['reason']}"
+            "Rejected intent %s: %s", intent.client_tag, risk_decision["reason"]
         )
     
     async def _publish_outcome(
@@ -534,13 +614,16 @@ class ExecutionPipeline:
     
     def stats(self) -> Dict[str, Any]:
         """Get pipeline statistics"""
+        catalog_summary = self._get_catalog().summary()
         return {
             "intents_received": self.intents_received,
             "intents_executed": self.intents_executed,
             "intents_rejected_risk": self.intents_rejected_risk,
             "intents_rejected_rate": self.intents_rejected_rate,
+            "intents_rejected_catalog": getattr(self, "intents_rejected_catalog", 0),
             "positions": dict(self.positions),
             "daily_pnl": self.daily_pnl,
             "read_tokens": self.read_limiter.tokens,
-            "write_tokens": self.write_limiter.tokens
+            "write_tokens": self.write_limiter.tokens,
+            "catalog": catalog_summary,
         }
