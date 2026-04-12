@@ -53,7 +53,7 @@ const tradingCore = [
 ];
 
 const swarmIntelligence = [
-  { name: 'Agent Grid', href: 'kalshi-grid', icon: LayoutGrid, color: 'text-orange-500' },
+  { name: 'Kalshi Grid', href: 'kalshi-grid', icon: LayoutGrid, color: 'text-orange-500' },
   { name: 'Swarm Matrix', href: 'swarm-consensus', icon: Grid, color: 'text-cyan-500' },
   { name: 'Performance', href: 'kalshi-performance', icon: Award, color: 'text-emerald-400' },
   { name: 'Calibration', href: 'calibration-dashboard', icon: Target, color: 'text-rose-400' },
