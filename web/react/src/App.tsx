@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { logUxEvent } from "./utils/uxTelemetry";
 import { useFillToast } from "./hooks/useFillToast";
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
@@ -43,6 +44,17 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('merid-sidebar-collapsed') === 'true'; } catch { return false; }
   });
+
+  // ─── View-impression telemetry ──────────────────────────────────────────────
+  // Fires logUxEvent('view_impression', view) on every route navigation.
+  // Events buffer in memory and flush to localStorage every 10 s
+  // (key: 'merid:ux_telemetry' — see utils/uxTelemetry.ts).
+  //
+  // This is the authoritative source of truth for the zombie-feature review
+  // process.  After ≥ 14 days of data, run getUxStats() to classify low-usage
+  // views.  See docs/UX_Zombie_Features.md for the full decision playbook.
+  // ────────────────────────────────────────────────────────────────────────────
+  useEffect(() => { logUxEvent('view_impression', view); }, [view]);
 
   const toggleSidebarCollapse = () => {
     setSidebarCollapsed(prev => {

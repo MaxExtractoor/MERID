@@ -32,6 +32,16 @@ interface SidebarProps {
 }
 
 /* ── Sidebar groups aligned to the Kalshi swarm workflow ──────────── */
+// Zombie-feature deprecation pattern (see docs/UX_Zombie_Features.md):
+//   When telemetry shows a view at < 1% of sessions for 14 days and it is NOT
+//   in the always-exempt list below, a future PR may:
+//     • Remove it from the array (hides navigation surface, keeps code).
+//     • After 14 quiet days, delete the view file and its route in App.tsx.
+//
+// Always-exempt views — NEVER remove without explicit human sign-off:
+//   operator, kill-switch, risk-control, lane-control, position-sizing,
+//   promotion-status  (execution / safety-critical paths).
+// ────────────────────────────────────────────────────────────────────────────
 
 const tradingCore = [
   { name: 'Overview', href: 'overview', icon: LayoutDashboard, color: 'text-blue-400' },
