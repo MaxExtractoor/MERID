@@ -4,6 +4,21 @@ import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
 
+// ─── CommandItem.legacy flag ────────────────────────────────────────────────
+// The `legacy?: boolean` field on CommandItem drives zombie-feature deprecation.
+// Usage pattern (see docs/UX_Zombie_Features.md):
+//   1. After telemetry shows a view at < 1% of sessions for 14 days, open an
+//      issue tagged `status:zombie-candidate`.
+//   2. Mark the corresponding COMMANDS entry `legacy: true` here.
+//   3. The `kalshiOnly` feature flag (line ~78) already filters out `legacy`
+//      items when kalshiOnly mode is active — that is the kill-switch for
+//      hiding a view without deleting code.
+//   4. Monitor for 14 more quiet days, then delete the view and entry.
+//
+// NEVER mark these views legacy without explicit human sign-off:
+//   operator, kill-switch, risk-control, lane-control, position-sizing,
+//   promotion-status  — they are always exempt even at 0% session share.
+// ────────────────────────────────────────────────────────────────────────────
 interface CommandItem {
   id: View;
   label: string;
