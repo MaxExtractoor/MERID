@@ -20,7 +20,7 @@ import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiInsightsPanel from '../components/KalshiInsightsPanel';
 import PublishPipelinePanel from '../components/PublishPipelinePanel';
-import type { SizingMetrics, KalshiRiskSummary } from '../types/kalshi';
+import type { SizingMetrics, KalshiRiskSummary, GridAgent } from '../types/kalshi';
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -33,23 +33,6 @@ interface HealthStatus {
   rate_limits: { orders_this_minute: number; max_per_minute: number; orders_this_hour: number; max_per_hour: number };
 }
 
-
-interface GridAgent {
-  name: string;
-  asset: string;
-  timeframe: string;
-  status: string;
-  cycles: number;
-  pf: number;
-  sharpe: number;
-  sortino: number;
-  calmar: number;
-  size_factor: number;
-  win_rate?: number;
-  errors?: number;
-  fills?: number;
-  active_tickers?: string[];
-}
 
 interface GridStatus {
   agent_count: number;
@@ -536,10 +519,12 @@ const KalshiVolDashboardView: React.FC = () => {
                         </div>
                       </td>
                       <td className={`p-2 text-right font-mono ${
-                        (a.win_rate ?? 0) >= 55 ? 'text-green-400' :
-                        (a.win_rate ?? 0) >= 45 ? 'text-yellow-400' : 'text-red-400'
+                        a.win_rate != null
+                          ? (a.win_rate >= 55 ? 'text-green-400' :
+                             a.win_rate >= 45 ? 'text-yellow-400' : 'text-red-400')
+                          : 'text-gray-600'
                       }`}>
-                        {((a.win_rate ?? 0)).toFixed(0)}%
+                        {a.win_rate != null ? `${a.win_rate.toFixed(0)}%` : 'n/a'}
                       </td>
                       <td className={`p-2 text-right font-mono ${
                         (a.pf ?? 0) >= 1.5 ? 'text-green-400' :
@@ -548,7 +533,9 @@ const KalshiVolDashboardView: React.FC = () => {
                         {(a.pf ?? 0).toFixed(2)}
                       </td>
                       <td className="p-2 text-right font-mono text-blue-400">{(a.sharpe ?? 0).toFixed(2)}</td>
-                      <td className="p-2 text-right font-mono text-gray-300">{a.fills ?? a.cycles ?? 0}</td>
+                      <td className="p-2 text-right font-mono text-gray-300">
+                        {a.fills != null ? a.fills : (a.cycles != null ? `${a.cycles}c` : 'n/a')}
+                      </td>
                       <td className="p-2 pr-4 text-right font-mono text-white">{(a.size_factor ?? 0).toFixed(2)}×</td>
                     </tr>
                   ))

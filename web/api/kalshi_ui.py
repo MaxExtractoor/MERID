@@ -99,17 +99,22 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
             ]
             
             # Get recent fills — aggregate from agent grid
+            _total_fill_count = 0
             try:
                 from merid.prediction.agent_grid import get_agent_grid as _get_ag
                 _grid = _get_ag()
                 _all_fills: list = []
                 for _agent in _grid.agents:
                     _all_fills.extend(_agent.get_fills(50))
+                    _total_fill_count += len(_agent.state.fill_log)
                 _all_fills.sort(key=lambda x: x.get("ts", ""), reverse=True)
                 summary["fills"] = _all_fills[:50]
+                # Store the true total count (not truncated by the 50-per-agent limit)
+                summary["_total_fill_count"] = _total_fill_count
             except Exception as _e:
                 logger.debug("fills aggregation skipped: %s", _e)
                 summary["fills"] = []
+                summary["_total_fill_count"] = 0
 
             # Get balance from Kalshi REST client
             try:
@@ -169,6 +174,21 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
             except Exception as _e:
                 logger.debug("kalshi_risk summary skipped: %s", _e)
 
+            # daily_trades: prefer performance tracker total_closes (authoritative),
+            # fall back to total fill count across agents (not truncated), then fills array length
+            _daily_trades = 0
+            try:
+                from merid.prediction.agent_performance_tracker import get_agent_performance_tracker as _get_apt
+                _apt = _get_apt()
+                _sys_summary = _apt.get_system_summary()
+                _daily_trades = _sys_summary.get("total_closes", 0)
+            except Exception as _tc:
+                logger.debug("perf tracker daily_trades skipped: %s", _tc)
+            if _daily_trades == 0:
+                _daily_trades = summary.get("_total_fill_count", len(summary["fills"]))
+                if _daily_trades > 0:
+                    logger.debug("daily_trades: using fill count %d (perf tracker unavailable)", _daily_trades)
+
             summary["risk"] = {
                 "kill_switch_active": _ks_active,
                 "kill_switch_reason": _ks_reason,
@@ -177,7 +197,7 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
                 "total_unrealized_pnl_usd": total_unrealized_pnl,
                 "daily_realized_pnl_usd": _daily_pnl,
                 "daily_total_pnl_usd": _daily_pnl + total_unrealized_pnl,
-                "daily_trades": len(summary["fills"]),
+                "daily_trades": _daily_trades,
                 "daily_fees_usd": 0.0,
                 "drawdown_pct": _drawdown,
                 "category_notional": {},

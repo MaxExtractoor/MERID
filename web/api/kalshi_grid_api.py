@@ -43,14 +43,15 @@ def _get_grid():
 # ── Read endpoints ─────────────────────────────────────────────────────
 
 def _normalize_agent(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize a raw agent summary to the shape KalshiVolDashboardView expects.
+    """Normalize a raw agent summary to the shape GridAgent interface expects.
 
     Raw shape (from KalshiTradingAgent.summary / AgentState.to_dict):
-      name, enabled, running, cycles_run, orders_placed, active_tickers, ...
-      config.assets, config.timeframes
+      name, enabled, running, cycles_run, orders_placed, active_tickers,
+      fill_count, errors (list), config.assets, config.timeframes
 
-    Target shape (GridAgent interface in KalshiVolDashboardView):
-      name, asset, timeframe, status, cycles, pf, sharpe, sortino, calmar, size_factor
+    Target shape (GridAgent interface in types/kalshi.ts):
+      name, asset, timeframe, status, cycles, pf, sharpe, sortino, calmar,
+      size_factor, win_rate, fills, errors, active_tickers
     """
     cfg = raw.get("config", {})
     assets: List = cfg.get("assets", [])
@@ -75,8 +76,40 @@ def _normalize_agent(raw: Dict[str, Any]) -> Dict[str, Any]:
     calmar = float(perf.get("calmar_ratio", perf.get("calmar", 0.0)))
     size_factor = float(perf.get("size_factor", raw.get("size_factor", 1.0)))
 
+    # Win rate — from performance tracker (fraction 0-1) → percentage for UI
+    win_rate_raw = perf.get("win_rate", None)
+    if win_rate_raw is not None:
+        win_rate: float | None = round(float(win_rate_raw) * 100, 1)
+    else:
+        win_rate = None
+
+    # Fills — prefer perf tracker total_fills, fall back to AgentState.fill_count
+    fills_raw = perf.get("total_fills", raw.get("fill_count", None))
+    fills: int | None = int(fills_raw) if fills_raw is not None else None
+
+    # Errors — count from AgentState.errors list length
+    errors_raw = raw.get("errors", None)
+    if isinstance(errors_raw, list):
+        errors: int | None = len(errors_raw)
+    elif isinstance(errors_raw, (int, float)):
+        errors = int(errors_raw)
+    else:
+        errors = None
+
+    # Active tickers — from AgentState
+    active_tickers = raw.get("active_tickers", None)
+    if active_tickers is not None and not isinstance(active_tickers, list):
+        active_tickers = None
+
+    # Log warning for missing metrics so operators can trace data gaps
+    agent_name = raw.get("name", "unknown")
+    if win_rate is None:
+        logger.debug("_normalize_agent(%s): win_rate not available from performance tracker", agent_name)
+    if fills is None:
+        logger.debug("_normalize_agent(%s): fills count not available", agent_name)
+
     return {
-        "name": raw.get("name", ""),
+        "name": agent_name,
         "asset": asset,
         "timeframe": timeframe,
         "status": status,
@@ -86,6 +119,10 @@ def _normalize_agent(raw: Dict[str, Any]) -> Dict[str, Any]:
         "sortino": round(sortino, 3),
         "calmar": round(calmar, 3),
         "size_factor": round(size_factor, 3),
+        "win_rate": win_rate,
+        "fills": fills,
+        "errors": errors,
+        "active_tickers": active_tickers,
     }
 
 

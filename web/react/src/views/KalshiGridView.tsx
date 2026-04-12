@@ -156,8 +156,15 @@ interface FillEntry {
    ═══════════════════════════════════════════════════════ */
 
 const ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
-const TIMEFRAMES = [...TRADABLE_TIMEFRAMES];
-const TF_LABELS = TRADABLE_TIMEFRAME_LABELS;
+// Fallback timeframe list when matrix data is unavailable.
+// Includes '15m', '1h', 'daily', 'pre-market' as the core set.
+const TIMEFRAMES = ['15m', '1h', 'daily', 'pre-market', ...TRADABLE_TIMEFRAMES].filter(
+  (v, i, arr) => arr.indexOf(v) === i  // deduplicate
+);
+const TF_LABELS: Record<string, string> = {
+  ...TRADABLE_TIMEFRAME_LABELS,
+  'pre-market': 'Pre-Mkt',
+};
 
 /* ═══════════════════════════════════════════════════════
    Component
