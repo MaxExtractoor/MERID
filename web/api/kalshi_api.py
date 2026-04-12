@@ -2724,23 +2724,32 @@ async def sizing_metrics_endpoint() -> Dict[str, Any]:
     sortino = risk_summary.get("sortino_ratio", 0)
     calmar = risk_summary.get("calmar_ratio", 0)
 
-    # Supplement with live performance tracker when risk summary has no data
-    if win_rate == 0 or pf == 0:
-        try:
-            from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
-            tracker = get_agent_performance_tracker()
-            sys = tracker.get_system_summary()
-            if win_rate == 0:
-                win_rate = round(sys.get("system_win_rate", 0) * 100, 1)
-            if trades_today == 0:
-                trades_today = sys.get("total_closes", 0)
-            top = tracker.get_top_agents(metric="sharpe_ratio", limit=1)
-            if top and sharpe == 0:
-                sharpe = top[0].get("sharpe_ratio", 0)
-            if top and pf == 0:
-                pf = top[0].get("avg_realized_edge", 0) / max(top[0].get("avg_predicted_edge", 1), 0.001)
-        except Exception as _e:
-            logger.debug("perf tracker risk supplement skipped: %s", _e)
+    # Continuous trader snapshot — authoritative source for trade counts
+    ct_snapshot: Dict[str, Any] = {}
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        sys = tracker.get_system_summary()
+        ct_snapshot = {
+            "total_trades": sys.get("total_closes", 0),
+            "total_fills": sys.get("total_fills", 0),
+            "system_win_rate": round(sys.get("system_win_rate", 0) * 100, 1),
+            "agent_count": sys.get("total_agents", 0),
+        }
+        # Prefer CT trade count over risk summary (which may be truncated)
+        ct_trades = sys.get("total_closes", 0)
+        if ct_trades > 0 and (trades_today == 0 or ct_trades > trades_today):
+            logger.debug("sizing_metrics: using CT trade count %d (risk_summary had %d)", ct_trades, trades_today)
+            trades_today = ct_trades
+        if win_rate == 0:
+            win_rate = round(sys.get("system_win_rate", 0) * 100, 1)
+        top = tracker.get_top_agents(metric="sharpe_ratio", limit=1)
+        if top and sharpe == 0:
+            sharpe = top[0].get("sharpe_ratio", 0)
+        if top and pf == 0:
+            pf = top[0].get("avg_realized_edge", 0) / max(top[0].get("avg_predicted_edge", 1), 0.001)
+    except Exception as _e:
+        logger.warning("sizing_metrics: performance tracker unavailable, using risk summary fallback: %s", _e)
 
     return {
         "kelly_fraction": round(kelly_f, 4),
@@ -2760,6 +2769,7 @@ async def sizing_metrics_endpoint() -> Dict[str, Any]:
         "win_rate_pct": round(win_rate, 1),
         "profit_factor": round(pf, 2),
         "trades_today": trades_today,
+        "continuous_trader": ct_snapshot,
     }
 
 
