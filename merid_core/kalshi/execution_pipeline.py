@@ -1,6 +1,11 @@
 """
 Kalshi Execution Pipeline
 Consumes OrderIntents from NATS, applies risk checks, and executes via Kalshi REST API
+
+.. deprecated::
+    This module is part of the LEGACY ``merid_core.kalshi`` package.
+    The canonical production path is ``merid.event_venues.kalshi``.
+    This file is retained only for the demo runner (scripts/kalshi_demo_runner.py).
 """
 
 import asyncio

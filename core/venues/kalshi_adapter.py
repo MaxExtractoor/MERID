@@ -8,7 +8,7 @@ Env vars:
     KALSHI_PRIVATE_KEY_PATH — path to RSA private key PEM file
     KALSHI_PRIVATE_KEY_PEM  — raw PEM string (alternative to path)
     KALSHI_API_HOST         — base URL (default: elections trade-api v2)
-    KALSHI_USE_DEMO         — set to "true" for demo environment
+    KALSHI_USE_DEMO         — set to "true" for demo environment (default: "false" — production)
 """
 
 from typing import Dict, Any, List, Optional
@@ -50,7 +50,7 @@ class KalshiAdapter(VenueAdapter):
         config = KalshiConfig(
             api_key=api_key_id or os.getenv("KALSHI_API_KEY_ID"),
             private_key_path=private_key_path or os.getenv("KALSHI_PRIVATE_KEY_PATH"),
-            use_demo=use_demo or os.getenv("KALSHI_USE_DEMO", "true").lower() == "true",
+            use_demo=use_demo or os.getenv("KALSHI_USE_DEMO", "false").lower() == "true",
         )
         # Use prime tier for higher rate limits if possible, default to basic
         self._client = KalshiVenueClient(config, rate_tier=os.getenv("KALSHI_RATE_TIER", "basic"))

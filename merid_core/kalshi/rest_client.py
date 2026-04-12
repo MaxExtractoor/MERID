@@ -1,6 +1,11 @@
 """
 Kalshi REST API Client
 Handles authentication and HTTP requests to Kalshi REST API
+
+.. deprecated::
+    This module is part of the LEGACY ``merid_core.kalshi`` package.
+    The canonical production REST client is ``merid.event_venues.kalshi.client``.
+    This file is retained only for legacy tooling.
 """
 
 import time
