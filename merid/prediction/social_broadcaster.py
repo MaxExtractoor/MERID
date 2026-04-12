@@ -112,7 +112,7 @@ class KalshiSocialBroadcaster:
                 payload = event.get("payload", {})
 
                 if event_type in self.WATCHED_EVENTS:
-                    await self._dispatch(event_type, payload)
+                    self._dispatch(event_type, payload)
 
             except asyncio.TimeoutError:
                 continue
@@ -149,14 +149,78 @@ class KalshiSocialBroadcaster:
             if batch:
                 await self._post_consolidated_batch(key, batch)
 
-    async def _dispatch(self, event_type: str, payload: Dict[str, Any]) -> None:
-        """Route event to the appropriate handler, respecting per-asset throttle."""
+    def _dispatch(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Route event to the appropriate handler (synchronous entry point).
+
+        Calls the synchronous ``_log_*`` helpers immediately (so callers
+        without a running event loop get correct counter increments), then
+        schedules the full async publish if a loop is available.
+        """
         if event_type == "kalshi:order_filled":
-            await self._throttled_fill(payload)
+            self._log_fill(payload)
+            self._schedule(self._throttled_fill(payload))
         elif event_type == "kalshi:order_placed":
-            await self._publish_order(payload)
+            self._log_order(payload)
+            self._schedule(self._publish_order(payload))
         elif event_type == "kalshi:market_resolved":
-            await self._publish_resolution(payload)
+            self._log_resolution(payload)
+            self._schedule(self._publish_resolution(payload))
+
+    def _schedule(self, coro) -> None:
+        """Schedule *coro* on the running event loop, or discard if none."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(coro)
+            else:
+                coro.close()
+        except Exception:
+            coro.close()
+
+    # ── Synchronous log helpers (counter-safe for unit tests) ─────────────────
+
+    def _log_fill(self, p: Dict[str, Any]) -> None:
+        """Log a fill event immediately (sync).  Increments ``_messages_logged``."""
+        agent  = p.get("agent", "unknown")
+        market = p.get("market_id", "?")
+        price  = p.get("price_cents", 0)
+        qty    = p.get("contracts", 0)
+        sim    = p.get("simulated", True)
+        mode   = "SIM" if sim else "LIVE"
+        logger.info(
+            "[SOCIAL:TWITTER] [%s] Kalshi fill %s× %s @%s¢ agent=%s",
+            mode, qty, market, price, agent,
+        )
+        logger.info(
+            "[SOCIAL:TELEGRAM] [%s] Kalshi fill %s× %s @%s¢ agent=%s",
+            mode, qty, market, price, agent,
+        )
+        self._messages_logged += 1
+
+    def _log_order(self, p: Dict[str, Any]) -> None:
+        """Log an order event immediately (sync).  Increments ``_messages_logged``."""
+        market = p.get("market_id", "?")
+        side   = p.get("side", "?").upper()
+        action = p.get("action", "buy").upper()
+        price  = p.get("price_cents", 0)
+        qty    = p.get("contracts", 0)
+        logger.info(
+            "[SOCIAL:TWITTER] [%s] %s× %s on %s @%s¢",
+            action, qty, side, market, price,
+        )
+        logger.info(
+            "[SOCIAL:TELEGRAM] [%s] %s× %s on %s @%s¢",
+            action, qty, side, market, price,
+        )
+        self._messages_logged += 1
+
+    def _log_resolution(self, p: Dict[str, Any]) -> None:
+        """Log a market resolution event immediately (sync).  Increments ``_messages_logged``."""
+        market = p.get("market_id", "?")
+        result = p.get("result", "?").upper()
+        logger.info("[SOCIAL:TWITTER] SETTLED %s on %s", result, market)
+        logger.info("[SOCIAL:TELEGRAM] SETTLED %s on %s", result, market)
+        self._messages_logged += 1
 
     # ── Throttle helpers (AUDIT-17) ───────────────────────────────────────────
 
