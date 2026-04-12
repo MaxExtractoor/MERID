@@ -348,7 +348,15 @@ class KalshiTradingAgent:
                     self._log_cycle_summary(cycle_stats)
                     return
         except Exception as _gate_exc:
-            self.logger.debug("pm_spot_hard_gate check failed (non-fatal): %s", _gate_exc)
+            # FIX-GATE-FAILCLOSED: Previously this was non-fatal (debug log + continue),
+            # allowing trades on potentially unhealthy spot feeds.  Now fail-closed:
+            # block the cycle when the gate check itself errors.
+            self.logger.warning(
+                "[AGENT-VETO] pm_spot_hard_gate check error (fail-closed): %s", _gate_exc,
+            )
+            cycle_stats["veto_spot_gate_error"] = 1
+            self._log_cycle_summary(cycle_stats)
+            return
 
         # 2. Resolve markets
         await self._resolve_markets()
@@ -1429,6 +1437,19 @@ class KalshiTradingAgent:
         side, action = action_map[signal.action]
         size = check.adjusted_size if check.adjusted_size else signal.contracts
         price_cents = signal.limit_price_cents or 0
+
+        # FIX-ZERO-SIZE: Guard against zero-contract orders reaching the router.
+        # Risk downsizing (check.adjusted_size) can legitimately reduce to 0;
+        # log clearly and skip rather than submitting a no-op order.
+        if size <= 0:
+            self.logger.info(
+                "[PM_SIZE] agent=%s market=%s SKIP: size=%d after risk adjustment "
+                "(adjusted_size=%s signal_contracts=%s)",
+                self.config.name, market.market_id, size,
+                check.adjusted_size, signal.contracts,
+            )
+            return False
+
         # Initialize force_paper before the [PM_SIZE] log (line ~1400 uses it).
         # The BTC-15m risk block below may override this; non-BTC-15m stays False.
         force_paper: bool = False

@@ -290,6 +290,9 @@ class RiskController:
         self._tier_entry_time: Dict[str, float] = {}
         # Set of metrics currently in breach (for multi-signal check).
         self._active_breaches: Set[str] = set()
+        # FIX-DEMOTE-PERSIST: Track when each breach metric last cleared so
+        # demotion respects persistence (avoids rapid tier oscillation).
+        self._breach_cleared_at: Dict[str, float] = {}
 
         # ---- Error deduplication tracking ------------------------------------
         # Maps error_class → timestamp of last counted occurrence.
@@ -377,6 +380,8 @@ class RiskController:
             # Condition cleared — remove from active breaches and tier entry time
             if metric in self._active_breaches:
                 logger.info("[risk] Tier breach cleared for metric=%s (fraction=%.2f)", metric, fraction)
+                # FIX-DEMOTE-PERSIST: Record the time this breach was first cleared.
+                self._breach_cleared_at[metric] = now_mono
             self._active_breaches.discard(metric)
             self._tier_entry_time.pop(metric, None)
             return
@@ -457,15 +462,29 @@ class RiskController:
                 pass
 
     def _maybe_demote_tier(self) -> None:
-        """Downgrade tier state if all active breaches have cleared."""
+        """Downgrade tier state if all active breaches have cleared.
+
+        FIX-DEMOTE-PERSIST: Require breaches to be clear for at least
+        ``warn_persistence_secs`` before demoting, preventing rapid
+        tier oscillation from noisy metrics.
+        """
         if self._global_kill:
             return  # TRIGGERED is reset only via reset()
 
+        now_mono = time.monotonic()
+        persistence = self.warn_persistence_secs
+
         # Recompute overall tier from still-active breaches
         if not self._active_breaches:
+            # All breaches cleared — check persistence before demoting
             if self._tier_state in (KillSwitchState.WARNING, KillSwitchState.LIMITED):
-                logger.info("[risk] All breach metrics cleared — reverting to ACTIVE")
+                if self._breach_cleared_at:
+                    last_clear = max(self._breach_cleared_at.values())
+                    if (now_mono - last_clear) < persistence:
+                        return  # Hold current tier until persistence window passes
+                logger.info("[risk] All breach metrics cleared (persistence satisfied) — reverting to ACTIVE")
                 self._tier_state = KillSwitchState.ACTIVE
+                self._breach_cleared_at.clear()
             return
 
         # Downgrade only if highest breach metric no longer warrants current tier
@@ -726,6 +745,7 @@ class RiskController:
         self._tier_state = KillSwitchState.ACTIVE
         self._tier_entry_time.clear()
         self._active_breaches.clear()
+        self._breach_cleared_at.clear()
 
         event = KillSwitchEvent(
             timestamp=self._now(),
@@ -982,6 +1002,7 @@ class RiskController:
             self._tier_state = KillSwitchState.ACTIVE
         self._tier_entry_time.clear()
         self._active_breaches.clear()
+        self._breach_cleared_at.clear()
         logger.info("[risk] Daily counters reset (kill-switch state preserved)")
 
     def on_kill(self, callback: Callable[[KillSwitchEvent], None]) -> None:
