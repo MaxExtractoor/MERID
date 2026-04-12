@@ -533,13 +533,23 @@ class KalshiRiskManager:
         """
         now = datetime.now(timezone.utc)
 
-        # 0. Phantom kill switch (F2) — block new orders when phantom positions detected
+        # 0. Phantom kill switch (F2) — block new orders when phantom positions detected.
+        # FAIL-CLOSED: any unexpected error during this check is treated as a block signal;
+        # only ImportError (optional reconciliation module absent) is allowed to pass through.
         try:
             from merid.reconciliation import is_phantom_kill_switch_active
             if is_phantom_kill_switch_active():
                 return False, "phantom_kill_switch:phantom positions detected — orders halted pending reconciliation"
-        except Exception:
-            pass  # Don't block if reconciliation module unavailable
+        except ImportError:
+            pass  # Reconciliation module is optional; absence is safe
+        except Exception as _pks_exc:
+            # Fail-closed: unknown error in kill-switch check → block the order
+            logger.error(
+                "phantom_kill_switch:unavailable — unexpected error, blocking order as fail-safe. "
+                "ticker=%s error=%s",
+                ticker, _pks_exc,
+            )
+            return False, "phantom_kill_switch:unavailable"
 
         # 0b. Bankroll zero guard (E2) — block risk-increasing orders when equity ≤ 0
         if self._state.current_equity_usd <= 0 and self._state.peak_equity_usd > 0:

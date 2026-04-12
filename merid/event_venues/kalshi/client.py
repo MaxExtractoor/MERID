@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import time
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, TypeVar
@@ -1107,19 +1108,27 @@ class KalshiVenueClient(EventVenueClient):
             order_group_id: Optional order group ID for aggregate limits
             self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
         """
-        outcome = order.outcome_id or "yes"
+        # Fail-closed: outcome_id is required; defaulting to "yes" would silently misprice NO contracts.
+        if not order.outcome_id:
+            raise ValueError(
+                "Kalshi outcome_id is required for order placement. "
+                "Set outcome_id='yes' or outcome_id='no' explicitly on the VenueOrder."
+            )
+        outcome = order.outcome_id
         kalshi_order: Dict[str, Any] = {
             "ticker": order.market_id,
             "action": order.side,           # "buy" or "sell"
             "side": outcome,                # "yes" or "no"
             "count": int(order.size),
             "type": order.order_type,       # "limit" or "market"
-            "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
+            # Collision-resistant client_order_id; never use a bare timestamp
+            "client_order_id": order.client_order_id or f"merid_{uuid.uuid4().hex}",
         }
 
         if order.order_type == "limit" and order.price:
-            # Kalshi uses {side}_price: yes_price or no_price (cents, integer)
-            kalshi_order[f"{outcome}_price"] = int(order.price * 100)
+            # Kalshi uses {side}_price: yes_price or no_price (cents, integer).
+            # Use round() not int() to avoid truncation of 0.505 → 50¢ instead of 51¢.
+            kalshi_order[f"{outcome}_price"] = round(float(order.price) * 100)
 
         # Map MERID time_in_force to Kalshi (gtc, ioc, fok)
         tif_map = {"GTC": "gtc", "IOC": "ioc", "FOK": "fok"}
@@ -1294,7 +1303,8 @@ class KalshiVenueClient(EventVenueClient):
         body_orders = []
         for spec in order_specs:
             order = {
-                "client_order_id": spec.get("client_order_id", str(uuid.uuid4())),
+                # Collision-resistant merid-prefixed ID; callers may supply their own.
+                "client_order_id": spec.get("client_order_id", f"merid_{uuid.uuid4().hex}"),
                 "ticker": spec["ticker"],
                 "side": spec["side"],
                 "action": spec.get("action", "buy"),
