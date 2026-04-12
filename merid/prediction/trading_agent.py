@@ -2227,6 +2227,15 @@ class KalshiTradingAgent:
                     _err_class = "no_open_orders"
                 elif "no position" in _err_str or "position not found" in _err_str:
                     _err_class = "no_position"
+                # ── Duplicate / idempotency-key collisions (LOW) ──────────
+                # Kalshi returns a 400/422 when client_order_id collides.
+                # These are benign and must not exhaust the error budget.
+                elif (
+                    "duplicate" in _err_str
+                    or "client_order_id" in _err_str
+                    or "idempoten" in _err_str
+                ):
+                    _err_class = "duplicate_order_rejected"
                 # ── Exchange-level order rejections (HIGH) ────────────────
                 # post-only cross: order would cross the spread; counted so
                 # repeated price-logic bugs don't silently accumulate.

@@ -145,6 +145,12 @@ def _classify_error_str(result_error) -> str:
         _err_class = "no_open_orders"
     elif "no position" in _err_str or "position not found" in _err_str:
         _err_class = "no_position"
+    elif (
+        "duplicate" in _err_str
+        or "client_order_id" in _err_str
+        or "idempoten" in _err_str
+    ):
+        _err_class = "duplicate_order_rejected"
     elif "post only cross" in _err_str or "post-only" in _err_str:
         _err_class = "order_rejected"
     elif "invalid_order_size" in _err_str or "invalid order size" in _err_str:
@@ -262,6 +268,11 @@ class TestErrorStringClassification:
         # no_position — LOW
         ("no position for market", "no_position"),
         ("position not found", "no_position"),
+        # duplicate_order_rejected — LOW (idempotency-key collision, benign)
+        ("duplicate client_order_id detected", "duplicate_order_rejected"),
+        ("Order rejected: duplicate", "duplicate_order_rejected"),
+        ("client_order_id already exists", "duplicate_order_rejected"),
+        ("idempotency key collision", "duplicate_order_rejected"),
         # order_rejected — HIGH (exchange-level rejections from place/amend)
         ("post only cross — order would match", "order_rejected"),
         ("post-only order rejected at this price", "order_rejected"),
@@ -308,6 +319,10 @@ class TestErrorStringClassification:
             "invalid order size: 0",
             "ticker_mismatch in routing",
             "ticker mismatch detected",
+            # duplicate_order_rejected patterns
+            "duplicate client_order_id detected",
+            "client_order_id already exists",
+            "idempotency key collision",
         ]
         for msg in test_messages:
             cls = _classify_error_str(msg)
@@ -343,6 +358,10 @@ class TestBenignClassificationDoesNotHalt:
         "depth below minimum required: only 2 contracts",
         "risk_check: position limit exceeded",
         "risk_manager_unavailable: timeout",
+        # duplicate_order_rejected (benign after FIX-DEDUP)
+        "duplicate client_order_id detected",
+        "Order rejected: duplicate",
+        "client_order_id already exists",
     ]
 
     @pytest.fixture
