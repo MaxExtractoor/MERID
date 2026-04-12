@@ -502,20 +502,45 @@ class TradingModeRequest(BaseModel):
 
 @router.post("/trading-mode")
 async def set_trading_mode(request: TradingModeRequest, _auth: None = Depends(_require_operator_auth)) -> Dict[str, Any]:
-    """Switch the system trading mode (paper/live/sim)."""
+    """Switch the system trading mode (paper/live/sim).
+
+    LIVE mode is gated: MERID_PM_LIVE_ENABLED must be True before any live switch
+    is accepted.  Attempting to enter LIVE without the flag returns HTTP 403.
+    """
     allowed = {"paper", "live", "sim", "hybrid", "autonomous"}
     if request.mode not in allowed:
         raise HTTPException(status_code=400, detail=f"Invalid mode '{request.mode}'. Allowed: {allowed}")
     try:
         from merid.settings import settings
+        # Gate: LIVE mode requires MERID_PM_LIVE_ENABLED to be explicitly set True.
+        if request.mode == "live" and not settings.MERID_PM_LIVE_ENABLED:
+            logger.warning(
+                "trading_mode_live_rejected: MERID_PM_LIVE_ENABLED is False — "
+                "refusing to switch to LIVE. reason=%s",
+                request.reason,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "LIVE mode requires MERID_PM_LIVE_ENABLED=true. "
+                    "Set the env var and restart before attempting a live mode switch."
+                ),
+            )
+        old_mode = settings.MERID_PM_TRADING_MODE
         settings.MERID_PM_TRADING_MODE = request.mode
-        logger.warning(f"Trading mode switched to '{request.mode}' — reason: {request.reason}")
+        # Log mode transitions at WARNING so they appear in all log levels
+        logger.warning(
+            "trading_mode_changed: %s → %s reason=%s live_enabled=%s",
+            old_mode, request.mode, request.reason, settings.MERID_PM_LIVE_ENABLED,
+        )
         return {
             "status": "ok",
             "mode": request.mode,
             "reason": request.reason,
             "timestamp": time.time(),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to switch trading mode: {e}")
         raise HTTPException(status_code=500, detail=str(e))
