@@ -526,6 +526,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         if tif not in {"GTC", "IOC", "FOK"}:
             tif = "GTC"
 
+        # FIX-DEDUP: Use intent.trace_id (UUID4) for collision-resistant client_order_id.
+        # The previous ms-timestamp format caused Kalshi to reject valid orders as
+        # duplicates when multiple orders dispatched within the same millisecond.
+        _coid = f"merid_{intent.trace_id}"
+
         order = VenueOrder(
             market_id=intent.ticker,
             side=intent.action,
@@ -534,7 +539,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             order_type="limit" if intent.order_type == "limit" else "market",
             outcome_id=intent.side,
             time_in_force=tif,
-            client_order_id=f"merid_{intent.source}_{int(time.time() * 1000)}",
+            client_order_id=_coid,
         )
 
         # Log order intent before submission

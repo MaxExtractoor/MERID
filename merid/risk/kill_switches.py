@@ -113,6 +113,7 @@ _ERROR_CLASS_SEVERITY: Dict[str, ErrorSeverity] = {
     "order_group_triggered": ErrorSeverity.LOW,     # group lifecycle: already triggered/resolved
     "paper_session_error": ErrorSeverity.LOW,       # paper-mode session bookkeeping
     "dry_run": ErrorSeverity.LOW,                   # diagnostic / dry-run mode signal
+    "duplicate_order_rejected": ErrorSeverity.LOW,  # idempotency-key collision (benign, fixed upstream)
     # ── LOW — risk-manager market-condition gates (expected during normal operation) ──
     "low_edge": ErrorSeverity.LOW,                  # post-fee edge below configured minimum
     "spread_too_wide": ErrorSeverity.LOW,           # orderbook spread exceeds configured max
@@ -232,6 +233,8 @@ class RiskController:
             # Operational noise
             "no_open_orders", "no_position", "order_group_triggered",
             "paper_session_error", "dry_run",
+            # Idempotency-key collision (benign after FIX-DEDUP)
+            "duplicate_order_rejected",
             # Risk-manager market-condition gates (expected, non-critical)
             "low_edge", "spread_too_wide", "depth_insufficient",
             "risk_check_blocked",
