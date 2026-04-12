@@ -47,10 +47,13 @@ export interface KalshiFill {
 export interface KalshiRiskSummary {
   kill_switch_active: boolean;
   kill_switch_reason: string | null;
+  /** Canonical daily PnL in USD — single source of truth for daily PnL display. */
   daily_pnl_usd: number;
   total_notional_usd: number;
   total_unrealized_pnl_usd: number;
+  /** Realized PnL for the day (USD). Same source as daily_pnl_usd for consistency. */
   daily_realized_pnl_usd: number;
+  /** Total PnL = realized + unrealized (USD). */
   daily_total_pnl_usd: number;
   daily_trades: number;
   daily_fees_usd: number;
@@ -60,6 +63,20 @@ export interface KalshiRiskSummary {
   open_market_count: number;
   recent_breaches: Array<{ ts: string; check: string; reason: string }>;
   limits: Record<string, number>;
+  // ExecutionGateStrip alias fields (set by /api/v1/kalshi/risk endpoint)
+  daily_pnl?: number;
+  max_daily_loss?: number;
+  total_exposure?: number;
+  max_exposure?: number;
+  position_count?: number;
+  max_positions?: number;
+}
+
+export interface ContinuousTraderSnapshot {
+  total_trades: number;
+  total_fills: number;
+  system_win_rate: number;
+  agent_count: number;
 }
 
 export interface SizingMetrics {
@@ -80,6 +97,30 @@ export interface SizingMetrics {
   win_rate_pct: number;
   profit_factor: number;
   trades_today: number;
+  /** Continuous trader performance snapshot — authoritative source for trade counts. */
+  continuous_trader?: ContinuousTraderSnapshot;
+}
+
+/** Agent summary as returned by /api/v1/kalshi-grid/status agent_cards[]. */
+export interface GridAgent {
+  name: string;
+  asset: string;
+  timeframe: string;
+  status: string;
+  cycles: number;
+  pf: number;
+  sharpe: number;
+  sortino: number;
+  calmar: number;
+  size_factor: number;
+  /** Win rate as percentage (0–100). Null when perf tracker data is unavailable. */
+  win_rate: number | null;
+  /** Error count for this agent session. Null when unavailable. */
+  errors: number | null;
+  /** Total fills for this agent session. Null when unavailable. */
+  fills: number | null;
+  /** Tickers this agent is currently active on. */
+  active_tickers: string[] | null;
 }
 
 export interface MarketOutcome {
