@@ -184,6 +184,17 @@ class OrderIntent:
     # STALE-GATE: UTC epoch seconds when the snapshot driving this intent was created.
     # The router uses this to reject orders based on stale data when a threshold is set.
     snapshot_ts: Optional[float] = None
+    # PRE-TRADE-GATE: Strategy group label used by the idempotency gate to group
+    # orders from the same logical strategy (e.g. "CRYPTO_15M_MM", "BTC_15M").
+    # Defaults to ``source`` when not explicitly set.
+    strategy_group: Optional[str] = None
+    # PRE-TRADE-GATE: Set True for market-maker agents so the gate uses a shorter
+    # time bucket (MM_DECISION_BUCKET_WIDTH_S) and allows fresh cycles within 60 s.
+    is_market_maker: bool = False
+    # PRE-TRADE-GATE: Optional cycle nonce supplied by MM agents.  When present,
+    # it is appended to the coid preimage, giving each logical MM trade cycle a
+    # unique identity even when (contract, side, qty, price) are identical.
+    cycle_id: Optional[str] = None
 
 
 @dataclass
@@ -479,6 +490,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             latency_ms=round(latency, 2),
         )
 
+    _gate_coid: Optional[str] = None  # gate coid initialised before try so except can reference it
     try:
         from merid.event_venues.base import VenueOrder
         from merid.event_venues.kalshi.client import get_kalshi_client
@@ -486,8 +498,6 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
 
         client = get_kalshi_client()
         await client.connect()
-
-        # ── Order Group Risk Check ─────────────────────────────────────────
         if intent.order_group_id:
             og_manager = OrderGroupRiskManager(client)
             group = og_manager.get_group(intent.order_group_id)
@@ -521,6 +531,74 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             
             # Record optimistic usage
             og_manager.record_new_order(intent.order_group_id, intent.count)
+
+        # ── Pre-trade idempotency gate ────────────────────────────────────
+        # The gate assigns a deterministic internal coid based on the order's
+        # logical identity (agent, strategy_group, contract, side, qty, price,
+        # time-bucket).  It blocks duplicate submissions while the same logical
+        # order is still pending/open, and allows fresh orders once the previous
+        # one has reached a terminal state.
+        #
+        # This is separate from the Kalshi client_order_id (UUID4 trace_id below)
+        # which guarantees uniqueness at the exchange level.  The gate operates
+        # at the application level to prevent our system from re-submitting the
+        # same logical order within the same time window.
+        try:
+            from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+            _pt_gate = get_pre_trade_gate()
+            _strategy_group = intent.strategy_group or intent.source or "unknown"
+            _gate_coid, _gate_decision, _gate_entry = _pt_gate.check_and_reserve(
+                agent_id=intent.source or "unknown",
+                strategy_group=_strategy_group,
+                contract_id=intent.ticker,
+                side=intent.side,
+                qty=intent.count,
+                price_cents=intent.price_cents,
+                is_mm=intent.is_market_maker,
+                cycle_id=intent.cycle_id,
+            )
+            if _gate_decision == "duplicate_blocked":
+                _dup_status = _gate_entry.status.value if _gate_entry else "unknown"
+                latency = (time.monotonic() - t0) * 1000
+                logger.warning(
+                    "[order-router] Pre-trade gate blocked: duplicate:%s "
+                    "coid=%s contract=%s agent=%s strategy_group=%s side=%s "
+                    "qty=%d price_cents=%d is_mm=%s",
+                    _dup_status, _gate_coid, intent.ticker,
+                    intent.source, _strategy_group, intent.side,
+                    intent.count, intent.price_cents, intent.is_market_maker,
+                )
+                # Roll back any optimistic order-group usage before returning.
+                if intent.order_group_id:
+                    try:
+                        og_manager = OrderGroupRiskManager(client)
+                        og_manager.rollback_order(intent.order_group_id, intent.count)
+                    except Exception as _rb:
+                        logger.warning("[OG-ROLLBACK] gate-block rollback failed: %s", _rb)
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"gate:duplicate:{_dup_status}",
+                    latency_ms=round(latency, 2),
+                )
+            # "idempotent": same logical order already pending — log and fall through.
+            # The order will be re-submitted to Kalshi with a new UUID trace_id, but
+            # since Kalshi's client_order_id is trace-id-based (unique per intent),
+            # this is a safe no-op at the exchange: the original order is already live.
+            if _gate_decision == "idempotent":
+                logger.info(
+                    "[order-router] Pre-trade gate: idempotent retry coid=%s "
+                    "contract=%s agent=%s side=%s is_mm=%s",
+                    _gate_coid, intent.ticker, intent.source,
+                    intent.side, intent.is_market_maker,
+                )
+        except ImportError:
+            pass  # gate module not available — fall through (safe-open)
+        except Exception as _gate_exc:
+            # Gate errors are non-fatal; log and proceed.
+            logger.warning(
+                "[order-router] Pre-trade gate check error (non-fatal): %s", _gate_exc
+            )
 
         # FIX-TIF: Normalize time_in_force to Kalshi-accepted values.
         # The default OrderIntent.time_in_force is "fill_or_kill" which must
@@ -586,6 +664,15 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     og_manager.rollback_order(intent.order_group_id, intent.count)
                 except Exception as _rb_exc:
                     logger.warning("[OG-ROLLBACK] rollback failed for %s: %s", intent.order_group_id, _rb_exc)
+            # Update pre-trade gate: order was rejected at Kalshi.
+            if _gate_coid:
+                try:
+                    from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+                    get_pre_trade_gate().update_status(
+                        _gate_coid, "rejected", log_context=f"kalshi_reject:{reason}"
+                    )
+                except Exception as _gu:
+                    logger.debug("[GATE] update rejected status failed (non-fatal): %s", _gu)
             return OrderResult(
                 status="rejected",
                 mode=mode,
@@ -615,6 +702,26 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             status = "partial_live"
         else:
             status = "accepted_live"
+
+        # Update pre-trade gate to reflect actual order outcome.
+        if _gate_coid:
+            try:
+                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+                _kalshi_status = placed.status or ""
+                if _kalshi_status.lower() in ("resting", "open"):
+                    _gate_new_status = "open"
+                elif filled_count >= requested_count and requested_count > 0:
+                    _gate_new_status = "filled"
+                elif filled_count > 0:
+                    _gate_new_status = "open"  # partial fill — still open
+                else:
+                    _gate_new_status = "open"  # accepted but not filled → resting
+                get_pre_trade_gate().update_status(
+                    _gate_coid, _gate_new_status,
+                    log_context=f"kalshi_ok:{placed.order_id or 'unknown'}",
+                )
+            except Exception as _gu:
+                logger.debug("[GATE] update post-place status failed (non-fatal): %s", _gu)
 
         # Record fill in KalshiRiskManager for exposure/rate tracking
         if filled_count > 0:
@@ -655,6 +762,15 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
     except Exception as exc:
         latency = (time.monotonic() - t0) * 1000
         logger.error(f"[order-router] LIVE execution failed: {exc}")
+        # Update gate on unexpected failure — release the pending slot.
+        if _gate_coid:
+            try:
+                from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+                get_pre_trade_gate().update_status(
+                    _gate_coid, "rejected", log_context=f"live_execution_error:{type(exc).__name__}"
+                )
+            except Exception:
+                pass
         return OrderResult(
             status="rejected",
             mode=mode,

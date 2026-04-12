@@ -218,6 +218,9 @@ async def _kalshi_place_order(
     count: int = 1,
     agent_name: str = "",
     snapshot_ts: Optional[float] = None,
+    strategy_group: Optional[str] = None,
+    is_market_maker: bool = False,
+    cycle_id: Optional[str] = None,
 ) -> ToolResult:
     """Place a YES/NO order on Kalshi.
 
@@ -225,6 +228,12 @@ async def _kalshi_place_order(
         snapshot_ts: POSIX epoch seconds of the MarketSnapshot that drove
             this intent (PATCH-3).  Threaded into ``OrderIntent.snapshot_ts``
             so the router can enforce ``MERID_SNAPSHOT_STALENESS_SECONDS``.
+        strategy_group: Strategy group label for the pre-trade gate coid.
+            Defaults to *agent_name* when not explicitly supplied.
+        is_market_maker: Set True for market-maker agents so the pre-trade gate
+            uses a shorter time bucket (``MM_DECISION_BUCKET_WIDTH_S``).
+        cycle_id: Optional nonce appended to the gate coid preimage so each
+            logical MM trade cycle gets a distinct identity.
     """
     t0 = time.time()
 
@@ -410,7 +419,13 @@ async def _kalshi_place_order(
             action=action,   # "buy" or "sell"
             price_cents=price_cents,
             count=count,
+            source=agent_name or "unknown",
             snapshot_ts=snapshot_ts,  # PATCH-3: thread staleness gate
+            # PRE-TRADE-GATE: wire strategy_group, MM flag and cycle_id so the
+            # gate can distinguish fresh MM cycles from accidental duplicates.
+            strategy_group=strategy_group or agent_name or "unknown",
+            is_market_maker=is_market_maker,
+            cycle_id=cycle_id,
         )
 
         result = await route_order_async(intent)
