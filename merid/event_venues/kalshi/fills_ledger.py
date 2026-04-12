@@ -55,11 +55,20 @@ class Fill:
     # DATA-1: Flag indicating this fill_id was synthetically generated
     # rather than provided by Kalshi. Must be surfaced in UI and alerts.
     derived_id: bool = False
+    # FIX-FEE-PNL: Fee paid for this fill in cents (0 if unknown).
+    # When provided, realized_pnl() returns fee-adjusted results.
+    fee_cents: int = 0
 
     def pnl_contribution(self) -> float:
-        """Net dollar value of this fill (positive = proceeds, negative = cost)."""
+        """Net dollar value of this fill (positive = proceeds, negative = cost).
+
+        FIX-FEE-PNL: Now subtracts fee_cents from the contribution so that
+        reported PnL reflects actual money after exchange fees.
+        """
         value = self.count * self.price_cents / 100.0
-        return -value if self.action == "buy" else value
+        fee = self.fee_cents / 100.0
+        raw = -value if self.action == "buy" else value
+        return raw - fee
 
 
 class KalshiFillsLedger:
@@ -71,6 +80,7 @@ class KalshiFillsLedger:
     def __init__(self) -> None:
         self._fills: Dict[str, Fill] = {}
         self._lock = asyncio.Lock()
+        self._positions_cache: Optional[Dict[str, int]] = None
 
     # ── Write ─────────────────────────────────────────────────────────────
 
@@ -89,6 +99,7 @@ class KalshiFillsLedger:
         source: str = "unknown",
         raw_data: Optional[dict] = None,
         derived_id: bool = False,
+        fee_cents: int = 0,
     ) -> bool:
         """Insert or ignore a fill.
 
@@ -129,7 +140,10 @@ class KalshiFillsLedger:
                 source=source,
                 raw_data=raw_data,
                 derived_id=derived_id,
+                fee_cents=fee_cents,
             )
+            # Invalidate cached positions on new fill
+            self._positions_cache = None
             logger.info(
                 "fills_ledger: +fill fill_id=%s ticker=%s %s %s %d@%dc src=%s",
                 fill_id, ticker, action, side, count, price_cents, source,
@@ -140,6 +154,7 @@ class KalshiFillsLedger:
         """Remove all fills — for testing only."""
         async with self._lock:
             self._fills.clear()
+            self._positions_cache = None
 
     # ── Read ──────────────────────────────────────────────────────────────
 
@@ -161,15 +176,18 @@ class KalshiFillsLedger:
     def positions(self) -> Dict[str, int]:
         """Net position per ticker (positive = net YES, negative = net NO).
 
-        Computed from fills each time; use a cache if hot-path performance matters.
+        Cached and invalidated on upsert() for O(1) hot-path reads.
         """
+        if self._positions_cache is not None:
+            return dict(self._positions_cache)
         pos: Dict[str, int] = {}
         for fill in self._fills.values():
             delta = fill.count if fill.action == "buy" else -fill.count
             if fill.side == "no":
                 delta = -delta  # buying "no" is short the yes side
             pos[fill.ticker] = pos.get(fill.ticker, 0) + delta
-        return pos
+        self._positions_cache = pos
+        return dict(pos)
 
     def realized_pnl(self) -> float:
         """Sum of PnL contributions across all fills."""
