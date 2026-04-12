@@ -476,24 +476,39 @@ const KalshiPortfolioView: React.FC<KalshiPortfolioProps> = ({ initialTab }) => 
         <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
           <div className="flex items-center gap-2 mb-1">
             <BarChart3 className="w-4 h-4 text-purple-400" />
-            <span className="text-xs text-gray-400">Realized PnL</span>
+            <span className="text-xs text-gray-400" title="Daily realized PnL from risk summary (USD)">Realized PnL</span>
           </div>
-          <p className={`text-lg font-bold ${
-            (gridPortfolio?.daily_pnl_usd ?? risk?.daily_realized_pnl_usd ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
-          }`}>
-            ${(gridPortfolio?.daily_pnl_usd ?? risk?.daily_realized_pnl_usd ?? 0).toFixed(2)}
-          </p>
-          <p className="text-xs text-gray-500">{risk?.daily_trades ?? 0} trades today</p>
+          {risk != null ? (
+            <>
+              <p className={`text-lg font-bold ${
+                (risk.daily_pnl_usd ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                ${(risk.daily_pnl_usd ?? 0).toFixed(2)}
+              </p>
+              <p className="text-xs text-gray-500">
+                {risk.daily_trades != null ? `${risk.daily_trades} trades today` : 'trades: n/a'}
+              </p>
+            </>
+          ) : (
+            <p className="text-lg font-bold text-gray-600">—</p>
+          )}
         </div>
         <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
           <div className="flex items-center gap-2 mb-1">
             <Activity className="w-4 h-4 text-yellow-400" />
-            <span className="text-xs text-gray-400">Notional</span>
+            <span className="text-xs text-gray-400" title="Total notional exposure (USD)">Notional</span>
           </div>
-          <p className="text-lg font-bold text-white">${(risk?.total_notional_usd ?? 0).toFixed(2)}</p>
-          <p className="text-xs text-gray-500">
-            OI: {gridPortfolio?.open_interest ?? risk?.open_market_count ?? 0} · {risk?.open_market_count ?? 0} markets
-          </p>
+          {risk != null ? (
+            <>
+              <p className="text-lg font-bold text-white">${(risk.total_notional_usd ?? 0).toFixed(2)}</p>
+              <p className="text-xs text-gray-500">
+                {risk.open_market_count != null ? `${risk.open_market_count} markets` : 'markets: n/a'}
+                {gridPortfolio != null && ` · OI: ${gridPortfolio.open_interest ?? 0}`}
+              </p>
+            </>
+          ) : (
+            <p className="text-lg font-bold text-gray-600">—</p>
+          )}
         </div>
         <div className={`rounded-xl p-4 border ${ksResult.data?.global_kill ? 'bg-red-500/5 border-red-500/30' : 'bg-slate-900 border-slate-800'}`}>
           <div className="flex items-center gap-2 mb-1">
