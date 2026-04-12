@@ -156,6 +156,20 @@ class OrderGroupRiskManager:
         if state:
             state.used_contracts += contracts
 
+    def rollback_order(self, og_id: str, contracts: int) -> None:
+        """Roll back an optimistic order record (e.g. after rejection).
+
+        FIX-OG-ROLLBACK: Without this, rejected orders permanently inflate
+        used_contracts, causing subsequent valid orders to hit the group limit.
+
+        Args:
+            og_id: Group ID
+            contracts: Number of contracts to roll back
+        """
+        state = self.groups.get(og_id)
+        if state:
+            state.used_contracts = max(0, state.used_contracts - contracts)
+
     def record_fill(self, og_id: str, matched_contracts: int) -> None:
         """Record a fill (updates matched contracts).
 

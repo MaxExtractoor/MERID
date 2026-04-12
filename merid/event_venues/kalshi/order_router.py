@@ -522,8 +522,21 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             # Record optimistic usage
             og_manager.record_new_order(intent.order_group_id, intent.count)
 
-        tif = intent.time_in_force.upper()
-        if tif not in {"GTC", "IOC", "FOK"}:
+        # FIX-TIF: Normalize time_in_force to Kalshi-accepted values.
+        # The default OrderIntent.time_in_force is "fill_or_kill" which must
+        # map to "FOK".  Previously "fill_or_kill".upper() == "FILL_OR_KILL"
+        # fell through to the silent GTC fallback — breaking FOK semantics.
+        _TIF_ALIASES: dict = {
+            "GTC": "GTC", "IOC": "IOC", "FOK": "FOK",
+            "FILL_OR_KILL": "FOK", "IMMEDIATE_OR_CANCEL": "IOC",
+            "GOOD_TIL_CANCELLED": "GTC", "GOOD_TIL_CANCELED": "GTC",
+        }
+        tif = _TIF_ALIASES.get(intent.time_in_force.upper(), "")
+        if not tif:
+            logger.warning(
+                "[KALSHI_ORDER_ROUTER] Unknown time_in_force=%r, defaulting to GTC",
+                intent.time_in_force,
+            )
             tif = "GTC"
 
         # FIX-DEDUP: Use intent.trace_id (UUID4) for collision-resistant client_order_id.
@@ -563,6 +576,16 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 "client_order_id=%s",
                 intent.ticker, reason, latency, order.client_order_id,
             )
+            # FIX-OG-ROLLBACK: Roll back optimistic order-group usage on rejection.
+            # Without this, the group's used_contracts counter drifts up even though
+            # the order never reached the exchange, causing subsequent orders to be
+            # rejected with order_group_limit_exceeded.
+            if intent.order_group_id:
+                try:
+                    og_manager = OrderGroupRiskManager(client)
+                    og_manager.rollback_order(intent.order_group_id, intent.count)
+                except Exception as _rb_exc:
+                    logger.warning("[OG-ROLLBACK] rollback failed for %s: %s", intent.order_group_id, _rb_exc)
             return OrderResult(
                 status="rejected",
                 mode=mode,

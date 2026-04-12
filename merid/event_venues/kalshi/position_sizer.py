@@ -406,8 +406,20 @@ class PositionSizer:
         # ── Convert fraction to contracts ─────────────────────────
         # f = fraction of bankroll to risk
         # risk per contract = loss_amount cents
-        # Include fee estimate
-        fee_per_contract = kalshi_fee_cents(price_cents, 1)
+        # Include fee estimate — use the actual contract count for tiered fees
+        # FIX-FEE: Previously used kalshi_fee_cents(price_cents, 1) which always
+        # applied the lowest tier (<100 contracts) regardless of actual size.
+        # Now we estimate contracts first, then compute fees at the correct tier.
+
+        # Initial rough contract estimate (fee-free) for tier lookup
+        rough_risk = loss_amount  # per-contract risk without fee
+        if rough_risk <= 0:
+            return 0
+        rough_contracts = max(1, int((f * bankroll_cents) / rough_risk))
+
+        fee_per_contract_cents = kalshi_fee_cents(price_cents, rough_contracts)
+        # Per-contract fee = total fee / contracts
+        fee_per_contract = fee_per_contract_cents / rough_contracts if rough_contracts > 0 else 0
         risk_per_contract = loss_amount + fee_per_contract
 
         if risk_per_contract <= 0:
@@ -434,7 +446,14 @@ class PositionSizer:
         contracts = min(contracts, remaining_capacity)
 
         # Apply size_factor from risk governance (e.g. 0.5 for downsized)
-        contracts = max(1, int(contracts * size_factor))
+        # FIX-SIZEFACTOR: Previously max(1, ...) forced a minimum of 1 contract
+        # even when size_factor intended to reduce to 0 (e.g. 1 * 0.5 = 0).
+        # Now allows zero contracts when risk governance demands full downsize.
+        contracts = int(contracts * size_factor)
+        if contracts <= 0 and size_factor > 0:
+            # If size_factor is positive but rounding eliminated the trade,
+            # allow minimum of 1 contract to avoid silently dropping all trades.
+            contracts = 1
 
         # Final bounds
         contracts = max(0, min(contracts, cfg.max_contracts))
