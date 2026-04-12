@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { logUxEvent } from "./utils/uxTelemetry";
 import { useFillToast } from "./hooks/useFillToast";
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
@@ -43,6 +44,9 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('merid-sidebar-collapsed') === 'true'; } catch { return false; }
   });
+
+  // Track which views are actually used — fires on every navigation
+  useEffect(() => { logUxEvent('view_impression', view); }, [view]);
 
   const toggleSidebarCollapse = () => {
     setSidebarCollapsed(prev => {
