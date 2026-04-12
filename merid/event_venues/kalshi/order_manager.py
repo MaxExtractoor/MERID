@@ -562,7 +562,9 @@ class OrderManager:
         if place_flatten_order and filled_before_cancel > 0 and self._client is not None:
             opposite_side = "sell" if tracked.side == "buy" else "buy"
             try:
-                # G14: VenueGate — skip real flatten order in paper/sim mode
+                # G14: VenueGate — skip real flatten order in paper/sim mode.
+                # FAIL-CLOSED: if VenueGate check raises, suppress the flatten to avoid
+                # uncontrolled position exits in an ambiguous state.
                 _allow_flatten = True
                 try:
                     from merid.prediction.venue_gate import get_venue_gate as _gvg
@@ -572,8 +574,14 @@ class OrderManager:
                             "[order-manager] flatten skipped: VenueGate in paper/sim mode for %s",
                             tracked.ticker,
                         )
-                except Exception:
-                    pass
+                except Exception as _vg_exc:
+                    _allow_flatten = False
+                    logger.warning(
+                        "[order-manager] VenueGate check raised — suppressing flatten as fail-safe. "
+                        "ticker=%s error=%s",
+                        tracked.ticker, _vg_exc,
+                        exc_info=True,
+                    )
                 flatten_placed = None
                 if _allow_flatten:
                     from merid.event_venues.base import VenueOrder
