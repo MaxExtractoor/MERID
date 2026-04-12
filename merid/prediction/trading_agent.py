@@ -1731,6 +1731,12 @@ class KalshiTradingAgent:
             # For quotes, place a buy and sell limit order pair
             _q_bid_result = None
             _q_ask_result = None
+            _is_mm = self.config.archetype == "market_maker"
+            # PRE-TRADE-GATE: Use cycle number as a stable nonce so each MM
+            # trade cycle generates a fresh gate coid even if bid/ask prices
+            # are unchanged.  The cycle counter increments once per _run_cycle,
+            # so retries of the same cycle's order share the same nonce.
+            _mm_cycle_id = str(self.state.cycles_run) if _is_mm else None
             if signal.bid_price_cents:
                 _q_bid_result = await _kalshi_place_order(
                     ticker=market.market_id,
@@ -1743,6 +1749,9 @@ class KalshiTradingAgent:
                         snapshot.snapshot_timestamp_utc_epoch_seconds
                         if snapshot else None
                     ),  # PATCH-3: staleness gate applies to quote legs too
+                    strategy_group=self.config.name,
+                    is_market_maker=_is_mm,
+                    cycle_id=_mm_cycle_id,
                 )
             if signal.ask_price_cents:
                 _q_ask_result = await _kalshi_place_order(
@@ -1756,6 +1765,9 @@ class KalshiTradingAgent:
                         snapshot.snapshot_timestamp_utc_epoch_seconds
                         if snapshot else None
                     ),  # PATCH-3: staleness gate applies to quote legs too
+                    strategy_group=self.config.name,
+                    is_market_maker=_is_mm,
+                    cycle_id=_mm_cycle_id,
                 )
             # Record as a single "quote" event in logs
             _q_ok = ((_q_bid_result is None or _q_bid_result.success) and
@@ -1795,6 +1807,8 @@ class KalshiTradingAgent:
                         snapshot.snapshot_timestamp_utc_epoch_seconds
                         if snapshot else None
                     ),  # PATCH-3: staleness enforcement in order router
+                    strategy_group=self.config.name,
+                    is_market_maker=(self.config.archetype == "market_maker"),
                 )
             result_success = result.success
             result_payload = result.payload
