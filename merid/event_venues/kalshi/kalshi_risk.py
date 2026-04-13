@@ -413,9 +413,15 @@ class KalshiRiskConfig:
     # Per-category limits
     category_limits: Dict[str, CategoryLimit] = field(default_factory=dict)
 
-    # Drawdown
-    drawdown_halt_pct: float = 0.10  # Halt at 10% drawdown
-    drawdown_unwind_pct: float = 0.15  # Force unwind at 15%
+    # Drawdown — 4-zone model (green / yellow / orange / red)
+    # Green  (0–10%):  full normal sizing
+    # Yellow (10–15%): scale sizes by 0.5–0.75
+    # Orange (15–20%): aggressively defensive, 0.25–0.33 sizing
+    # Red    (>20%):   drawdown_halt_active = True; no new risk-adding orders
+    drawdown_yellow_pct: float = 0.10   # Green → Yellow threshold
+    drawdown_orange_pct: float = 0.15   # Yellow → Orange threshold (soft limit)
+    drawdown_halt_pct: float = 0.20     # Orange → Red / halt threshold (hard limit)
+    drawdown_unwind_pct: float = 0.25   # Force unwind at 25% (was 15%)
 
     # Minimum edge to trade
     min_edge: float = 0.02
@@ -605,13 +611,18 @@ class KalshiRiskManager:
             self._activate_kill_switch("Daily loss limit breached")
             return False, f"Daily loss ${abs(self._state.daily_pnl_usd):.2f} exceeds max ${self._config.max_daily_loss_usd:.2f}"
 
-        # 7. Drawdown
+        # 7. Drawdown — 4-zone model
+        # Red (>halt_pct): engage drawdown_halt_active; reject new risk-adding orders
+        #                  but do NOT increment error budget (use drawdown_halt class).
+        # Orange / Yellow zones apply size multipliers (enforced at sizing layer).
         if self._state.peak_equity_usd > 0:
             drawdown = (self._state.peak_equity_usd - self._state.current_equity_usd) / self._state.peak_equity_usd
             if drawdown >= self._config.drawdown_unwind_pct:
                 self._activate_kill_switch(f"Drawdown {drawdown:.1%} exceeds unwind threshold")
+                self._set_drawdown_halt(drawdown)
                 return False, f"Drawdown {drawdown:.1%} exceeds unwind threshold {self._config.drawdown_unwind_pct:.1%}"
             if drawdown >= self._config.drawdown_halt_pct:
+                self._set_drawdown_halt(drawdown)
                 return False, f"Drawdown {drawdown:.1%} exceeds halt threshold {self._config.drawdown_halt_pct:.1%}"
 
         # 8. Post-fee edge
@@ -738,6 +749,7 @@ class KalshiRiskManager:
         if self._state.peak_equity_usd > 0:
             _dd = (self._state.peak_equity_usd - self._state.current_equity_usd) / self._state.peak_equity_usd
             if _dd >= self._config.drawdown_halt_pct:
+                self._set_drawdown_halt(_dd)
                 try:
                     from merid.event_venues.kalshi.deployment import get_deployment_controller
                     _dc = get_deployment_controller()
@@ -785,8 +797,26 @@ class KalshiRiskManager:
 
     # ── Kill switch ──────────────────────────────────────────────────────
 
+    def _set_drawdown_halt(self, drawdown: float) -> None:
+        """Engage the dedicated drawdown-halt flag on the global RiskController.
+
+        This is a *policy* gate that is completely separate from the error
+        budget.  Calling this never increments the error counter.
+        """
+        try:
+            from merid.risk.kill_switches import risk_controller as _rc
+            _rc.set_drawdown_halt(
+                True,
+                reason=(
+                    f"Portfolio drawdown {drawdown:.1%} >= halt threshold "
+                    f"{self._config.drawdown_halt_pct:.1%}"
+                ),
+            )
+        except Exception:
+            pass  # non-fatal; worst case agents still get the venue-level rejection
+
     def _maybe_auto_reset_drawdown_kill_switch(self) -> None:
-        """Auto-reset kill switch when drawdown has fully recovered.
+        """Auto-reset kill switch and drawdown_halt flag when drawdown recovers.
 
         This is the symmetric "clear" path to ``_activate_kill_switch``.
         It runs on every equity update and resets the kill switch when:
@@ -801,11 +831,10 @@ class KalshiRiskManager:
         those require an explicit operator reset.
         """
         if not self._state.kill_switch_active:
-            return
-        if self._state.kill_switch_reason is None:
-            return
-        if "drawdown" not in self._state.kill_switch_reason.lower():
-            return
+            # Even if the venue kill switch is not active we may still need to
+            # clear the drawdown_halt flag on recovery.
+            pass  # fall through to the drawdown_halt clear logic below
+
         if self._state.peak_equity_usd <= 0:
             return
 
@@ -813,6 +842,23 @@ class KalshiRiskManager:
             (self._state.peak_equity_usd - self._state.current_equity_usd)
             / self._state.peak_equity_usd
         )
+
+        # Clear the global drawdown_halt_active flag when drawdown recovers
+        if current_dd < self._config.drawdown_halt_pct:
+            try:
+                from merid.risk.kill_switches import risk_controller as _rc
+                if _rc.is_drawdown_halted():
+                    _rc.set_drawdown_halt(False)
+            except Exception:
+                pass
+
+        if not self._state.kill_switch_active:
+            return
+        if self._state.kill_switch_reason is None:
+            return
+        if "drawdown" not in self._state.kill_switch_reason.lower():
+            return
+
         if current_dd < self._config.drawdown_halt_pct:
             logger.info(
                 "Drawdown recovered (%.1f%% < halt=%.1f%%) — venue status: ok — auto-resetting kill switch",
