@@ -2214,6 +2214,45 @@ class KalshiTradingAgent:
                     or "authentication" in _err_str
                 ):
                     _err_class = "auth_error"
+                # ── Infra / routing errors — MUST precede generic exchange/timeout ──
+                # These come from order_router.py rejection paths. The specific
+                # prefix must be checked before generic exchange/timeout patterns
+                # because the exception string embedded in the reason may contain
+                # "timeout", "exchange", etc. keywords.
+                elif "sync_route_unsupported" in _err_str:
+                    _err_class = "gate_blocked"
+                elif "routing_exception" in _err_str or "live_execution_error" in _err_str:
+                    _err_class = "exchange_error"
+                elif "risk_controller_unavailable" in _err_str:
+                    _err_class = "risk_check_blocked"
+                elif "pre_validation_failed" in _err_str:
+                    _err_class = "risk_check_blocked"
+                # ── Kalshi business errors (400/422) — MUST precede exchange_error ──
+                # KalshiBusinessError.__str__ = "[business_error] 400: <body>".
+                # The body contains "exchange" so the generic ("exchange" + "error")
+                # check would fire first without these specific patterns up here.
+                elif (
+                    "exchange_closed" in _err_str
+                    or "unknown_security" in _err_str
+                    or "market_not_open" in _err_str
+                    or "market not open" in _err_str
+                    or "market already settled" in _err_str
+                    or "market_already_settled" in _err_str
+                    or "event_not_found" in _err_str
+                    or "market_not_found" in _err_str
+                ):
+                    _err_class = "market_closed"
+                elif (
+                    "invalid_quantity" in _err_str
+                    or "order_size_below_minimum" in _err_str
+                    or "min_size" in _err_str
+                    or "order size below" in _err_str
+                ):
+                    _err_class = "min_notional"
+                elif "order_exceeds_limit" in _err_str or "exceeds_limit" in _err_str:
+                    _err_class = "risk_check_blocked"
+                elif "business_error" in _err_str:
+                    _err_class = "exchange_error"
                 # ── Exchange / 5xx transient errors (MEDIUM) ─────────────
                 elif (
                     "exchange_error" in _err_str

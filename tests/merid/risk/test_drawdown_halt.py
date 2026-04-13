@@ -141,7 +141,9 @@ class TestDrawdownStateMachineTransitions:
 
     def test_timestamps_set_on_transition(self):
         """Verify dd_triggered_at and dd_recovery_at are set/cleared correctly."""
-        risk = _make_risk(halt_pct=0.10, cooldown_secs=0.0)
+        # Use cooldown_secs=60 so COOLDOWN doesn't collapse to NORMAL immediately,
+        # giving us a chance to observe dd_recovery_at being set.
+        risk = _make_risk(halt_pct=0.10, cooldown_secs=60.0)
         assert risk._state.dd_triggered_at is None
         assert risk._state.dd_recovery_at is None
 
@@ -150,11 +152,14 @@ class TestDrawdownStateMachineTransitions:
         assert risk._state.dd_triggered_at is not None
         assert risk._state.dd_recovery_at is None
 
-        _set_equity(risk, peak=1000.0, current=930.0)  # 7% DD → COOLDOWN
+        _set_equity(risk, peak=1000.0, current=930.0)  # 7% DD → COOLDOWN (60s wait)
         risk._update_dd_halt_state()
         assert risk._state.dd_recovery_at is not None
+        assert risk._state.dd_halt_state == DrawdownHaltState.COOLDOWN
 
-        risk._update_dd_halt_state()  # → NORMAL (cooldown=0)
+        # Simulate elapsed cooldown and confirm final → NORMAL clears timestamps
+        risk._state.dd_recovery_at -= 61.0
+        risk._update_dd_halt_state()  # → NORMAL
         assert risk._state.dd_triggered_at is None
         assert risk._state.dd_recovery_at is None
 
@@ -264,8 +269,8 @@ class TestKillSwitchAutoResetViaCheckOrder:
         _check(risk)
         assert risk._state.kill_switch_active
 
-        # Recover to 8% — below halt threshold
-        _set_equity(risk, peak=1000.0, current=920.0)  # 8% DD
+        # Recover to 7% — below recovery_threshold (10%-2%=8%) AND below halt_pct
+        _set_equity(risk, peak=1000.0, current=930.0)  # 7% DD
         ok, reason = _check(risk)
         assert not risk._state.kill_switch_active
         assert ok, f"Trading should resume: {reason}"

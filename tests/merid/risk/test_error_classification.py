@@ -104,6 +104,38 @@ def _classify_error_str(result_error) -> str:
         or "authentication" in _err_str
     ):
         _err_class = "auth_error"
+    # ── Infra / routing errors — MUST precede generic exchange/timeout ──
+    elif "sync_route_unsupported" in _err_str:
+        _err_class = "gate_blocked"
+    elif "routing_exception" in _err_str or "live_execution_error" in _err_str:
+        _err_class = "exchange_error"
+    elif "risk_controller_unavailable" in _err_str:
+        _err_class = "risk_check_blocked"
+    elif "pre_validation_failed" in _err_str:
+        _err_class = "risk_check_blocked"
+    # ── Kalshi business errors (400/422) — MUST precede exchange_error ──
+    elif (
+        "exchange_closed" in _err_str
+        or "unknown_security" in _err_str
+        or "market_not_open" in _err_str
+        or "market not open" in _err_str
+        or "market already settled" in _err_str
+        or "market_already_settled" in _err_str
+        or "event_not_found" in _err_str
+        or "market_not_found" in _err_str
+    ):
+        _err_class = "market_closed"
+    elif (
+        "invalid_quantity" in _err_str
+        or "order_size_below_minimum" in _err_str
+        or "min_size" in _err_str
+        or "order size below" in _err_str
+    ):
+        _err_class = "min_notional"
+    elif "order_exceeds_limit" in _err_str or "exceeds_limit" in _err_str:
+        _err_class = "risk_check_blocked"
+    elif "business_error" in _err_str:
+        _err_class = "exchange_error"
     elif (
         "exchange_error" in _err_str
         or "500" in _err_str
@@ -151,6 +183,7 @@ def _classify_error_str(result_error) -> str:
         or "idempoten" in _err_str
     ):
         _err_class = "duplicate_order_rejected"
+    # ── Exchange-level order rejections (HIGH) ────────────────────────
     elif "post only cross" in _err_str or "post-only" in _err_str:
         _err_class = "order_rejected"
     elif "invalid_order_size" in _err_str or "invalid order size" in _err_str:
@@ -273,6 +306,44 @@ class TestErrorStringClassification:
         ("Order rejected: duplicate", "duplicate_order_rejected"),
         ("client_order_id already exists", "duplicate_order_rejected"),
         ("idempotency key collision", "duplicate_order_rejected"),
+        # ── Infra / routing errors — budget-exempt (MEDIUM/LOW) ──────────
+        # sync_route_unsupported → gate_blocked (LOW)
+        ("sync_route_unsupported_mode_paper", "gate_blocked"),
+        ("sync_route_unsupported_mode_live", "gate_blocked"),
+        # routing_exception / live_execution_error → exchange_error (MEDIUM)
+        ("routing_exception:TimeoutError('read timeout')", "exchange_error"),
+        ("live_execution_error:ConnectionResetError", "exchange_error"),
+        # risk_controller_unavailable → risk_check_blocked (MEDIUM)
+        ("risk_controller_unavailable", "risk_check_blocked"),
+        ("risk_controller_unavailable:import error", "risk_check_blocked"),
+        # pre_validation_failed → risk_check_blocked (MEDIUM)
+        ("pre_validation_failed:invalid_price", "risk_check_blocked"),
+        ("pre_validation_failed:side_error", "risk_check_blocked"),
+        # ── Kalshi business errors (400/422) — venue noise, budget-exempt ──
+        # market lifecycle → market_closed (MEDIUM)
+        ("[business_error] 400: exchange_closed", "market_closed"),
+        ("[business_error] 422: unknown_security", "market_closed"),
+        ("exchange_closed: order sent outside trading hours", "market_closed"),
+        ("unknown_security: ticker delisted", "market_closed"),
+        ("market_not_open for trading", "market_closed"),
+        ("market not open for new orders", "market_closed"),
+        ("market already settled", "market_closed"),
+        ("market_already_settled", "market_closed"),
+        ("event_not_found: KXBTC-23JAN", "market_closed"),
+        ("market_not_found: ticker expired", "market_closed"),
+        # size below minimum → min_notional (LOW)
+        ("[business_error] 400: invalid_quantity", "min_notional"),
+        ("invalid_quantity: negative size", "min_notional"),
+        ("order_size_below_minimum: 1 < 5", "min_notional"),
+        ("min_size not met", "min_notional"),
+        ("order size below minimum", "min_notional"),
+        # position/notional limit → risk_check_blocked (MEDIUM)
+        ("[business_error] 422: order_exceeds_limit", "risk_check_blocked"),
+        ("order_exceeds_limit: position limit exceeded", "risk_check_blocked"),
+        ("position exceeds_limit for account", "risk_check_blocked"),
+        # generic 400/422 → exchange_error (MEDIUM)
+        ("[business_error] 400: unsupported_msg_type", "exchange_error"),
+        ("business_error: unrecognised order flag", "exchange_error"),
         # order_rejected — HIGH (exchange-level rejections from place/amend)
         ("post only cross — order would match", "order_rejected"),
         ("post-only order rejected at this price", "order_rejected"),
@@ -323,6 +394,23 @@ class TestErrorStringClassification:
             "duplicate client_order_id detected",
             "client_order_id already exists",
             "idempotency key collision",
+            # new routing/infra patterns
+            "sync_route_unsupported_mode_paper",
+            "routing_exception:TimeoutError",
+            "live_execution_error:ConnectionReset",
+            "risk_controller_unavailable",
+            "pre_validation_failed:invalid_side",
+            # new Kalshi business error patterns
+            "[business_error] 400: exchange_closed",
+            "unknown_security: ticker removed",
+            "market_not_open",
+            "market already settled",
+            "event_not_found",
+            "market_not_found",
+            "invalid_quantity",
+            "order_size_below_minimum",
+            "order_exceeds_limit",
+            "business_error: unsupported_msg_type",
         ]
         for msg in test_messages:
             cls = _classify_error_str(msg)
