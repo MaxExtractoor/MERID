@@ -977,6 +977,75 @@ class RiskController:
         return not self._global_kill
     
     # -------------------------------------------------------------------------
+    # Drawdown circuit-breaker integration
+    # -------------------------------------------------------------------------
+
+    def record_drawdown_breach(self, is_breach: bool, details: str = "") -> bool:
+        """Record a drawdown circuit-breaker signal from the venue risk manager.
+
+        Called by ``KalshiRiskManager._update_dd_halt_state()`` whenever the
+        drawdown halt state machine transitions so the central HaltController
+        reflects drawdown alongside error-budget and daily-loss breaches.
+
+        Args:
+            is_breach: True when drawdown has triggered a halt; False when recovered.
+            details: Human-readable context (e.g. "dd_state=triggered drawdown=11.2%").
+
+        Returns:
+            True if global trading is still allowed (same as can_trade()).
+        """
+        now_mono = time.monotonic()
+        if is_breach:
+            if "drawdown" not in self._active_breaches:
+                logger.warning("[risk] Drawdown breach signalled by venue risk manager: %s", details)
+            self._active_breaches.add("drawdown")
+            if "drawdown" not in self._tier_entry_time:
+                self._tier_entry_time["drawdown"] = now_mono
+        else:
+            if "drawdown" in self._active_breaches:
+                logger.info("[risk] Drawdown breach cleared by venue risk manager: %s", details)
+                self._breach_cleared_at["drawdown"] = now_mono
+            self._active_breaches.discard("drawdown")
+            self._tier_entry_time.pop("drawdown", None)
+            self._maybe_demote_tier()
+        return not self._global_kill
+
+    def get_global_halt_view(self) -> Dict:
+        """Return a combined view of all halt conditions for dashboards and observability.
+
+        Shows whether trading is halted, the current state, and every active
+        breach so operators can diagnose the root cause at a glance.
+
+        Returns a dict with:
+            trading_allowed  — bool: False when in TRIGGERED state.
+            state            — current KillSwitchState value string.
+            halt_reasons     — list of "<metric>:<fraction>" strings for each breach.
+            active_breaches  — sorted list of currently breaching metrics.
+            is_global_kill   — bool: True only when kill switch is TRIGGERED.
+            kill_reason      — reason string if kill switch is active, else None.
+        """
+        state = self.get_state()
+        halt_reasons: List[str] = []
+        if self._global_kill:
+            halt_reasons.append(
+                f"kill_switch:{self._kill_reason.value if self._kill_reason else 'unknown'}"
+            )
+        for metric in sorted(self._active_breaches):
+            if metric == "drawdown":
+                halt_reasons.append("drawdown:active")
+            else:
+                frac = self._breach_fraction(metric)
+                halt_reasons.append(f"{metric}:{frac:.0%}")
+        return {
+            "trading_allowed": not self._global_kill,
+            "state": state.value,
+            "halt_reasons": halt_reasons,
+            "active_breaches": sorted(self._active_breaches),
+            "is_global_kill": self._global_kill,
+            "kill_reason": self._kill_reason.value if self._kill_reason else None,
+        }
+
+    # -------------------------------------------------------------------------
     # Callbacks
     # -------------------------------------------------------------------------
     
