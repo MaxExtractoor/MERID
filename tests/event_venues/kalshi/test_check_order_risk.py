@@ -182,3 +182,85 @@ class TestMaxYesPriceCap:
         assert not ok_above
         assert "max_yes_price_cap" in reason_above
 
+
+# ── Drawdown kill switch auto-reset (venue status: ok on recovery) ────────────
+
+class TestDrawdownKillSwitchAutoReset:
+    """Kill switch set by drawdown unwind auto-resets when equity recovers."""
+
+    @pytest.fixture
+    def rm(self):
+        cfg = KalshiRiskConfig(
+            drawdown_halt_pct=0.10,
+            drawdown_unwind_pct=0.15,
+        )
+        mgr = KalshiRiskManager(config=cfg)
+        # Seed a realistic equity baseline
+        mgr._state.peak_equity_usd = 10_000.0
+        mgr._state.current_equity_usd = 10_000.0
+        return mgr
+
+    def test_drawdown_kill_switch_stays_clear_in_normal_operation(self, rm):
+        """No kill switch when drawdown is within limits."""
+        rm.record_equity_snapshot(9_500.0)  # 5% drawdown
+        assert rm.kill_switch_active is False
+
+    def test_drawdown_below_halt_pct_does_not_trigger_kill_switch(self, rm):
+        """Drawdown just below halt threshold does not trigger kill switch."""
+        rm.record_equity_snapshot(9_010.0)  # ~9.9% drawdown
+        assert rm.kill_switch_active is False
+
+    def test_drawdown_unwind_activates_kill_switch(self, rm):
+        """Drawdown >= unwind threshold activates kill switch via check_order."""
+        rm._state.current_equity_usd = 8_300.0  # 17% drawdown
+        ok, reason = rm.check_order("KXBTC", "crypto", 10, 50)
+        assert not ok
+        assert rm.kill_switch_active is True
+        assert "drawdown" in rm._state.kill_switch_reason.lower()
+
+    def test_kill_switch_auto_resets_when_drawdown_recovers(self, rm):
+        """After a drawdown kill switch is activated, recovery clears venue status back to ok."""
+        # Activate kill switch via drawdown unwind
+        rm._state.current_equity_usd = 8_300.0  # 17% drawdown
+        rm.check_order("KXBTC", "crypto", 10, 50)
+        assert rm.kill_switch_active is True
+
+        # Equity recovers well above halt threshold (< 10% drawdown)
+        rm.record_equity_snapshot(9_200.0)  # 8% drawdown — below halt_pct
+        assert rm.kill_switch_active is False, "Kill switch should auto-clear on drawdown recovery"
+
+    def test_kill_switch_stays_active_while_drawdown_above_halt_pct(self, rm):
+        """Kill switch stays active when drawdown has not fully recovered."""
+        rm._state.current_equity_usd = 8_300.0
+        rm.check_order("KXBTC", "crypto", 10, 50)
+        assert rm.kill_switch_active is True
+
+        # Partial recovery but still above halt_pct (10%)
+        rm.record_equity_snapshot(8_900.0)  # 11% drawdown
+        assert rm.kill_switch_active is True
+
+    def test_daily_loss_kill_switch_not_auto_reset_by_equity_recovery(self, rm):
+        """Kill switch triggered by daily loss is NOT auto-reset by equity recovery."""
+        rm._state.daily_pnl_usd = -rm._config.max_daily_loss_usd - 1.0
+        rm._activate_kill_switch("Daily loss limit breached")
+        assert rm.kill_switch_active is True
+
+        # Equity snapshot at good level — should NOT clear kill switch
+        rm.record_equity_snapshot(9_500.0)  # only 5% drawdown
+        assert rm.kill_switch_active is True, "Daily-loss kill switch must not auto-reset"
+
+    def test_kill_switch_full_cycle_via_record_pnl(self, rm):
+        """Full cycle via record_pnl: normal → kill switch → recovery → ok."""
+        assert rm.kill_switch_active is False
+
+        # Simulate a loss that activates kill switch via check_order drawdown path
+        rm._state.current_equity_usd = 8_400.0  # 16% drawdown
+        rm.check_order("KXBTC", "crypto", 10, 50)
+        assert rm.kill_switch_active is True
+
+        # Gradual equity recovery via record_pnl
+        rm.record_pnl(500.0)   # equity 8_900 (~11% dd) — still halted
+        assert rm.kill_switch_active is True
+
+        rm.record_pnl(500.0)   # equity 9_400 (~6% dd) — recovered
+        assert rm.kill_switch_active is False
