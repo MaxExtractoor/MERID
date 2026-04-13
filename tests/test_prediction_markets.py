@@ -792,6 +792,92 @@ class TestPredictionMarketRisk:
         )
         assert self.risk.is_halted is False
 
+    # ------------------------------------------------------------------
+    # Drawdown recovery (circuit-breaker close → venue status: ok)
+    # ------------------------------------------------------------------
+
+    def test_drawdown_halt_auto_clears_on_recovery(self):
+        """Halt-threshold breach clears automatically when drawdown recovers."""
+        # Trigger halt (10% drawdown at 10% threshold)
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("900"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+        assert self.risk.unwind_requested is False
+
+        # Equity recovers to < 10% drawdown → venue status: ok
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("950"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is False
+        assert self.risk.halt_reason == ""
+
+    def test_drawdown_halt_does_not_clear_while_still_below_threshold(self):
+        """Halt stays active as long as drawdown remains at or above halt_pct."""
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("900"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+
+        # Still 12% drawdown — must stay halted
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("880"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+
+    def test_drawdown_unwind_halt_not_auto_cleared(self):
+        """Unwind-level halt (unwind_requested=True) is NOT auto-cleared on recovery."""
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("800"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+        assert self.risk.unwind_requested is True
+
+        # Equity recovers — unwind halt should NOT auto-clear (requires resume())
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("950"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True, "Unwind halt must not auto-clear"
+
+    def test_non_drawdown_halt_not_cleared_by_check_drawdown(self):
+        """A halt triggered by a non-drawdown reason is not cleared by check_drawdown()."""
+        self.risk.halt("Manual operator halt")
+        assert self.risk.is_halted is True
+
+        # Good equity — but the halt reason is not drawdown → must stay halted
+        self.risk.check_drawdown(
+            portfolio_value_usd=Decimal("980"),
+            peak_value_usd=Decimal("1000"),
+        )
+        assert self.risk.is_halted is True
+
+    def test_drawdown_full_cycle_halted_then_ok(self):
+        """End-to-end: pre-drawdown OK → halt → recovery → OK."""
+        peak = Decimal("1000")
+
+        # Pre-drawdown — should pass
+        self.risk.check_drawdown(portfolio_value_usd=peak, peak_value_usd=peak)
+        assert self.risk.is_halted is False
+
+        # During halt
+        self.risk.check_drawdown(portfolio_value_usd=Decimal("890"), peak_value_usd=peak)
+        assert self.risk.is_halted is True
+
+        # Still in halt zone
+        self.risk.check_drawdown(portfolio_value_usd=Decimal("895"), peak_value_usd=peak)
+        assert self.risk.is_halted is True
+
+        # Recovery — above 95% of peak (< 10% drawdown)
+        self.risk.check_drawdown(portfolio_value_usd=Decimal("960"), peak_value_usd=peak)
+        assert self.risk.is_halted is False
+
+
     def test_circuit_breaker_trips(self):
         now = datetime.now(timezone.utc)
         with patch("merid.prediction.risk.datetime") as mock_dt:
