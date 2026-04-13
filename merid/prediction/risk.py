@@ -72,9 +72,14 @@ class PredictionRiskConfig:
     max_orders_per_minute: int = 30
     max_orders_per_hour: int = 300
 
-    # Kill switch
-    drawdown_halt_pct: Decimal = Decimal("0.10")   # Halt at 10 % drawdown
-    drawdown_unwind_pct: Decimal = Decimal("0.15")  # Unwind at 15 % drawdown
+    # Kill switch — 4-zone drawdown model (mirrors KalshiRiskConfig)
+    # Green  (0–10%):  full normal sizing
+    # Yellow (10–15%): scale sizes by 0.5–0.75
+    # Orange (15–20%): aggressively defensive, 0.25–0.33 sizing
+    # Red    (>20%):   drawdown_halt_active = True; no new risk-adding orders
+    drawdown_yellow_pct: Decimal = Decimal("0.10")   # Green → Yellow threshold
+    drawdown_halt_pct: Decimal = Decimal("0.20")     # Orange → Red / hard halt (was 0.10)
+    drawdown_unwind_pct: Decimal = Decimal("0.25")   # Force unwind (was 0.15)
 
     # Circuit breaker: halt if odds move > X cents in Y seconds
     odds_move_threshold_cents: Decimal = Decimal("15")
@@ -602,11 +607,13 @@ class PredictionMarketRisk:
                 f"Drawdown {drawdown:.2%} >= unwind threshold {self.config.drawdown_unwind_pct:.2%}.",
                 unwind=True,
             )
+            self._set_drawdown_halt_flag(float(drawdown))
         elif drawdown >= self.config.drawdown_halt_pct:
             self.halt(
                 f"Drawdown {drawdown:.2%} >= halt threshold {self.config.drawdown_halt_pct:.2%}.",
                 unwind=False,
             )
+            self._set_drawdown_halt_flag(float(drawdown))
         else:
             # Drawdown has recovered below the halt threshold.
             # Auto-clear only if the halt was set by this method (drawdown-triggered)
@@ -618,6 +625,31 @@ class PredictionMarketRisk:
                     float(self.config.drawdown_halt_pct * 100),
                 )
                 self.resume()
+            # Clear the global drawdown_halt flag when drawdown recovers
+            self._clear_drawdown_halt_flag()
+
+    def _set_drawdown_halt_flag(self, drawdown: float) -> None:
+        """Engage the global RiskController drawdown_halt_active flag (non-fatal)."""
+        try:
+            from merid.risk.kill_switches import risk_controller as _rc
+            _rc.set_drawdown_halt(
+                True,
+                reason=(
+                    f"Portfolio drawdown {drawdown:.1%} >= halt threshold "
+                    f"{float(self.config.drawdown_halt_pct):.1%}"
+                ),
+            )
+        except Exception:
+            pass  # non-fatal
+
+    def _clear_drawdown_halt_flag(self) -> None:
+        """Clear the global RiskController drawdown_halt_active flag (non-fatal)."""
+        try:
+            from merid.risk.kill_switches import risk_controller as _rc
+            if _rc.is_drawdown_halted():
+                _rc.set_drawdown_halt(False)
+        except Exception:
+            pass  # non-fatal
 
     def record_price(self, market_id: str, price_cents: Decimal) -> None:
         """Record a price for circuit breaker monitoring."""

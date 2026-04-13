@@ -1368,13 +1368,47 @@ class KalshiContinuousTrader:
             notional_usd=notional,
             source=source,
         )
+
+        # ── Time-to-expiry guardrail ──────────────────────────────────────
+        # As expiry approaches, scale down size to avoid large P&L swings from
+        # last-minute binary resolution.
+        # Rule: when time remaining < LATE_EXPIRY_SECS, apply a taper multiplier.
+        # The taper is linear: 1.0 at LATE_EXPIRY_SECS, 0.0 at 0 secs.
+        _LATE_EXPIRY_SECS = 120  # 2-minute warning window
+        _late_mult = 1.0
+        _tte_secs: Optional[float] = None
+        if candidate.expiry_ts and candidate.expiry_ts > 0:
+            import time as _time_mod
+            _tte_secs = candidate.expiry_ts - _time_mod.time()
+            if _tte_secs <= 0:
+                # Market has expired — skip entirely
+                result.size_contracts = 0
+                result.notional_usd = 0.0
+                logger.debug(
+                    "[CT-TTE] %s expired (tte=%.0fs) — skipping new entry",
+                    candidate.ticker, _tte_secs,
+                )
+                return result
+            if _tte_secs < _LATE_EXPIRY_SECS:
+                _late_mult = max(0.0, _tte_secs / _LATE_EXPIRY_SECS)
+                _scaled_size = int(math.floor(size_contracts * _late_mult))
+                if _scaled_size != size_contracts:
+                    logger.debug(
+                        "[CT-TTE] %s late-expiry taper: tte=%.0fs mult=%.2f "
+                        "size %d → %d",
+                        candidate.ticker, _tte_secs, _late_mult,
+                        size_contracts, _scaled_size,
+                    )
+                result.size_contracts = _scaled_size
+                result.notional_usd = notional * _late_mult
+
         logger.info(
             "signal_to_sizing: %s edge=%.4f win_prob=%.4f payout=%.2f | "
             "kelly_raw=%.4f kelly_frac=%.4f (k=%.2f%%) size=%d source=%s "
             "min_edge_threshold=%.4f [%s/%s] ACCEPTED",
             candidate.ticker, edge, win_prob, float(payout_cents),
             kelly_raw, kelly_frac, effective_kelly_fraction * 100,
-            size_contracts, source,
+            result.size_contracts, source,
             min_edge_threshold, candidate.underlying, candidate.timeframe,
         )
         return result
@@ -1762,6 +1796,44 @@ class KalshiContinuousTrader:
                     "veto_reason": veto_reason,
                 })
                 continue
+
+            # ── Drawdown-halt guard ─────────────────────────────────────
+            # When portfolio drawdown has exceeded the hard threshold the risk
+            # layer sets drawdown_halt_active=True.  CT must stop submitting
+            # new risk-adding orders to avoid spamming the venue with 50+
+            # rejections that would otherwise burn the error budget and trigger
+            # the generic kill switch.  This check is logged only once per cycle
+            # (the inner loop already breaks after the first veto below) to avoid
+            # log spam.
+            try:
+                from merid.risk.kill_switches import risk_controller as _dd_rc
+                if _dd_rc.is_drawdown_halted():
+                    veto_reason = "drawdown_halt_active"
+                    logger.debug(
+                        "[CT-DRAWDOWN-HALT] Portfolio drawdown halt active (%s) — "
+                        "suppressing new risk-adding order for ticker=%s asset=%s tf=%s",
+                        _dd_rc.drawdown_halt_reason or "unknown",
+                        candidate.ticker, candidate.underlying, candidate.timeframe,
+                    )
+                    vetoed_by_reason[veto_reason] = vetoed_by_reason.get(veto_reason, 0) + 1
+                    if _pas is not None:
+                        _pas["vetoed"] += 1
+                        _pas["veto_reasons"][veto_reason] = _pas["veto_reasons"].get(veto_reason, 0) + 1
+                    ticker_diagnostics.append({
+                        "ticker": candidate.ticker,
+                        "asset": candidate.underlying,
+                        "timeframe": candidate.timeframe,
+                        "implied_yes_prob": mid_prob,
+                        "model_win_prob": 0.0,
+                        "edge_bps": 0.0,
+                        "side": "none",
+                        "kelly_raw": 0.0,
+                        "kelly_frac": 0.0,
+                        "veto_reason": veto_reason,
+                    })
+                    continue
+            except Exception:
+                pass  # fail-open: if check errors out, proceed normally
 
             # Build context so strategy grid can apply the correct asset-tier
             # Kelly multiplier, min-liquidity gate, and timeframe-specific
