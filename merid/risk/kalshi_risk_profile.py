@@ -101,11 +101,21 @@ class KalshiRiskProfile:
         est_prob: float = 0.5,
         consec_losses: int = 0,
         initial_equity: Optional[float] = None,
+        asset: Optional[str] = None,
+        timeframe: Optional[str] = None,
     ) -> Dict:
         """
         Compute the final per-trade dollar risk.
 
         Returns a dict with all intermediate values for observability.
+
+        Args:
+            yes_price_cents: Current YES price in cents (1–99).
+            est_prob:         Model-estimated win probability (0–1).
+            consec_losses:    Consecutive losing trades (for dynamic_size).
+            initial_equity:   Starting equity for compounding (defaults to current equity).
+            asset:            Asset symbol for zone lookup (BTC/ETH/SOL/XRP/DOGE).
+            timeframe:        Timeframe for zone lookup (15m/1h/4h/1d).
         """
         eq = self.equity
         peak = max(self.peak_equity, eq)
@@ -189,7 +199,32 @@ class KalshiRiskProfile:
             kf_mult = kf_size / max(pre_kf_size, 1e-9)
 
         # ── Step 9: hard 5% equity cap ────────────────────────────────────
-        final_size = min(kf_size, 0.05 * eq)
+        pre_zone_size = min(kf_size, 0.05 * eq)
+        pre_zone_size = max(pre_zone_size, 0.0)
+
+        # ── Step 10: drawdown zone multiplier ─────────────────────────────
+        # Apply portfolio-level zone multiplier (green/yellow/orange/red).
+        # This is the final, overriding step: even a perfectly-sized Kelly bet
+        # should be cut when the portfolio is in drawdown.
+        mult_dd = 1.0
+        try:
+            from merid.risk.drawdown_zones import get_drawdown_zone_manager
+            _dzm = get_drawdown_zone_manager()
+            mult_dd = _dzm.size_multiplier(dd_pct, asset=asset, timeframe=timeframe)
+        except Exception:
+            pass  # fail-open: no zone module → full size
+
+        # ── Step 11: profit-lock multiplier ──────────────────────────────
+        mult_lock = 1.0
+        try:
+            from merid.risk.profit_lock import get_profit_lock_engine
+            mult_lock = get_profit_lock_engine().size_multiplier()
+        except Exception:
+            pass  # fail-open: no profit-lock engine → full size
+
+        # ── Step 12: final composite size ─────────────────────────────────
+        # size_final = Kelly × drawdown_zone_mult × profit_lock_mult
+        final_size = pre_zone_size * mult_dd * mult_lock
         final_size = max(final_size, 0.0)
 
         return {
@@ -203,6 +238,9 @@ class KalshiRiskProfile:
             "pre_kf_size": pre_kf_size,
             "kf_mult": kf_mult,
             "kf_size": kf_size,
+            "pre_zone_size": pre_zone_size,
+            "mult_dd": mult_dd,
+            "mult_lock": mult_lock,
             "drawdown_pct": dd_pct,
             "consec_losses": consec_losses,
             "yes_price_cents": yes_price_cents,
