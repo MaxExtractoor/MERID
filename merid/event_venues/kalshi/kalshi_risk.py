@@ -26,6 +26,7 @@ Usage::
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -34,6 +35,27 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.kalshi_risk")
+
+
+# ── Drawdown halt state machine ──────────────────────────────────────────
+
+class DrawdownHaltState(str, Enum):
+    """Three-state drawdown halt machine.
+
+    NORMAL     — No drawdown halt active; new entries are allowed.
+    TRIGGERED  — Drawdown ≥ halt threshold; new entries are blocked.
+    COOLDOWN   — Drawdown has recovered below the recovery threshold;
+                 waiting for the cooldown period before resuming.
+
+    Transitions:
+        NORMAL    → TRIGGERED  when drawdown ≥ drawdown_halt_pct
+        TRIGGERED → COOLDOWN   when drawdown < (drawdown_halt_pct - drawdown_recovery_buffer_pct)
+        COOLDOWN  → TRIGGERED  when drawdown ≥ drawdown_halt_pct during cooldown
+        COOLDOWN  → NORMAL     when cooldown_secs have elapsed since recovery
+    """
+    NORMAL = "normal"
+    TRIGGERED = "triggered"
+    COOLDOWN = "cooldown"
 
 
 # ── Orderbook state classification ──────────────────────────────────────
@@ -414,8 +436,14 @@ class KalshiRiskConfig:
     category_limits: Dict[str, CategoryLimit] = field(default_factory=dict)
 
     # Drawdown
-    drawdown_halt_pct: float = 0.10  # Halt at 10% drawdown
-    drawdown_unwind_pct: float = 0.15  # Force unwind at 15%
+    drawdown_halt_pct: float = 0.10        # Halt new entries at 10% drawdown
+    drawdown_unwind_pct: float = 0.15      # Force-unwind + kill-switch at 15%
+    # Hysteresis: equity must recover this many pct-points *below* halt_pct before
+    # the state machine transitions from TRIGGERED → COOLDOWN (prevents flip-flop).
+    drawdown_recovery_buffer_pct: float = 0.02  # 2 pp below halt before cooldown
+    # Seconds to wait in COOLDOWN before fully resuming normal trading.
+    # Set to 0 for instant recovery (useful in tests).
+    drawdown_cooldown_secs: float = 300.0  # 5 min default
 
     # Minimum edge to trade
     min_edge: float = 0.02
@@ -466,6 +494,11 @@ class RiskState:
     category_contracts: Dict[str, int] = field(default_factory=dict)
     breach_log: List[Dict[str, Any]] = field(default_factory=list)
     pnl_history: List[Dict[str, Any]] = field(default_factory=list)
+    # ── Drawdown halt state machine ────────────────────────────────────
+    dd_halt_state: DrawdownHaltState = DrawdownHaltState.NORMAL
+    # Monotonic timestamps for state transitions (None = not entered yet)
+    dd_triggered_at: Optional[float] = None    # when TRIGGERED was entered
+    dd_recovery_at: Optional[float] = None     # when COOLDOWN was entered
 
 
 class KalshiRiskManager:
@@ -532,6 +565,12 @@ class KalshiRiskManager:
             (allowed, reason) — True if order passes all checks
         """
         now = datetime.now(timezone.utc)
+
+        # ── Always update drawdown state machine first so the kill-switch
+        # auto-reset and DD state are both current even when PnL updates
+        # are not flowing (fixes: kill-switch stuck after equity recovery).
+        self._update_dd_halt_state()
+        self._maybe_auto_reset_drawdown_kill_switch()
 
         # 0. Phantom kill switch (F2) — block new orders when phantom positions detected.
         # FAIL-CLOSED: any unexpected error during this check is treated as a block signal;
@@ -605,14 +644,16 @@ class KalshiRiskManager:
             self._activate_kill_switch("Daily loss limit breached")
             return False, f"Daily loss ${abs(self._state.daily_pnl_usd):.2f} exceeds max ${self._config.max_daily_loss_usd:.2f}"
 
-        # 7. Drawdown
-        if self._state.peak_equity_usd > 0:
-            drawdown = (self._state.peak_equity_usd - self._state.current_equity_usd) / self._state.peak_equity_usd
-            if drawdown >= self._config.drawdown_unwind_pct:
-                self._activate_kill_switch(f"Drawdown {drawdown:.1%} exceeds unwind threshold")
-                return False, f"Drawdown {drawdown:.1%} exceeds unwind threshold {self._config.drawdown_unwind_pct:.1%}"
-            if drawdown >= self._config.drawdown_halt_pct:
-                return False, f"Drawdown {drawdown:.1%} exceeds halt threshold {self._config.drawdown_halt_pct:.1%}"
+        # 7. Drawdown halt state machine
+        # _update_dd_halt_state() already ran at the top of check_order().
+        # Block new entries when DD state machine is TRIGGERED or COOLDOWN.
+        if self._state.dd_halt_state in (DrawdownHaltState.TRIGGERED, DrawdownHaltState.COOLDOWN):
+            current_dd = self._compute_drawdown()
+            return False, (
+                f"drawdown_halt:{self._state.dd_halt_state.value} "
+                f"drawdown={current_dd:.1%} "
+                f"halt_threshold={self._config.drawdown_halt_pct:.1%}"
+            )
 
         # 8. Post-fee edge
         if edge > 0:
@@ -734,6 +775,9 @@ class KalshiRiskManager:
         if self._state.daily_pnl_usd < -self._config.max_daily_loss_usd:
             self._activate_kill_switch("Daily loss limit breached")
 
+        # Update drawdown state machine and auto-reset kill switch if recovered.
+        self._update_dd_halt_state()
+
         # L8: Trigger DeploymentController auto-rollback on drawdown breach
         if self._state.peak_equity_usd > 0:
             _dd = (self._state.peak_equity_usd - self._state.current_equity_usd) / self._state.peak_equity_usd
@@ -768,6 +812,7 @@ class KalshiRiskManager:
             self._state.pnl_history = self._state.pnl_history[-500:]
 
         # Auto-clear drawdown kill switch when equity fully recovers
+        self._update_dd_halt_state()
         self._maybe_auto_reset_drawdown_kill_switch()
 
     def get_pnl_history(self, limit: int = 100) -> List[Dict[str, Any]]:
@@ -775,15 +820,157 @@ class KalshiRiskManager:
         return self._state.pnl_history[-limit:]
 
     def reset_daily(self) -> None:
-        """Reset daily counters (call at start of trading day)."""
+        """Reset daily counters (call at start of trading day).
+
+        The drawdown state machine is also reset so a new trading session
+        always starts from DD_NORMAL, regardless of prior-day equity.
+        The kill-switch state is NOT reset — a manual operator action is
+        required if the kill switch was active at day-end.
+        """
         self._state.daily_pnl_usd = 0.0
         self._state.orders_this_minute = 0
         self._state.orders_this_hour = 0
         self._state.category_notional.clear()
         self._state.category_contracts.clear()
-        logger.info("KalshiRiskManager daily counters reset")
+        # Reset DD state machine — new session starts clean.
+        # Also reset peak to current so the new day begins at 0% drawdown.
+        old_dd = self._state.dd_halt_state
+        self._state.dd_halt_state = DrawdownHaltState.NORMAL
+        self._state.dd_triggered_at = None
+        self._state.dd_recovery_at = None
+        self._state.peak_equity_usd = self._state.current_equity_usd
+        if old_dd != DrawdownHaltState.NORMAL:
+            logger.info(
+                "KalshiRiskManager daily reset: DD state %s → NORMAL (new session)",
+                old_dd.value,
+            )
+        else:
+            logger.info("KalshiRiskManager daily counters reset")
 
     # ── Kill switch ──────────────────────────────────────────────────────
+
+    def _compute_drawdown(self) -> float:
+        """Return current peak-to-trough drawdown as a fraction (0.0–1.0).
+
+        Returns 0.0 when no peak has been recorded yet.
+        """
+        if self._state.peak_equity_usd <= 0:
+            return 0.0
+        return (
+            (self._state.peak_equity_usd - self._state.current_equity_usd)
+            / self._state.peak_equity_usd
+        )
+
+    def _update_dd_halt_state(self) -> None:
+        """Drive the drawdown halt state machine based on current equity.
+
+        Call this whenever equity changes (record_pnl, record_equity_snapshot)
+        AND at the start of check_order() so the state is always current even
+        when equity updates are not flowing in.
+
+        State machine:
+            NORMAL    → TRIGGERED  when drawdown ≥ drawdown_halt_pct
+            TRIGGERED → COOLDOWN   when drawdown < (halt_pct - recovery_buffer_pct)
+            COOLDOWN  → TRIGGERED  when drawdown re-exceeds halt_pct
+            COOLDOWN  → NORMAL     after drawdown_cooldown_secs have elapsed
+
+        Also activates the hard kill switch when drawdown ≥ drawdown_unwind_pct so
+        the kill-switch check (step 1 of check_order) catches it on the same call
+        even when PnL updates are not flowing in.
+
+        Side-effects:
+            - Logs each state transition at WARNING (entry) / INFO (recovery).
+            - Notifies the central RiskController via record_drawdown_breach()
+              so the global halt view is accurate (best-effort, non-fatal).
+        """
+        if self._state.peak_equity_usd <= 0:
+            return
+
+        dd = self._compute_drawdown()
+        now = time.monotonic()
+        old_state = self._state.dd_halt_state
+        recovery_threshold = self._config.drawdown_halt_pct - self._config.drawdown_recovery_buffer_pct
+
+        # ── Hard unwind threshold: activate kill switch immediately ───────
+        # This runs unconditionally so the kill switch is set even when PnL
+        # updates have stopped flowing (was the primary "stuck halt" bug).
+        if dd >= self._config.drawdown_unwind_pct:
+            self._activate_kill_switch(f"Drawdown {dd:.1%} exceeds unwind threshold")
+
+        # ── State machine ─────────────────────────────────────────────────
+        if self._state.dd_halt_state == DrawdownHaltState.NORMAL:
+            if dd >= self._config.drawdown_halt_pct:
+                self._state.dd_halt_state = DrawdownHaltState.TRIGGERED
+                self._state.dd_triggered_at = now
+                self._state.dd_recovery_at = None
+                logger.warning(
+                    "[DD] NORMAL → TRIGGERED: drawdown=%.1f%% ≥ halt=%.1f%% | "
+                    "peak=%.2f current=%.2f | new entries blocked",
+                    dd * 100, self._config.drawdown_halt_pct * 100,
+                    self._state.peak_equity_usd, self._state.current_equity_usd,
+                )
+                self._log_breach("dd_halt_triggered", f"drawdown={dd:.1%}")
+
+        elif self._state.dd_halt_state == DrawdownHaltState.TRIGGERED:
+            if dd < recovery_threshold:
+                # Transition to COOLDOWN then immediately check if cooldown
+                # has already expired (handles cooldown_secs=0 in one call).
+                self._state.dd_halt_state = DrawdownHaltState.COOLDOWN
+                self._state.dd_recovery_at = now
+                elapsed = 0.0
+                if elapsed >= self._config.drawdown_cooldown_secs:
+                    self._state.dd_halt_state = DrawdownHaltState.NORMAL
+                    self._state.dd_triggered_at = None
+                    self._state.dd_recovery_at = None
+                    logger.info(
+                        "[DD] TRIGGERED → NORMAL (instant recovery): "
+                        "drawdown=%.1f%% cooldown=0s",
+                        dd * 100,
+                    )
+                else:
+                    logger.info(
+                        "[DD] TRIGGERED → COOLDOWN: drawdown=%.1f%% < recovery_threshold=%.1f%% | "
+                        "cooldown=%.0fs | peak=%.2f current=%.2f",
+                        dd * 100, recovery_threshold * 100,
+                        self._config.drawdown_cooldown_secs,
+                        self._state.peak_equity_usd, self._state.current_equity_usd,
+                    )
+
+        elif self._state.dd_halt_state == DrawdownHaltState.COOLDOWN:
+            if dd >= self._config.drawdown_halt_pct:
+                # Drawdown re-exceeded threshold during cooldown — back to TRIGGERED
+                self._state.dd_halt_state = DrawdownHaltState.TRIGGERED
+                self._state.dd_triggered_at = now
+                self._state.dd_recovery_at = None
+                logger.warning(
+                    "[DD] COOLDOWN → TRIGGERED: drawdown=%.1f%% re-exceeded halt=%.1f%%",
+                    dd * 100, self._config.drawdown_halt_pct * 100,
+                )
+                self._log_breach("dd_halt_re_triggered", f"drawdown={dd:.1%}")
+            elif self._state.dd_recovery_at is not None:
+                elapsed = now - self._state.dd_recovery_at
+                if elapsed >= self._config.drawdown_cooldown_secs:
+                    self._state.dd_halt_state = DrawdownHaltState.NORMAL
+                    self._state.dd_triggered_at = None
+                    self._state.dd_recovery_at = None
+                    logger.info(
+                        "[DD] COOLDOWN → NORMAL: cooldown expired (%.0fs ≥ %.0fs) | "
+                        "drawdown=%.1f%% | trading fully resumed",
+                        elapsed, self._config.drawdown_cooldown_secs, dd * 100,
+                    )
+
+        new_state = self._state.dd_halt_state
+        if new_state != old_state:
+            # Notify central RiskController (best-effort — import error is non-fatal)
+            try:
+                from merid.risk.kill_switches import risk_controller
+                is_breach = new_state != DrawdownHaltState.NORMAL
+                risk_controller.record_drawdown_breach(
+                    is_breach,
+                    details=f"dd_state={new_state.value} drawdown={dd:.1%}",
+                )
+            except Exception:
+                pass
 
     def _maybe_auto_reset_drawdown_kill_switch(self) -> None:
         """Auto-reset kill switch when drawdown has fully recovered.
@@ -906,9 +1093,7 @@ class KalshiRiskManager:
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serializable risk status."""
-        drawdown = 0.0
-        if self._state.peak_equity_usd > 0:
-            drawdown = (self._state.peak_equity_usd - self._state.current_equity_usd) / self._state.peak_equity_usd
+        drawdown = self._compute_drawdown()
 
         daily_pnl = round(self._state.daily_pnl_usd, 2)
         return {
@@ -931,6 +1116,9 @@ class KalshiRiskManager:
             "category_contracts": dict(self._state.category_contracts),
             "breach_count": len(self._state.breach_log),
             "recent_breaches": self._state.breach_log[-5:],
+            # ── Drawdown state machine ─────────────────────────────────
+            "dd_halt_state": self._state.dd_halt_state.value,
+            "dd_trading_blocked": self._state.dd_halt_state != DrawdownHaltState.NORMAL,
             "limits": {
                 "max_total_notional_usd": self._config.max_total_notional_usd,
                 "max_daily_loss_usd": self._config.max_daily_loss_usd,
@@ -938,6 +1126,8 @@ class KalshiRiskManager:
                 "max_position_per_contract": self._config.max_position_per_contract,
                 "drawdown_halt_pct": self._config.drawdown_halt_pct,
                 "drawdown_unwind_pct": self._config.drawdown_unwind_pct,
+                "drawdown_recovery_buffer_pct": self._config.drawdown_recovery_buffer_pct,
+                "drawdown_cooldown_secs": self._config.drawdown_cooldown_secs,
                 "min_edge": self._config.min_edge,
                 "min_post_fee_edge": self._config.min_post_fee_edge,
             },
