@@ -583,7 +583,15 @@ class PredictionMarketRisk:
         logger.info("PM kill switch deactivated")
 
     def check_drawdown(self, portfolio_value_usd: Decimal, peak_value_usd: Decimal) -> None:
-        """Check portfolio drawdown and trigger halt/unwind if needed."""
+        """Check portfolio drawdown and trigger halt/unwind if needed.
+
+        This is the authoritative drawdown state machine.  It is called on every
+        equity update and must be a pure function of the current drawdown level:
+
+          drawdown >= drawdown_unwind_pct  → HALT + unwind request (sticky — needs resume())
+          drawdown >= drawdown_halt_pct    → HALT without unwind (auto-clears on recovery)
+          drawdown <  drawdown_halt_pct    → OK — clear any non-unwind drawdown halt
+        """
         if peak_value_usd <= Decimal("0"):
             return
 
@@ -599,6 +607,17 @@ class PredictionMarketRisk:
                 f"Drawdown {drawdown:.2%} >= halt threshold {self.config.drawdown_halt_pct:.2%}.",
                 unwind=False,
             )
+        else:
+            # Drawdown has recovered below the halt threshold.
+            # Auto-clear only if the halt was set by this method (drawdown-triggered)
+            # and an unwind was NOT requested (unwind halts require explicit resume()).
+            if self._halted and "drawdown" in self._halt_reason.lower() and not self._unwind_requested:
+                logger.info(
+                    "PM drawdown recovered (%.2f%% < halt=%.2f%%) — venue status: ok",
+                    float(drawdown * 100),
+                    float(self.config.drawdown_halt_pct * 100),
+                )
+                self.resume()
 
     def record_price(self, market_id: str, price_cents: Decimal) -> None:
         """Record a price for circuit breaker monitoring."""

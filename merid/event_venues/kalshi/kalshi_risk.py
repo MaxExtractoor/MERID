@@ -751,6 +751,9 @@ class KalshiRiskManager:
                 except Exception as _rbe:
                     pass  # non-fatal — risk manager already halts via kill switch
 
+        # Auto-clear drawdown kill switch when equity fully recovers
+        self._maybe_auto_reset_drawdown_kill_switch()
+
     def record_equity_snapshot(self, equity_usd: float) -> None:
         """Record an equity snapshot from live balance (called by PortfolioRiskAgent)."""
         self._state.current_equity_usd = equity_usd
@@ -763,6 +766,9 @@ class KalshiRiskManager:
         })
         if len(self._state.pnl_history) > 500:
             self._state.pnl_history = self._state.pnl_history[-500:]
+
+        # Auto-clear drawdown kill switch when equity fully recovers
+        self._maybe_auto_reset_drawdown_kill_switch()
 
     def get_pnl_history(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Return recent PnL history points for the equity curve endpoint."""
@@ -778,6 +784,42 @@ class KalshiRiskManager:
         logger.info("KalshiRiskManager daily counters reset")
 
     # ── Kill switch ──────────────────────────────────────────────────────
+
+    def _maybe_auto_reset_drawdown_kill_switch(self) -> None:
+        """Auto-reset kill switch when drawdown has fully recovered.
+
+        This is the symmetric "clear" path to ``_activate_kill_switch``.
+        It runs on every equity update and resets the kill switch when:
+
+          1. kill switch is currently active, AND
+          2. the kill switch was triggered by a drawdown event (not daily loss
+             or a manual/emergency stop), AND
+          3. current drawdown has recovered below the halt threshold.
+
+        Venue status transitions: HALTED → OK (logged at INFO level).
+        Daily-loss kills and manual emergency stops are intentionally excluded;
+        those require an explicit operator reset.
+        """
+        if not self._state.kill_switch_active:
+            return
+        if self._state.kill_switch_reason is None:
+            return
+        if "drawdown" not in self._state.kill_switch_reason.lower():
+            return
+        if self._state.peak_equity_usd <= 0:
+            return
+
+        current_dd = (
+            (self._state.peak_equity_usd - self._state.current_equity_usd)
+            / self._state.peak_equity_usd
+        )
+        if current_dd < self._config.drawdown_halt_pct:
+            logger.info(
+                "Drawdown recovered (%.1f%% < halt=%.1f%%) — venue status: ok — auto-resetting kill switch",
+                current_dd * 100,
+                self._config.drawdown_halt_pct * 100,
+            )
+            self.reset_kill_switch()
 
     def _activate_kill_switch(self, reason: str) -> None:
         if not self._state.kill_switch_active:
