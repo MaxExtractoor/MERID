@@ -120,6 +120,13 @@ _ERROR_CLASS_SEVERITY: Dict[str, ErrorSeverity] = {
     "depth_insufficient": ErrorSeverity.LOW,        # orderbook depth below configured minimum
     # ── MEDIUM — risk-manager position/notional/route rejections (transient) ─────────
     "risk_check_blocked": ErrorSeverity.MEDIUM,     # KalshiRiskManager rejected order (non-critical)
+    # ── LOW — expected risk-regime halts (do NOT burn error budget) ───────────
+    # When portfolio drawdown exceeds the soft/hard thresholds the risk layer
+    # correctly rejects new risk-adding orders.  These are intentional policy
+    # decisions, not system failures, and must never contribute to the 50-error
+    # kill-switch budget.  The dedicated `drawdown_halt_active` flag on
+    # RiskController provides the proper gate for this condition.
+    "drawdown_halt": ErrorSeverity.LOW,             # drawdown-based order rejection (policy, not error)
 }
 
 
@@ -222,6 +229,9 @@ class RiskController:
     # market-condition gates that fire every cycle when conditions are unfavourable;
     # they are expected and must not exhaust the budget.
     # "risk_check_blocked" covers non-critical KalshiRiskManager rejections.
+    # "drawdown_halt" covers intentional risk-regime order rejections (drawdown
+    # exceeds the soft/hard thresholds); these are policy decisions, not system
+    # failures, and must never consume the error budget.
     error_exempt_classes: Set[str] = field(
         default_factory=lambda: {
             "min_notional", "ws_reconnect", "loop_lag", "gate_blocked",
@@ -238,6 +248,8 @@ class RiskController:
             # Risk-manager market-condition gates (expected, non-critical)
             "low_edge", "spread_too_wide", "depth_insufficient",
             "risk_check_blocked",
+            # Intentional drawdown-based order halt (policy, not system failure)
+            "drawdown_halt",
         }
     )
     # ---- Deduplication -------------------------------------------------------
@@ -301,6 +313,15 @@ class RiskController:
         # warnings and tracked via ``_dedup_suppressed_counts``.
         self._dedup_last_seen: Dict[str, float] = {}
         self._dedup_suppressed_counts: Counter = Counter()
+
+        # ---- Drawdown-halt state (separate from error budget) ----------------
+        # When portfolio drawdown exceeds the hard threshold the risk layer sets
+        # this flag instead of burning the generic error budget.  Agents MUST
+        # check is_drawdown_halted() before submitting new risk-adding orders so
+        # they stop spamming the venue (and getting rejected 50+ times) while the
+        # drawdown condition persists.
+        self._drawdown_halt_active: bool = False
+        self._drawdown_halt_reason: Optional[str] = None
 
         # Load from settings if available
         self._load_from_settings()
@@ -500,6 +521,61 @@ class RiskController:
     # Core API
     # -------------------------------------------------------------------------
 
+    # ---- Drawdown-halt management -------------------------------------------
+
+    def set_drawdown_halt(self, active: bool, reason: Optional[str] = None) -> None:
+        """Set or clear the drawdown-halt flag.
+
+        This is a *dedicated* gate for risk-regime drawdown halts that is
+        completely separate from the generic error budget.  It must NOT
+        increment the error counter — it is a policy decision, not a failure.
+
+        When ``active=True`` agents must stop submitting new risk-adding orders
+        immediately (check ``is_drawdown_halted()`` at the top of each cycle).
+        The flag auto-clears when the drawdown recovers below the threshold.
+
+        Args:
+            active:  True to engage the halt; False to clear it.
+            reason:  Human-readable description of the trigger (e.g. the
+                     drawdown percentage and threshold that was breached).
+        """
+        was_active = self._drawdown_halt_active
+        self._drawdown_halt_active = active
+        self._drawdown_halt_reason = reason if active else None
+
+        if active and not was_active:
+            logger.warning(
+                "[risk] DRAWDOWN HALT engaged — %s. "
+                "New risk-adding orders suppressed.  "
+                "Error budget unaffected.",
+                reason or "drawdown exceeded hard threshold",
+            )
+        elif not active and was_active:
+            logger.info(
+                "[risk] DRAWDOWN HALT cleared — drawdown has recovered below threshold.",
+            )
+
+    def is_drawdown_halted(self) -> bool:
+        """Return True when portfolio drawdown has exceeded the hard limit.
+
+        Agents MUST check this before submitting any *new risk-adding* order.
+        Position-reduction / de-risk orders are still allowed when halted.
+
+        This check is intentionally independent of ``can_trade()`` so that
+        drawdown enforcement never burns the 50-error generic error budget.
+        """
+        return self._drawdown_halt_active
+
+    @property
+    def drawdown_halt_active(self) -> bool:
+        """Property alias for ``is_drawdown_halted()`` — convenient for status dicts."""
+        return self._drawdown_halt_active
+
+    @property
+    def drawdown_halt_reason(self) -> Optional[str]:
+        """Human-readable reason for the current drawdown halt (None if not active)."""
+        return self._drawdown_halt_reason
+
     def can_trade(self) -> bool:
         """Check if trading is allowed.
 
@@ -599,6 +675,9 @@ class RiskController:
             "active_breaches": list(self._active_breaches),
             "warn_pct": self.warn_pct,
             "limit_pct": self.limit_pct,
+            # Drawdown-halt state (separate from error budget)
+            "drawdown_halt_active": self._drawdown_halt_active,
+            "drawdown_halt_reason": self._drawdown_halt_reason,
         }
 
     def get_error_budget_metrics(self) -> dict:

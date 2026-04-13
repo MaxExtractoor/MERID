@@ -2182,7 +2182,14 @@ class KalshiTradingAgent:
                 elif "bankroll_zero" in _err_str:
                     _err_class = "risk_violation"
                 elif "drawdown" in _err_str and "exceed" in _err_str:
-                    _err_class = "risk_violation"
+                    # Drawdown-based order rejections are intentional risk-regime
+                    # enforcement (the system is correctly applying halt/unwind
+                    # policy), NOT a system failure.  Classifying them as
+                    # risk_violation (CRITICAL) was burning the 50-error budget
+                    # and triggering the kill switch — the very loop we are
+                    # stopping.  Use the dedicated drawdown_halt class (LOW /
+                    # exempt) so these never consume the error budget.
+                    _err_class = "drawdown_halt"
                 # ── Risk-manager: market-condition gates (LOW) ────────────
                 # Must precede risk_check_blocked / min_notional.
                 elif "post-fee edge" in _err_str or "post_fee_edge" in _err_str:
