@@ -464,6 +464,7 @@ class RiskState:
     last_hour_reset: Optional[datetime] = None
     category_notional: Dict[str, float] = field(default_factory=dict)
     category_contracts: Dict[str, int] = field(default_factory=dict)
+    daily_fees_usd: float = 0.0
     breach_log: List[Dict[str, Any]] = field(default_factory=list)
     pnl_history: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -770,6 +771,19 @@ class KalshiRiskManager:
         # Auto-clear drawdown kill switch when equity fully recovers
         self._maybe_auto_reset_drawdown_kill_switch()
 
+    def record_fees(self, fee_usd: float) -> None:
+        """Record fees paid (in USD) for the current trading day.
+
+        Fees are accumulated separately from PnL so callers can distinguish
+        gross PnL (before fees) from net PnL (after fees).  The ``summary()``
+        method exposes the running total as ``daily_fees_usd``.
+
+        Args:
+            fee_usd: Fee amount in USD (positive value; will be stored as-is).
+        """
+        if fee_usd > 0:
+            self._state.daily_fees_usd += fee_usd
+
     def get_pnl_history(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Return recent PnL history points for the equity curve endpoint."""
         return self._state.pnl_history[-limit:]
@@ -777,6 +791,7 @@ class KalshiRiskManager:
     def reset_daily(self) -> None:
         """Reset daily counters (call at start of trading day)."""
         self._state.daily_pnl_usd = 0.0
+        self._state.daily_fees_usd = 0.0
         self._state.orders_this_minute = 0
         self._state.orders_this_hour = 0
         self._state.category_notional.clear()
@@ -923,7 +938,7 @@ class KalshiRiskManager:
             "peak_equity_usd": round(self._state.peak_equity_usd, 2),
             "current_equity_usd": round(self._state.current_equity_usd, 2),
             "daily_trades": self._state.orders_this_hour,
-            "daily_fees_usd": 0.0,
+            "daily_fees_usd": round(self._state.daily_fees_usd, 2),
             "open_market_count": 0,
             "orders_this_minute": self._state.orders_this_minute,
             "orders_this_hour": self._state.orders_this_hour,

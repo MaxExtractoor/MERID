@@ -2160,6 +2160,44 @@ async def get_order_groups_dashboard() -> Dict[str, Any]:
         raise HTTPException(500, f"Order groups dashboard failed: {exc}")
 
 
+
+def _get_canonical_daily_pnl() -> float:
+    """Return the authoritative daily PnL in USD.
+
+    Priority:
+    1. ``RiskController._daily_pnl`` (global kill-switch controller) when
+       non-zero — this value is updated by every lane/strategy via
+       ``risk_controller.record_pnl()``, making it the most complete tally.
+    2. ``KalshiRiskManager._state.daily_pnl_usd`` — the venue-level
+       accumulator, updated per fill in trading_agent.  Used as fallback
+       when the global controller has not recorded any PnL yet (e.g. early
+       in the session before the first trade).
+
+    Having a single canonical helper means ``/pnl``, ``/risk``, and
+    ``/health`` endpoints all return the *same* number, eliminating the
+    ~$1.02 UI/backend discrepancy that arises when different code paths read
+    from different accumulators.
+    """
+    # Primary: global risk controller
+    try:
+        from merid.risk.kill_switches import risk_controller as _rc
+        rc_pnl = float(_rc.get_status().get("daily_pnl", 0.0))
+        if rc_pnl != 0.0:
+            return round(rc_pnl, 2)
+    except Exception as _e:
+        logger.debug("canonical_pnl rc lookup skipped: %s", _e)
+
+    # Fallback: venue-level risk manager
+    risk = _get_risk()
+    if risk:
+        try:
+            return round(risk.state.daily_pnl_usd, 2)
+        except Exception as _e:
+            logger.debug("canonical_pnl venue lookup skipped: %s", _e)
+
+    return 0.0
+
+
 @router.get("/pnl")
 async def get_pnl() -> Dict[str, Any]:
     """Portfolio PnL summary from risk manager."""
@@ -2178,7 +2216,7 @@ async def get_pnl() -> Dict[str, Any]:
             except Exception as _e:
                 logger.debug("category_pnl tracker skipped: %s", _e)
             return {
-                "daily_pnl_usd": round(state.daily_pnl_usd, 2),
+                "daily_pnl_usd": _get_canonical_daily_pnl(),
                 "total_notional_usd": round(state.total_notional_usd, 2),
                 "peak_equity_usd": round(state.peak_equity_usd, 2),
                 "current_equity_usd": round(state.current_equity_usd, 2),
@@ -2223,13 +2261,14 @@ async def get_risk() -> Dict[str, Any]:
         if not _rc_status.get("can_trade", True):
             base["kill_switch_active"] = True
             base["kill_switch_reason"] = _rc_status.get("kill_reason")
-        _rc_pnl = float(_rc_status.get("daily_pnl", 0.0))
-        if _rc_pnl != 0.0:
-            base["daily_pnl_usd"] = _rc_pnl
-            base["daily_realized_pnl_usd"] = _rc_pnl
-            base["daily_total_pnl_usd"] = _rc_pnl
     except Exception as _e:
-        logger.debug("risk_controller pnl supplement skipped: %s", _e)
+        logger.debug("risk_controller kill-switch supplement skipped: %s", _e)
+
+    # Apply canonical daily PnL (single source of truth) — see _get_canonical_daily_pnl()
+    _canonical_pnl = _get_canonical_daily_pnl()
+    base["daily_pnl_usd"] = _canonical_pnl
+    base["daily_realized_pnl_usd"] = _canonical_pnl
+    base["daily_total_pnl_usd"] = _canonical_pnl
 
     # Supplement always-zero perf metrics from AgentPerformanceTracker
     if base.get("win_rate_pct", 0) == 0 or base.get("daily_trades", 0) == 0:
