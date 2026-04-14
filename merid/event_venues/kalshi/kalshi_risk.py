@@ -763,6 +763,15 @@ class KalshiRiskManager:
                 except Exception as _rbe:
                     pass  # non-fatal — risk manager already halts via kill switch
 
+        # Feed realized P&L into the profit-lock engine so Phase-3 protection
+        # can track session high-water marks and enforce the give-back limit.
+        # Fail-open: if the module is unavailable, sizing proceeds at full size.
+        try:
+            from merid.risk.profit_lock import get_profit_lock_engine
+            get_profit_lock_engine().record_pnl(pnl_usd)
+        except Exception:
+            pass
+
         # Auto-clear drawdown kill switch when equity fully recovers
         self._maybe_auto_reset_drawdown_kill_switch()
 

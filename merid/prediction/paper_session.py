@@ -133,10 +133,11 @@ class SessionRiskLimits:
     # Correlated-asset cluster caps (cents, combined across all timeframes)
     max_cluster_daily_loss_cents: float = 10000.0   # $100/day per cluster
 
-    # Rolling drawdown governance
+    # Rolling drawdown governance — aligned with global 4-zone model
+    # (green <10%, yellow 10–15%, orange 15–20%, red ≥20%)
     drawdown_warning_pct: float = 5.0    # Warn at 5% DD from HWM
-    drawdown_downsize_pct: float = 8.0   # Auto-downsize at 8%
-    drawdown_halt_pct: float = 12.0      # Auto-halt at 12%
+    drawdown_downsize_pct: float = 10.0  # Auto-downsize at 10% (yellow zone)
+    drawdown_halt_pct: float = 20.0      # Auto-halt at 20% (red zone, was 12%)
     downsize_factor: float = 0.5         # Reduce logical size to 50%
 
 
