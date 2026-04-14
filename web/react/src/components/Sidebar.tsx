@@ -16,6 +16,7 @@ import {
   Target,
   Grid,
   TrendingUp,
+  TrendingDown,
   ClipboardList,
   Shield,
   BarChart3,
@@ -68,6 +69,7 @@ const analytics = [
 const operatorSection = [
   { name: 'Operator', href: 'operator', icon: Sliders, color: 'text-indigo-400' },
   { name: 'Kill Switch', href: 'kill-switch', icon: ShieldAlert, color: 'text-red-400' },
+  { name: 'Risk Dashboard', href: 'risk-dashboard', icon: TrendingDown, color: 'text-rose-400' },
   { name: 'Risk Control', href: 'risk-control', icon: Shield, color: 'text-orange-400' },
   { name: 'Position Sizing', href: 'position-sizing', icon: BarChart3, color: 'text-sky-400' },
   { name: 'Promotion', href: 'promotion-status', icon: Award, color: 'text-amber-400' },

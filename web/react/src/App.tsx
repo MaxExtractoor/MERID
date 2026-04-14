@@ -19,6 +19,7 @@ import SwarmConsensusMatrix from "./views/SwarmConsensusMatrix";
 import CalibrationDashboardView from "./views/CalibrationDashboardView";
 import OperatorDashboard from "./views/OperatorDashboard";
 import RiskControlView from "./views/RiskControlView";
+import RiskDashboardView from "./views/RiskDashboardView";
 import PositionSizingView from "./views/PositionSizingView";
 import PromotionStatusView from "./views/PromotionStatusView";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -135,6 +136,7 @@ export default function App() {
               {view === "operator" && <OperatorDashboard />}
               {view === "kill-switch" && <KillSwitchView />}
               {view === "risk-control" && <RiskControlView />}
+              {view === "risk-dashboard" && <RiskDashboardView />}
               {view === "position-sizing" && <PositionSizingView />}
               {view === "promotion-status" && <PromotionStatusView />}
               {view === "logs" && <Logs />}
