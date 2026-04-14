@@ -5108,3 +5108,250 @@ async def get_twitter_stream_rolling(
         return {"asset": asset, "count": 0, "rolling_compound": 0.0, "error": str(exc)}
 
 
+# ── Global Risk Status ────────────────────────────────────────────────────────
+
+# In-memory ring buffer for state transitions (max 200 entries).
+import collections as _collections
+import datetime as _dt_mod
+
+_STATE_TRANSITIONS: "collections.deque[Dict[str, Any]]" = _collections.deque(maxlen=200)
+
+
+def _record_state_transition(event_type: str, detail: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    """Append a timestamped entry to the state-transitions ring buffer."""
+    entry: Dict[str, Any] = {
+        "ts": _dt_mod.datetime.now(_dt_mod.timezone.utc).isoformat(),
+        "event_type": event_type,
+        "detail": detail,
+    }
+    if extra:
+        entry.update(extra)
+    _STATE_TRANSITIONS.append(entry)
+
+
+@router.get("/global-risk-status")
+async def get_global_risk_status() -> Dict[str, Any]:
+    """Aggregated risk snapshot for the GlobalRiskStatus dashboard widget.
+
+    Returns:
+        drawdown_pct, zone, zone_multiplier — from DrawdownZoneManager.
+        profit_lock_state, locked_profit_usd, giveback_remaining_usd — from ProfitLockEngine.
+        error_budget_used, error_budget_threshold — from RiskController.
+        drawdown_halt_active, manual_halt_active — halt flags.
+    """
+    import datetime as _dt_local
+
+    result: Dict[str, Any] = {
+        "ts": _dt_local.datetime.now(_dt_local.timezone.utc).isoformat(),
+        # Drawdown zone
+        "drawdown_pct": 0.0,
+        "zone": "green",
+        "zone_multiplier": 1.0,
+        # Profit-lock
+        "profit_lock_state": "safe",
+        "profit_lock_multiplier": 1.0,
+        "locked_profit_usd": 0.0,
+        "giveback_remaining_usd": 0.0,
+        "session_high_usd": 0.0,
+        # Combined effective multiplier
+        "effective_multiplier": 1.0,
+        # Error budget
+        "error_budget_used": 0,
+        "error_budget_threshold": 50,
+        "error_budget_pct": 0.0,
+        # Halt flags
+        "drawdown_halt_active": False,
+        "manual_halt_active": False,
+        "kill_switch_active": False,
+        "kill_switch_reason": None,
+    }
+
+    # --- Drawdown zone --------------------------------------------------
+    try:
+        from merid.risk.drawdown_zones import get_drawdown_zone_manager
+        dzm = get_drawdown_zone_manager()
+        dz_status = dzm.get_status()
+        dd_pct = dz_status.get("current_drawdown_pct", 0.0)
+        zone_str = dz_status.get("current_zone", "green")
+        mults = dz_status.get("multipliers", {})
+        zone_mult = mults.get(zone_str, 1.0)
+        result["drawdown_pct"] = round(dd_pct, 2)
+        result["zone"] = zone_str
+        result["zone_multiplier"] = round(zone_mult, 4)
+    except Exception as _e:
+        logger.debug("global_risk_status: drawdown zone lookup failed: %s", _e)
+
+    # --- Profit-lock ----------------------------------------------------
+    try:
+        from merid.risk.profit_lock import get_profit_lock_engine
+        pl = get_profit_lock_engine()
+        pl_status = pl.get_status()
+        pl_state = pl_status.get("state", "safe")
+        pl_mult = pl_status.get("size_multiplier", 1.0)
+        locked = pl_status.get("locked_profit", 0.0)
+        headroom = pl_status.get("headroom", 0.0)
+        session_high = pl_status.get("session_high", 0.0)
+        result["profit_lock_state"] = pl_state
+        result["profit_lock_multiplier"] = round(pl_mult, 4)
+        result["locked_profit_usd"] = round(locked, 2)
+        result["giveback_remaining_usd"] = round(max(0.0, headroom), 2)
+        result["session_high_usd"] = round(session_high, 2)
+    except Exception as _e:
+        logger.debug("global_risk_status: profit lock lookup failed: %s", _e)
+
+    # --- Effective combined multiplier ----------------------------------
+    result["effective_multiplier"] = round(
+        result["zone_multiplier"] * result["profit_lock_multiplier"], 4
+    )
+
+    # --- Error budget ---------------------------------------------------
+    try:
+        from merid.risk.kill_switches import risk_controller as _rc
+        eb = _rc.get_error_budget_metrics()
+        result["error_budget_used"] = eb.get("error_count", 0)
+        result["error_budget_threshold"] = eb.get("error_threshold", 50)
+        result["error_budget_pct"] = round(eb.get("budget_used_pct", 0.0), 1)
+    except Exception as _e:
+        logger.debug("global_risk_status: error budget lookup failed: %s", _e)
+
+    # --- Halt flags / kill switch ---------------------------------------
+    try:
+        from merid.risk.kill_switches import risk_controller as _rc
+        rc_status = _rc.get_status()
+        result["drawdown_halt_active"] = bool(rc_status.get("drawdown_halt_active", False))
+        result["kill_switch_active"] = bool(rc_status.get("kill_switch_active", False))
+        result["kill_switch_reason"] = rc_status.get("kill_reason")
+    except Exception as _e:
+        logger.debug("global_risk_status: kill switch lookup failed: %s", _e)
+
+    try:
+        from core.automated_risk_controls import get_risk_coordinator
+        coord = get_risk_coordinator()
+        result["manual_halt_active"] = bool(coord.halt_manager.is_halted)
+    except Exception as _e:
+        logger.debug("global_risk_status: manual halt lookup failed: %s", _e)
+
+    return result
+
+
+@router.get("/risk/state-transitions")
+async def get_risk_state_transitions(limit: int = Query(50, ge=1, le=200)) -> Dict[str, Any]:
+    """Return the most recent risk state transition log entries.
+
+    Entries are added by the backend whenever zone, profit-lock state,
+    drawdown halt, or kill-switch state changes.  The buffer holds up to
+    200 entries (FIFO ring buffer).
+    """
+    entries = list(_STATE_TRANSITIONS)[-limit:]
+    entries.reverse()  # newest first
+
+    # Supplement with live state so the UI always has at least one entry
+    if not entries:
+        try:
+            from merid.risk.drawdown_zones import get_drawdown_zone_manager
+            dzm = get_drawdown_zone_manager()
+            dz = dzm.get_status()
+            entries.append({
+                "ts": _dt_mod.datetime.now(_dt_mod.timezone.utc).isoformat(),
+                "event_type": "current_state",
+                "detail": f"Zone: {dz.get('current_zone', 'green').upper()} "
+                          f"(DD {dz.get('current_drawdown_pct', 0.0):.1f}%)",
+            })
+        except Exception:
+            pass
+
+    return {"transitions": entries, "total": len(_STATE_TRANSITIONS)}
+
+
+@router.get("/risk/effective-config")
+async def get_effective_risk_config() -> Dict[str, Any]:
+    """Return the live effective risk configuration (read-only mirror).
+
+    Exposes drawdown thresholds, profit-lock settings, kill-switch params,
+    and CT time-boxing config so operators never need to grep YAML.
+    """
+    cfg: Dict[str, Any] = {
+        "drawdown": {
+            "green_pct": 10.0,
+            "soft_pct": 15.0,
+            "hard_pct": 20.0,
+            "halt_pct": 20.0,
+            "multipliers": {
+                "green": 1.0,
+                "yellow": 0.625,
+                "orange": 0.30,
+                "red": 0.0,
+            },
+        },
+        "profit_lock": {
+            "lock_fraction": 0.60,
+            "max_giveback_fraction": 0.40,
+            "caution_threshold": 0.50,
+            "states": {
+                "safe": {"multiplier": 1.0, "description": "Full sizing"},
+                "caution": {"multiplier": 0.5, "description": "50% sizing"},
+                "frozen": {"multiplier": 0.0, "description": "No new entries"},
+            },
+        },
+        "kill_switch": {
+            "error_budget_threshold": 50,
+            "dedup_window_secs": 60.0,
+            "warn_pct": 0.70,
+            "limit_pct": 0.90,
+            "exempt_classes": [],
+            "note": "Drawdown rejects do NOT consume error budget",
+        },
+        "ct_timebox": {
+            "taper_start_minutes_before_expiry": 2.0,
+            "expired_skip": True,
+            "description": "CT orders skip if market expires in < 2 min",
+        },
+    }
+
+    # Override from live objects when available
+    try:
+        from merid.risk.drawdown_zones import get_drawdown_zone_manager
+        dzm = get_drawdown_zone_manager()
+        dz_status = dzm.get_status()
+        thresholds = dz_status.get("thresholds", {})
+        mults = dz_status.get("multipliers", {})
+        cfg["drawdown"]["green_pct"] = round(thresholds.get("green_pct", 0.10) * 100, 1)
+        cfg["drawdown"]["soft_pct"] = round(thresholds.get("soft_pct", 0.15) * 100, 1)
+        cfg["drawdown"]["hard_pct"] = round(thresholds.get("hard_pct", 0.20) * 100, 1)
+        cfg["drawdown"]["halt_pct"] = cfg["drawdown"]["hard_pct"]
+        cfg["drawdown"]["multipliers"]["green"] = mults.get("green", 1.0)
+        cfg["drawdown"]["multipliers"]["yellow"] = mults.get("yellow", 0.625)
+        cfg["drawdown"]["multipliers"]["orange"] = mults.get("orange", 0.30)
+        cfg["drawdown"]["multipliers"]["red"] = mults.get("red", 0.0)
+    except Exception as _e:
+        logger.debug("effective_config: drawdown zone config lookup failed: %s", _e)
+
+    try:
+        from merid.risk.profit_lock import get_profit_lock_engine
+        pl = get_profit_lock_engine()
+        cfg["profit_lock"]["lock_fraction"] = pl.lock_fraction
+        cfg["profit_lock"]["max_giveback_fraction"] = pl.max_giveback_fraction
+        cfg["profit_lock"]["caution_threshold"] = pl.caution_threshold
+    except Exception as _e:
+        logger.debug("effective_config: profit lock config lookup failed: %s", _e)
+
+    try:
+        from merid.risk.kill_switches import risk_controller as _rc
+        cfg["kill_switch"]["error_budget_threshold"] = _rc.error_threshold
+        cfg["kill_switch"]["dedup_window_secs"] = float(getattr(_rc, "dedup_window_secs", 60.0))
+        exempt = list(getattr(_rc, "error_exempt_classes", set()))
+        cfg["kill_switch"]["exempt_classes"] = sorted(exempt)
+    except Exception as _e:
+        logger.debug("effective_config: kill switch config lookup failed: %s", _e)
+
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskManager
+        cfg["ct_timebox"]["taper_start_minutes_before_expiry"] = getattr(
+            KalshiRiskManager, "CT_TAPER_MINUTES", 2.0
+        )
+    except Exception:
+        pass
+
+    return cfg
+
+
