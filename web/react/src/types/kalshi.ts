@@ -121,6 +121,88 @@ export interface GridAgent {
   fills: number | null;
   /** Tickers this agent is currently active on. */
   active_tickers: string[] | null;
+  /** Combined effective size multiplier: DD zone × profit-lock × size_factor. */
+  effective_size_multiplier?: number | null;
+  /** Drawdown zone multiplier component. */
+  dd_zone_multiplier?: number | null;
+  /** Profit-lock multiplier component. */
+  profit_lock_multiplier?: number | null;
+  /** Reason this agent/market is not trading, if applicable. */
+  reason_not_trading?: string | null;
+}
+
+/** Aggregated global risk snapshot returned by /api/v1/kalshi/global-risk-status. */
+export interface GlobalRiskStatus {
+  ts: string;
+  /** Portfolio drawdown as a percentage (e.g. 12.3). */
+  drawdown_pct: number;
+  /** Current drawdown zone: green | yellow | orange | red. */
+  zone: 'green' | 'yellow' | 'orange' | 'red';
+  /** Size multiplier for the current zone (e.g. 0.625 for yellow). */
+  zone_multiplier: number;
+  /** Profit-lock state: safe | caution | frozen. */
+  profit_lock_state: 'safe' | 'caution' | 'frozen';
+  /** Profit-lock size multiplier (1.0 / 0.5 / 0.0). */
+  profit_lock_multiplier: number;
+  /** Locked profit in USD. */
+  locked_profit_usd: number;
+  /** Remaining give-back headroom in USD before FROZEN triggers. */
+  giveback_remaining_usd: number;
+  /** Session realized P&L high-water mark in USD. */
+  session_high_usd: number;
+  /** Combined effective size multiplier (zone × profit-lock). */
+  effective_multiplier: number;
+  /** Number of errors counted toward budget in the current window. */
+  error_budget_used: number;
+  /** Error budget threshold (default 50). */
+  error_budget_threshold: number;
+  /** Error budget utilization percentage. */
+  error_budget_pct: number;
+  /** True when drawdown halt is active (≥20% DD). Does NOT consume error budget. */
+  drawdown_halt_active: boolean;
+  /** True when an operator manual halt is active. */
+  manual_halt_active: boolean;
+  /** True when the kill switch is fired (error budget exceeded). */
+  kill_switch_active: boolean;
+  kill_switch_reason: string | null;
+}
+
+/** A single risk state transition event from /api/v1/kalshi/risk/state-transitions. */
+export interface StateTransition {
+  ts: string;
+  event_type: string;
+  detail: string;
+  [key: string]: unknown;
+}
+
+/** Effective live risk configuration from /api/v1/kalshi/risk/effective-config. */
+export interface EffectiveRiskConfig {
+  drawdown: {
+    green_pct: number;
+    soft_pct: number;
+    hard_pct: number;
+    halt_pct: number;
+    multipliers: { green: number; yellow: number; orange: number; red: number };
+  };
+  profit_lock: {
+    lock_fraction: number;
+    max_giveback_fraction: number;
+    caution_threshold: number;
+    states: Record<string, { multiplier: number; description: string }>;
+  };
+  kill_switch: {
+    error_budget_threshold: number;
+    dedup_window_secs: number;
+    warn_pct: number;
+    limit_pct: number;
+    exempt_classes: string[];
+    note: string;
+  };
+  ct_timebox: {
+    taper_start_minutes_before_expiry: number;
+    expired_skip: boolean;
+    description: string;
+  };
 }
 
 export interface MarketOutcome {
