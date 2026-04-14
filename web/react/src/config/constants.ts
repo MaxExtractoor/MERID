@@ -190,6 +190,11 @@ export const API_ENDPOINTS = {
   KALSHI_RISK_BTC15M_RECORD_RESULT: "/api/v1/kalshi/risk/btc15m/record-result",
   KALSHI_RISK_DD_GUARD: "/api/v1/kalshi/risk/dd-guard",
 
+  // ── Global Risk Status (drawdown zone + profit-lock + kill-switch) ──
+  KALSHI_GLOBAL_RISK_STATUS: "/api/v1/kalshi/global-risk-status",
+  KALSHI_RISK_STATE_TRANSITIONS: "/api/v1/kalshi/risk/state-transitions",
+  KALSHI_RISK_EFFECTIVE_CONFIG: "/api/v1/kalshi/risk/effective-config",
+
   // ── Market Mood Bus ────────────────────────────────────────────────
   KALSHI_MOOD: (asset: string, timeframe: string) => `/api/v1/kalshi/mood/${asset}/${timeframe}`,
   KALSHI_MOOD_ALL: "/api/v1/kalshi/mood/all",

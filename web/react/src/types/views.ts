@@ -25,4 +25,5 @@ export type View =
   | "settings"
   | "lane-control"
   | "swarm-consensus"
-  | "calibration-dashboard";
+  | "calibration-dashboard"
+  | "risk-dashboard";

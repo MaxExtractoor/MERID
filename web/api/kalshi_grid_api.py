@@ -24,7 +24,7 @@ Endpoints:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
@@ -108,6 +108,39 @@ def _normalize_agent(raw: Dict[str, Any]) -> Dict[str, Any]:
     if fills is None:
         logger.debug("_normalize_agent(%s): fills count not available", agent_name)
 
+    # Effective size multiplier: DD zone mult × profit-lock mult × size_factor
+    dd_mult = 1.0
+    pl_mult = 1.0
+    reason_not_trading: Optional[str] = None
+
+    try:
+        from merid.risk.drawdown_zones import get_drawdown_zone_manager
+        from merid.risk.profit_lock import get_profit_lock_engine
+        from merid.risk.kill_switches import risk_controller as _rc
+
+        dzm = get_drawdown_zone_manager()
+        dz_status = dzm.get_status()
+        zone_str = dz_status.get("current_zone", "green")
+        mults = dz_status.get("multipliers", {})
+        dd_mult = float(mults.get(zone_str, 1.0))
+
+        pl = get_profit_lock_engine()
+        pl_mult = pl.size_multiplier()
+
+        # Determine reason_not_trading
+        if _rc.is_drawdown_halted():
+            reason_not_trading = "drawdown_halt_active"
+        elif not _rc.can_trade():
+            reason_not_trading = "kill_switch_active"
+        elif pl.profit_lock_state.value == "frozen":
+            reason_not_trading = "ProfitLock FROZEN"
+        elif not running:
+            reason_not_trading = "agent_stopped"
+    except Exception:
+        pass
+
+    effective_size_multiplier = round(dd_mult * pl_mult * size_factor, 4)
+
     return {
         "name": agent_name,
         "asset": asset,
@@ -123,6 +156,10 @@ def _normalize_agent(raw: Dict[str, Any]) -> Dict[str, Any]:
         "fills": fills,
         "errors": errors,
         "active_tickers": active_tickers,
+        "effective_size_multiplier": effective_size_multiplier,
+        "dd_zone_multiplier": round(dd_mult, 4),
+        "profit_lock_multiplier": round(pl_mult, 4),
+        "reason_not_trading": reason_not_trading,
     }
 
 

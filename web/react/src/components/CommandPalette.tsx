@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid, Target, Shield, Award } from 'lucide-react';
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid, Target, Shield, Award, TrendingDown } from 'lucide-react';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -46,6 +46,7 @@ const COMMANDS: CommandItem[] = [
   // Operator
   { id: 'operator', label: 'Operator', section: 'Operator', icon: Monitor, keywords: ['ops', 'control', 'status', 'operator', 'orchestrator'] },
   { id: 'kill-switch', label: 'Kill Switch', section: 'Operator', icon: ShieldAlert, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
+  { id: 'risk-dashboard', label: 'Risk Dashboard', section: 'Operator', icon: TrendingDown, keywords: ['risk', 'drawdown', 'zone', 'profit', 'lock', 'multiplier', 'halt'] },
   { id: 'risk-control', label: 'Risk Control', section: 'Operator', icon: Shield, keywords: ['risk', 'circuit', 'breaker', 'protection', 'caps', 'limits'] },
   { id: 'position-sizing', label: 'Position Sizing', section: 'Operator', icon: BarChart3, keywords: ['position', 'sizing', 'kelly', 'vol', 'drawdown', 'tier'] },
   { id: 'promotion-status', label: 'Promotion Status', section: 'Operator', icon: Award, keywords: ['promotion', 'auto', 'promoter', 'shadow', 'live', 'paper', 'gauntlet'] },
