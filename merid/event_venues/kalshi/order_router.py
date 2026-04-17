@@ -1060,10 +1060,25 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         await client.connect()
 
         # ── A5: Re-validate market conditions per-order ───────────────────
+        _market_check_passed = False
         try:
             from merid.event_venues.kalshi.market_filter import DEFAULT_FILTER_CONFIG
             _market_result = await client.get_market(intent.ticker)
-            if _market_result.success and _market_result.value is not None:
+            if not _market_result.success:
+                # Handle 404 / market not found (BUG-404 fix)
+                _error_str = str(_market_result.error or "").lower()
+                if "404" in _error_str or "not found" in _error_str or "client error" in _error_str:
+                    latency = (time.monotonic() - t0) * 1000
+                    logger.warning("[order-router] A5: market %s not found (404), rejecting order", intent.ticker)
+                    _release_gate_record(intent, f"market_not_found:{intent.ticker}")
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"market_not_found:{intent.ticker}",
+                        latency_ms=round(latency, 2),
+                    )
+            elif _market_result.value is not None:
+                _market_check_passed = True
                 _mkt = _market_result.value
                 _bid = int(getattr(_mkt, "best_bid", 0) or 0)
                 _ask = int(getattr(_mkt, "best_ask", 0) or 0)
@@ -1092,7 +1107,19 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     logger.warning("[order-router] A5: market %s volume too low (%d < %d)", intent.ticker, _vol, _cfg.min_volume)
                     return _a5_reject(f"market_condition:volume_too_low:{_vol}")
         except Exception as _exc:
-            logger.debug("[order-router] A5: market condition check skipped: %s", _exc)
+            # Only skip check if market was found but check failed; fail-closed on 404
+            _exc_str = str(_exc).lower()
+            if "404" in _exc_str or "not found" in _exc_str or "client error" in _exc_str:
+                latency = (time.monotonic() - t0) * 1000
+                logger.warning("[order-router] A5: market %s not found (404 from exception), rejecting order: %s", intent.ticker, _exc)
+                _release_gate_record(intent, f"market_not_found:{intent.ticker}")
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"market_not_found:{intent.ticker}",
+                    latency_ms=round(latency, 2),
+                )
+            logger.debug("[order-router] A5: market condition check skipped (market found but check failed): %s", _exc)
 
         # ── Order Group Risk Check ─────────────────────────────────────────
         # A3/RISK-05: track og_manager and whether a debit was recorded so we
