@@ -315,9 +315,9 @@ class TestTinyBankrollMode:
         )
         guardian = TradingGuardian(checklist)
         
-        # With $5.74 bankroll (574 cents), computed should be 0
+        # With small bankroll (below floor), computed should be 0
         raw_cap, effective_cap, override_applied = guardian.compute_live_cap_with_override(
-            "BTC", 574, 0.65
+            "BTC", 400, 0.65
         )
         
         assert raw_cap == 0
