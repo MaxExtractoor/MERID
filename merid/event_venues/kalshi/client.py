@@ -3774,6 +3774,29 @@ def handle_fix_reject(msg: Dict[str, str]) -> Optional[Exception]:
 
     return None
 
+    async def close(self) -> None:
+        """Close HTTP client and cleanup resources with Windows error handling.
+
+        Handles Windows-specific asyncio errors gracefully during shutdown
+        to prevent ERROR_OPERATION_ABORTED (WinError 995) from propagating.
+        """
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except asyncio.CancelledError:
+                # Normal during shutdown - don't log as error
+                pass
+            except OSError as e:
+                # Handle Windows-specific errors silently
+                if self._is_windows_recoverable_error(e):
+                    logger.debug("[kalshi] close() suppressed Windows error: %r", e)
+                else:
+                    logger.warning("[kalshi] close() got OSError: %r", e)
+            except Exception as e:
+                logger.debug("[kalshi] close() error (non-fatal): %r", e)
+            finally:
+                self._http_client = None
+
 
 # ── Singleton ────────────────────────────────────────────────────────────
 

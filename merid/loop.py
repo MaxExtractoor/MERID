@@ -251,6 +251,10 @@ class MeridLoop:
         self._tick_in_progress = False  # mirrored for health/status reads (no await needed)
         self._tick_step_timings: Dict[str, float] = {}  # per-step duration tracking
 
+        # Adaptive slow-action tracking: skip steps that were recently slow (BUG-EL fix)
+        self._slow_action_last_skip: Dict[str, float] = {}  # step -> timestamp when skipped due to slowness
+        self._SLOW_ACTION_COOLDOWN_S = 60.0  # skip slow action for 60s after it exceeds budget
+
         # Timers for staggered cadences
         self._last_feature_refresh = 0.0
         self._last_agent_cycle = 0.0
@@ -265,11 +269,11 @@ class MeridLoop:
         self._last_reflection_cycle = 0.0
         self._reflection_cycle_interval = 300.0  # 5 minutes — run after enough fills accumulate
         self._last_liquidity_refresh = 0.0
-        self._liquidity_refresh_interval = 30.0  # 30 seconds — orderbook health sweep
+        self._liquidity_refresh_interval = 60.0  # 60 seconds — orderbook health sweep (increased from 30s to reduce event-loop lag)
         self._last_config_reload = 0.0
         self._config_reload_interval = 300.0  # 5 minutes — hot-reload risk limits / reality assertions
         self._last_order_groups_sync = 0.0
-        self._order_groups_sync_interval = 30.0  # 30s — lifecycle state check
+        self._order_groups_sync_interval = 60.0  # 60s — lifecycle state check (increased from 30s to reduce event-loop lag)
 
         # W6: pre-initialise ws_bridge so _refresh_liquidity can safely reference it
         # before run() is called (e.g. in tests or if tick() is called standalone).
@@ -367,6 +371,21 @@ class MeridLoop:
         '{"features": 30, "agent_cycles": 30, "promotion_sync": 15, "liquidity": 20, "betting": 30, "reconciliation": 10, "arb_scan": 10}'
     ))
 
+    def _should_skip_due_to_slowness(self, step_name: str, now: float) -> bool:
+        """Check if a step should be skipped because it was recently slow (BUG-EL fix).
+
+        Returns True if the step exceeded the slow-action budget within the cooldown window.
+        This prevents event-loop lag by skipping steps that are known to be slow.
+        """
+        last_slow = self._slow_action_last_skip.get(step_name)
+        if last_slow is None:
+            return False
+        if now - last_slow < self._SLOW_ACTION_COOLDOWN_S:
+            return True
+        # Cooldown expired, clear the record
+        self._slow_action_last_skip.pop(step_name, None)
+        return False
+
     async def _run_step(self, name: str, coro, summary: Dict) -> None:
         """Execute a single loop step with isolation — errors are logged
         and recorded in the summary but never propagate to crash the tick."""
@@ -407,6 +426,8 @@ class MeridLoop:
                     "Slow action '%s': %.1fms (budget %.0fms)",
                     name, elapsed_ms, _SLOW_ACTION_BUDGET_MS,
                 )
+                # Track for adaptive skipping (BUG-EL fix)
+                self._slow_action_last_skip[name] = time.time()
 
     async def tick(self, now: Optional[float] = None, force: bool = False) -> Dict[str, Any]:
         """Run one full cycle of the swarm loop.
@@ -479,20 +500,29 @@ class MeridLoop:
         parallel_coros = []
 
         if now - self._last_feature_refresh >= self.config.feature_refresh_interval:
-            parallel_coros.append(self._run_step("features", self._refresh_features(now, summary), summary))
-            self._last_feature_refresh = now
+            if self._should_skip_due_to_slowness("features", now):
+                summary["actions"].append("features_refreshed:skipped_recently_slow")
+            else:
+                parallel_coros.append(self._run_step("features", self._refresh_features(now, summary), summary))
+                self._last_feature_refresh = now
 
         if now - self._last_consensus >= self.config.consensus_interval:
             parallel_coros.append(self._run_step("consensus", self._run_consensus(summary), summary))
             self._last_consensus = now
 
         if now - self._last_arb_scan >= self.config.arb_scan_interval:
-            parallel_coros.append(self._run_step("arb_scan", self._run_arb_scan(now, summary), summary))
-            self._last_arb_scan = now
+            if self._should_skip_due_to_slowness("arb_scan", now):
+                summary["actions"].append("arb_scan:skipped_recently_slow")
+            else:
+                parallel_coros.append(self._run_step("arb_scan", self._run_arb_scan(now, summary), summary))
+                self._last_arb_scan = now
 
         if now - self._last_liquidity_refresh >= self._liquidity_refresh_interval:
-            parallel_coros.append(self._run_step("liquidity", self._refresh_liquidity(now, summary), summary))
-            self._last_liquidity_refresh = now
+            if self._should_skip_due_to_slowness("liquidity", now):
+                summary["actions"].append("liquidity_sweep:skipped_recently_slow")
+            else:
+                parallel_coros.append(self._run_step("liquidity", self._refresh_liquidity(now, summary), summary))
+                self._last_liquidity_refresh = now
 
         if now - self._last_cqi_update >= self.config.cqi_interval:
             parallel_coros.append(self._run_step("cqi", self._update_cqi(now, summary), summary))
