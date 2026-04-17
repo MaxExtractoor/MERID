@@ -24,8 +24,28 @@ from core.venue_adapter import VenueAdapter, OrderSide, OrderType, Order, Market
 from core.rate_limiter import rate_limiter
 from core.venues.kalshi_adapter import kalshi_adapter
 
-# LEGACY: Non-Kalshi venue adapters preserved in _legacy/
-_alpaca = _ibkr = _binanceus = _sim = None
+# LEGACY: Non-Kalshi venue adapters - safe import with fallback to None
+def _safe_import_adapter(module_name: str, attr_name: str):
+    """Safely import an adapter, returning None if not available."""
+    try:
+        module = __import__(module_name, fromlist=[attr_name])
+        return getattr(module, attr_name, None)
+    except Exception:
+        return None
+
+alpaca_adapter = _safe_import_adapter("core.venues.alpaca_adapter", "alpaca_adapter")
+ibkr_adapter = _safe_import_adapter("core.venues.ibkr_adapter", "ibkr_adapter")
+binanceus_adapter = _safe_import_adapter("core.venues.binanceus_adapter", "binanceus_adapter")
+coinbase_advanced_adapter = _safe_import_adapter("core.venues.coinbase_advanced_adapter", "coinbase_advanced_adapter")
+kraken_adapter = _safe_import_adapter("core.venues.kraken_adapter", "kraken_adapter")
+gemini_adapter = _safe_import_adapter("core.venues.gemini_adapter", "gemini_adapter")
+merid_sim_adapter = _safe_import_adapter("core.venues.sim_adapter", "merid_sim_adapter")
+bitget_adapter = _safe_import_adapter("core.venues.bitget_adapter", "bitget_adapter")
+kucoin_adapter = _safe_import_adapter("core.venues.kucoin_adapter", "kucoin_adapter")
+gateio_adapter = _safe_import_adapter("core.venues.gateio_adapter", "gateio_adapter")
+mexc_adapter = _safe_import_adapter("core.venues.mexc_adapter", "mexc_adapter")
+htx_adapter = _safe_import_adapter("core.venues.htx_adapter", "htx_adapter")
+okx_adapter = _safe_import_adapter("core.venues.okx_adapter", "okx_adapter")
 
 logger = structlog.get_logger(__name__)
 
@@ -60,7 +80,8 @@ class UniversalRouter:
     def __init__(self):
         self.logger = logger.bind(router="UniversalRouter")
         self.rate_limiter = rate_limiter
-        self.adapters: Dict[str, VenueAdapter] = {
+        # Build adapters dict, filtering out None values for missing adapters
+        _all_adapters = {
             # US-Compliant venues
             "alpaca": alpaca_adapter,
             "ibkr": ibkr_adapter,
@@ -77,6 +98,9 @@ class UniversalRouter:
             "mexc": mexc_adapter,
             "htx": htx_adapter,
             "okx": okx_adapter,
+        }
+        self.adapters: Dict[str, VenueAdapter] = {
+            k: v for k, v in _all_adapters.items() if v is not None
         }
         self.venue_health: Dict[str, bool] = {}
         

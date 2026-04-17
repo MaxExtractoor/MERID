@@ -91,18 +91,34 @@ class FeatureRegistry:
         
         return features
     
-    def get_dependencies(self, feature_name: str) -> List[str]:
-        """Get all dependencies for a feature."""
+    def get_dependencies(self, feature_name: str, _visited: Optional[set] = None) -> List[str]:
+        """Get all dependencies for a feature.
+
+        Args:
+            feature_name: Name of the feature to get dependencies for
+            _visited: Internal set to track visited features (for cycle detection)
+
+        Returns:
+            List of dependency feature names
+        """
+        if _visited is None:
+            _visited = set()
+
+        # Cycle detection - prevent infinite recursion
+        if feature_name in _visited:
+            return []
+        _visited.add(feature_name)
+
         feature = self._features.get(feature_name)
         if not feature:
             return []
-        
+
         deps = set(feature.dependencies)
-        
+
         # Recursively get dependencies
         for dep in feature.dependencies:
-            deps.update(self.get_dependencies(dep))
-        
+            deps.update(self.get_dependencies(dep, _visited))
+
         return list(deps)
 
 
