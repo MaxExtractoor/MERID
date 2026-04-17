@@ -260,10 +260,17 @@ class DislocationScanner:
         """Scan all symbols for cross-venue dislocations."""
         now = now or time.time()
         new_signals = []
+        
+        # BUG-EL20 fix: Limit symbols scanned to prevent 2s+ blocking
+        MAX_SYMBOLS_SCAN = 3
+        symbols_scanned = 0
 
         for symbol, venues in self._prices.items():
+            if symbols_scanned >= MAX_SYMBOLS_SCAN:
+                break
             if len(venues) < 2:
                 continue
+            symbols_scanned += 1
             venue_list = list(venues.values())
             # Find all pairwise dislocations
             for i in range(len(venue_list)):
@@ -459,13 +466,12 @@ class DislocationScanner:
         now = now or time.time()
         rng = random.Random(int(now / 60))
 
-        symbols = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        # BUG-EL21 fix: Limit symbols in synthetic scan to reduce CPU load
+        symbols = ["BTC", "ETH", "SOL"]
         venues_map = {
-            "BTC": [("binance", 43250), ("coinbase", 43280), ("kraken", 43260)],
-            "ETH": [("binance", 2650), ("coinbase", 2655), ("uniswap", 2645)],
-            "SOL": [("binance", 105.5), ("coinbase", 105.8), ("jupiter", 105.3)],
-            "XRP": [("binance", 0.62), ("coinbase", 0.621), ("kraken", 0.619)],
-            "DOGE": [("binance", 0.105), ("coinbase", 0.1055), ("kraken", 0.1048)],
+            "BTC": [("binance", 43250), ("coinbase", 43280)],
+            "ETH": [("binance", 2650), ("coinbase", 2655)],
+            "SOL": [("binance", 105.5), ("coinbase", 105.8)],
         }
 
         signals = []

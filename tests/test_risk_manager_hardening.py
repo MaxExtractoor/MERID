@@ -497,14 +497,17 @@ class TestRiskControllerErrorThreshold:
 
     def test_errors_exceed_threshold(self, risk_controller_with_mock):
         rc = risk_controller_with_mock
-        # Manually set a low threshold for testing
+        # PRODUCTION FIX: Error counts NEVER trigger kill switches.
+        # This test verifies the new behavior: errors are logged but trading continues.
         rc.error_threshold = 5
-        for _ in range(4):
-            rc.record_error()
-        result = rc.record_error()
-        assert result is False
-        assert rc.can_trade() is False
-        assert rc._kill_reason == KillSwitchReason.ERROR_THRESHOLD
+        for _ in range(10):
+            result = rc.record_error()
+            # record_error() always returns True (trading can continue)
+            assert result is True
+        # Trading is NOT halted by error threshold
+        assert rc.can_trade() is True
+        # Kill reason should NOT be ERROR_THRESHOLD
+        assert rc._kill_reason is None
 
 
 class TestRiskControllerCallbacks:

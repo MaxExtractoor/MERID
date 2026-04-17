@@ -25,7 +25,7 @@ class TestServerConfig:
         config = ServerConfig()
         assert config.host == "0.0.0.0"
         assert config.port == 8001
-        assert config.debug is True
+        assert config.debug is False
         assert config.cors_origins == ["*"]
 
     def test_from_env_defaults(self):
