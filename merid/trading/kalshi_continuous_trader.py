@@ -438,6 +438,7 @@ class OrderTracker:
                 "placed_at": time.time(),
                 "price_cents": cost_cents,
                 "contracts": order.get("quantity", 1),
+                "estimated_fee_cents": fee,  # Store for adjustment on fill
             }
 
     def record_cancel(self, order_id: str) -> None:
@@ -463,15 +464,21 @@ class OrderTracker:
                 from merid.event_venues.kalshi.kalshi_risk import kalshi_fee_cents
                 contracts = self.resting_orders[order_id].get("contracts", 1)
                 actual_fee = kalshi_fee_cents(fill_price_cents, contracts)
-                # Replace estimated fee with actual fee
-                self.total_fees_cents += actual_fee
+                # Adjust fee: actual - estimated (estimated was added in record_order)
+                estimated_fee = int(
+                    float(self.resting_orders[order_id].get("estimated_fee_cents", actual_fee))
+                )
+                self.total_fees_cents += (actual_fee - estimated_fee)
+            else:
+                # Fee already accounted in record_order, no adjustment needed
+                pass
 
             self.resting_orders.pop(order_id, None)
             self.orders_filled += 1
             return True
 
         # Order not in resting_orders - may have been placed as immediate executed
-        # or already cancelled. Still count the fill if we track total filled.
+        # or already cancelled. Fee was already recorded in record_order for immediate fills.
         self.orders_filled += 1
         return False
 
