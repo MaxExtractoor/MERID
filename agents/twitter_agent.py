@@ -335,6 +335,30 @@ class TwitterAgent:
         )
         return self.post_tweet(text)
 
+    def post_system_status(
+        self,
+        blocks_mined: int,
+        agents_active: int,
+        consensus_rate: float,
+    ) -> Optional[Tweet]:
+        """Post a system status update tweet.
+
+        Args:
+            blocks_mined: Number of blocks mined
+            agents_active: Number of active agents
+            consensus_rate: Consensus rate (0-1)
+
+        Returns:
+            Tweet object if posted successfully, None otherwise
+        """
+        text = (
+            f"🤖 MERID System Status\n"
+            f"⛏️ Blocks: {blocks_mined}\n"
+            f"🔄 Agents: {agents_active}\n"
+            f"📊 Consensus: {consensus_rate:.1%}"
+        )
+        return self.post_tweet(text)
+
     def post_tweet_reply(self, text: str, reply_to_id: str) -> Optional[Tweet]:
         """Post a reply tweet to thread a follow-up on the same market."""
         if not self.enabled:

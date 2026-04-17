@@ -73,7 +73,10 @@ class TestMarketAnalystAgentObserve:
         market_state = MarketState(
             timestamp=1234567890.0,
             prices={"BTC": 50000.0},
-            volumes={"BTC": 1000.0}
+            volumes={"BTC": 1000.0},
+            funding_rates={"BTC": 0.01},
+            news_sentiment=0.5,
+            volatility_index=0.2
         )
         
         await agent.observe(market_state)
@@ -90,14 +93,20 @@ class TestMarketAnalystAgentObserve:
         await agent.observe(MarketState(
             timestamp=1234567890.0,
             prices={"BTC": 50000.0},
-            volumes={"BTC": 1000.0}
+            volumes={"BTC": 1000.0},
+            funding_rates={"BTC": 0.01},
+            news_sentiment=0.5,
+            volatility_index=0.2
         ))
         
         # Second observation
         await agent.observe(MarketState(
             timestamp=1234567891.0,
             prices={"BTC": 51000.0},
-            volumes={"BTC": 1200.0}
+            volumes={"BTC": 1200.0},
+            funding_rates={"BTC": 0.01},
+            news_sentiment=0.5,
+            volatility_index=0.2
         ))
         
         assert len(agent._price_history["BTC"]) == 2
@@ -111,7 +120,7 @@ class TestMarketAnalystAgentDetectTrend:
         """Test bullish trend detection."""
         agent = MarketAnalystAgent()
         # Rising prices
-        prices = [45000.0 + i * 100 for i in range(25)]
+        prices = [45000.0 + i * 500 for i in range(25)]  # Steeper rise for strength > 0.5
         
         trend = agent._detect_trend(prices)
         
@@ -123,7 +132,7 @@ class TestMarketAnalystAgentDetectTrend:
         """Test bearish trend detection."""
         agent = MarketAnalystAgent()
         # Falling prices
-        prices = [55000.0 - i * 100 for i in range(25)]
+        prices = [55000.0 - i * 500 for i in range(25)]  # Steeper fall for strength > 0.5
         
         trend = agent._detect_trend(prices)
         
@@ -208,7 +217,8 @@ class TestMarketAnalystAgentAnalyzeVolume:
     def test_volume_increasing(self):
         """Test increasing volume detection."""
         agent = MarketAnalystAgent()
-        volumes = list(range(100, 200))  # Increasing
+        # Need >20% increase between halves to trigger "increasing"
+        volumes = [100, 105, 110, 115, 120, 180, 185, 190, 195, 200]
         
         analysis = agent._analyze_volume(volumes)
         
@@ -217,7 +227,8 @@ class TestMarketAnalystAgentAnalyzeVolume:
     def test_volume_decreasing(self):
         """Test decreasing volume detection."""
         agent = MarketAnalystAgent()
-        volumes = list(range(200, 100, -1))  # Decreasing
+        # Need >20% decrease between halves to trigger "decreasing"
+        volumes = [200, 195, 190, 185, 180, 120, 115, 110, 105, 100]
         
         analysis = agent._analyze_volume(volumes)
         

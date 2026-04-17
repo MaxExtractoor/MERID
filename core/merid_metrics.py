@@ -293,11 +293,21 @@ class ProbabilityCalibrator:
             warnings.simplefilter("ignore")
             iso = IsotonicRegression(out_of_bounds='clip')
             iso.fit(y_pred, y_true)
-        
+
         # Store isotonic mapping points
+        # Handle API change: scikit-learn 1.3+ uses X_thresholds_ instead of X_
+        if hasattr(iso, 'X_thresholds_'):
+            # scikit-learn 1.3+
+            x_vals = iso.X_thresholds_.tolist()
+            y_vals = iso._transform(iso.X_thresholds_).tolist()
+        else:
+            # scikit-learn < 1.3 (legacy)
+            x_vals = iso.X_.tolist()
+            y_vals = iso.y_.tolist()
+
         self.params = {
-            "x_values": iso.X_.tolist(),
-            "y_values": iso.y_.tolist()
+            "x_values": x_vals,
+            "y_values": y_vals
         }
     
     def _fit_temperature(self, y_pred: np.ndarray, y_true: np.ndarray) -> None:
