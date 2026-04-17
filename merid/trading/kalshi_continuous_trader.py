@@ -125,26 +125,25 @@ class TraderConfig:
     dry_run: bool = False
 
     # ── Bankroll management (capital-preservation-first) ──────────────
-    initial_bankroll_cents: int = 574    # $5.74 starting capital
-    max_risk_per_trade_pct: float = 0.02 # risk max 2% of bankroll per trade
-    kelly_fraction: float = 0.25         # quarter-Kelly (survival-first)
+    initial_bankroll_cents: int = 1400   # $14.00 - calibrated to match user's $12.97 Kalshi cash + buffer
+    max_risk_per_trade_pct: float = 0.015 # risk max 1.5% of bankroll per trade (tightened from 2%)
+    kelly_fraction: float = 0.20         # fifth-Kelly (more conservative, survival-first)
     max_contract_price_cents: int = 65   # Allow mid-curve markets up to 65¢ (was 35¢)
     min_contract_price_cents: int = 2    # skip penny contracts (no liquidity)
-    max_position_per_market: int = 5     # max contracts held per ticker (ceiling; per-asset MAX_CONTRACTS_PER_MARKET clips further)
-    max_open_positions: int = 5          # max simultaneous markets
-    max_total_exposure_pct: float = 0.20 # never have >20% of bankroll at risk
+    max_position_per_market: int = 3     # max contracts held per ticker (reduced from 5)
+    max_open_positions: int = 3          # max simultaneous markets (reduced from 5)
+    max_total_exposure_pct: float = 0.15 # never have >15% of bankroll at risk (tightened from 20%)
 
     # ── Per-asset exposure limits ────────────────────────────────────
     # Maximum fraction of bankroll each crypto asset may consume.
     # Independent buckets — BTC at its cap does NOT block ETH/SOL/XRP/DOGE.
-    # All assets capped at 30% — high enough to participate fully, low enough
-    # that no single asset can dominate total risk.
+    # Assets capped 20-25% — tighter for high-vol alts (SOL/XRP/DOGE), moderate for majors (BTC/ETH).
     asset_max_exposure_pct: Dict[str, float] = field(default_factory=lambda: {
-        "BTC":  0.30,
-        "ETH":  0.30,
-        "SOL":  0.30,
-        "XRP":  0.30,
-        "DOGE": 0.30,
+        "BTC":  0.25,  # tightened from 30%
+        "ETH":  0.25,  # tightened from 30%
+        "SOL":  0.20,  # tightened from 30% (higher vol asset)
+        "XRP":  0.20,  # tightened from 30% (higher vol asset)
+        "DOGE": 0.20,  # tightened from 30% (highest vol asset)
     })
     asset_exposure_default_pct: float = 0.10   # fallback for any unlisted asset
     # CT-only: scales each asset's cent cap by timeframe (15m / 1h / daily / weekly). Not read from env
@@ -163,9 +162,9 @@ class TraderConfig:
     min_asset_cap_cents: int = 100           # $1.00 floor
 
     # ── Drawdown protection ──────────────────────────────────────────
-    drawdown_halt_pct: float = 0.20      # HALT if bankroll drops 20% from peak
-    drawdown_reduce_pct: float = 0.10    # reduce sizing at 10% drawdown
-    min_balance_cents: int = 200         # never trade below $2.00 reserve
+    drawdown_halt_pct: float = 0.15      # HALT if bankroll drops 15% from peak (tightened from 20%)
+    drawdown_reduce_pct: float = 0.08    # reduce sizing at 8% drawdown (tightened from 10%)
+    min_balance_cents: int = 300         # never trade below $3.00 reserve (raised from $2.00)
 
     # ── Edge requirements (very strict) ──────────────────────────────
     min_edge: Decimal = Decimal("0.06")  # 6% net edge after fees+slippage — mirrors EDGE_MIN_THRESHOLD; from_env() uses the constant
@@ -191,15 +190,15 @@ class TraderConfig:
     # ── Fee-aware edge scaling ───────────────────────────────────────
     # Kalshi fee = ceil(0.07 * C * P * (1-P)); worst at mid-curve
     # Require higher edge at mid-curve prices where fee drag is worst
-    fee_edge_multiplier_midcurve: float = 1.5  # 1.5x min_edge for 40-60¢ contracts
-    fee_edge_multiplier_penny: float = 2.0     # 2x min_edge for ≤5¢ contracts (rounding kills)
+    fee_edge_multiplier_midcurve: float = 1.75  # 1.75x min_edge for 40-60¢ contracts (tightened from 1.5x)
+    fee_edge_multiplier_penny: float = 2.0      # 2x min_edge for ≤5¢ contracts (rounding kills)
 
     # ── Anti-churn hysteresis ────────────────────────────────────────
     churn_cooldown_cycles: int = 3       # don't flip direction on same ticker for 3 cycles
     churn_edge_improvement: float = 0.05 # unless edge improved by 5% absolute
 
     # ── Fee drag monitoring ──────────────────────────────────────────
-    max_fee_drag_pct: float = 0.30       # tighten filters if fees > 30% of gross edge
+    max_fee_drag_pct: float = 0.25       # tighten filters if fees > 25% of gross edge (tightened from 30%)
     fee_drag_lookback: int = 30          # base rolling window (overridden by vol-adaptive)
 
     # ── Volatility-adaptive fee-drag window ────────────────────────
@@ -219,7 +218,7 @@ class TraderConfig:
     # ── Per-cycle spend cap ──────────────────────────────────────────
     # Never spend more than this fraction of current balance in a single cycle.
     # Env: KALSHI_TRADER_CYCLE_SPEND_PCT (default 0.15 = 15%)
-    max_cycle_spend_pct: float = 0.15
+    max_cycle_spend_pct: float = 0.10    # max 10% of balance per cycle (tightened from 15%)
 
     # ── Exit thresholds (auto-exit, fractional price 0–1) ────────────
     # Env: KALSHI_TRADER_YES_STOP_CENTS / KALSHI_TRADER_YES_PROFIT_CENTS
@@ -299,38 +298,38 @@ class TraderConfig:
         return cls(
             interval_seconds=int(os.getenv("KALSHI_TRADER_INTERVAL", "60")),
             dry_run=os.getenv("KALSHI_TRADER_DRY_RUN", "false").lower() in ("true", "1", "yes"),
-            initial_bankroll_cents=int(os.getenv("KALSHI_TRADER_BANKROLL", "574")),
-            max_risk_per_trade_pct=float(os.getenv("KALSHI_TRADER_RISK_PCT", "0.02")),
-            kelly_fraction=float(os.getenv("KALSHI_TRADER_KELLY_FRAC", "0.25")),
+            initial_bankroll_cents=int(os.getenv("KALSHI_TRADER_BANKROLL", "1400")),  # $14.00 default matches calibrated bankroll
+            max_risk_per_trade_pct=float(os.getenv("KALSHI_TRADER_RISK_PCT", "0.015")),  # 1.5% - calibrated
+            kelly_fraction=float(os.getenv("KALSHI_TRADER_KELLY_FRAC", "0.20")),  # fifth-Kelly - calibrated
             max_contract_price_cents=99 if smoke_test else int(os.getenv("KALSHI_TRADER_MAX_PRICE", "65")),
             min_contract_price_cents=int(os.getenv("KALSHI_TRADER_MIN_PRICE", "2")),
             max_position_per_market=1 if smoke_test else int(os.getenv("KALSHI_TRADER_MAX_POSITION", "5")),
-            max_open_positions=int(os.getenv("KALSHI_TRADER_MAX_OPEN", "5")),
-            max_total_exposure_pct=float(os.getenv("KALSHI_TRADER_MAX_EXPOSURE", "0.20")),
+            max_open_positions=int(os.getenv("KALSHI_TRADER_MAX_OPEN", "3")),  # calibrated
+            max_total_exposure_pct=float(os.getenv("KALSHI_TRADER_MAX_EXPOSURE", "0.15")),  # 15% - calibrated
             asset_max_exposure_pct={
-                "BTC":  float(os.getenv("KALSHI_TRADER_EXPOSURE_BTC",  "0.30")),
-                "ETH":  float(os.getenv("KALSHI_TRADER_EXPOSURE_ETH",  "0.30")),
-                "SOL":  float(os.getenv("KALSHI_TRADER_EXPOSURE_SOL",  "0.30")),
-                "XRP":  float(os.getenv("KALSHI_TRADER_EXPOSURE_XRP",  "0.30")),
-                "DOGE": float(os.getenv("KALSHI_TRADER_EXPOSURE_DOGE", "0.30")),
+                "BTC":  float(os.getenv("KALSHI_TRADER_EXPOSURE_BTC",  "0.25")),  # calibrated
+                "ETH":  float(os.getenv("KALSHI_TRADER_EXPOSURE_ETH",  "0.25")),  # calibrated
+                "SOL":  float(os.getenv("KALSHI_TRADER_EXPOSURE_SOL",  "0.20")),  # high vol - tighter
+                "XRP":  float(os.getenv("KALSHI_TRADER_EXPOSURE_XRP",  "0.20")),  # high vol - tighter
+                "DOGE": float(os.getenv("KALSHI_TRADER_EXPOSURE_DOGE", "0.20")),  # highest vol - tightest
             },
             asset_exposure_default_pct=float(os.getenv("KALSHI_TRADER_EXPOSURE_DEFAULT", "0.10")),
             global_max_exposure_pct=float(os.getenv("KALSHI_TRADER_GLOBAL_EXPOSURE", "0.50")),
             min_asset_cap_cents=int(os.getenv("KALSHI_TRADER_MIN_ASSET_CAP_CENTS", "100")),
-            drawdown_halt_pct=float(os.getenv("KALSHI_TRADER_DD_HALT", "0.20")),
-            drawdown_reduce_pct=float(os.getenv("KALSHI_TRADER_DD_REDUCE", "0.10")),
-            min_balance_cents=int(os.getenv("KALSHI_TRADER_MIN_BALANCE", "200")),
+            drawdown_halt_pct=float(os.getenv("KALSHI_TRADER_DD_HALT", "0.15")),  # 15% - calibrated
+            drawdown_reduce_pct=float(os.getenv("KALSHI_TRADER_DD_REDUCE", "0.08")),  # 8% - calibrated
+            min_balance_cents=int(os.getenv("KALSHI_TRADER_MIN_BALANCE", "300")),  # $3.00 - calibrated
             min_edge=_resolve_trader_min_edge(smoke_test),
             directional_max_tilt=float(os.getenv("KALSHI_CT_DIRECTIONAL_MAX_TILT", "0.15")),
             max_markets_to_scan=int(os.getenv("KALSHI_TRADER_MAX_SCAN", "10")),
             max_strike_distance_pct=float(os.getenv("KALSHI_TRADER_MAX_DISTANCE", "0.125")),
             stale_order_seconds=int(os.getenv("KALSHI_TRADER_STALE_ORDER_SEC", "120")),
             max_orders_per_cycle=1 if smoke_test else int(os.getenv("KALSHI_TRADER_MAX_ORDERS_CYCLE", "1")),
-            fee_edge_multiplier_midcurve=float(os.getenv("KALSHI_TRADER_FEE_MULT_MID", "1.5")),
+            fee_edge_multiplier_midcurve=float(os.getenv("KALSHI_TRADER_FEE_MULT_MID", "1.75")),  # 1.75x - calibrated
             fee_edge_multiplier_penny=float(os.getenv("KALSHI_TRADER_FEE_MULT_PENNY", "2.0")),
             churn_cooldown_cycles=int(os.getenv("KALSHI_TRADER_CHURN_COOLDOWN", "3")),
             churn_edge_improvement=float(os.getenv("KALSHI_TRADER_CHURN_EDGE_IMPROV", "0.05")),
-            max_fee_drag_pct=float(os.getenv("KALSHI_TRADER_MAX_FEE_DRAG", "0.30")),
+            max_fee_drag_pct=float(os.getenv("KALSHI_TRADER_MAX_FEE_DRAG", "0.25")),  # 25% - calibrated
             fee_drag_lookback=int(os.getenv("KALSHI_TRADER_FEE_DRAG_LOOKBACK", "30")),
             vol_lookback_bars=int(os.getenv("KALSHI_TRADER_VOL_LOOKBACK", "20")),
             vol_low_threshold=float(os.getenv("KALSHI_TRADER_VOL_LOW", "0.40")),
@@ -338,7 +337,7 @@ class TraderConfig:
             fee_window_low_vol=int(os.getenv("KALSHI_TRADER_FEE_WIN_LOW", "50")),
             fee_window_mid_vol=int(os.getenv("KALSHI_TRADER_FEE_WIN_MID", "30")),
             fee_window_high_vol=int(os.getenv("KALSHI_TRADER_FEE_WIN_HIGH", "20")),
-            max_cycle_spend_pct=float(os.getenv("KALSHI_TRADER_CYCLE_SPEND_PCT", "0.15")),
+            max_cycle_spend_pct=float(os.getenv("KALSHI_TRADER_CYCLE_SPEND_PCT", "0.10")),  # 10% - calibrated
             yes_stop_loss_cents=int(os.getenv("KALSHI_TRADER_YES_STOP_CENTS", "8")),
             yes_profit_take_cents=int(os.getenv("KALSHI_TRADER_YES_PROFIT_CENTS", "85")),
             # Phase 2: CT -> Router migration canary flip

@@ -78,7 +78,7 @@ profiles:
     fee_aware_settings:
       min_edge_cents: 0.35
       avoid_mid_fee_band: true
-      mid_fee_band_multiplier: 1.5
+      mid_fee_band_multiplier: 1.75  # tightened from 1.5 to match code-level calibration
       max_price_cents_grid:
         BTC:  {15m: 45, 1h: 55, daily: 65, weekly: 70, monthly: 75, annual: 85}
         ETH:  {15m: 42, 1h: 52, daily: 62, weekly: 68, monthly: 73, annual: 83}
@@ -87,7 +87,7 @@ profiles:
         DOGE: {15m: 35, 1h: 45, daily: 55, weekly: 60, monthly: 66, annual: 72}
 
     kelly_settings:
-      base_fraction: 0.25
+      base_fraction: 0.20  # tightened from 0.25 (fifth-Kelly for capital preservation)
       confidence_tier_multiplier:
         no_trade: 0.0
         cautious: 0.5

@@ -18,7 +18,7 @@ import os
 # ── Kelly / Position sizing ───────────────────────────────────────────────
 
 # Maximum fractional Kelly to apply — prevents over-betting on high-edge signals
-KELLY_MAX_FRACTION: float = float(os.getenv("MERID_KELLY_MAX_FRACTION", "0.25"))
+KELLY_MAX_FRACTION: float = float(os.getenv("MERID_KELLY_MAX_FRACTION", "0.20"))  # tightened from 0.25
 
 # Hard cap on adjusted Kelly after all multipliers (50% of bankroll absolute max)
 KELLY_ABSOLUTE_CAP: float = float(os.getenv("MERID_KELLY_ABSOLUTE_CAP", "0.50"))
@@ -40,14 +40,14 @@ EDGE_FLOOR_TERMINAL: float = float(os.getenv("MERID_PM_MIN_EDGE_TERMINAL", "0.06
 CONFIDENCE_MIN_THRESHOLD: float = float(os.getenv("MERID_PM_MIN_CONFIDENCE", "0.60"))
 
 # Max single position as % of total bankroll
-POSITION_MAX_PCT: float = float(os.getenv("MERID_POSITION_MAX_PCT", "0.10"))
+POSITION_MAX_PCT: float = float(os.getenv("MERID_POSITION_MAX_PCT", "0.075"))  # tightened from 0.10
 
 # Max simultaneous open positions across the entire portfolio.
-# Runtime default matches CT (KALSHI_TRADER_MAX_OPEN=5) and risk engine (KALSHI_MAX_OPEN_POSITIONS=5).
-MAX_OPEN_POSITIONS: int = int(os.getenv("MERID_MAX_OPEN_POSITIONS", "5"))
+# Runtime default matches CT (KALSHI_TRADER_MAX_OPEN=3) and risk engine (KALSHI_MAX_OPEN_POSITIONS=3).
+MAX_OPEN_POSITIONS: int = int(os.getenv("MERID_MAX_OPEN_POSITIONS", "3"))  # tightened from 5
 
 # Max open positions sharing the same underlying asset/category
-MAX_CORRELATED_POSITIONS: int = int(os.getenv("MERID_MAX_CORRELATED_POSITIONS", "5"))
+MAX_CORRELATED_POSITIONS: int = int(os.getenv("MERID_MAX_CORRELATED_POSITIONS", "3"))  # tightened from 5
 
 # ── Debate position sizing multipliers ──────────────────────────────────
 

@@ -1,0 +1,129 @@
+# MERID Environment Configuration Template
+# Copy this file to ~/.merid_env and fill in your values
+# Source it in your shell: source ~/.merid_env
+
+# =============================================================================
+# TRADING MODE (CRITICAL - Set carefully!)
+# =============================================================================
+
+# Paper = Simulated trades (recommended for first 3 months)
+# Live = Real money on Kalshi (only after proven profitable)
+export MERID_PM_TRADING_MODE=paper
+export MERID_PM_LIVE_ENABLED=false
+
+# Fresh start = reset all state (use once, then set to 0)
+export MERID_FRESH_START=0
+
+# =============================================================================
+# RISK PARAMETERS (Set according to your capital bracket)
+# =============================================================================
+
+# Capital bracket profiles:
+# - initial_live: $5-$100 (current default)
+# - modern_tradeable_kalshi_v1: $100-$1k
+# - production: $1k-$10k
+# - diagnostic: debugging only
+export KALSHI_CT_PROFILE=initial_live
+
+# Kelly fraction (position sizing)
+# - 0.20 = fifth-Kelly (conservative, current)
+# - 0.15 = sixth-Kelly (ultra-conservative at scale)
+# - 0.10 = tenth-Kelly (generational wealth mode)
+export MERID_KELLY_MAX_FRACTION=0.20
+
+# Edge threshold (minimum edge before trading)
+# - 0.012 = 1.2% (initial_live profile)
+# - 0.011 = 1.1% (modern_tradeable, lowest)
+# - 0.008 = 0.8% (diagnostic only)
+export KALSHI_TRADER_MIN_EDGE=0.012
+
+# Maximum exposure per cycle
+# Percentage of bankroll to risk per 60-second cycle
+export KALSHI_TRADER_CYCLE_SPEND_PCT=0.10
+
+# =============================================================================
+# KALSHI API CREDENTIALS (Required for live trading)
+# =============================================================================
+
+# Get these from https://kalshi.com/account/settings/api
+# Never commit these to git! Keep in this file only.
+
+# Demo/Practice Account
+export KALSHI_DEMO_KEY_ID=your_demo_key_id_here
+export KALSHI_DEMO_PRIVATE_KEY_PATH=/path/to/kalshi_demo_key.pem
+
+# Live Account (only use after 3 months paper profitability)
+export KALSHI_LIVE_KEY_ID=your_live_key_id_here
+export KALSHI_LIVE_PRIVATE_KEY_PATH=/path/to/kalshi_live_key.pem
+
+# Which environment to use (demo or live)
+export KALSHI_ENV=demo
+
+# =============================================================================
+# TELEGRAM ALERTS (For 24/7 monitoring)
+# =============================================================================
+
+# Create a bot: https://core.telegram.org/bots/tutorial
+# Get chat ID: https://api.telegram.org/bot<token>/getUpdates
+export TELEGRAM_BOT_TOKEN=your_bot_token_here
+export TELEGRAM_CHAT_ID=your_chat_id_here
+
+# Enable/disable alerts
+export MERID_FF_TELEGRAM_ALERTS=1
+
+# =============================================================================
+# ADVANCED SETTINGS (Usually leave at defaults)
+# =============================================================================
+
+# Maximum open positions
+export MERID_MAX_OPEN_POSITIONS=3
+
+# Maximum correlated positions per asset
+export MERID_MAX_CORRELATED_POSITIONS=3
+
+# Position max as % of bankroll
+export MERID_POSITION_MAX_PCT=0.075
+
+# Database and log paths
+export MERID_DATA_DIR=data
+export MERID_LOG_DIR=logs
+
+# API port
+export MERID_API_PORT=8011
+
+# =============================================================================
+# DEBUGGING (Only for development)
+# =============================================================================
+
+# Smoke test mode (permissive limits, tiny sizes)
+# export KALSHI_TRADER_SMOKE_TEST=true
+
+# Diagnostic profile (low edge for testing)
+# export KALSHI_CT_PROFILE=diagnostic
+# export KALSHI_CT_DIAGNOSTIC_MIN_EDGE=0.008
+
+# =============================================================================
+# SAFETY INTERLOCKS (Do not change unless you understand the risks)
+# =============================================================================
+
+# Prevent accidental live trading with smoke test
+export KALSHI_TRADER_SMOKE_ALLOW_NO_SETTINGS=false
+
+# Auto-exit on critical errors
+export MERID_AUTO_EXIT_ON_FATAL=true
+
+# =============================================================================
+# PATH CONFIGURATION
+# =============================================================================
+
+# Add your virtual environment to PATH if needed
+# export PATH="/path/to/merid/.venv/bin:$PATH"
+
+# =============================================================================
+# VERIFICATION
+# =============================================================================
+
+echo "MERID Environment Loaded"
+echo "Trading Mode: $MERID_PM_TRADING_MODE"
+echo "Profile: $KALSHI_CT_PROFILE"
+echo "Kelly: $MERID_KELLY_MAX_FRACTION"
