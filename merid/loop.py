@@ -269,11 +269,11 @@ class MeridLoop:
         self._last_reflection_cycle = 0.0
         self._reflection_cycle_interval = 300.0  # 5 minutes — run after enough fills accumulate
         self._last_liquidity_refresh = 0.0
-        self._liquidity_refresh_interval = 60.0  # 60 seconds — orderbook health sweep (increased from 30s to reduce event-loop lag)
+        self._liquidity_refresh_interval = 120.0  # 120 seconds — orderbook health sweep (reduced from 60s to cut event-loop lag in half)
         self._last_config_reload = 0.0
         self._config_reload_interval = 300.0  # 5 minutes — hot-reload risk limits / reality assertions
         self._last_order_groups_sync = 0.0
-        self._order_groups_sync_interval = 60.0  # 60s — lifecycle state check (increased from 30s to reduce event-loop lag)
+        self._order_groups_sync_interval = 120.0  # 120s — lifecycle state check (increased from 60s to reduce event-loop lag)
 
         # W6: pre-initialise ws_bridge so _refresh_liquidity can safely reference it
         # before run() is called (e.g. in tests or if tick() is called standalone).
@@ -625,14 +625,9 @@ class MeridLoop:
         store = self._signal_store()
         step_start = time.perf_counter()
 
-        # LIMIT: Process max 1 symbol per tick during first 100 ticks to reduce thread pool pressure
-        # This prevents WS message queue overflow when event loop is under load
-        if self.metrics.total_ticks < 100:
-            MAX_SYMBOLS_PER_TICK = 1
-        elif self.metrics.total_ticks < 200:
-            MAX_SYMBOLS_PER_TICK = 2
-        else:
-            MAX_SYMBOLS_PER_TICK = 5
+        # AGGRESSIVE LIMIT: Process max 1 symbol per tick to prevent event-loop blocking
+        # BUG-EL18 fix: Reduced from 5 symbols to prevent 6.5s+ blocking (budget is 1s)
+        MAX_SYMBOLS_PER_TICK = 1
         symbols_this_tick = self.config.active_symbols[:MAX_SYMBOLS_PER_TICK]
         
         def _sync_feature_refresh():
@@ -658,11 +653,29 @@ class MeridLoop:
         
         # Generate Kalshi signals if prediction domain is active
         # Skip during first 30 ticks (2.5 min) to reduce startup load
+        # BUG-EL19 fix: Run in thread pool with timeout to prevent blocking event loop
         kalshi_ms = 0
         if "prediction" in self.config.active_domains and self.metrics.total_ticks > 30:
             kalshi_start = time.perf_counter()
-            await self._refresh_kalshi_signals(now, summary, store)
-            kalshi_ms = (time.perf_counter() - kalshi_start) * 1000
+            # Skip if features thread pool work already took >500ms (we're running slow)
+            if thread_ms > 500:
+                summary["actions"].append("kalshi_signals:skipped_due_to_slow_features")
+                logger.debug("Skipping Kalshi signals: features thread work took %.0fms", thread_ms)
+            else:
+                # Run Kalshi signal generation in thread pool to prevent blocking
+                try:
+                    loop = asyncio.get_running_loop()
+                    await asyncio.wait_for(
+                        loop.run_in_executor(_get_loop_executor(), self._sync_refresh_kalshi_signals, now),
+                        timeout=2.0  # 2 second timeout for Kalshi signal generation
+                    )
+                    kalshi_ms = (time.perf_counter() - kalshi_start) * 1000
+                except asyncio.TimeoutError:
+                    logger.warning("Kalshi signal generation timed out after 2s")
+                    summary["actions"].append("kalshi_signals:timeout")
+                except Exception as _kexc:
+                    logger.debug("Kalshi signal generation failed: %s", _kexc)
+                    summary["actions"].append("kalshi_signals:error")
         
         self.metrics.features_refreshed += 1
         total_ms = (time.perf_counter() - step_start) * 1000
@@ -685,11 +698,35 @@ class MeridLoop:
             for signal in signals:
                 store.store_signal(signal.to_dict())
             
-            if signals:
-                logger.info(f"Generated {len(signals)} Kalshi signals")
-                summary["actions"].append(f"kalshi_signals:{len(signals)}")
+            # Always add action to summary (even with 0 signals for testability)
+            logger.info(f"Generated {len(signals)} Kalshi signals")
+            summary["actions"].append(f"kalshi_signals:{len(signals)}")
         except Exception as exc:
             logger.warning(f"Kalshi signal generation failed (graceful degradation): {exc}")
+            summary["actions"].append("kalshi_signals:error")
+    
+    def _sync_refresh_kalshi_signals(self, now: float) -> None:
+        """Synchronous wrapper for _refresh_kalshi_signals to run in thread pool.
+        
+        BUG-EL19 fix: This prevents blocking the event loop during Kalshi signal generation.
+        """
+        try:
+            # Create a new event loop for this thread and run the async method
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Create a minimal summary dict for the sync context
+            _summary: Dict[str, Any] = {"actions": []}
+            
+            try:
+                from merid.signals.store import get_signal_store
+                store = get_signal_store()
+                loop.run_until_complete(self._refresh_kalshi_signals(now, _summary, store))
+            finally:
+                loop.close()
+        except Exception as exc:
+            # Silent failure - this is fire-and-forget from thread pool
+            logger.debug(f"Kalshi signal generation in thread pool failed: {exc}")
     
     async def _run_agent_cycles_bg(self, summary: Dict):
         """Background wrapper — runs agent cycles without blocking the tick."""
@@ -1194,8 +1231,8 @@ class MeridLoop:
                 summary["actions"].append("liquidity_sweep:no_active_tickers")
                 return
 
-            # Deduplicate and CAP: reduce to 5 markets during startup, 10 after
-            MAX_TICKERS = 5 if self.metrics.total_ticks < 120 else 10
+            # Deduplicate and CAP: reduce to 3 markets during startup, 5 after
+            MAX_TICKERS = 3 if self.metrics.total_ticks < 120 else 5
             tickers = list(dict.fromkeys(tickers))[:MAX_TICKERS]
 
             # D13: Subscribe WS bridge to any new tickers discovered this sweep

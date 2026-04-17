@@ -23,7 +23,7 @@ async def test_loop_generates_kalshi_signals():
     
     # Mock signal store and generator
     with patch("merid.signals.store.get_signal_store") as mock_store, \
-         patch("merid.signals.kalshi_signals.get_kalshi_venue_adapter") as mock_adapter:
+         patch("merid.event_venues.kalshi.venue_adapter.get_kalshi_venue_adapter") as mock_adapter:
         
         # Mock store
         store = MagicMock()
@@ -156,7 +156,7 @@ async def test_feature_refresh_includes_kalshi_if_prediction_active():
     with patch("merid.signals.store.get_signal_store") as mock_store, \
          patch("merid.signals.features.FeatureService") as mock_fs, \
          patch("merid.signals.live_feeds.get_live_feed_manager") as mock_lfm, \
-         patch("merid.signals.kalshi_signals.get_kalshi_venue_adapter") as mock_adapter:
+         patch("merid.event_venues.kalshi.venue_adapter.get_kalshi_venue_adapter") as mock_adapter:
         
         # Mock dependencies
         store = MagicMock()
