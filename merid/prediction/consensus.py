@@ -886,38 +886,45 @@ class PredictionConsensusStore:
             total_instruments = sum(inst_by_status.values())
 
             # Opinion volume
-            total_opinions = conn.execute("SELECT COUNT(*) FROM pred_opinions").fetchone()[0]
+            row = conn.execute("SELECT COUNT(*) FROM pred_opinions").fetchone()
+            total_opinions = row[0] if row else 0
 
             # Opinions in last hour / last 24h
-            opinions_1h = conn.execute(
+            row = conn.execute(
                 "SELECT COUNT(*) FROM pred_opinions WHERE created_at > ?",
                 (now - 3600,),
-            ).fetchone()[0]
-            opinions_24h = conn.execute(
+            ).fetchone()
+            opinions_1h = row[0] if row else 0
+            row = conn.execute(
                 "SELECT COUNT(*) FROM pred_opinions WHERE created_at > ?",
                 (now - 86400,),
-            ).fetchone()[0]
+            ).fetchone()
+            opinions_24h = row[0] if row else 0
 
             # Distinct active agents (submitted opinion in last hour)
-            active_agents = conn.execute(
+            row = conn.execute(
                 "SELECT COUNT(DISTINCT agent_id) FROM pred_opinions WHERE created_at > ?",
                 (now - 3600,),
-            ).fetchone()[0]
+            ).fetchone()
+            active_agents = row[0] if row else 0
 
             # Staleness: newest opinion age
-            newest_opinion = conn.execute(
+            row = conn.execute(
                 "SELECT MAX(created_at) FROM pred_opinions"
-            ).fetchone()[0]
+            ).fetchone()
+            newest_opinion = row[0] if row else None
             opinion_age_s = round(now - newest_opinion, 1) if newest_opinion else None
 
             # Staleness: newest instrument refresh age
-            newest_refresh = conn.execute(
+            row = conn.execute(
                 "SELECT MAX(last_refreshed) FROM pred_instruments"
-            ).fetchone()[0]
+            ).fetchone()
+            newest_refresh = row[0] if row else None
             instrument_age_s = round(now - newest_refresh, 1) if newest_refresh else None
 
             # Resolved count
-            resolved_count = conn.execute("SELECT COUNT(*) FROM pred_resolved").fetchone()[0]
+            row = conn.execute("SELECT COUNT(*) FROM pred_resolved").fetchone()
+            resolved_count = row[0] if row else 0
 
             # Plans by status
             plan_rows = conn.execute(

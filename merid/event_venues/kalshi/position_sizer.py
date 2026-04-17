@@ -603,6 +603,9 @@ class PositionSizer:
 
         # Linear interpolation between min and full
         range_pf = cfg.pf_full_kelly_at - cfg.pf_min_for_scaling
+        if range_pf <= 0:
+            # Degenerate case: pf_min == pf_full, jump directly to full scale
+            return 1.0
         progress = (profit_factor - cfg.pf_min_for_scaling) / range_pf
         min_scale = cfg.min_bankroll_pct / cfg.max_bankroll_pct
         return min_scale + progress * (1.0 - min_scale)
