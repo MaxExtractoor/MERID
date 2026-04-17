@@ -244,8 +244,9 @@ class KalshiVenueAdapter:
         try:
             await self.client.connect()
             positions = await self.client.get_positions()
-            await self.client.close()
-            
+            # NOTE: Do NOT close client here - singleton adapter keeps connection alive
+            # Closing causes race conditions when multiple concurrent calls happen
+
             # Sync REST positions into cache for consistency
             if positions:
                 try:
@@ -319,7 +320,7 @@ class KalshiVenueAdapter:
         try:
             await self.client.connect()
             orders = await self.client.get_orders()
-            await self.client.close()
+            # NOTE: Do NOT close client here - singleton adapter keeps connection alive
             if status:
                 orders = [o for o in orders if o.status == status]
             return orders
@@ -431,7 +432,7 @@ class KalshiVenueAdapter:
         try:
             await self.client.connect()
             placed = await self.client.place_order(order)
-            await self.client.close()
+            # NOTE: Do NOT close client here - singleton adapter keeps connection alive
             return placed
         except Exception as exc:
             logger.error(f"Failed to place Kalshi order: {exc}")

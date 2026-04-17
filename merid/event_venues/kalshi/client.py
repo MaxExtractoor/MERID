@@ -865,6 +865,20 @@ class KalshiVenueClient(EventVenueClient):
                         )
                         await asyncio.sleep(0.05)
                         continue
+                # Handle "client has been closed" error - reset and retry
+                if "client has been closed" in msg:
+                    last_error = e
+                    if attempt < KALSHI_MAX_RETRIES:
+                        await self._reset_http_client_after_loop_error()
+                        logger.warning(
+                            "[kalshi] %s HTTP client was closed (%s), reset; retry %s/%s",
+                            operation_name,
+                            e,
+                            attempt + 1,
+                            KALSHI_MAX_RETRIES + 1,
+                        )
+                        await asyncio.sleep(0.05)
+                        continue
                 latency_ms = (time.time() - start_time) * 1000
                 logger.warning(f"[kalshi] {operation_name} RuntimeError after retries: {e}")
                 return OperationResult.fail(
