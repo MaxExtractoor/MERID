@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MERID Elite Production Dashboard</title>
+    <link href="/static/css/output.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+    <style>
+        /* Elite Animations */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(102, 126, 234, 0.5); }
+            50% { box-shadow: 0 0 30px rgba(102, 126, 234, 0.8); }
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        
+        @keyframes rotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        
+        /* Elite Components */
+        .loading { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        .glow-effect { animation: glow 2s ease-in-out infinite; }
+        .slide-in { animation: slideIn 0.5s ease-out; }
+        .rotate { animation: rotate 2s linear infinite; }
+        .shimmer {
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+            background-size: 200% 100%;
+            animation: shimmer 2s infinite;
+        }
+        
+        /* Status Indicators */
+        .status-online { color: #10b981; text-shadow: 0 0 10px rgba(16, 185, 129, 0.5); }
+        .status-offline { color: #ef4444; text-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }
+        .status-warning { color: #f59e0b; text-shadow: 0 0 10px rgba(245, 158, 11, 0.5); }
+        .status-degraded { color: #f97316; text-shadow: 0 0 10px rgba(249, 115, 22, 0.5); }
+        
+        /* Elite Cards */
+        .elite-card {
+            -webkit-backdrop-filter: blur(20px);
+            backdrop-filter: blur(20px);
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 20px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+        
+        .elite-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+            transition: left 0.5s;
+        }
+        
+        .elite-card:hover::before {
+            left: 100%;
+        }
+        
+        .elite-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        }
+        
+        /* Gradient Background */
+        .elite-gradient {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+            background-size: 400% 400%;
+            animation: gradientShift 15s ease infinite;
+        }
+        
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        
+        /* Glass Effect */
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.08);
+            -webkit-backdrop-filter: blur(20px);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 16px;
+            position: relative;
+        }
+        
+        /* Metric Tiles */
+        .metric-tile {
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 16px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+        
+        .metric-tile:hover {
+            transform: scale(1.05);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+        
+        /* Price Cards */
+        .price-card {
+            background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(34, 197, 94, 0.05));
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 12px;
+            padding: 16px;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+        
+        .price-card.negative {
+            background: linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(239, 68, 68, 0.05));
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        
+        .price-card:hover {
+            transform: translateX(5px);
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
+        }
+        
+        /* Alert Banner */
+        .alert-banner {
+            background: linear-gradient(90deg, rgba(239, 68, 68, 0.2), rgba(245, 158, 11, 0.2));
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 12px;
+            padding: 12px 20px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            animation: slideIn 0.5s ease-out;
+        }
+        
+        /* Progress Bars */
+        .progress-bar {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            height: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #10b981, #34d399);
+            border-radius: 10px;
+            transition: width 0.5s ease;
+            position: relative;
+        }
+        
+        .progress-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            animation: shimmer 2s infinite;
+        }
+        
+        /* Floating Elements */
+        .floating {
+            animation: float 3s ease-in-out infinite;
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 4px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.5);
+        }
+    </style>
+</head>
+<body class="elite-gradient min-h-screen text-white">
+    <!-- Alert Banner for System Issues -->
+    <div id="alert-banner" class="container mx-auto px-4 pt-4" style="display: none;">
+        <div class="alert-banner">
+            <span class="rotate">⚠️</span>
+            <span id="alert-message">System issues detected</span>
+            <button onclick="dismissAlert()" class="ml-auto text-white hover:text-gray-300">✕</button>
+        </div>
+    </div>
+
+    <!-- Main Container -->
+    <div class="container mx-auto px-4 py-8">
+        <!-- Elite Header -->
+        <header class="mb-10 text-center slide-in">
+            <div class="flex items-center justify-center mb-4">
+                <div class="text-6xl mr-4 floating">🚀</div>
+                <div>
+                    <h1 class="text-5xl font-bold mb-2 bg-clip-text text-transparent bg-gradient-to-r from-white to-purple-200">
+                        MERID Elite Production Dashboard
+                    </h1>
+                    <p class="text-xl text-gray-200">Advanced Market Intelligence & Predictive Analytics Platform</p>
+                </div>
+                <div class="text-6xl ml-4 floating" style="animation-delay: 1s;">📊</div>
+            </div>
+            
+            <!-- Live Status Indicator -->
+            <div class="flex items-center justify-center gap-4 mt-4">
+                <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                    <span class="text-sm text-gray-200">LIVE</span>
+                </div>
+                <div class="text-sm text-gray-300" id="current-time">--:--:--</div>
+                <div class="text-sm text-gray-300" id="system-uptime">Uptime: --</div>
+            </div>
+        </header>
+
+        <!-- Elite System Status Bar -->
+        <div class="elite-card p-6 mb-8 slide-in" style="animation-delay: 0.1s;">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
+                <!-- System Health -->
+                <div class="metric-tile text-center">
+                    <div class="text-3xl font-bold mb-2" id="system-health">Loading...</div>
+                    <div class="text-sm text-gray-300">System Health</div>
+                    <div class="progress-bar mt-3">
+                        <div class="progress-fill" id="health-progress" style="width: 0%"></div>
+                    </div>
+                </div>
+                
+                <!-- Active Exchanges -->
+                <div class="metric-tile text-center">
+                    <div class="text-3xl font-bold mb-2" id="active-exchanges">0</div>
+                    <div class="text-sm text-gray-300">Active Exchanges</div>
+                    <div class="text-xs text-gray-400 mt-2">Real-time feeds</div>
+                </div>
+                
+                <!-- Prediction Markets -->
+                <div class="metric-tile text-center">
+                    <div class="text-3xl font-bold mb-2" id="prediction-markets">0</div>
+                    <div class="text-sm text-gray-300">Prediction Markets</div>
+                    <div class="text-xs text-gray-400 mt-2">Kalshi + Mock</div>
+                </div>
+                
+                <!-- Active Agents -->
+                <div class="metric-tile text-center">
+                    <div class="text-3xl font-bold mb-2" id="active-agents">8</div>
+                    <div class="text-sm text-gray-300">Active Agents</div>
+                    <div class="text-xs text-gray-400 mt-2">Swarm Intelligence</div>
+                </div>
+                
+                <!-- Data Freshness -->
+                <div class="metric-tile text-center">
+                    <div class="text-3xl font-bold mb-2" id="data-freshness">0s</div>
+                    <div class="text-sm text-gray-300">Data Freshness</div>
+                    <div class="text-xs text-gray-400 mt-2" id="last-update">--:--:--</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Dashboard Grid -->
+        <div class="grid grid-cols-1 xl:grid-cols-3 gap-8">
+            <!-- Price Feed Section - 2 columns -->
+            <div class="xl:col-span-2">
+                <div class="elite-card p-6 slide-in" style="animation-delay: 0.2s;">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-3xl font-bold">Real-Time Price Feed</h2>
+                        <div class="flex gap-2">
+                            <button onclick="refreshPrices()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">
+                                🔄 Refresh
+                            </button>
+                            <select id="price-filter" onchange="filterPrices()" class="px-4 py-2 bg-gray-800 rounded-lg" title="Filter price assets by category">
+                                <option value="all">All Assets</option>
+                                <option value="major">Major Pairs</option>
+                                <option value="crypto">Crypto</option>
+                                <option value="defi">DeFi</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- Price Stats -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                        <div class="glass-effect p-4 text-center">
+                            <div class="text-sm text-gray-300">Total Volume</div>
+                            <div class="text-xl font-bold" id="total-volume">$0M</div>
+                        </div>
+                        <div class="glass-effect p-4 text-center">
+                            <div class="text-sm text-gray-300">24h Change</div>
+                            <div class="text-xl font-bold" id="avg-change">0%</div>
+                        </div>
+                        <div class="glass-effect p-4 text-center">
+                            <div class="text-sm text-gray-300">Active Pairs</div>
+                            <div class="text-xl font-bold" id="active-pairs">0</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Price List -->
+                    <div id="price-feed" class="space-y-3 max-h-96 overflow-y-auto">
+                        <div class="loading text-center py-8">Loading price data...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Sidebar -->
+            <div class="space-y-8">
+                <!-- Prediction Markets -->
+                <div class="elite-card p-6 slide-in" style="animation-delay: 0.3s;">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-2xl font-bold">Prediction Markets</h2>
+                        <div class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                    </div>
+                    <div id="prediction-markets-list" class="space-y-4 max-h-64 overflow-y-auto">
+                        <div class="loading text-center py-8">Loading markets...</div>
+                    </div>
+                </div>
+
+                <!-- System Alerts -->
+                <div class="elite-card p-6 slide-in" style="animation-delay: 0.4s;">
+                    <h2 class="text-2xl font-bold mb-4">System Alerts</h2>
+                    <div id="system-alerts" class="space-y-3 max-h-48 overflow-y-auto">
+                        <div class="text-sm text-gray-400">No active alerts</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Section -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8">
+            <!-- Price Trends Chart -->
+            <div class="elite-card p-6 slide-in" style="animation-delay: 0.5s;">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-2xl font-bold">Price Trends</h2>
+                    <select id="chart-symbol" onchange="updateChart()" class="px-3 py-1 bg-gray-800 rounded-lg text-sm" title="Select trading symbol for price chart">
+                        <option value="BTC/USDT">BTC/USDT</option>
+                        <option value="ETH/USDT">ETH/USDT</option>
+                    </select>
+                </div>
+                <canvas id="price-chart" width="400" height="200"></canvas>
+            </div>
+
+            <!-- Market Sentiment Chart -->
+            <div class="elite-card p-6 slide-in" style="animation-delay: 0.6s;">
+                <h2 class="text-2xl font-bold mb-4">Market Sentiment</h2>
+                <canvas id="sentiment-chart" width="400" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- API Status Grid -->
+        <div class="elite-card p-6 mt-8 slide-in" style="animation-delay: 0.7s;">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-2xl font-bold">Service Status</h2>
+                <div class="text-sm text-gray-300">
+                    <span id="online-services">0</span> / <span id="total-services">0</span> Online
+                </div>
+            </div>
+            <div id="api-status" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                <div class="loading text-center py-8 col-span-full">Loading service status...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Elite JavaScript -->
+    <script>
+        // Elite Production Dashboard
+        const API_BASE = window.location.origin;
+        let priceData = {};
+        let charts = {};
+        let updateInterval;
+        
+        // Initialize elite dashboard
+        async function initEliteDashboard() {
+            showLoadingState();
+            await loadAllData();
+            initCharts();
+            startRealTimeUpdates();
+            updateTime();
+            setInterval(updateTime, 1000);
+        }
+        
+        // Show loading state
+        function showLoadingState() {
+            document.querySelectorAll('.loading').forEach(el => {
+                el.style.display = 'block';
+            });
+        }
+        
+        // Load all data
+        async function loadAllData() {
+            await Promise.all([
+                loadSystemStatus(),
+                loadPriceFeed(),
+                loadPredictionMarkets(),
+                loadApiStatus(),
+                loadSystemAlerts()
+            ]);
+        }
+        
+        // Load system status with enhanced metrics
+        async function loadSystemStatus() {
+            try {
+                const response = await axios.get(`${API_BASE}/api/v1/production/status`);
+                const data = response.data;
+                
+                // Update system health
+                const healthStatus = data.system_health.toLowerCase();
+                const healthElement = document.getElementById('system-health');
+                
+                if (healthStatus === 'healthy') {
+                    healthElement.innerHTML = '<span class="status-online">● HEALTHY</span>';
+                    document.getElementById('health-progress').style.width = '100%';
+                } else if (healthStatus === 'degraded') {
+                    healthElement.innerHTML = '<span class="status-warning">● DEGRADED</span>';
+                    document.getElementById('health-progress').style.width = '70%';
+                } else {
+                    healthElement.innerHTML = '<span class="status-offline">● UNHEALTHY</span>';
+                    document.getElementById('health-progress').style.width = '30%';
+                    showAlert('System performance degraded - some services unavailable');
+                }
+                
+                // Update service counts
+                document.getElementById('online-services').textContent = data.summary.online_services;
+                document.getElementById('total-services').textContent = data.summary.total_services;
+                
+                // Update timestamp
+                const timestamp = new Date(data.timestamp);
+                document.getElementById('last-update').textContent = timestamp.toLocaleTimeString();
+                
+                // Calculate data freshness
+                const freshness = Math.floor((Date.now() - timestamp) / 1000);
+                document.getElementById('data-freshness').textContent = `${freshness}s`;
+                
+            } catch (error) {
+                console.error('Failed to load system status:', error);
+                document.getElementById('system-health').innerHTML = '<span class="status-offline">● ERROR</span>';
+            }
+        }
+        
+        // Load enhanced price feed
+        async function loadPriceFeed() {
+            try {
+                const response = await axios.get(`${API_BASE}/api/v1/live/prices`);
+                const data = response.data;
+                
+                priceData = data.prices || {};
+                const priceFeedDiv = document.getElementById('price-feed');
+                
+                if (Object.keys(priceData).length > 0) {
+                    renderPriceFeed(priceData);
+                    updatePriceStats(priceData);
+                } else {
+                    priceFeedDiv.innerHTML = '<div class="text-center py-8 text-gray-400">No price data available</div>';
+                }
+                
+                // Update active exchanges count
+                const exchanges = new Set(Object.values(priceData).map(p => p.exchange));
+                document.getElementById('active-exchanges').textContent = exchanges.size;
+                
+            } catch (error) {
+                console.error('Failed to load price feed:', error);
+                document.getElementById('price-feed').innerHTML = 
+                    '<div class="text-center py-8 text-red-400">Failed to load price data</div>';
+            }
+        }
+        
+        // Render price feed with enhanced cards
+        function renderPriceFeed(prices) {
+            const priceFeedDiv = document.getElementById('price-feed');
+            const filter = document.getElementById('price-filter').value;
+            
+            let filteredPrices = Object.entries(prices);
+            
+            // Apply filter
+            if (filter === 'major') {
+                filteredPrices = filteredPrices.filter(([symbol]) => 
+                    symbol.includes('BTC') || symbol.includes('ETH') || symbol.includes('USDT')
+                );
+            } else if (filter === 'crypto') {
+                filteredPrices = filteredPrices.filter(([symbol]) => 
+                    !symbol.includes('USD') || symbol.includes('USDT')
+                );
+            }
+            
+            priceFeedDiv.innerHTML = '';
+            
+            filteredPrices.forEach(([symbol, priceData]) => {
+                // Ensure priceData has required properties with defaults
+                const price = priceData.price || 0;
+                const change = priceData.change_24h_pct || 0;
+                const volume = priceData.volume_24h || 0;
+                const exchange = priceData.exchange || 'Unknown';
+                const name = priceData.name || symbol;
+                
+                const changeClass = change >= 0 ? 'text-green-400' : 'text-red-400';
+                const changeSymbol = change >= 0 ? '+' : '';
+                const isNegative = change < 0;
+                
+                const priceCard = `
+                    <div class="price-card ${isNegative ? 'negative' : ''} slide-in">
+                        <div class="flex justify-between items-center">
+                            <div class="flex-1">
+                                <div class="font-bold text-lg">${symbol}</div>
+                                <div class="text-2xl font-bold">$${price.toFixed(2)}</div>
+                                <div class="text-xs text-gray-400">${name}</div>
+                            </div>
+                            <div class="text-right">
+                                <div class="${changeClass} text-lg font-bold">
+                                    ${changeSymbol}${change.toFixed(2)}%
+                                </div>
+                                <div class="text-sm text-gray-300">
+                                    Vol: $${(volume / 1000000).toFixed(1)}M
+                                </div>
+                                <div class="text-xs text-gray-400">${exchange}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                priceFeedDiv.innerHTML += priceCard;
+            });
+            
+            document.getElementById('active-pairs').textContent = filteredPrices.length;
+        }
+        
+        // Update price statistics
+        function updatePriceStats(prices) {
+            const priceArray = Object.values(prices);
+            
+            // Calculate total volume with safe defaults
+            const totalVolume = priceArray.reduce((sum, p) => sum + (p.volume_24h || 0), 0);
+            document.getElementById('total-volume').textContent = `$${(totalVolume / 1000000).toFixed(0)}M`;
+            
+            // Calculate average change with safe defaults
+            const validPrices = priceArray.filter(p => typeof p.change_24h_pct === 'number');
+            const avgChange = validPrices.length > 0 
+                ? validPrices.reduce((sum, p) => sum + p.change_24h_pct, 0) / validPrices.length 
+                : 0;
+            const changeElement = document.getElementById('avg-change');
+            changeElement.textContent = `${avgChange >= 0 ? '+' : ''}${avgChange.toFixed(2)}%`;
+            changeElement.className = `text-xl font-bold ${avgChange >= 0 ? 'text-green-400' : 'text-red-400'}`;
+        }
+        
+        // Load prediction markets
+        async function loadPredictionMarkets() {
+            try {
+                const response = await axios.get(`${API_BASE}/api/v1/live/predictions`);
+                const data = response.data;
+                
+                const marketsDiv = document.getElementById('prediction-markets-list');
+                marketsDiv.innerHTML = '';
+                
+                if (data.markets && data.markets.length > 0) {
+                    data.markets.slice(0, 5).forEach(market => {
+                        // Ensure market has required properties with defaults
+                        const yesPrice = market.yes_price || 0;
+                        const noPrice = market.no_price || 0;
+                        const volume = market.volume || 0;
+                        const question = market.question || 'Market Question';
+                        const category = market.category || 'Unknown';
+                        
+                        const yesPercentage = (yesPrice * 100).toFixed(1);
+                        const noPercentage = (noPrice * 100).toFixed(1);
+                        
+                        const marketCard = `
+                            <div class="glass-effect p-4 slide-in">
+                                <div class="mb-3">
+                                    <div class="font-bold text-sm">${question}</div>
+                                    <div class="text-xs text-gray-400">${category}</div>
+                                </div>
+                                <div class="flex justify-between text-sm mb-2">
+                                    <div>
+                                        <span class="text-green-400 font-bold">Yes: ${yesPercentage}%</span>
+                                    </div>
+                                    <div>
+                                        <span class="text-red-400 font-bold">No: ${noPercentage}%</span>
+                                    </div>
+                                </div>
+                                <div class="w-full bg-gray-700 rounded-full h-2">
+                                    <div class="bg-green-500 h-2 rounded-full" style="width: ${yesPercentage}%"></div>
+                                </div>
+                                <div class="text-xs text-gray-400 mt-2">
+                                    Volume: $${volume.toFixed(1)}M
+                                </div>
+                            </div>
+                        `;
+                        
+                        marketsDiv.innerHTML += marketCard;
+                    });
+                    
+                    document.getElementById('prediction-markets').textContent = data.markets.length;
+                } else {
+                    marketsDiv.innerHTML = '<div class="text-center py-8 text-gray-400">No markets available</div>';
+                    document.getElementById('prediction-markets').textContent = '0';
+                }
+            } catch (error) {
+                console.error('Failed to load prediction markets:', error);
+                document.getElementById('prediction-markets-list').innerHTML = 
+                    '<div class="text-center py-8 text-red-400">Failed to load markets</div>';
+            }
+        }
+        
+        // Load API status with enhanced display
+        async function loadApiStatus() {
+            try {
+                const response = await axios.get(`${API_BASE}/api/v1/production/status`);
+                const data = response.data;
+                
+                const statusDiv = document.getElementById('api-status');
+                statusDiv.innerHTML = '';
+                
+                Object.entries(data.categories).forEach(([category, services]) => {
+                    // Handle both services.services and services array structures
+                    const serviceList = services.services || services || [];
+                    
+                    serviceList.forEach(service => {
+                        // Ensure service has required properties with defaults
+                        const status = service.status || 'unknown';
+                        const name = service.name || 'Unknown Service';
+                        const responseTime = service.response_time_ms;
+                        
+                        const statusClass = status === 'online' ? 'status-online' : 
+                                          status === 'offline' ? 'status-offline' : 'status-warning';
+                        const statusIcon = status === 'online' ? '●' : 
+                                        status === 'offline' ? '○' : '◐';
+                        
+                        const serviceCard = `
+                            <div class="glass-effect p-3 text-center slide-in">
+                                <div class="${statusClass} text-lg mb-1">${statusIcon}</div>
+                                <div class="text-xs font-medium">${name}</div>
+                                <div class="text-xs text-gray-400">${category}</div>
+                                ${responseTime !== undefined && responseTime !== null ? 
+                                    `<div class="text-xs text-gray-500 mt-1">${responseTime.toFixed(0)}ms</div>` : ''}
+                            </div>
+                        `;
+                        
+                        statusDiv.innerHTML += serviceCard;
+                    });
+                });
+            } catch (error) {
+                console.error('Failed to load API status:', error);
+                document.getElementById('api-status').innerHTML = 
+                    '<div class="text-center py-8 text-red-400 col-span-full">Failed to load service status</div>';
+            }
+        }
+        
+        // Load system alerts
+        async function loadSystemAlerts() {
+            try {
+                const response = await axios.get(`${API_BASE}/api/v1/production/status`);
+                const data = response.data;
+                
+                const alertsDiv = document.getElementById('system-alerts');
+                const alerts = [];
+                
+                // Check for offline services
+                if (data.summary.offline_services > 0) {
+                    alerts.push({
+                        type: 'warning',
+                        message: `${data.summary.offline_services} services offline`
+                    });
+                }
+                
+                // Check for degraded services
+                if (data.summary.degraded_services > 0) {
+                    alerts.push({
+                        type: 'warning',
+                        message: `${data.summary.degraded_services} services degraded`
+                    });
+                }
+                
+                if (alerts.length === 0) {
+                    alertsDiv.innerHTML = '<div class="text-sm text-green-400">✓ All systems operational</div>';
+                } else {
+                    alertsDiv.innerHTML = alerts.map(alert => `
+                        <div class="glass-effect p-2 text-sm ${alert.type === 'warning' ? 'text-yellow-400' : 'text-red-400'}">
+                            ⚠️ ${alert.message}
+                        </div>
+                    `).join('');
+                }
+            } catch (error) {
+                console.error('Failed to load system alerts:', error);
+            }
+        }
+        
+        // Initialize enhanced charts
+        function initCharts() {
+            // Price chart with gradient
+            const priceCtx = document.getElementById('price-chart').getContext('2d');
+            charts.price = new Chart(priceCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'BTC/USDT',
+                        data: [],
+                        borderColor: 'rgb(34, 197, 94)',
+                        backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                        }
+                    },
+                    scales: {
+                        y: { 
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: 'rgba(255, 255, 255, 0.7)' }
+                        },
+                        x: { 
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: 'rgba(255, 255, 255, 0.7)' }
+                        }
+                    }
+                }
+            });
+
+            // Enhanced sentiment chart
+            const sentimentCtx = document.getElementById('sentiment-chart').getContext('2d');
+            charts.sentiment = new Chart(sentimentCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Bullish', 'Bearish', 'Neutral'],
+                    datasets: [{
+                        data: [45, 30, 25],
+                        backgroundColor: [
+                            'rgba(34, 197, 94, 0.8)',
+                            'rgba(239, 68, 68, 0.8)',
+                            'rgba(245, 158, 11, 0.8)'
+                        ],
+                        borderWidth: 0,
+                        hoverOffset: 10
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: 'rgba(255, 255, 255, 0.9)' }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return context.label + ': ' + context.parsed + '%';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // Simulate real-time data
+            simulateChartData();
+        }
+        
+        // Simulate chart data
+        function simulateChartData() {
+            setInterval(() => {
+                // Update price chart
+                if (charts.price && charts.price.data.labels.length > 20) {
+                    charts.price.data.labels.shift();
+                    charts.price.data.datasets[0].data.shift();
+                }
+                
+                const now = new Date();
+                charts.price.data.labels.push(now.toLocaleTimeString());
+                charts.price.data.datasets[0].data.push(40000 + Math.random() * 2000);
+                charts.price.update('none');
+                
+                // Update sentiment chart
+                const total = 100;
+                const bullish = 40 + Math.random() * 20;
+                const bearish = 20 + Math.random() * 20;
+                const neutral = total - bullish - bearish;
+                
+                charts.sentiment.data.datasets[0].data = [bullish, bearish, neutral];
+                charts.sentiment.update('none');
+            }, 3000);
+        }
+        
+        // Start real-time updates
+        function startRealTimeUpdates() {
+            updateInterval = setInterval(async () => {
+                await loadAllData();
+            }, 5000);
+        }
+        
+        // Update current time
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('current-time').textContent = now.toLocaleTimeString();
+            
+            // Update uptime (simulated)
+            const uptime = Math.floor(Math.random() * 86400);
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+            document.getElementById('system-uptime').textContent = `Uptime: ${hours}h ${minutes}m`;
+        }
+        
+        // Refresh prices manually
+        async function refreshPrices() {
+            const button = event.target;
+            button.disabled = true;
+            button.textContent = '🔄 Refreshing...';
+            
+            await loadPriceFeed();
+            
+            setTimeout(() => {
+                button.disabled = false;
+                button.textContent = '🔄 Refresh';
+            }, 1000);
+        }
+        
+        // Filter prices
+        function filterPrices() {
+            if (priceData && Object.keys(priceData).length > 0) {
+                renderPriceFeed(priceData);
+            }
+        }
+        
+        // Show alert banner
+        function showAlert(message) {
+            const banner = document.getElementById('alert-banner');
+            const messageElement = document.getElementById('alert-message');
+            
+            messageElement.textContent = message;
+            banner.style.display = 'block';
+        }
+        
+        // Dismiss alert
+        function dismissAlert() {
+            document.getElementById('alert-banner').style.display = 'none';
+        }
+        
+        // Update chart based on symbol selection
+        function updateChart() {
+            const symbol = document.getElementById('chart-symbol').value;
+            if (charts.price) {
+                charts.price.data.datasets[0].label = symbol;
+                charts.price.update();
+            }
+        }
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (updateInterval) {
+                clearInterval(updateInterval);
+            }
+        });
+        
+        // Initialize on DOM load
+        document.addEventListener('DOMContentLoaded', initEliteDashboard);
+    </script>
+</body>
+</html>

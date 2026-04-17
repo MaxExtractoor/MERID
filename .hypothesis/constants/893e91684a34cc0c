@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\latency_optimizer\config.py
+# hypothesis_version: 6.151.4
+
+[8.0, 12.0, 20.0, 25.0, 30.0, 60.0, 80.0, 120.0, 150.0, 250.0, 750.0, 1500.0, 2000.0, 3500.0, 6000.0, 'command_execution', 'default_request', 'dev_swarm', 'edge_execution', 'fast_risk_path', 'llm', 'llm_light_mode', 'local_runner', 'reroute_edge_path', 'route_light_model', 'route_small_model', 'signal_gate', 'skip_optional_stage', 'social', 'social_signal_gate', 'summary_only', 'tick_to_order', 'trading', 'use_cached_result', 'use_cached_signal']

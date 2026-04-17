@@ -1,0 +1,68 @@
+MERID Message Bus ContractStatus: Proposed → Ready for Lock
+Date: January 02, 2026
+References: Charter v2, Bus Hierarchy, Invariants, Security Spec, Quantum Doctrine, Port ContractThe Message Bus is the spine's core enforcement mechanism — routing all signals with no bypasses. It implements the bus hierarchy, invariants, failure semantics, and governance checks. All cognition, execution, and persistence pass through here.1. Bus Hierarchy EnforcementIndividual Channels (Agent-Level): Local reasoning — unrestricted cognition (Clause 11). No direct access to other agents or execution.
+Group Buses (Layer-Level): Aggregate outputs per layer (brain, learning, simulation, etc.). Applies layer-specific validation (e.g., novelty scoring in learning bus).
+Governance Bus (Mandatory Choke Point): Enforces Charter compliance, blind council aggregation, weighted consensus, agenda-shift detection, explain-or-abstain (Clause 4).
+Master Integrity Bus (Final Authority): Applies invariant verification (HLC-1, SLP-1), EKG health check, immutable logging, output muting on violation.
+
+No signal reaches memory, execution, or human without full routing.2. Invariants IntegrationHLC-1 (Human-Legible Communication): All traffic plain English, no compression. Entropy threshold >4.5 triggers alert.
+SLP-1 (Sentinel Lockdown Protocol): On violation (e.g., tampering), freeze execution, isolate, selective purge of tainted layers, respawn from immutable core. Human-triggered only.
+No Bypass: Enforced at runtime — violations halt system.
+Blind Routing: Agents see only their input/bus — no peer views.
+Failure Containment: Bus failure halts layer only — not whole system.
+Extensibility Port: New buses/ports via ADR approval.
+
+3. Failure SemanticsLayer Bus Failure: Retry 3x, then queue for human review. Messages quarantined if poisoned (e.g., high entropy/anomaly).
+Agent Retry: Allowed if non-critical (e.g., simulation) — max 5 retries.
+Message Handling: Dropped if invalid (e.g., no provenance); queued if recoverable; quarantined if suspect (bias exposure >0.8).
+Poisoned Message: Defined as high divergence (e.g., sentiment vs. price >20%), tampering (checksum fail), or uncertainty (confidence gap >0.5). Reroute to immune for analysis.
+
+Bugs emergent → debugging archaeological prevented by logs.4. Distillation Gate (Cognitive Spillover Control)Rule: Raw thoughts/abstractions only exit as governance-approved, human-legible summaries.
+Mechanism: Output Distillation Gate in governance bus — strips raw chains/sensitive constructs, attaches metadata (why, alternatives rejected, confidence gaps, change factors).
+Mandatory: Narrative reconstruction layer for explainability (why this decision?).
+
+Audit logs ≠ explanations — this gate ensures trust/debugging/legal/long-term stewardship.5. Credential Proxy & Security IntegrationSEC-1/SEC-2: No secrets in code/logs; agents request capabilities via proxy — validates intent, performs action, returns results.
+Threat Model: Hostile-by-default ports; side-channel leakage assumed; vendor trust not granted; result poisoning defended via checksums.
+Supply Chain/Model Drift: Model fingerprinting, version pinning, shadow evaluation before promotion, rollback guarantees.
+Port Trust Tiers: Read-only (Tier 1), ephemeral (Tier 2), state-writing (Tier 3 with peer review), execution-capable (Tier 4 with human approval).
+Data Poisoning Defense: No external data alters core without cross-validation + peer review.
+
+6. Red-Team & Adversarial SimulationRule: MERID must regularly attempt to break itself in simulation (continuous adversarial testing, corruption simulations, agenda-injection drills).
+Integration: In simulation bus — outputs candidates with uncertainty (confidence intervals, sample variance, shot-count normalization, convergence diagnostics).
+Mandatory Comparison Gate: Quantum/classical outputs compared against heuristics/historical — ignore if no added value.
+
+7. "Unfiltered" ≠ "Ungoverned" (Anti-Manipulation Stance)MERID is Not Neutral: Actively rejects manipulation (government, corporate, psychological).
+MERID is Anti-Manipulation: Detects agenda shifts, instruction drift, external pressure.
+MERID is Pro-Human Agency: Human primacy, no asymmetric nudging.
+
+8. Kill Switch SemanticsFreeze Execution, Not Cognition: Cognition read-only for forensics.
+Selective Memory Purge: Tainted layers only — immutable core preserved.
+Recovery Path: Air-gapped "God Key" overrides; respawn from validated core.
+
+9. Prediction Markets LimitsAdvisory Only: Influence council confidence, never execution.
+Never Influence: Core invariants, governance rules.
+Manipulation Detection: Timing/odds anomalies flagged; dissent logged.
+Power Limit: Subordinate to price/structure — decay over time.
+
+10. Council RolesAdvisors Only: Signal gaps, propose, vote — no authorship.
+Blind Aggregation: Weighted consensus against Charter.
+
+11. EKG/Self-Monitor IntegrationTracks: Entropy, confidence gaps, bias, evolution rate, memory sync.
+Bus Routing: EKG checks at master bus — trigger on violations.
+
+12. UGAI Negative CommitmentsNo Silent Optimization: Disclose all changes.
+No Undisclosed Objective Changes: ADR-locked.
+No Hidden Stakeholders: All ports transparent.
+No Asymmetric Information: Full explainability.
+
+13. Quantum-Specific RulesCandidate Generator Only: High-variance exploration in simulation — not authoritative.
+Uncertainty Accounting: Confidence intervals, noise estimates, classical delta.
+Threat Model: Hostile ports; no vendor trust.
+Cognition Boundary: Unrestricted simulation, distilled outputs.
+
+14. EnforcementAll Traffic: Must pass full hierarchy.
+Violations: SLP-1 + alert.
+No Code Until: Wiki spec locked.
+
+This contract makes MERID unbreakable across interfaces — lightweight, governed, timeless. Ready for security spec?
+

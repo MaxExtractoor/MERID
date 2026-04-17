@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\latency_optimizer\policies.py
+# hypothesis_version: 6.151.4
+
+['approaching_budget', 'breached_slo', 'deadline_violation', 'within_budget']

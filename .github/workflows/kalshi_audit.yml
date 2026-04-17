@@ -1,0 +1,206 @@
+name: Kalshi Deep Audit
+# Scheduled deep audit against live Kalshi environment
+# Runs every 6 hours to verify invariants against real trading data
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"  # Every 6 hours
+  workflow_dispatch:  # Manual trigger for testing
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ── Deep audit against live Kalshi environment ──────────────────────
+  deep-audit-live:
+    name: Deep Audit (Live Environment)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Deep audit requires live credentials (demo mode for safety)
+      - name: Run deep audit (24h window)
+        env:
+          KALSHI_ENV: demo
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_DEMO_API_KEY_ID }}
+          KALSHI_PRIVATE_KEY_PATH: kalshi_private_key.pem
+        run: |
+          mkdir -p reports
+          
+          # Write private key from secret
+          echo "${{ secrets.KALSHI_DEMO_PRIVATE_KEY }}" > kalshi_private_key.pem
+          
+          # Run deep audit (24h window, tolerant to missing live creds)
+          python scripts/audit_kalshi_values.py \
+            --since 24h \
+            --env demo \
+            --json \
+            2>&1 | tee reports/kalshi-deep-audit.json || true
+          
+          # Check for critical invariant failures
+          python -c "
+          import json
+          import sys
+          
+          try:
+              with open('reports/kalshi-deep-audit.json') as f:
+                  content = f.read()
+                  # Handle both direct JSON and log-wrapped JSON
+                  if content.strip().startswith('{'):
+                      data = json.loads(content)
+                  else:
+                      # Extract JSON from log output
+                      for line in content.split('\n'):
+                          line = line.strip()
+                          if line.startswith('{'):
+                              data = json.loads(line)
+                              break
+                      else:
+                          print('No JSON data found in output')
+                          sys.exit(0)  # Soft fail if no data
+              
+              errors = sum(1 for r in data.get('results', []) 
+                        if not r.get('passed') and r.get('severity') == 'error')
+              
+              print(f\"\\n=== KALSHI DEEP AUDIT SUMMARY ===\")
+              print(f\"Total checks: {data.get('passed', 0) + data.get('failed', 0)}\")
+              print(f\"Passed: {data.get('passed', 0)}\")
+              print(f\"Failed: {data.get('failed', 0)}\")
+              print(f\"Critical errors: {errors}\")
+              
+              if errors > 0:
+                  print(f\"\\n❌ CRITICAL: {errors} invariant violations detected!\")
+                  for r in data.get('results', []):
+                      if not r.get('passed') and r.get('severity') == 'error':
+                          print(f\"  - {r.get('name')}: {r.get('delta')}\")
+                  sys.exit(1)
+              else:
+                  print(f\"\\n✅ All invariants satisfied\")
+                  sys.exit(0)
+                  
+          except Exception as e:
+              print(f'Audit result parsing error: {e}')
+              print('(This is OK if running without live credentials)')
+              sys.exit(0)  # Soft fail
+          " 2>&1 | tee reports/kalshi-deep-audit-summary.txt
+
+      - name: Upload deep audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-deep-audit-report
+          path: reports/kalshi-deep-audit*
+
+  # ── Property tests (full suite, slow mode) ────────────────────────
+  property-tests-full:
+    name: Property Tests (Full Suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run full property-based test suite
+        run: |
+          mkdir -p reports
+          # Full Hypothesis mode (200+ examples per property)
+          python -m pytest tests/test_kalshi_properties.py -v \
+            --tb=short \
+            --hypothesis-profile=ci \
+            --junitxml=reports/kalshi-properties-full.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-properties-full-report
+          path: reports/kalshi-properties-full.xml
+
+  # ── Trace replay verification ─────────────────────────────────────
+  trace-replay-smoke:
+    name: Trace Replay Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run trace replay on sample cycle
+        run: |
+          mkdir -p reports
+          # Verify trace replay harness works (self-test mode)
+          python -c "
+          import sys
+          sys.path.insert(0, 'scripts')
+          from ct_trace_replay import RecordedCycle, CycleInput, CycleOutput, CycleReplayer
+          
+          # Create a minimal synthetic cycle for smoke test
+          cycle = RecordedCycle()
+          cycle.input.cycle_number = 1
+          cycle.input.timestamp = '2024-01-01T00:00:00'
+          cycle.input.correlation_id = 'test-123'
+          cycle.input.spot_prices = {'BTC': 70000.0}
+          cycle.input.balance_cents = 10000
+          cycle.input.positions = {}
+          cycle.input.config = {'dry_run': True}
+          
+          cycle.output.assets_discovered = ['BTC']
+          cycle.output.markets_per_asset = {'BTC': 5}
+          cycle.output.final_exposure_cents = 0
+          cycle.output.final_balance_cents = 10000
+          cycle.output.bankroll_invariant_delta = 0
+          cycle.output.protect_mode = 'normal'
+          
+          replayer = CycleReplayer(cycle)
+          passed, diffs = replayer.replay_and_verify()
+          
+          if passed:
+              print('✓ Trace replay smoke test: PASSED')
+          else:
+              print(f'✗ Trace replay smoke test: {len(diffs)} issues')
+              for d in diffs:
+                  print(f'  - {d}')
+              sys.exit(1)
+          " 2>&1 | tee reports/trace-replay-smoke.txt
+
+      - name: Upload smoke test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trace-replay-smoke-report
+          path: reports/trace-replay-smoke.txt

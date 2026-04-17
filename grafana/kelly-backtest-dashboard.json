@@ -1,0 +1,190 @@
+{
+  "title": "Kelly Backtest & Live Metrics",
+  "uid": "kelly-backtest",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Kelly Equity",
+      "id": 1,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM_DS_UID"
+      },
+      "targets": [
+        {
+          "expr": "kelly_equity{strategy=\"$strategy\"}",
+          "legendFormat": "{{strategy}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Max Drawdown",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM_DS_UID"
+      },
+      "targets": [
+        {
+          "expr": "kelly_max_drawdown{strategy=\"$strategy\"}",
+          "legendFormat": "DD {{strategy}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": -1,
+          "max": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Kelly Fraction in Use",
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM_DS_UID"
+      },
+      "targets": [
+        {
+          "expr": "kelly_fraction{strategy=\"$strategy\"}",
+          "legendFormat": "Kelly {{strategy}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Risk of Ruin (MC estimate)",
+      "id": 4,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PROM_DS_UID"
+      },
+      "targets": [
+        {
+          "expr": "kelly_risk_of_ruin{strategy=\"$strategy\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "strategy",
+        "label": "Strategy",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PROM_DS_UID"
+        },
+        "query": "label_values(kelly_fraction, strategy)",
+        "refresh": 2,
+        "hide": 0
+      }
+    ]
+  }
+}

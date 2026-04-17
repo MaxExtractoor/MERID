@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\risk.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.05, 0.1, 0.15, 3.0, 100.0, 100000.0, -100, 300, 'CRITICAL', 'HIGH', 'MEDIUM', 'RiskAgent started', 'RiskAgent stopped', 'agents.risk', 'gemma3:1b', 'long', 'market_id', 'price', 'quantity', 'risk-agent', 'risk-agent-01', 'side', 'ticker', 'timestamp', 'total_exposure', 'value', 'var_95']

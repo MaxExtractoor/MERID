@@ -1,0 +1,18 @@
+{
+  "critical": [],
+  "high": [],
+  "medium": [],
+  "info": [
+    "Trade mode: paper (safe)",
+    "MERID_ALLOW_LIVE_TRADES=false (safe)",
+    "VenueGate: mode=paper, simulate=True",
+    "Kill switch: armed=False, daily_loss_limit=$500.0",
+    "Execution guard: kill_active=False",
+    "Agent grid: 35 agents configured, 35 enabled",
+    "KALSHI_USE_DEMO=True",
+    "Max daily loss: $500.0, Max position: $1000.0",
+    "Syntax check: 10 files, 0 errors",
+    ".env file exists (11647 bytes)",
+    "LoopConfig.enable_execution=False (safe)"
+  ]
+}

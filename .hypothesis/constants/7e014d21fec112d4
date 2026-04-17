@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\interfaces\x_publisher.py
+# hypothesis_version: 6.151.4
+
+[280, 'Authorization', 'Content-Type', 'Posted update to X.', 'application/json', 'text']

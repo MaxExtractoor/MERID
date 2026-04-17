@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\reflection\learning.py
+# hypothesis_version: 6.151.4
+
+[-0.2, 0.2, 0.4, 0.5, 0.6, 0.7, 1.0, 1000, 'High Abstention Rate', 'Strong Accept Bias', 'Strong Reject Bias', 'TOP RECOMMENDATIONS:', 'abstain', 'abstain_bias', 'accept', 'accept_bias', 'actionable', 'agent_id', 'cached_agents', 'calibration_issue', 'confidence', 'critical', 'decision_bias', 'description', 'evidence_count', 'failure_mode', 'high_accuracy', 'high_reality_gap', 'insight_id', 'insight_type', 'insights_generated', 'low_accuracy', 'low_reality_gap', 'min_evidence', 'optimism_bias', 'overconfidence', 'pattern', 'pattern_tags', 'performance', 'pessimism_bias', 'prediction_error', 'prediction_quality', 'recommendation', 'recommendations', 'reflection.learning', 'reject', 'reject_bias', 'success_factor', 'timestamp', 'title', 'total_insights', 'uncertainty_modeling', 'underconfidence', 'uptime_seconds', 'urgent']

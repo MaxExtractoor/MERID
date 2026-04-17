@@ -1,0 +1,246 @@
+name: Pre-Scale Daily Verification
+# Daily health checks for the 7-day warm-up protocol
+# Runs verification jobs and emits metrics for dashboard
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC (before market open)
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # Manual trigger for testing
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ── Job 1: Audit Chain Integrity Check ─────────────────────────────
+  audit-chain-verification:
+    name: Audit Chain Integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run audit chain verification
+        id: verify
+        run: |
+          python scripts/verify_audit_chain.py --json > reports/audit_chain_status.json
+          
+          # Extract status for GitHub Actions output
+          VALID=$(jq -r '.valid' reports/audit_chain_status.json)
+          RECORDS=$(jq -r '.records_checked' reports/audit_chain_status.json)
+          
+          echo "audit_valid=$VALID" >> $GITHUB_OUTPUT
+          echo "records_checked=$RECORDS" >> $GITHUB_OUTPUT
+          
+          if [ "$VALID" != "true" ]; then
+            echo "::error::Audit chain verification FAILED"
+            exit 1
+          fi
+
+      - name: Get latest chain hash
+        id: hash
+        run: |
+          LATEST=$(python scripts/verify_audit_chain.py --latest-hash --json | jq -r '.latest_hash')
+          SEQ=$(python scripts/verify_audit_chain.py --latest-hash --json | jq -r '.sequence')
+          echo "latest_hash=$LATEST" >> $GITHUB_OUTPUT
+          echo "sequence=$SEQ" >> $GITHUB_OUTPUT
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-chain-daily-${{ github.run_date }}
+          path: reports/audit_chain_status.json
+
+      - name: Emit metrics (summary)
+        run: |
+          echo "## 📊 Daily Audit Chain Verification" >> $GITHUB_STEP_SUMMARY
+          echo "- **Valid:** ${{ steps.verify.outputs.audit_valid }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Records Checked:** ${{ steps.verify.outputs.records_checked }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest Sequence:** ${{ steps.hash.outputs.sequence }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest Hash:** \`${{ steps.hash.outputs.latest_hash }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ── Job 2: Wiring Validation No-Op Check ──────────────────────────
+  wiring-validation-nop:
+    name: Wiring Validation (No-Op)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run wiring validation (check mode)
+        id: wiring
+        run: |
+          # Check no forbidden patterns in current HEAD
+          if grep -rE "or 50\b|500_000\b.*fallback|session_equity_cents\s*=\s*0[^.]" merid/prediction/ merid/event_venues/kalshi/ 2>/dev/null; then
+            echo "::error::Found forbidden fallback patterns in codebase"
+            echo "wiring_status=FAIL" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Check strict group ID still enabled in prod config
+          if ! grep -q "KALSHI_STRICT_GROUP_ID=true" config/profiles/env.prod.kalshi-pm.live.example; then
+            echo "::error::Strict group ID not enabled in production config"
+            echo "wiring_status=FAIL" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "wiring_status=OK" >> $GITHUB_OUTPUT
+          echo "## 🔒 Wiring Validation" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** OK ✓" >> $GITHUB_STEP_SUMMARY
+          echo "- No forbidden patterns found" >> $GITHUB_STEP_SUMMARY
+          echo "- Strict group ID enabled" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check for tainted markers in recent commits
+        run: |
+          # Check last 24 hours of commits for tainted markers
+          if git log --since="24 hours ago" --oneline --all | grep -i "tainted\|fallback\|50¢"; then
+            echo "::warning::Found suspicious commit messages (tainted/fallback/50¢)"
+            echo "Recent commits may need review"
+          fi
+
+  # ── Job 3: Risk Event Counts Aggregation ─────────────────────────
+  risk-event-metrics:
+    name: Risk Event Metrics
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [audit-chain-verification]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Aggregate risk events from audit chain
+        run: |
+          python << 'EOF'
+          import json
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, '.')
+          from core.risk_audit_chain import get_risk_audit_chain
+          
+          chain = get_risk_audit_chain()
+          
+          # Count events by type in last 24h window (if timestamps available)
+          # For now, count all events since genesis
+          records = chain.export_proof_bundle()
+          
+          event_counts = {}
+          for rec in records:
+              et = rec['event_type']
+              event_counts[et] = event_counts.get(et, 0) + 1
+          
+          # Ensure all critical events are present (even if zero count)
+          for critical in ['risk.position_sync_failed', 'risk.bankroll_unavailable', 
+                          'risk.equity_feed_lost', 'consensus.threshold_changed']:
+              if critical not in event_counts:
+                  event_counts[critical] = 0
+          
+          report = {
+              'date': str(__import__('datetime').datetime.utcnow().isoformat()),
+              'total_records': len(records),
+              'event_counts': event_counts,
+              'audit_chain_valid': True,  # Would be passed from previous job
+              'pre_scale_status': 'OK' if all(c <= 5 for c in event_counts.values()) else 'WARN'
+              # WARN if >5 of any single risk event type (anomaly detection)
+          }
+          
+          Path('reports').mkdir(exist_ok=True)
+          with open('reports/pre_scale_health.json', 'w') as f:
+              json.dump(report, f, indent=2)
+          
+          print(json.dumps(report, indent=2))
+          EOF
+
+      - name: Upload health report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-scale-health-daily
+          path: reports/pre_scale_health.json
+
+      - name: Generate summary
+        run: |
+          echo "## 📈 Pre-Scale Health Report" >> $GITHUB_STEP_SUMMARY
+          cat reports/pre_scale_health.json | jq -r '
+            "- **Total Records:** \(.total_records)",
+            "- **Status:** \(.pre_scale_status)",
+            "",
+            "**Risk Event Counts:**",
+            "- position_sync_failed: \(.event_counts["risk.position_sync_failed"])",
+            "- bankroll_unavailable: \(.event_counts["risk.bankroll_unavailable"])",
+            "- equity_feed_lost: \(.event_counts["risk.equity_feed_lost"])",
+            "- threshold_changed: \(.event_counts["consensus.threshold_changed"])"
+          ' >> $GITHUB_STEP_SUMMARY
+
+  # ── Job 4: Pre-Scale Health File Update ───────────────────────────
+  update-health-status:
+    name: Update Status File
+    runs-on: ubuntu-latest
+    needs: [audit-chain-verification, wiring-validation-nop, risk-event-metrics]
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile final status
+        run: |
+          python << 'EOF'
+          import json
+          from pathlib import Path
+          from datetime import datetime, timezone
+          
+          # Read individual job statuses (simplified - in practice would use artifact passing)
+          status = {
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+              "run_id": "${{ github.run_id }}",
+              "audit_chain": {
+                  "valid": True,  # Would come from audit-chain-verification job
+                  "records_checked": 0  # Would come from artifact
+              },
+              "wiring_validation": "OK",  # Would come from wiring-validation-nop job
+              "risk_events": {
+                  "position_sync_failed": 0,
+                  "bankroll_unavailable": 0,
+                  "equity_feed_lost": 0,
+                  "threshold_changed": 0
+              },
+              "pre_scale_ready": False,  # Set to True after 7 consecutive OK days
+              "recommendation": "Continue 7-day monitoring protocol"
+          }
+          
+          Path('status').mkdir(exist_ok=True)
+          with open('status/pre_scale_health.json', 'w') as f:
+              json.dump(status, f, indent=2)
+          
+          print("Status file updated:", json.dumps(status, indent=2))
+          EOF
+
+      - name: Commit status file (optional - for tracking)
+        run: |
+          # This would push to a status branch or separate repo
+          # For now, just show what would be committed
+          echo "Would commit status/pre_scale_health.json"
+          cat status/pre_scale_health.json

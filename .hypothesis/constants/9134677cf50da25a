@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\latency_optimizer\telemetry.py
+# hypothesis_version: 6.151.4
+
+[1.0, 'count', 'description', 'latency', 'ms']

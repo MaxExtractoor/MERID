@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\error_handling.py
+# hypothesis_version: 6.151.4
+
+[0.5, 1.0, 2.0, 30.0, 60.0, 100.0, -100, 100, 3600, 'circuit_break', 'circuit_breakers', 'closed', 'component', 'components', 'consecutive_failures', 'critical', 'error_type', 'errors_by_type', 'escalate', 'failure_count', 'fallback', 'half_open', 'healthy', 'high', 'ignore', 'is_healthy', 'last_check', 'last_failure_time', 'last_success_time', 'low', 'medium', 'name', 'open', 'open_until', 'operation', 'overall_healthy', 'recent_errors', 'retry', 'severity', 'state', 'success_count', 'timestamp', 'total_errors', 'unhealthy_components', 'uptime_percentage']

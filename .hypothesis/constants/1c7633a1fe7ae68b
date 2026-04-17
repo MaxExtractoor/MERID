@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\governance\constitutional.py
+# hypothesis_version: 6.151.4
+
+[2.0, 3.0, 5.0, 10.0, 15.0, 20.0, 25.0, 50.0, 67.0, 50000.0, 100000.0, 200000.0, 100, 'AUDIT_TRAIL_REQUIRED', 'COLD_WALLET_MIN_PCT', 'CONSENSUS_QUORUM_PCT', 'HOT_WALLET_MAX_USD', 'MAX_LEVERAGE', 'MAX_RETRY_ATTEMPTS', 'MAX_SINGLE_TRADE_PCT', 'MAX_SLIPPAGE_PCT', 'MIN_LIQUIDITY_RATIO', 'NO_PRINCIPAL_TRADING', 'PROFIT_LOCK_DAYS', 'SHADOW_MODE_REQUIRED', 'SYSTEM HALTED: %s', 'WARM_WALLET_MAX_USD', 'actual_value', 'attempted_by', 'bypass_attempts', 'capital_protection', 'context', 'critical', 'critical_violations', 'custody', 'description', 'execution', 'halt_reason', 'halted', 'high', 'human_approval', 'integrity_valid', 'invariant_name', 'invariants_hash', 'leverage_risk', 'limit_value', 'low', 'medium', 'new_protocol', 'principal_protection', 'resolution', 'resolved', 'severity', 'system', 'timestamp', 'total_violations', 'violation_id', 'withdrawal']

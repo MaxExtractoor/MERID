@@ -1,0 +1,44 @@
+# Prevent Codeium from scanning heavyweight or generated assets
+.venv/
+.git/
+node_modules/
+htmlcov/
+.docs/
+logs/
+docs_archive/
+coverage.xml
+coverage.json
+.coverage
+full_collect*.txt
+build/
+dist/
+tmp/
+
+# IMPORTANT: allow full access to data directory
+!data/
+!data/**
+
+# Allow specific bundle analysis files
+!build/stats.html
+!dist/stats.html
+
+# Narrow ignores for scripts/tools: keep core CLIs accessible
+scripts/archive/
+scripts/generated/
+scripts/tmp/
+tools/archive/
+tools/generated/
+tools/tmp/
+
+# --- Explicit allowlist overrides ---
+
+# Allow Codeium to read these files even though parent dirs are ignored
+!asset_universe.py
+!live_price_feed.py
+!rti_stream.py
+
+# --- merid.log access ---
+# If merid.log is inside an ignored directory, unignore the parent path(s) too:
+!logs/
+!logs/**
+!logs/merid.log

@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\consensus_logging.py
+# hypothesis_version: 6.151.4
+
+[0.0, 1000, 'Dissenting Opinions:', 'abstain', 'active_rounds', 'agent_id', 'approve', 'avg_confidence', 'avg_duration_seconds', 'confidence', 'dissent', 'duration_seconds', 'end_time', 'failed', 'final_action', 'final_confidence', 'no_quorum', 'outcome', 'outcome_distribution', 'overruled_by', 'pass_rate', 'passed', 'proposal', 'quorum_reached', 'quorum_required', 'reasoning', 'recent_rounds', 'reject', 'resolution', 'round_id', 'start_time', 'timeout', 'timestamp', 'total_rounds', 'total_trust_weight', 'trust_weight', 'vote', 'vote_summary', 'votes']

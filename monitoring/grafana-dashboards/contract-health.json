@@ -1,0 +1,200 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "MERID Contract Health",
+    "tags": [
+      "merid",
+      "contract",
+      "structural"
+    ],
+    "timezone": "browser",
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "API v1 Route Count",
+        "description": "Total registered /api/v1 routes. A sudden drop indicates router import failure or profile misconfiguration.",
+        "type": "stat",
+        "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+        "targets": [
+          {
+            "expr": "merid_contract_health_api_v1_route_count",
+            "legendFormat": "Routes"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "steps": [
+                { "color": "red", "value": 0 },
+                { "color": "yellow", "value": 50 },
+                { "color": "green", "value": 100 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "SSE Endpoint Count",
+        "description": "Number of SSE streaming endpoints. Should be >= 2. A drop means an SSE handler failed to register.",
+        "type": "stat",
+        "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+        "targets": [
+          {
+            "expr": "merid_contract_health_sse_endpoint_count",
+            "legendFormat": "SSE Streams"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "steps": [
+                { "color": "red", "value": 0 },
+                { "color": "yellow", "value": 1 },
+                { "color": "green", "value": 2 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Active Profile",
+        "description": "Current MERID_PROFILE value. Expected: kalshi-only in prod.",
+        "type": "stat",
+        "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+        "targets": [
+          {
+            "expr": "merid_contract_health_profile_info",
+            "legendFormat": "{{profile}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              { "type": "value", "options": { "kalshi-only": { "text": "kalshi-only", "color": "green" } } },
+              { "type": "value", "options": { "full": { "text": "full", "color": "blue" } } }
+            ]
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Feature Flags",
+        "description": "Runtime feature flag states. 1 = enabled, 0 = disabled.",
+        "type": "table",
+        "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+        "targets": [
+          {
+            "expr": "merid_feature_flag_enabled",
+            "legendFormat": "{{flag}}"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Contract Violation 404s (rate/5m)",
+        "description": "Rate of 404 responses under /api/v1, tagged as possible_contract_violation. A spike means frontend is calling routes that don't exist.",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+        "targets": [
+          {
+            "expr": "rate(merid_contract_violations_total[5m])",
+            "legendFormat": "404s /api/v1"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "palette-classic" },
+            "custom": { "fillOpacity": 10, "lineWidth": 2 },
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 0.1 },
+                { "color": "red", "value": 1.0 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Contract Violation Paths (top 10)",
+        "description": "Most frequently hit 404 paths under /api/v1. Use to identify dead frontend constants or missing routes.",
+        "type": "table",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+        "targets": [
+          {
+            "expr": "topk(10, sum by (path) (merid_contract_violations_total))",
+            "legendFormat": "{{path}}"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Route Count Over Time",
+        "description": "Track route count across deploys to detect regressions.",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+        "targets": [
+          {
+            "expr": "merid_contract_health_api_v1_route_count",
+            "legendFormat": "API v1 Routes"
+          },
+          {
+            "expr": "merid_contract_health_sse_endpoint_count",
+            "legendFormat": "SSE Endpoints"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": { "fillOpacity": 5, "lineWidth": 2 }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Feature Flag Toggles Over Time",
+        "description": "Track when flags are toggled. Useful for correlating behavior changes with flag state.",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+        "targets": [
+          {
+            "expr": "merid_feature_flag_enabled",
+            "legendFormat": "{{flag}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": { "fillOpacity": 20, "lineWidth": 2, "stacking": { "mode": "none" } },
+            "min": 0,
+            "max": 1
+          }
+        }
+      }
+    ],
+    "annotations": {
+      "list": [
+        {
+          "name": "Deployments",
+          "datasource": "-- Grafana --",
+          "enable": true,
+          "iconColor": "blue",
+          "tags": ["deploy"]
+        }
+      ]
+    },
+    "templating": {
+      "list": []
+    },
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "schemaVersion": 38,
+    "version": 1
+  }
+}

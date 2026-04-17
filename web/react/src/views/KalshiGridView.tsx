@@ -1,0 +1,1391 @@
+/**
+ * KalshiGridView — Dedicated Kalshi agent grid dashboard.
+ *
+ * Shows:
+ *   - Header strip: session guard, grid running/stopped, kill switch
+ *   - Agent grid matrix: 5 rows (assets) × 4 columns (timeframes)
+ *   - Portfolio risk card
+ *   - Controls: Start/Stop, Pause/Resume, Kill switch reset
+ *   - Recent fills table
+ *   - Drill-down to KalshiAgentDetail on cell click
+ */
+
+import { useState, useCallback, useEffect } from 'react';
+import { ChevronRight } from 'lucide-react';
+import { logUiError } from '../utils/logger';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, GRID_CELL_STATUS, AUTH_TOKEN_KEY} from '../config/constants';
+import PaperLadderCard from '../components/PaperLadderCard';
+import KalshiModeBadge from '../components/KalshiModeBadge';
+import ExecutionGateStrip from '../components/ExecutionGateStrip';
+import KalshiReconciliationBadge from '../components/KalshiReconciliationBadge';
+import KalshiCancelAllButton from '../components/KalshiCancelAllButton';
+import SwarmInsightTab from '../components/SwarmInsightTab';
+import {
+  BarChart3, Play, Square, Pause, RotateCcw, RefreshCw,
+  ShieldAlert, Star, Zap, Clock, Activity, Wifi, WifiOff, X,
+  AlertTriangle, Shield, Target, Radio,
+} from '../ui/icons';
+import { ConfirmModal } from '../components/ConfirmModal';
+import KalshiBankrollPanel from '../components/KalshiBankrollPanel';
+
+/* ═══════════════════════════════════════════════════════
+   Types
+   ═══════════════════════════════════════════════════════ */
+
+interface AgentSummary {
+  name: string;
+  enabled: boolean;
+  running: boolean;
+  last_cycle_at: string | null;
+  cycles_run: number;
+  orders_placed: number;
+  orders_this_window: number;
+  active_tickers: string[];
+  last_error: string | null;
+  signal_count: number;
+  order_count: number;
+  fill_count: number;
+  brier_score?: number;
+  calibration_error?: number;
+  last_heartbeat_ts: string | null;
+  config: {
+    assets: string[];
+    timeframes: string[];
+    risk_limits: {
+      max_yes_position: number;
+      max_no_position: number;
+      max_orders_per_window: number;
+      max_notional_usd: string;
+      max_contracts_per_order: number;
+    };
+    entry_window: {
+      minutes_before_expiry: number;
+      cutoff_minutes_before_expiry: number;
+    };
+    risk_profile: string;
+  };
+}
+
+interface VenueMode {
+  mode: 'paper' | 'live' | 'mock';
+  is_live: boolean;
+  live_enabled: boolean;
+}
+
+interface GridStatus {
+  running: boolean;
+  agent_count: number;
+  agents: AgentSummary[];
+  venue_mode?: VenueMode;
+  venue_health: {
+    connected: boolean;
+    circuit: {
+      state: string;
+      failure_count: number;
+      last_failure: string | null;
+    };
+    rate_limits: {
+      read: number;
+      write: number;
+    };
+    error_rate: number;
+  };
+  metrics: {
+    active_markets: number;
+    covered_markets: number;
+    coverage_pct: number;
+    total_orders: number;
+    total_fills: number;
+    pnl_by_category: Record<string, number>;
+  };
+  portfolio_risk: {
+    kill_switch_active: boolean;
+    daily_pnl_usd: number;
+    total_notional_usd: number;
+    margin_utilization: number;
+    paused_agents: string[];
+  };
+  session: {
+    trading_allowed: boolean;
+    block_reason: string | null;
+    maintenance_day: boolean;
+    maintenance_window: string;
+  };
+}
+
+interface GridHealth {
+  status: string;
+  issues: string[];
+  catalog: { market_count: number; last_refresh: string | null; categories: number };
+  risk: { kill_switch: boolean; daily_pnl: number; drawdown_pct: number };
+  ws: { running: boolean; events_forwarded: number; subscribed_tickers: number };
+  rate_limits: { orders_this_minute: number; max_per_minute: number; orders_this_hour: number; max_per_hour: number };
+}
+
+interface SignalEntry {
+  ts: string;
+  market_id: string;
+  question: string;
+  action: string;
+  contracts: number;
+  limit_price_cents: number | null;
+  edge: number | null;
+  confidence: number | null;
+  implied_yes: number | null;
+  implied_no: number | null;
+}
+
+interface OrderEntry {
+  ts: string;
+  market_id: string;
+  question: string;
+  side: string;
+  action: string;
+  price_cents: number;
+  contracts: number;
+  ref_bid: number | null;
+  ref_ask: number | null;
+  ref_mid: number | null;
+  success: boolean;
+  simulated: boolean | null;
+  error: string | null;
+}
+
+interface FillEntry {
+  ts: string;
+  market_id: string;
+  side: string;
+  action: string;
+  price_cents: number;
+  contracts: number;
+  agent: string;
+  simulated: boolean;
+}
+
+/* ═══════════════════════════════════════════════════════
+   Constants
+   ═══════════════════════════════════════════════════════ */
+
+const HEARTBEAT_THRESHOLDS = {
+  OK: 120,    // seconds - green
+  WARN: 300,  // seconds - yellow
+} as const;
+
+function getHeartbeatStatus(lastHeartbeatTs: string | null): { status: 'ok' | 'warn' | 'dead'; color: string; label: string } {
+  if (!lastHeartbeatTs) return { status: 'dead', color: 'text-red-400', label: 'Dead' };
+  
+  const now = Date.now();
+  const last = Date.parse(lastHeartbeatTs);
+  if (isNaN(last)) return { status: 'dead', color: 'text-red-400', label: 'Invalid' };
+  
+  const ageSec = (now - last) / 1000;
+  if (ageSec <= HEARTBEAT_THRESHOLDS.OK) return { status: 'ok', color: 'text-green-400', label: 'OK' };
+  if (ageSec <= HEARTBEAT_THRESHOLDS.WARN) return { status: 'warn', color: 'text-yellow-400', label: 'Stale' };
+  return { status: 'dead', color: 'text-red-400', label: 'Dead' };
+}
+
+const ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
+const TIMEFRAMES = ['15m', '1h', 'daily', 'pre-market'];
+
+const TF_LABELS: Record<string, string> = {
+  '15m': '15 Min',
+  '1h': 'Hourly',
+  'daily': 'Daily',
+  'pre-market': 'Pre-Mkt',
+};
+
+/* ═══════════════════════════════════════════════════════
+   Component
+   ═══════════════════════════════════════════════════════ */
+
+interface GridMatrixCell {
+  agent: string;
+  enabled: boolean;
+  running: boolean;
+  cycles: number;
+  orders: number;
+  active_tickers: string[];
+  status: 'active' | 'covering';
+}
+
+interface GridMatrixData {
+  matrix: Record<string, Record<string, GridMatrixCell>>;
+  assets: string[];
+  timeframes: string[];
+}
+
+type GridTab = 'grid' | 'health' | 'insight';
+
+function UtilBar({ value, max, warn = 75, danger = 90 }: { value: number; max: number; warn?: number; danger?: number }) {
+  const p = max > 0 ? Math.min((value / max) * 100, 100) : 0;
+  const color = p >= danger ? 'bg-red-500' : p >= warn ? 'bg-amber-500' : 'bg-emerald-500';
+  return (
+    <div className="w-full bg-slate-700 rounded-full h-1.5 mt-0.5">
+      <div className={`h-1.5 rounded-full transition-all ${color}`} style={{ width: `${p}%` }} />
+    </div>
+  );
+}
+
+export default function KalshiGridView() {
+  const [activeTab, setActiveTab] = useState<GridTab>('grid');
+  const [status, setStatus] = useState<GridStatus | null>(null);
+  const [gridHealth, setGridHealth] = useState<GridHealth | null>(null);
+  const [matrixData, setMatrixData] = useState<GridMatrixData | null>(null);
+  const [fills, setFills] = useState<FillEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [agentSignals, setAgentSignals] = useState<SignalEntry[]>([]);
+  const [agentOrders, setAgentOrders] = useState<OrderEntry[]>([]);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [startMode, setStartMode] = useState<'paper' | 'live'>('paper');
+  const [canaryLoading, setCanaryLoading] = useState(false);
+  const [canaryResult, setCanaryResult] = useState<{ ok: boolean; ticker?: string; latency_ms?: number; error?: string } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    confirmVariant?: 'primary' | 'danger' | 'warning';
+    checklistItems?: import('../components/ConfirmModal').ChecklistItem[];
+  }>({ isOpen: false, title: '', message: '', onConfirm: () => undefined, checklistItems: [] });
+  
+  const closeConfirmModal = useCallback(() => {
+    setConfirmModal(prev => ({ ...prev, isOpen: false }));
+  }, []);
+
+  // ── Watchlist/Favorites ──
+  const [watchlist, setWatchlist] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('merid:kalshi:watchlist');
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch { return new Set(); }
+  });
+
+  const toggleWatchlist = useCallback((asset: string) => {
+    setWatchlist(prev => {
+      const next = new Set(prev);
+      if (next.has(asset)) next.delete(asset); else next.add(asset);
+      localStorage.setItem('merid:kalshi:watchlist', JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
+  // ── Kill Switch Handler ──
+  const handleKillSwitch = useCallback(async () => {
+    const confirmed = window.confirm('⚠️ EMERGENCY KILL SWITCH\n\nThis will immediately halt the Kalshi grid and cancel all orders.\n\nAre you sure you want to continue?');
+    if (!confirmed) return;
+    
+    try {
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_KILL_SWITCH('enable')}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
+        },
+        body: JSON.stringify({ reason: 'Manual operator kill switch from Grid view' }),
+      });
+      if (!response.ok) throw new Error('Failed to activate kill switch');
+      // Refetch will happen automatically via polling
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to activate kill switch');
+    }
+  }, []);
+
+  // ── Keyboard Shortcut ──
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+Shift+K for emergency kill switch
+      if (e.ctrlKey && e.shiftKey && e.key === 'K') {
+        e.preventDefault();
+        handleKillSwitch();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [handleKillSwitch]);
+
+  // ── Agent Focus from Portfolio ──
+  useEffect(() => {
+    const focusAgent = sessionStorage.getItem('merid:focus-agent');
+    if (focusAgent) {
+      // UI-003 fix: flatMap to correctly flatten Record<string, Record<string, GridMatrixCell>>
+      const agentCell = Object.values(matrixData?.matrix || {})
+        .flatMap(row => Object.values(row))
+        .find(cell => cell?.agent === focusAgent);
+      if (agentCell) {
+        setSelectedAgent(focusAgent);
+        sessionStorage.removeItem('merid:focus-agent');
+      } else {
+        // Clear stale focus to prevent retry on every matrixData update
+        sessionStorage.removeItem('merid:focus-agent');
+      }
+    }
+  }, [matrixData]);
+
+  const withAuthHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
+      ...(headers ?? {}),
+    };
+  }, []);
+
+  const fetchJson = useCallback(async <T,>(endpoint: string, init?: RequestInit): Promise<T> => {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      ...init,
+      headers: withAuthHeaders(init?.headers),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    return response.json() as Promise<T>;
+  }, [withAuthHeaders]);
+
+  // ── Fetch ────────────────────────────────────────────
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const [statusRes, matrixRes, fillsRes, healthRes] = await Promise.allSettled([
+        fetchJson<GridStatus>(API_ENDPOINTS.KALSHI_GRID_STATUS),
+        fetchJson<GridMatrixData>(API_ENDPOINTS.KALSHI_GRID_MATRIX),
+        fetchJson<{ fills?: FillEntry[] } | FillEntry[]>(API_ENDPOINTS.KALSHI_GRID_FILLS),
+        fetchJson<GridHealth>(API_ENDPOINTS.KALSHI_GRID_HEALTH),
+      ]);
+
+      if (statusRes.status === 'fulfilled') {
+        setStatus(statusRes.value);
+      }
+      if (matrixRes.status === 'fulfilled') {
+        setMatrixData(matrixRes.value);
+      }
+      if (fillsRes.status === 'fulfilled') {
+        const payload = fillsRes.value;
+        setFills(Array.isArray(payload) ? payload : (payload.fills ?? []));
+      }
+      if (healthRes.status === 'fulfilled') {
+        setGridHealth(healthRes.value);
+      }
+    } catch (err) {
+      // Log error but keep stale data on network/parse errors
+      logUiError('KalshiGridView', 'Failed to fetch grid status', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchJson]);
+
+  const fetchAgentDetail = useCallback(async (name: string) => {
+    try {
+      const [sigRes, ordRes] = await Promise.allSettled([
+        fetchJson<{ signals?: SignalEntry[] }>(API_ENDPOINTS.KALSHI_GRID_AGENT_SIGNALS(name)),
+        fetchJson<{ orders?: OrderEntry[] }>(API_ENDPOINTS.KALSHI_GRID_AGENT_ORDERS(name)),
+      ]);
+      if (sigRes.status === 'fulfilled') {
+        setAgentSignals(sigRes.value.signals ?? []);
+      }
+      if (ordRes.status === 'fulfilled') {
+        setAgentOrders(ordRes.value.orders ?? []);
+      }
+    } catch (err) {
+      // Log error but keep stale agent data
+      logUiError('KalshiGridView', `Failed to fetch agent detail for ${name}`, err);
+    }
+  }, [fetchJson]);
+
+  useEffect(() => {
+    fetchStatus();
+    const interval = setInterval(fetchStatus, DEFAULTS.POLLING_INTERVALS.STANDARD);
+    return () => clearInterval(interval);
+  }, [fetchStatus]);
+
+  // Sync startMode with actual server mode when status arrives
+  useEffect(() => {
+    if (status?.venue_mode?.mode && status.venue_mode.mode !== 'mock') {
+      setStartMode(status.venue_mode.mode as 'paper' | 'live');
+    }
+  }, [status?.venue_mode?.mode]);
+
+  useEffect(() => {
+    if (selectedAgent) {
+      fetchAgentDetail(selectedAgent);
+      const interval = setInterval(() => fetchAgentDetail(selectedAgent), DEFAULTS.POLLING_INTERVALS.STANDARD);
+      return () => clearInterval(interval);
+    }
+  }, [selectedAgent, fetchAgentDetail]);
+
+  // ── Actions ──────────────────────────────────────────
+
+  const postAction = async (url: string) => {
+    setActionLoading(true);
+    setActionError(null);
+    try {
+      await fetchJson(url, { method: 'POST' });
+      await fetchStatus();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Action failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const runCanaryTrade = async () => {
+    setCanaryLoading(true);
+    setCanaryResult(null);
+    try {
+      const res = await fetchJson<{ ok: boolean; ticker?: string; latency_ms?: number; error?: string }>(
+        API_ENDPOINTS.KALSHI_GRID_CANARY_TRADE, { method: 'POST' }
+      );
+      setCanaryResult(res);
+    } catch (err) {
+      setCanaryResult({ ok: false, error: err instanceof Error ? err.message : 'Canary failed' });
+    } finally {
+      setCanaryLoading(false);
+    }
+  };
+
+
+  // ── Helpers ──────────────────────────────────────────
+
+  const findAgent = (asset: string, tf: string): GridMatrixCell | undefined => {
+    if (!matrixData?.matrix) return undefined;
+    return matrixData.matrix[asset]?.[tf];
+  };
+
+  const agentStatusColor = (cell: GridMatrixCell) => {
+    if (!cell.enabled) return 'bg-gray-500/20 text-gray-400';
+    if (cell.running && cell.status === GRID_CELL_STATUS.ACTIVE) return 'bg-green-500/20 text-green-400';
+    if (cell.status === GRID_CELL_STATUS.COVERING) return 'bg-blue-500/20 text-blue-400';
+    return 'bg-gray-500/20 text-gray-400';
+  };
+
+  const agentStatusLabel = (cell: GridMatrixCell) => {
+    if (!cell.enabled) return 'Paused';
+    if (cell.status === GRID_CELL_STATUS.ACTIVE) return 'Active';
+    if (cell.status === GRID_CELL_STATUS.COVERING) return 'Watching';
+    return 'Idle';
+  };
+
+  // ── Loading ──────────────────────────────────────────
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-2 text-gray-400">
+          <RefreshCw className="w-4 h-4 animate-spin" />
+          <span>Loading Kalshi agent grid...</span>
+        </div>
+      </div>
+    );
+  }
+
+  const gridRunning = status?.running ?? false;
+  const portfolio = status?.portfolio_risk;
+  const session = status?.session;
+  const venueMode = status?.venue_mode;
+  const isLive = venueMode?.is_live ?? false;
+
+  const activeAssets = matrixData?.assets || ASSETS;
+  const activeTimeframes = matrixData?.timeframes || TIMEFRAMES;
+
+  return (
+    <div className="space-y-6">
+      <ExecutionGateStrip />
+
+      {/* Continuous trader bankroll */}
+      <KalshiBankrollPanel />
+
+      {/* ── Header ──────────────────────────────────────── */}
+      <div className="flex items-center justify-between flex-wrap gap-4">
+        <div className="flex items-center gap-3">
+          <BarChart3 className="w-6 h-6 text-orange-400" />
+          <div>
+            <h2 className="text-xl font-bold text-white flex items-center gap-2">Kalshi Agent Grid <KalshiModeBadge /></h2>
+            <p className="text-sm text-gray-400">
+              {status?.agent_count ?? 0} agents &middot; {activeAssets.length} assets &middot; {activeTimeframes.length} timeframes
+            </p>
+          </div>
+        </div>
+
+        {/* Status badges */}
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Reconciliation Badge */}
+          <KalshiReconciliationBadge compact={true} />
+
+          {/* Environment badge */}
+          <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-semibold ${
+            isLive ? 'bg-red-500/30 text-red-300 border border-red-500/50' : 'bg-amber-500/20 text-amber-400'
+          }`}>
+            <Zap className="w-3 h-3" />
+            {isLive ? '🔴 LIVE' : '📄 PAPER'}
+          </span>
+
+          {/* Session */}
+          <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full ${
+            session?.trading_allowed ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+          }`}>
+            <Clock className="w-3 h-3" />
+            {session?.trading_allowed ? 'Trading Open' : session?.block_reason || 'Closed'}
+          </span>
+
+          {/* Grid status */}
+          <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full ${
+            gridRunning ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
+          }`}>
+            <Activity className="w-3 h-3" />
+            Grid: {gridRunning ? 'Running' : 'Stopped'}
+          </span>
+
+          {/* Venue Health */}
+          {status?.venue_health && (
+            <>
+              <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full ${
+                status.venue_health.connected ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+              }`}>
+                <Activity className="w-3 h-3" />
+                Kalshi: {status.venue_health.connected ? 'Connected' : 'Offline'}
+              </span>
+              <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full ${
+                status.venue_health?.circuit?.state === 'closed' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'
+              }`}>
+                <Shield className="w-3 h-3" />
+                Breaker: {(status?.venue_health?.circuit?.state ?? 'unknown').toUpperCase()}
+              </span>
+            </>
+          )}
+
+          {/* Kill switch */}
+          {portfolio?.kill_switch_active && (
+            <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-red-500/20 text-red-400">
+              <AlertTriangle className="w-3 h-3" />
+              Kill Switch Active
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ── Controls ────────────────────────────────────── */}
+      {actionError && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="ml-auto text-red-300 hover:text-red-200"
+            aria-label="Dismiss action error"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Mode display badge - no controls */}
+        <KalshiModeBadge />
+
+        {/* Emergency Kill Switch */}
+        <button
+          type="button"
+          onClick={handleKillSwitch}
+          className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-medium hover:bg-red-500/20 transition-colors"
+          title="Emergency Kill Switch (Ctrl+Shift+K)"
+        >
+          <ShieldAlert className="w-3 h-3" />
+          KILL
+        </button>
+
+        {!gridRunning ? (
+          <button
+            type="button"
+            onClick={() => {
+              if (startMode === 'live') {
+                const checklist: import('../components/ConfirmModal').ChecklistItem[] = [
+                  { id: 'risk_limits', label: `I have reviewed current risk limits (drawdown ${((gridHealth?.risk?.drawdown_pct ?? 0) * 100).toFixed(1)}%, margin ${((portfolio?.margin_utilization ?? 0) * 100).toFixed(1)}%)` },
+                  { id: 'environment', label: `I confirm this is the intended Kalshi environment (${status?.venue_mode?.mode ?? 'unknown'})` },
+                  { id: 'live_orders', label: 'I understand real money orders will be placed' },
+                ];
+                setConfirmModal({
+                  isOpen: true,
+                  title: 'Start Grid in LIVE Mode',
+                  message: '⚠️ Live mode places real orders on Kalshi. Confirm the checklist items below before continuing.',
+                  confirmVariant: 'danger',
+                  checklistItems: checklist,
+                  onConfirm: () => {
+                    closeConfirmModal();
+                    postAction(`${API_ENDPOINTS.KALSHI_GRID_START}?mode=${startMode}`);
+                  },
+                });
+              } else {
+                postAction(`${API_ENDPOINTS.KALSHI_GRID_START}?mode=${startMode}`);
+              }
+            }}
+            disabled={actionLoading}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-sm text-white rounded-lg transition-colors disabled:opacity-50 ${
+              startMode === 'live' ? 'bg-red-700 hover:bg-red-600' : 'bg-green-600 hover:bg-green-500'
+            }`}
+          >
+            <Play className="w-3.5 h-3.5" /> Start Grid {startMode === 'live' ? '(LIVE)' : ''}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => postAction(API_ENDPOINTS.KALSHI_GRID_STOP)}
+            disabled={actionLoading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-red-600 hover:bg-red-500 text-white rounded-lg transition-colors disabled:opacity-50"
+          >
+            <Square className="w-3.5 h-3.5" /> Stop Grid
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => postAction(API_ENDPOINTS.KALSHI_GRID_PAUSE)}
+          disabled={actionLoading || !gridRunning}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-amber-600 hover:bg-amber-500 text-white rounded-lg transition-colors disabled:opacity-50"
+        >
+          <Pause className="w-3.5 h-3.5" /> Pause All
+        </button>
+        <button
+          type="button"
+          onClick={() => postAction(API_ENDPOINTS.KALSHI_GRID_RESUME)}
+          disabled={actionLoading || !gridRunning}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors disabled:opacity-50"
+        >
+          <RotateCcw className="w-3.5 h-3.5" /> Resume All
+        </button>
+        
+        {/* Cancel All Orders */}
+        <KalshiCancelAllButton 
+          compact={true}
+          onSuccess={() => {
+            // UI-004 fix: targeted refetch instead of full page reload
+            fetchStatus();
+          }}
+        />
+        
+        {portfolio?.kill_switch_active && (
+          <button
+            type="button"
+            onClick={() => {
+              setConfirmModal({
+                isOpen: true,
+                title: 'Reset Kill Switch',
+                message: 'Reset Kalshi kill switch and resume trading?',
+                confirmVariant: 'warning',
+                onConfirm: () => {
+                  setConfirmModal(prev => ({ ...prev, isOpen: false }));
+                  postAction(API_ENDPOINTS.KALSHI_GRID_KILL_SWITCH_RESET);
+                },
+              });
+            }}
+            disabled={actionLoading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-red-700 hover:bg-red-600 text-white rounded-lg transition-colors disabled:opacity-50"
+            aria-label="Reset Kalshi kill switch"
+          >
+            <Shield className="w-3.5 h-3.5" /> Reset Kill Switch
+          </button>
+        )}
+
+        {/* C4: Canary trade — verify order→fill→recon before session */}
+        <button
+          type="button"
+          onClick={runCanaryTrade}
+          disabled={canaryLoading}
+          title="Send 1-contract paper order to verify the full order→fill pipeline"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition-colors disabled:opacity-50"
+        >
+          {canaryLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
+          Canary Trade
+        </button>
+        {canaryResult && (
+          <span className={`text-xs px-2 py-1 rounded-full ${canaryResult.ok ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+            {canaryResult.ok
+              ? `✓ ${canaryResult.ticker} ${canaryResult.latency_ms}ms`
+              : `✗ ${canaryResult.error?.slice(0, 40)}`}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={fetchStatus}
+          className="ml-auto p-1.5 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
+          title="Refresh"
+          aria-label="Refresh grid status"
+        >
+          <RefreshCw className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* ── Tabs ────────────────────────────────────────── */}
+      <div className="flex gap-1 border-b border-slate-800">
+        {(['grid', 'health', 'insight'] as GridTab[]).map(tab => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setActiveTab(tab)}
+            className={`px-4 py-2 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${
+              activeTab === tab
+                ? 'border-orange-500 text-orange-400'
+                : 'border-transparent text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            {tab === 'health' ? 'Health & Diagnostics' : tab === 'insight' ? 'Swarm Insight' : 'Agent Grid'}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Health Tab ──────────────────────────────────── */}
+      {activeTab === 'health' && (
+        <div className="space-y-5">
+          {/* Issues banner */}
+          {gridHealth && gridHealth.issues.length > 0 && (
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                <h2 className="text-sm font-semibold text-amber-300">Health Issues ({gridHealth.issues.length})</h2>
+              </div>
+              <ul className="space-y-1">
+                {gridHealth.issues.map((issue, i) => (
+                  <li key={i} className="text-xs text-amber-300/80 flex items-start gap-2">
+                    <span className="text-amber-500 mt-0.5">•</span>{issue}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {gridHealth && gridHealth.issues.length === 0 && (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-3 flex items-center gap-2">
+              <Activity className="w-4 h-4 text-emerald-400" />
+              <span className="text-sm text-emerald-300 font-medium">All systems healthy</span>
+            </div>
+          )}
+
+          {/* Catalog + WS + Rate limits */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Target className="w-4 h-4 text-orange-400" />
+                <h3 className="text-sm font-semibold text-white">Market Catalog</h3>
+              </div>
+              {gridHealth ? (
+                <>
+                  <p className="text-2xl font-bold text-orange-400 font-mono">{gridHealth.catalog.market_count}</p>
+                  <p className="text-xs text-slate-500 mt-1">markets · {gridHealth.catalog.categories} categories</p>
+                  {gridHealth.catalog.last_refresh && (
+                    <p className="text-[10px] text-slate-600 mt-1">Refreshed {new Date(gridHealth.catalog.last_refresh).toLocaleTimeString()}</p>
+                  )}
+                </>
+              ) : <p className="text-sm text-slate-600">—</p>}
+            </div>
+
+            <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Radio className="w-4 h-4 text-cyan-400" />
+                <h3 className="text-sm font-semibold text-white">WebSocket Feed</h3>
+              </div>
+              {gridHealth ? (
+                <>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={`w-2 h-2 rounded-full ${gridHealth.ws.running ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
+                    <span className={`text-sm font-bold ${gridHealth.ws.running ? 'text-green-400' : 'text-red-400'}`}>
+                      {gridHealth.ws.running ? 'LIVE' : 'DOWN'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400">{gridHealth.ws.subscribed_tickers} tickers subscribed</p>
+                  <p className="text-xs text-slate-500 mt-0.5">{(gridHealth.ws.events_forwarded ?? 0).toLocaleString()} events forwarded</p>
+                </>
+              ) : <p className="text-sm text-slate-600">—</p>}
+            </div>
+
+            <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Activity className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-semibold text-white">Rate Limits</h3>
+              </div>
+              {gridHealth ? (
+                <div className="space-y-2">
+                  <div>
+                    <div className="flex justify-between text-xs mb-0.5">
+                      <span className="text-slate-400">Orders/min</span>
+                      <span className="text-slate-300 font-mono">{gridHealth.rate_limits.orders_this_minute} / {gridHealth.rate_limits.max_per_minute}</span>
+                    </div>
+                    <UtilBar value={gridHealth.rate_limits.orders_this_minute} max={gridHealth.rate_limits.max_per_minute} />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-xs mb-0.5">
+                      <span className="text-slate-400">Orders/hr</span>
+                      <span className="text-slate-300 font-mono">{gridHealth.rate_limits.orders_this_hour} / {gridHealth.rate_limits.max_per_hour}</span>
+                    </div>
+                    <UtilBar value={gridHealth.rate_limits.orders_this_hour} max={gridHealth.rate_limits.max_per_hour} />
+                  </div>
+                </div>
+              ) : <p className="text-sm text-slate-600">—</p>}
+            </div>
+          </div>
+
+          {/* Venue connection detail */}
+          <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
+            <div className="flex items-center gap-2 mb-3">
+              {status?.venue_health?.connected
+                ? <Wifi className="w-4 h-4 text-green-400" />
+                : <WifiOff className="w-4 h-4 text-red-400" />}
+              <h3 className="text-sm font-semibold text-white">Venue Connection</h3>
+            </div>
+            {status?.venue_health ? (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                <div>
+                  <p className="text-slate-500 mb-1">Status</p>
+                  <p className={`font-semibold ${status.venue_health.connected ? 'text-green-400' : 'text-red-400'}`}>
+                    {status.venue_health.connected ? 'Connected' : 'Disconnected'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-500 mb-1">Circuit Breaker</p>
+                  <p className={`font-semibold ${status.venue_health?.circuit?.state === 'closed' ? 'text-green-400' : 'text-red-400'}`}>
+                    {(status?.venue_health?.circuit?.state ?? 'unknown').toUpperCase()}
+                  </p>
+                  {(status.venue_health?.circuit?.failure_count ?? 0) > 0 && (
+                    <p className="text-slate-600">{status.venue_health.circuit.failure_count} failures</p>
+                  )}
+                </div>
+                <div>
+                  <p className="text-slate-500 mb-1">Error Rate</p>
+                  <p className={`font-semibold font-mono ${(status.venue_health?.error_rate ?? 0) > 0.05 ? 'text-red-400' : 'text-slate-300'}`}>
+                    {((status.venue_health?.error_rate ?? 0) * 100).toFixed(2)}%
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-500 mb-1">Rate Tokens</p>
+                  <p className="font-semibold font-mono text-slate-300">
+                    R:{(status.venue_health?.rate_limits?.read ?? 0).toFixed(0)} W:{(status.venue_health?.rate_limits?.write ?? 0).toFixed(0)}
+                  </p>
+                </div>
+              </div>
+            ) : <p className="text-sm text-slate-600">No venue data</p>}
+          </div>
+
+          {/* Per-agent status table */}
+          {status?.agents && status.agents.length > 0 && (
+            <div className="bg-slate-900/70 rounded-xl border border-slate-800 overflow-hidden">
+              <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-white">Agent Status</h3>
+                <div className="flex items-center gap-3 text-xs">
+                  <span className="text-slate-400">Heartbeat:</span>
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1">
+                      <div className="w-2 h-2 rounded-full bg-green-400"></div>
+                      <span className="text-green-400">OK (&lt;2min)</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="w-2 h-2 rounded-full bg-yellow-400"></div>
+                      <span className="text-yellow-400">Stale (2-5min)</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="w-2 h-2 rounded-full bg-red-400"></div>
+                      <span className="text-red-400">Dead (&gt;5min)</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-500">
+                    <th className="text-left px-4 py-2">Agent</th>
+                    <th className="text-left px-4 py-2">Status</th>
+                    <th className="text-left px-4 py-2">Assets</th>
+                    <th className="text-right px-4 py-2">Cycles</th>
+                    <th className="text-right px-4 py-2">Orders</th>
+                    <th className="text-right px-4 py-2">Fills</th>
+                    <th className="text-right px-4 py-2" title="Brier score (lower=better; &lt;0.15 good)">Brier</th>
+                    <th className="text-right px-4 py-2" title="Calibration error (MAE between predicted and realized edge)">Cal.Err</th>
+                    <th className="text-right px-4 py-2">Heartbeat</th>
+                    <th className="text-right px-4 py-2">Last Cycle</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {status.agents.map(agent => {
+                    const hasError = !!agent.last_error;
+                    const isPaused = status.portfolio_risk?.paused_agents?.includes(agent.name);
+                    const heartbeat = getHeartbeatStatus(agent.last_heartbeat_ts);
+                    const rowClass = heartbeat.status === 'dead' ? 'border-b border-slate-800/50 hover:bg-slate-800/20 bg-red-950/20' : 
+                                     heartbeat.status === 'warn' ? 'border-b border-slate-800/50 hover:bg-slate-800/20 bg-yellow-950/10' : 
+                                     'border-b border-slate-800/50 hover:bg-slate-800/20';
+                    return (
+                      <tr key={agent.name} className={rowClass}>
+                        <td className="px-4 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`w-1.5 h-1.5 rounded-full ${
+                              hasError ? 'bg-red-400' : agent.running ? 'bg-green-400 animate-pulse' : !agent.enabled ? 'bg-slate-700' : 'bg-slate-500'
+                            }`} />
+                            <span className="text-slate-200 font-medium">{agent.name}</span>
+                            {isPaused && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-400 font-bold">PAUSED</span>}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2">
+                          <span className={`font-medium ${
+                            hasError ? 'text-red-400' : agent.running ? 'text-green-400' : !agent.enabled ? 'text-slate-600' : 'text-slate-400'
+                          }`}>
+                            {hasError ? 'Error' : agent.running ? 'Running' : !agent.enabled ? 'Disabled' : 'Idle'}
+                          </span>
+                          {hasError && <p className="text-red-400/70 text-[10px] truncate max-w-[200px]" title={agent.last_error ?? ''}>{agent.last_error}</p>}
+                        </td>
+                        <td className="px-4 py-2 text-slate-400 font-mono">{(agent.config?.assets ?? []).join(', ')}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-300">{(agent.cycles_run ?? 0).toLocaleString()}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-300">{agent.orders_placed}</td>
+                        <td className="px-4 py-2 text-right font-mono text-slate-300">{agent.fill_count}</td>
+                        <td className="px-4 py-2 text-right font-mono" title={`Brier: ${(agent.brier_score ?? 0).toFixed(4)}`}>
+                          {(agent.brier_score ?? 0) > 0 ? (
+                            <span className={`${(agent.brier_score ?? 0) < 0.15 ? 'text-emerald-400' : (agent.brier_score ?? 0) > 0.25 ? 'text-rose-400' : 'text-amber-400'}`}>
+                              {(agent.brier_score ?? 0).toFixed(3)}
+                            </span>
+                          ) : <span className="text-slate-700">—</span>}
+                        </td>
+                        <td className="px-4 py-2 text-right text-slate-500">
+                          {(agent.calibration_error ?? 0) > 0 ? (
+                            <span className={`${(agent.calibration_error ?? 0) < 0.05 ? 'text-emerald-400' : (agent.calibration_error ?? 0) > 0.15 ? 'text-rose-400' : 'text-amber-400'}`}>
+                              {(agent.calibration_error ?? 0).toFixed(3)}
+                            </span>
+                          ) : <span className="text-slate-700">—</span>}
+                        </td>
+                        <td className="px-4 py-2 text-right">
+                          <span className={`font-medium ${heartbeat.color}`}>{heartbeat.label}</span>
+                        </td>
+                        <td className="px-4 py-2 text-right text-slate-500">
+                          {agent.last_cycle_at ? new Date(agent.last_cycle_at).toLocaleTimeString() : '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Grid Tab content (existing) ──────────────────── */}
+      {activeTab === 'grid' && <>
+
+      {/* ── Grid Metrics ── */}
+      {status?.metrics && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Market Coverage</span>
+            <p className="text-xl font-bold text-white mt-1">{(status.metrics?.coverage_pct ?? 0).toFixed(1)}%</p>
+            <p className="text-[10px] text-gray-500">{status.metrics.covered_markets} / {status.metrics.active_markets} markets</p>
+          </div>
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Total Orders</span>
+            <p className="text-xl font-bold text-white mt-1">{status.metrics.total_orders}</p>
+            <p className="text-[10px] text-gray-500">{((status.venue_health?.error_rate ?? 0) * 100).toFixed(2)}% error rate</p>
+          </div>
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Total Fills</span>
+            <p className="text-xl font-bold text-white mt-1">{status.metrics.total_fills}</p>
+          </div>
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Rate Limit</span>
+            <p className="text-xl font-bold text-white mt-1">{(status.venue_health?.rate_limits?.write ?? 0).toFixed(0)}</p>
+            <p className="text-[10px] text-gray-500">Write tokens available</p>
+          </div>
+          <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Health Score</span>
+            <p className={`text-xl font-bold mt-1 ${status.venue_health?.connected ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {status.venue_health?.connected ? '100%' : '0%'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Portfolio Risk Card ─────────────────────────── */}
+      {portfolio && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Daily P&L</span>
+            <p className={`text-xl font-bold mt-1 ${
+              (portfolio.daily_pnl_usd ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
+            }`}>
+              {(portfolio.daily_pnl_usd ?? 0) >= 0 ? '+' : ''}${(portfolio.daily_pnl_usd ?? 0).toFixed(2)}
+            </p>
+          </div>
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Total Notional</span>
+            <p className="text-xl font-bold text-white mt-1">${(portfolio.total_notional_usd ?? 0).toFixed(2)}</p>
+          </div>
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Margin Util</span>
+            <p className="text-xl font-bold text-white mt-1">{((portfolio.margin_utilization ?? 0) * 100).toFixed(1)}%</p>
+          </div>
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-4">
+            <span className="text-xs text-gray-400 uppercase tracking-wider">Paused Agents</span>
+            <p className="text-xl font-bold text-white mt-1">{(portfolio.paused_agents ?? []).length}</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Agent Grid Matrix ───────────────────────────── */}
+      <div className="bg-slate-900/70 rounded-xl border border-slate-800 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-700">
+              <th className="text-left text-xs text-gray-400 uppercase tracking-wider p-3 w-20">Asset</th>
+              {activeTimeframes.map(tf => (
+                <th key={tf} className="text-center text-xs text-gray-400 uppercase tracking-wider p-3">
+                  {TF_LABELS[tf] || tf}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {activeAssets.map(asset => (
+              <tr key={asset} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                <td className="p-3 font-semibold text-white flex items-center gap-2">
+                  {asset}
+                  <button
+                    type="button"
+                    onClick={() => toggleWatchlist(asset)}
+                    className={`p-1 rounded hover:bg-slate-700 transition-colors ${
+                      watchlist.has(asset) ? 'text-yellow-400' : 'text-gray-600 hover:text-yellow-400'
+                    }`}
+                    title={watchlist.has(asset) ? 'Remove from watchlist' : 'Add to watchlist'}
+                    aria-label={watchlist.has(asset) ? 'Remove from watchlist' : 'Add to watchlist'}
+                  >
+                    <Star className={`w-3.5 h-3.5 ${watchlist.has(asset) ? 'fill-current' : ''}`} />
+                  </button>
+                </td>
+                {activeTimeframes.map(tf => {
+                  const cell = findAgent(asset, tf);
+                  if (!cell) {
+                    return (
+                      <td key={tf} className="p-3 text-center">
+                        <span className="text-xs text-gray-600">—</span>
+                      </td>
+                    );
+                  }
+                  return (
+                    <td key={tf} className="p-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedAgent(cell.agent)}
+                        className={`w-full p-2 rounded-lg border transition-colors text-left ${
+                          selectedAgent === cell.agent
+                            ? 'bg-blue-600/20 border-blue-500/50'
+                            : 'bg-slate-800/50 border-slate-700/50 hover:border-slate-600'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${agentStatusColor(cell)}`}>
+                            {agentStatusLabel(cell)}
+                          </span>
+                          <ChevronRight className="w-3 h-3 text-gray-500" />
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-gray-400">
+                          <span>{cell.cycles}c</span>
+                          <span>{cell.orders}o</span>
+                        </div>
+                        {cell.active_tickers && cell.active_tickers.length > 0 && (
+                          <div className="text-[10px] text-gray-500 mt-1 truncate">
+                            {cell.active_tickers[0]}
+                          </div>
+                        )}
+                      </button>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ── Agent Detail Panel ──────────────────────────── */}
+      {selectedAgent && (() => {
+        const agent = status?.agents?.find(a => a.name === selectedAgent);
+        if (!agent) return null;
+        // Defensive: config may be undefined from API
+        const config = agent.config ?? {};
+        const assets = config.assets ?? [];
+        const timeframes = config.timeframes ?? [];
+        const riskLimits = config.risk_limits ?? { max_notional_usd: '—' };
+        const activeTickers = agent.active_tickers ?? [];
+        return (
+          <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-white">{agent.name}</h3>
+                <p className="text-sm text-gray-400">
+                  {assets.join(', ') || 'No assets'} &middot; {timeframes.join(', ') || 'No timeframes'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => postAction(
+                    agent.enabled
+                      ? API_ENDPOINTS.KALSHI_GRID_AGENT_PAUSE(agent.name)
+                      : API_ENDPOINTS.KALSHI_GRID_AGENT_RESUME(agent.name)
+                  )}
+                  className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg transition-colors ${
+                    agent.enabled
+                      ? 'bg-amber-600/20 text-amber-400 hover:bg-amber-600/30'
+                      : 'bg-green-600/20 text-green-400 hover:bg-green-600/30'
+                  }`}
+                >
+                  {agent.enabled ? <><Pause className="w-3 h-3" /> Pause</> : <><Play className="w-3 h-3" /> Resume</>}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedAgent(null)}
+                  className="p-1 rounded hover:bg-slate-700 text-gray-400"
+                  aria-label="Close agent detail"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Agent stats */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div className="text-center">
+                <span className="text-xs text-gray-400">Cycles</span>
+                <p className="text-sm font-semibold text-white">{agent.cycles_run ?? 0}</p>
+              </div>
+              <div className="text-center">
+                <span className="text-xs text-gray-400">Orders</span>
+                <p className="text-sm font-semibold text-white">{agent.orders_placed ?? 0}</p>
+              </div>
+              <div className="text-center">
+                <span className="text-xs text-gray-400">Fills</span>
+                <p className="text-sm font-semibold text-white">{agent.fill_count ?? 0}</p>
+              </div>
+              <div className="text-center">
+                <span className="text-xs text-gray-400">Signals</span>
+                <p className="text-sm font-semibold text-white">{agent.signal_count ?? 0}</p>
+              </div>
+              <div className="text-center">
+                <span className="text-xs text-gray-400">Max Notional</span>
+                <p className="text-sm font-semibold text-white">${riskLimits.max_notional_usd ?? '—'}</p>
+              </div>
+            </div>
+
+            {/* Risk Limits Detail */}
+            <div className="bg-slate-800/50 rounded-lg p-3 space-y-2">
+              <h4 className="text-xs text-gray-400 uppercase tracking-wider">Risk Configuration</h4>
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                <div>
+                  <span className="text-gray-500">Max YES:</span>
+                  <span className="ml-1 text-gray-300">{riskLimits.max_yes_position ?? '—'}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Max NO:</span>
+                  <span className="ml-1 text-gray-300">{riskLimits.max_no_position ?? '—'}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500">Max/Order:</span>
+                  <span className="ml-1 text-gray-300">{riskLimits.max_contracts_per_order ?? '—'}</span>
+                </div>
+              </div>
+              <div className="text-xs">
+                <span className="text-gray-500">Risk Profile:</span>
+                <span className="ml-1 text-blue-400 capitalize">{config.risk_profile ?? 'default'}</span>
+              </div>
+            </div>
+
+            {/* Active tickers */}
+            {activeTickers.length > 0 && (
+              <div>
+                <h4 className="text-xs text-gray-400 uppercase tracking-wider mb-2">Active Tickers</h4>
+                <div className="flex flex-wrap gap-1.5">
+                  {activeTickers.map(t => (
+                    <span key={t} className="text-xs px-2 py-0.5 bg-slate-800 text-gray-300 rounded">
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Last error */}
+            {agent.last_error && (
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+                <span className="text-xs text-red-400">{agent.last_error}</span>
+              </div>
+            )}
+
+            {/* Recent Signals */}
+            {agentSignals.length > 0 && (
+              <div>
+                <h4 className="text-xs text-gray-400 uppercase tracking-wider mb-2">Recent Signals</h4>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-slate-700">
+                        <th className="text-left p-2">Time</th>
+                        <th className="text-left p-2">Market</th>
+                        <th className="text-left p-2">Action</th>
+                        <th className="text-right p-2">Edge</th>
+                        <th className="text-right p-2">Conf</th>
+                        <th className="text-right p-2">Contracts</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {agentSignals.slice(-10).reverse().map((s, i) => (
+                        <tr key={i} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                          <td className="p-2 text-gray-400">{new Date(s.ts).toLocaleTimeString()}</td>
+                          <td className="p-2 text-gray-300 truncate max-w-[200px]" title={s.market_id}>{s.market_id}</td>
+                          <td className="p-2">
+                            <span className={`px-1.5 py-0.5 rounded ${
+                              s.action.includes('BUY') ? 'bg-green-500/20 text-green-400' :
+                              s.action.includes('SELL') ? 'bg-red-500/20 text-red-400' :
+                              'bg-gray-500/20 text-gray-400'
+                            }`}>
+                              {s.action}
+                            </span>
+                          </td>
+                          <td className={`p-2 text-right font-mono ${
+                            (s.edge ?? 0) > 0 ? 'text-green-400' : (s.edge ?? 0) < 0 ? 'text-red-400' : 'text-gray-400'
+                          }`}>
+                            {s.edge != null ? `${s.edge > 0 ? '+' : ''}${((s.edge ?? 0) * 100).toFixed(1)}%` : '—'}
+                          </td>
+                          <td className="p-2 text-right font-mono text-gray-300">
+                            {s.confidence != null ? `${((s.confidence ?? 0) * 100).toFixed(0)}%` : '—'}
+                          </td>
+                          <td className="p-2 text-right text-gray-300">{s.contracts}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Recent Orders */}
+            {agentOrders.length > 0 && (
+              <div>
+                <h4 className="text-xs text-gray-400 uppercase tracking-wider mb-2">Recent Orders</h4>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-slate-700">
+                        <th className="text-left p-2">Time</th>
+                        <th className="text-left p-2">Market</th>
+                        <th className="text-left p-2">Side</th>
+                        <th className="text-right p-2">Price</th>
+                        <th className="text-right p-2">Qty</th>
+                        <th className="text-right p-2">Ref Mid</th>
+                        <th className="text-center p-2">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {agentOrders.slice(-10).reverse().map((o, i) => (
+                        <tr key={i} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                          <td className="p-2 text-gray-400">{new Date(o.ts).toLocaleTimeString()}</td>
+                          <td className="p-2 text-gray-300 truncate max-w-[200px]" title={o.market_id}>{o.market_id}</td>
+                          <td className="p-2">
+                            <span className={`px-1.5 py-0.5 rounded ${
+                              o.action === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                            }`}>
+                              {(o.action ?? '')?.toUpperCase?.() ?? ''} {(o.side ?? '')?.toUpperCase?.() ?? ''}
+                            </span>
+                          </td>
+                          <td className="p-2 text-right font-mono text-gray-300">{o.price_cents}¢</td>
+                          <td className="p-2 text-right text-gray-300">{o.contracts}</td>
+                          <td className="p-2 text-right font-mono text-gray-400">
+                            {o.ref_mid != null ? `${(o.ref_mid ?? 0).toFixed(1)}¢` : '—'}
+                          </td>
+                          <td className="p-2 text-center">
+                            {o.success ? (
+                              <span className="text-green-400">{o.simulated ? 'SIM' : 'FILLED'}</span>
+                            ) : (
+                              <span className="text-red-400" title={o.error || ''}>FAILED</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── Paper Trading Ladder ─────────────────────────── */}
+      <PaperLadderCard />
+
+      {/* ── Recent Fills (all agents) ───────────────────── */}
+      <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Recent Fills</h3>
+          <span className="text-xs text-gray-500">{fills.length} fills</span>
+        </div>
+        {fills.length === 0 ? (
+          <p className="text-sm text-gray-500 text-center py-4">No fills yet — start the grid to begin paper trading</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 border-b border-slate-700">
+                  <th className="text-left p-2">Time</th>
+                  <th className="text-left p-2">Agent</th>
+                  <th className="text-left p-2">Market</th>
+                  <th className="text-left p-2">Side</th>
+                  <th className="text-right p-2">Price</th>
+                  <th className="text-right p-2">Qty</th>
+                  <th className="text-center p-2">Mode</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fills.slice(0, 20).map((f, i) => (
+                  <tr key={i} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                    <td className="p-2 text-gray-400">{new Date(f.ts).toLocaleTimeString()}</td>
+                    <td className="p-2 text-gray-300">{f.agent}</td>
+                    <td className="p-2 text-gray-300 truncate max-w-[200px]" title={f.market_id}>{f.market_id}</td>
+                    <td className="p-2">
+                      <span className={`px-1.5 py-0.5 rounded ${
+                        f.action === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                      }`}>
+                        {(f.action ?? '')?.toUpperCase?.() ?? ''} {(f.side ?? '')?.toUpperCase?.() ?? ''}
+                      </span>
+                    </td>
+                    <td className="p-2 text-right font-mono text-gray-300">{f.price_cents}¢</td>
+                    <td className="p-2 text-right text-gray-300">{f.contracts}</td>
+                    <td className="p-2 text-center">
+                      <span className={f.simulated ? 'text-amber-400' : isLive ? 'text-red-400' : 'text-green-400'}>
+                        {f.simulated ? 'SIM' : isLive ? 'LIVE' : 'PAPER'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      </> }
+
+      {/* ── Swarm Insight Tab ─────────────────────────── */}
+      {activeTab === 'insight' && (
+        <SwarmInsightTab
+          status={status}
+          gridRunning={gridRunning}
+          isLive={isLive}
+          portfolio={portfolio}
+        />
+      )}
+
+      {/* Confirm Modal */}
+      <ConfirmModal
+        isOpen={confirmModal.isOpen}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        confirmVariant={confirmModal.confirmVariant}
+        checklistItems={confirmModal.checklistItems}
+        onConfirm={confirmModal.onConfirm}
+        onCancel={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+      />
+    </div>
+  );
+}

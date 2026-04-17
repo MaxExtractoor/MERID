@@ -1,0 +1,52 @@
+{
+  "technical_gate": {
+    "name": "technical_gate",
+    "frequency": "daily",
+    "last_run": "2026-01-26T23:21:58.112500",
+    "next_run": "2026-01-27T23:21:58.112500",
+    "status": "PASS",
+    "evidence_url": "governance\\evidence\\technical_gate_20260126_232158.json",
+    "issues": [
+      "Mock gate - real TechnicalReadinessGate not available"
+    ]
+  },
+  "operational_gate": {
+    "name": "operational_gate",
+    "frequency": "daily",
+    "last_run": "2026-01-26T23:21:58.127439",
+    "next_run": "2026-01-27T23:21:58.127439",
+    "status": "PASS",
+    "evidence_url": "governance\\evidence\\operational_gate_20260126_232158.json",
+    "issues": [
+      "Mock gate - real OperationalReadinessGate not available"
+    ]
+  },
+  "threeam_drill": {
+    "name": "threeam_drill",
+    "frequency": "weekly",
+    "last_run": "2026-01-26T23:22:10.660975",
+    "next_run": "2026-02-02T23:22:10.660975",
+    "status": "PASS",
+    "evidence_url": "ops\\drills\\3am_drill_report.md",
+    "issues": []
+  },
+  "weekly_summary": {
+    "name": "weekly_summary",
+    "frequency": "weekly",
+    "last_run": "2026-01-26T23:22:10.676435",
+    "next_run": "2026-02-02T23:22:10.676435",
+    "status": "PASS",
+    "evidence_url": "governance\\evidence\\weekly_summary_20260126_232210.json",
+    "issues": []
+  },
+  "monthly_audit": {
+    "name": "monthly_audit",
+    "frequency": "monthly",
+    "last_run": null,
+    "next_run": "2026-02-25T23:21:58.095698",
+    "status": "PENDING",
+    "evidence_url": "",
+    "issues": []
+  },
+  "timestamp": "2026-01-26T23:22:10.681764"
+}

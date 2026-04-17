@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\db\neo4j.py
+# hypothesis_version: 6.151.4
+
+[0.9, 1.1, 'accept', 'adjustment', 'agent_id', 'approved', 'confidence', 'consensus', 'energy_id', 'id', 'limit', 'neo4j', 'neo4j.io', 'payload', 'reality_id', 'reasoning', 'reject', 'source', 'timestamp', 'utc_iso', 'vote']

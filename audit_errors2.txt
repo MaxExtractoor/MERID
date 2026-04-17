@@ -1,0 +1,716 @@
+﻿tests/test_metrics.py::TestCalibrationStore::test_bad_forecaster_low_weight
+tests/test_metrics.py::TestCalibrationStore::test_brier_stats_dataclass
+tests/test_metrics.py::TestCalibrationStore::test_ewma_brier_updates
+tests/test_metrics.py::TestCalibrationStore::test_forecast_record_dataclass
+tests/test_metrics.py::TestCalibrationStore::test_get_brier_default
+tests/test_metrics.py::TestCalibrationStore::test_get_forecaster_summary
+tests/test_metrics.py::TestCalibrationStore::test_get_unresolved_markets
+tests/test_metrics.py::TestCalibrationStore::test_get_weight_insufficient_history
+tests/test_metrics.py::TestCalibrationStore::test_get_weight_with_history
+tests/test_metrics.py::TestCalibrationStore::test_invalid_outcome_raises
+tests/test_metrics.py::TestCalibrationStore::test_list_forecasters
+tests/test_metrics.py::TestCalibrationStore::test_p_model_clamped
+tests/test_metrics.py::TestCalibrationStore::test_record_and_count
+tests/test_metrics.py::TestCalibrationStore::test_record_multiple_forecasts
+tests/test_metrics.py::TestCalibrationStore::test_reset_clears_all
+tests/test_metrics.py::TestCalibrationStore::test_resolve_idempotent
+tests/test_metrics.py::TestCalibrationStore::test_resolve_multiple_forecasters_same_market
+tests/test_metrics.py::TestCalibrationStore::test_resolve_no_forecasts
+tests/test_metrics.py::TestCalibrationStore::test_resolve_outcome_no
+tests/test_metrics.py::TestCalibrationStore::test_resolve_outcome_yes
+tests/test_metrics.py::TestRealizedEdgeStore::test_edge_stats_aggregation
+tests/test_metrics.py::TestRealizedEdgeStore::test_edge_stats_properties
+tests/test_metrics.py::TestRealizedEdgeStore::test_get_unresolved_markets
+tests/test_metrics.py::TestRealizedEdgeStore::test_record_trade_entry
+tests/test_metrics.py::TestRealizedEdgeStore::test_reset_clears_all
+tests/test_metrics.py::TestRealizedEdgeStore::test_resolve_market_batch
+tests/test_metrics.py::TestRealizedEdgeStore::test_resolve_nonexistent_trade
+tests/test_metrics.py::TestRealizedEdgeStore::test_resolve_trade_idempotent
+tests/test_metrics.py::TestRealizedEdgeStore::test_resolve_trade_no_loses
+tests/test_metrics.py::TestRealizedEdgeStore::test_resolve_trade_no_wins
+tests/test_metrics.py::TestRealizedEdgeStore::test_resolve_trade_yes_loses
+tests/test_metrics.py::TestRealizedEdgeStore::test_resolve_trade_yes_wins
+tests/test_metrics.py::TestRealizedEdgeStore::test_trade_edge_record_dataclass
+tests/test_metrics.py::TestOutcomeResolver::test_resolution_result_dataclass
+tests/test_metrics.py::TestOutcomeResolver::test_resolve_all_empty
+tests/test_metrics.py::TestOutcomeResolver::test_resolve_manual
+tests/test_metrics.py::TestOutcomeResolver::test_resolve_manual_invalid_outcome
+tests/test_metrics.py::TestOutcomeResolver::test_status
+tests/test_metrics.py::TestIntegrationBrierAndEdge::test_edge_leakage_detection
+tests/test_metrics.py::TestIntegrationBrierAndEdge::test_full_lifecycle
+tests/test_metrics.py::TestIntegrationBrierAndEdge::test_good_vs_bad_forecaster
+tests/test_metrics.py::TestIntegrationBrierAndEdge::test_multiple_buckets_independent
+tests/test_metrics.py::TestCalibrationWeights::test_perfect_forecaster_high_weight
+tests/test_metrics.py::TestCalibrationWeights::test_weight_clamps_to_range
+tests/test_metrics.py::TestCalibrationWeights::test_worst_forecaster_min_weight
+tests/test_metrics.py::TestMetricsAPI::test_forecasters_endpoint_importable
+tests/test_metrics.py::TestMetricsAPI::test_manual_resolve_model
+tests/test_dev_swarm.py::TestDevSwarmCore::test_swarm_initialization
+tests/test_dev_swarm.py::TestDevSwarmCore::test_agent_registration
+tests/test_dev_swarm.py::TestDevSwarmCore::test_find_agent_by_role
+tests/test_dev_swarm.py::TestDevSwarmCore::test_task_execution_success
+tests/test_dev_swarm.py::TestDevSwarmCore::test_task_id_generation
+tests/test_dev_swarm.py::TestSafetyLimits::test_concurrent_task_limit
+tests/test_dev_swarm.py::TestSafetyLimits::test_daily_cost_limit
+tests/test_dev_swarm.py::TestSafetyLimits::test_task_timeout
+tests/test_dev_swarm.py::TestSafetyLimits::test_cost_tracking
+tests/test_dev_swarm.py::TestSafetyLimits::test_daily_cost_reset
+tests/test_dev_swarm.py::TestTaskLifecycle::test_task_status_progression
+tests/test_dev_swarm.py::TestTaskLifecycle::test_task_cancellation
+tests/test_dev_swarm.py::TestTaskLifecycle::test_cancel_nonexistent_task
+tests/test_dev_swarm.py::TestTaskLifecycle::test_task_history_tracking
+tests/test_dev_swarm.py::TestStatistics::test_get_stats_empty
+tests/test_dev_swarm.py::TestStatistics::test_get_stats_with_tasks
+tests/test_dev_swarm.py::TestStatistics::test_success_rate_calculation
+tests/test_dev_swarm.py::TestErrorHandling::test_agent_tool_failure
+tests/test_dev_swarm.py::TestErrorHandling::test_graceful_shutdown
+tests/test_dev_swarm.py::TestIntegration::test_full_merid_swarm
+tests/test_dev_swarm.py::TestIntegration::test_multi_agent_pipeline
+tests/test_dev_swarm.py::TestPersistence::test_save_and_load_task
+tests/test_dev_swarm.py::TestPersistence::test_load_tasks_empty
+tests/test_dev_swarm.py::TestPersistence::test_load_tasks_with_limit
+tests/test_dev_swarm.py::TestPersistence::test_get_task_by_id
+tests/test_dev_swarm.py::TestPersistence::test_get_task_by_id_not_found
+tests/test_dev_swarm.py::TestPersistence::test_update_task
+tests/test_dev_swarm.py::TestPersistence::test_update_task_not_found_appends
+tests/test_dev_swarm.py::TestPersistence::test_save_and_load_metadata
+tests/test_dev_swarm.py::TestPersistence::test_load_metadata_empty
+tests/test_dev_swarm.py::TestPersistence::test_compact_storage
+tests/test_dev_swarm.py::TestPersistence::test_compact_storage_already_compact
+tests/test_dev_swarm.py::TestPersistence::test_get_stats
+tests/test_dev_swarm.py::TestPersistence::test_get_stats_empty
+tests/test_dev_swarm.py::TestMetrics::test_initialize
+tests/test_dev_swarm.py::TestMetrics::test_record_task_created
+tests/test_dev_swarm.py::TestMetrics::test_record_task_completed
+tests/test_dev_swarm.py::TestMetrics::test_record_task_completed_no_timestamps
+tests/test_dev_swarm.py::TestMetrics::test_update_active_tasks
+tests/test_dev_swarm.py::TestMetrics::test_update_daily_cost
+tests/test_dev_swarm.py::TestMetrics::test_update_success_rate
+tests/test_dev_swarm.py::TestMetrics::test_record_agent_phase
+tests/test_dev_swarm.py::TestMetrics::test_record_agent_phase_with_error
+tests/test_dev_swarm.py::TestMetrics::test_update_storage_stats
+tests/test_dev_swarm.py::TestMetrics::test_update_storage_stats_no_size
+tests/test_dev_swarm.py::TestMetrics::test_update_from_swarm
+tests/test_dev_swarm.py::TestMetrics::test_get_metrics_singleton
+tests/test_dev_swarm.py::TestAPIRoutes::test_get_stats
+tests/test_dev_swarm.py::TestAPIRoutes::test_list_agents
+tests/test_dev_swarm.py::TestAPIRoutes::test_list_tasks_empty
+tests/test_dev_swarm.py::TestAPIRoutes::test_create_task
+tests/test_dev_swarm.py::TestAPIRoutes::test_create_task_validation_error
+tests/test_dev_swarm.py::TestAPIRoutes::test_get_task_not_found
+tests/test_dev_swarm.py::TestAPIRoutes::test_cancel_task_not_found
+tests/test_dev_swarm.py::TestAPIRoutes::test_health_check
+tests/test_dev_swarm.py::TestAPIRoutes::test_update_config
+tests/test_dev_swarm.py::TestAPIRoutes::test_update_config_no_changes
+tests/test_dev_swarm.py::TestAPIRoutes::test_create_and_get_task
+tests/test_dev_swarm.py::TestAuditorContext::test_auditor_context_imports
+tests/test_dev_swarm.py::TestAuditorContext::test_risk_zones_contain_known_categories
+tests/test_dev_swarm.py::TestAuditorContext::test_risk_zones_are_non_empty
+tests/test_dev_swarm.py::TestAuditorContext::test_remediation_tasks_have_required_fields
+tests/test_dev_swarm.py::TestAuditorContext::test_auditor_context_mentions_key_files
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_context_references_coverage_gate
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_context_references_coverage_percentage
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_context_references_legacy_risk_matrix
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_context_references_quarantine_hook
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_context_references_dev_swarm_module
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_context_mentions_windows_iocp
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_context_mentions_redis
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_legacy_risk_zones_files_are_paths
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_legacy_remediation_priorities_are_bounded
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_legacy_remediation_efforts_are_valid
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_legacy_remediation_target_files_non_empty
+tests/test_dev_swarm.py::TestAuditorContextExtended::test_context_test_count_matches_auditor_check
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_execute_task_persists
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_load_state
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_load_state_no_persistence
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_compact_storage_with_persistence
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_compact_storage_no_persistence
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_get_storage_stats_with_persistence
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_get_storage_stats_no_persistence
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_persist_save_task_exception
+tests/test_dev_swarm.py::TestPersistenceIntegration::test_persist_metadata_exception
+tests/test_dev_swarm.py::TestTimeoutsDisabled::test_execute_without_timeout
+tests/test_dev_swarm.py::TestAgentPhaseErrors::test_execute_task_general_exception
+tests/test_dev_swarm.py::TestAgentPhaseErrors::test_agent_phase_timeout
+tests/test_dev_swarm.py::TestAgentPhaseErrors::test_agent_phase_exception
+tests/test_dev_swarm.py::TestShutdown::test_shutdown_no_active_tasks
+tests/test_dev_swarm.py::TestShutdown::test_shutdown_with_active_tasks
+tests/test_dev_swarm.py::TestToolFunctions::test_analyze_coverage_exception
+tests/test_dev_swarm.py::TestToolFunctions::test_analyze_coverage_success
+tests/test_dev_swarm.py::TestToolFunctions::test_run_pytest_exception
+tests/test_dev_swarm.py::TestToolFunctions::test_run_pytest_success
+tests/test_dev_swarm.py::TestToolFunctions::test_run_linters_exception
+tests/test_dev_swarm.py::TestToolFunctions::test_run_linters_success
+tests/test_dev_swarm.py::TestToolFunctions::test_get_git_status_exception
+tests/test_dev_swarm.py::TestToolFunctions::test_get_git_status_success
+tests/test_dev_swarm.py::TestDevTaskTemplates::test_fix_coverage_gap
+tests/test_dev_swarm.py::TestDevTaskTemplates::test_add_tests_for_module
+tests/test_dev_swarm.py::TestDevTaskTemplates::test_refactor_for_quality_small
+tests/test_dev_swarm.py::TestDevTaskTemplates::test_refactor_for_quality_large
+tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_list_tasks_with_status_filter
+tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_get_task_from_history
+tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_get_running_task_duration
+tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_cancel_active_task
+tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_update_config_cost
+tests/test_dev_swarm.py::TestMetricsExceptionPaths::test_record_task_created_with_none_fields
+tests/test_dev_swarm.py::TestMetricsExceptionPaths::test_update_from_swarm_with_history
+tests/test_dev_swarm.py::TestPersistenceExceptionPaths::test_save_task_corrupted_file
+tests/test_dev_swarm.py::TestPersistenceExceptionPaths::test_load_tasks_corrupted_lines
+tests/test_dev_swarm.py::TestPersistenceExceptionPaths::test_load_metadata_corrupted
+tests/test_dev_swarm.py::TestPersistenceInitException::test_persistence_init_failure_is_caught
+tests/test_dev_swarm.py::TestExecuteTaskPipelineException::test_pipeline_raises_sets_failed
+tests/test_dev_swarm.py::TestRetryLoop::test_test_failure_triggers_coding_retry
+tests/test_dev_swarm.py::TestWaitForActiveTasks::test_wait_exits_when_tasks_clear
+tests/test_dev_swarm.py::TestLoadStateException::test_load_state_catches_exception
+tests/test_dev_swarm.py::TestLoadStateException::test_load_state_no_metadata
+tests/test_dev_swarm.py::TestNonCallableTool::test_non_callable_tool_skipped
+tests/test_dev_swarm.py::TestAPIShutdownAndSingleton::test_get_swarm_singleton_init
+tests/test_dev_swarm.py::TestAPIShutdownAndSingleton::test_shutdown_endpoint
+tests/test_dev_swarm.py::TestReadinessAuditor::test_run_audit_returns_report
+tests/test_dev_swarm.py::TestReadinessAuditor::test_all_checks_pass_in_current_repo
+tests/test_dev_swarm.py::TestReadinessAuditor::test_report_passed_property
+tests/test_dev_swarm.py::TestReadinessAuditor::test_summary_table_is_markdown
+tests/test_dev_swarm.py::TestReadinessAuditor::test_create_drift_tasks_empty_when_passing
+tests/test_dev_swarm.py::TestReadinessAuditor::test_create_drift_tasks_for_drifted_item
+tests/test_dev_swarm.py::TestReadinessAuditor::test_individual_checks_return_check_result
+tests/test_dev_swarm.py::TestReadinessAuditor::test_check_makefile_target_hit
+tests/test_dev_swarm.py::TestReadinessAuditor::test_check_makefile_target_miss
+tests/test_dev_swarm.py::TestReadinessAuditor::test_cli_entrypoint_exit_zero
+tests/test_dev_swarm.py::TestReadinessEndpoint::test_readiness_endpoint_returns_json
+tests/test_dev_swarm.py::TestReadinessEndpoint::test_readiness_endpoint_all_ok
+tests/test_dev_swarm.py::TestSLOTracking::test_record_and_load
+tests/test_dev_swarm.py::TestSLOTracking::test_multiple_records
+tests/test_dev_swarm.py::TestSLOTracking::test_compute_slo_empty
+tests/test_dev_swarm.py::TestSLOTracking::test_compute_slo_all_passing
+tests/test_dev_swarm.py::TestSLOTracking::test_compute_slo_with_failures
+tests/test_dev_swarm.py::TestSLOTracking::test_slo_metrics_dataclass
+tests/test_dev_swarm.py::TestSLOEndpoint::test_slo_endpoint_returns_json
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_drift_report_dataclass
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_drift_report_with_critical
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_drift_report_warning_still_passes
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_drift_report_to_dict
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_load_baseline
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_run_drift_audit
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_check_baseline_files_exist
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_check_gitignore_size
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_check_dev_swarm_test_count
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_check_empty_test_files
+tests/test_dev_swarm.py::TestCodebaseDriftAuditor::test_create_drift_tasks
+tests/test_dev_swarm.py::TestCodebaseDriftEndpoint::test_codebase_drift_endpoint
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_rotate_secrets_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_expand_gitignore_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_trading_coverage_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_compliance_coverage_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_security_tests_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_governance_tests_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_api_smoke_tests_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_clean_empty_tests_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_codebase_drift_audit_template
+tests/test_dev_swarm.py::TestBaselineDevTaskTemplates::test_all_baseline_templates_callable
+tests/test_dev_swarm.py::TestRRGDevTaskTemplates::test_build_state_manager_template
+tests/test_dev_swarm.py::TestRRGDevTaskTemplates::test_black_swan_drill_harness_template
+tests/test_dev_swarm.py::TestRRGDevTaskTemplates::test_observability_kill_switch_template
+tests/test_dev_swarm.py::TestRRGDevTaskTemplates::test_enforce_agent_registry_template
+tests/test_dev_swarm.py::TestRRGDevTaskTemplates::test_emergency_control_panel_template
+tests/test_dev_swarm.py::TestRRGDevTaskTemplates::test_model_drift_detection_template
+tests/test_dev_swarm.py::TestRRGDevTaskTemplates::test_override_intent_logging_template
+tests/test_dev_swarm.py::TestRRGDevTaskTemplates::test_rrg_templates_priority_ordering
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_parse_gap_report_returns_commitments
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_parse_gap_report_finds_rrg_items
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_parse_gap_report_finds_uw_items
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_overdue_detection
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_overdue_count_matches_list
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_report_passed_property
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_summary_table_is_markdown
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_create_overdue_tasks
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_check_historical_commitments_integration
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_parse_missing_file
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_parse_empty_file
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_commitment_status_enum
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_severity_enum
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_commitment_is_overdue_logic
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_severity_mapping_by_prefix
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_severity_overrides
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_cli_entrypoint_exit_code
+tests/test_dev_swarm.py::TestHistoricalCommitmentsAuditor::test_parse_synthetic_report
+tests/test_dev_swarm.py::TestRRGTemplateContracts::test_all_rrg_templates_have_required_fields
+tests/test_dev_swarm.py::TestRRGTemplateContracts::test_rrg_templates_no_duplicate_task_ids
+tests/test_dev_swarm.py::TestRRGTemplateContracts::test_rrg_templates_idempotent_content
+tests/test_dev_swarm.py::TestRRGTemplateContracts::test_rrg_templates_target_files_are_strings
+tests/test_dev_swarm.py::TestRRGTemplateContracts::test_rrg_priority_sort_order
+tests/test_dev_swarm.py::TestRRGTemplateContracts::test_rrg_descriptions_contain_gap_id
+tests/test_dev_swarm.py::TestRRGTemplateContracts::test_rrg_templates_include_test_files
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_malformed_table_rows_skipped
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_partial_data_missing_evidence_column
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_bold_and_unbold_status_both_parse
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_idempotent_parse_no_mutation
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_idempotent_task_creation
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_create_overdue_tasks_empty_report
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_create_overdue_tasks_all_completed
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_failure_isolation_one_bad_row
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_overdue_task_priority_matches_severity
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_summary_table_empty_report
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_check_historical_commitments_schema
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_obsolete_status_not_overdue
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_medium_low_severity_never_overdue
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_section_tracking_across_parts
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_unicode_in_description
+tests/test_dev_swarm.py::TestHistoricalAuditorEdgeCases::test_very_long_description_truncated_in_table
+tests/test_dev_swarm.py::TestS2ConfigFixture::test_s2_config_has_all_templates
+tests/test_dev_swarm.py::TestS2ConfigFixture::test_s2_config_template_keys
+tests/test_dev_swarm.py::TestS2ConfigFixture::test_s2_config_priorities_are_ints
+tests/test_dev_swarm.py::TestS2ConfigFixture::test_s2_config_is_read_only_across_tests
+tests/test_dev_swarm.py::TestDevSwarmInstanceFixture::test_instance_is_fresh
+tests/test_dev_swarm.py::TestDevSwarmInstanceFixture::test_instance_has_no_persistence
+tests/test_dev_swarm.py::TestDevSwarmInstanceFixture::test_instance_config_matches
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_overdue_counts[none.md-0]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_overdue_counts[one_overdue.md-1]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_overdue_counts[mixed.md-2]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_passed_flag[none.md-True]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_passed_flag[one_overdue.md-False]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_passed_flag[mixed.md-False]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_total_commitments[none.md-2]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_total_commitments[one_overdue.md-2]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_total_commitments[mixed.md-4]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_total_commitments[malformed.md-2]
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_malformed_skips_bad_rows
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_task_generation_from_fixture
+tests/test_dev_swarm.py::TestParametrizedAuditorOverdue::test_auditor_none_dataset_no_tasks
+tests/test_dev_swarm.py::TestCrossFixtureIntegration::test_s2_templates_cover_overdue_gaps
+tests/test_dev_swarm.py::TestCrossFixtureIntegration::test_mixed_overdue_all_have_templates
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_status_from_str_whitespace_and_case
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_status_from_str_invalid_returns_none
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_status_from_str_lowercase_maps_correctly
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_severity_for_id_no_alpha_prefix
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_severity_for_id_empty_string
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_severity_for_id_unknown_prefix
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_duplicate_ids_in_report
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_file_with_no_table_section
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_file_with_only_separator_rows
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_overdue_tasks_have_empty_target_files
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_overdue_tasks_success_criteria_references_id
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_check_historical_commitments_ok_path
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_check_historical_commitments_drifted_path
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_check_historical_commitments_many_overdue_truncates
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_cli_fix_flag_creates_tasks
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_large_report_performance
+tests/test_dev_swarm.py::TestNegativePathAuditor::test_report_with_mixed_sections_and_overdue
+tests/test_dev_swarm.py::TestNegativePathSwarmConfig::test_swarm_config_defaults
+tests/test_dev_swarm.py::TestNegativePathSwarmConfig::test_swarm_config_zero_tasks_limit
+tests/test_dev_swarm.py::TestNegativePathSwarmConfig::test_swarm_instance_isolation
+tests/test_dev_swarm.py::TestNegativePathSwarmConfig::test_swarm_daily_cost_starts_at_zero
+tests/test_dev_swarm.py::TestNegativePathSwarmConfig::test_swarm_no_agents_initially
+tests/test_dev_swarm.py::TestAuditorCrossBoundaryScenarios::test_all_sections_populated
+tests/test_dev_swarm.py::TestAuditorCrossBoundaryScenarios::test_progressive_resolution_scenario
+tests/test_dev_swarm.py::TestAuditorCrossBoundaryScenarios::test_mixed_severity_overdue_priority
+tests/test_dev_swarm.py::TestAuditorCrossBoundaryScenarios::test_obsolete_items_never_generate_tasks
+tests/test_dev_swarm.py::TestAuditorCrossBoundaryScenarios::test_report_with_interleaved_narrative
+tests/test_dev_swarm.py::TestSeason2RRGFlows::test_overdue_commitments_produce_matching_templates
+tests/test_dev_swarm.py::TestSeason2RRGFlows::test_full_rrg_pipeline_from_report_to_tasks
+tests/test_dev_swarm.py::TestSeason2RRGFlows::test_s2_template_effort_distribution
+tests/test_dev_swarm.py::TestSeason2RRGFlows::test_s2_templates_have_success_criteria
+tests/test_dev_swarm.py::TestSeason2RRGFlows::test_swarm_can_accept_template_tasks
+tests/test_dev_swarm.py::TestLightLoadInvariants::test_rapid_template_creation
+tests/test_dev_swarm.py::TestLightLoadInvariants::test_rapid_parse_cycles
+tests/test_dev_swarm.py::TestLightLoadInvariants::test_rapid_task_generation
+tests/test_dev_swarm.py::TestLightLoadInvariants::test_swarm_task_history_under_load
+tests/test_dev_swarm.py::TestLightLoadInvariants::test_combined_template_and_auditor_load
+tests/test_dev_swarm.py::TestPerformanceBenchmarks::test_template_creation_throughput
+tests/test_dev_swarm.py::TestPerformanceBenchmarks::test_parse_throughput
+tests/test_dev_swarm.py::TestPerformanceBenchmarks::test_summary_table_throughput
+tests/test_dev_swarm.py::TestSoakLoop::test_task_create_and_discard_loop
+tests/test_dev_swarm.py::TestSoakLoop::test_swarm_history_bounded_growth
+tests/test_dev_swarm.py::TestSoakLoop::test_auditor_parse_loop_no_leak
+tests/test_dev_swarm.py::TestSoakLoop::test_template_instantiation_loop
+tests/test_dev_swarm.py::TestRestartRecovery::test_swarm_state_survives_persistence_roundtrip
+tests/test_dev_swarm.py::TestRestartRecovery::test_swarm_fresh_after_no_persistence
+tests/test_dev_swarm.py::TestRestartRecovery::test_config_preserved_across_restart
+tests/test_dev_swarm.py::TestDependencyFailure::test_auditor_handles_missing_report_file
+tests/test_dev_swarm.py::TestDependencyFailure::test_auditor_handles_unreadable_file
+tests/test_dev_swarm.py::TestDependencyFailure::test_swarm_operates_without_persistence_backend
+tests/test_dev_swarm.py::TestDependencyFailure::test_swarm_handles_agent_registration_without_agents
+tests/test_dev_swarm.py::TestDependencyFailure::test_readiness_check_with_empty_report
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_evaluate_returns_report
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_report_has_all_dimensions
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_scores_are_bounded
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_pct_is_reasonable
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_level_is_valid
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_gaps_are_subset_of_items
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_by_dimension_covers_all_items
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_cli_json_output
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_cli_exit_code_reflects_readiness
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_t05_detected_after_soak_tests_added
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_t06_detected_after_restart_tests_added
+tests/test_dev_swarm.py::TestMeridReadinessAuditor::test_t07_detected_after_dep_failure_tests_added
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_evaluate_returns_report
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_report_has_all_10_dimensions
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_scores_bounded
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_pct_reasonable
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_level_valid
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_gaps_subset_of_items
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_item_count_is_37
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_architecture_checks
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_risk_safety_checks
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_evaluate_all_returns_two_reports
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_combined_score_is_sum
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_cli_swarm_json
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_cli_all_json
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_swarm_doc_exists
+tests/test_dev_swarm.py::TestSwarmTradingReadiness::test_by_dimension_covers_all_items
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_sections_dict_has_10_entries
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_all_scores_bounded
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_aggregate_scores_returns_triple
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_aggregate_pct_matches
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_readiness_level_labels
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_composite_scores_keys
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_composite_scores_sum_to_total
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_custom_sections
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_cli_json_output
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_none_sections_uses_default
+tests/test_dev_swarm.py::TestMeridReadinessScore::test_single_section
+tests/test_dev_swarm.py::TestDevSwarmPauseResume::test_initial_state_not_paused
+tests/test_dev_swarm.py::TestDevSwarmPauseResume::test_pause_returns_true_first_time
+tests/test_dev_swarm.py::TestDevSwarmPauseResume::test_pause_returns_false_when_already_paused
+tests/test_dev_swarm.py::TestDevSwarmPauseResume::test_resume_returns_true_after_pause
+tests/test_dev_swarm.py::TestDevSwarmPauseResume::test_resume_returns_false_when_not_paused
+tests/test_dev_swarm.py::TestDevSwarmPauseResume::test_is_paused_property
+tests/test_dev_swarm.py::TestDevSwarmPauseResume::test_execute_task_rejected_when_paused
+tests/test_dev_swarm.py::TestDevSwarmPauseResume::test_execute_task_works_after_resume
+tests/test_dev_swarm.py::TestOperatorAPI::test_pause_endpoint_exists
+tests/test_dev_swarm.py::TestOperatorAPI::test_resume_endpoint_exists
+tests/test_dev_swarm.py::TestOperatorAPI::test_operator_summary_endpoint_exists
+tests/test_dev_swarm.py::TestOperatorAPI::test_operator_audit_trail_endpoint_exists
+tests/test_dev_swarm.py::TestOperatorAPI::test_operator_module_importable
+tests/test_dev_swarm.py::TestOperatorAPI::test_operator_dashboard_spec_exists
+tests/test_dev_swarm.py::TestOperatorAPI::test_equity_series_endpoint_exists
+tests/test_dev_swarm.py::TestOperatorAPI::test_risk_utilization_endpoint_exists
+tests/test_dev_swarm.py::TestOperatorAPI::test_equity_buffer_functions
+tests/test_dev_swarm.py::TestOperatorAPI::test_ui_audit_checklist_exists
+tests/test_dev_swarm.py::TestMetricsAPI::test_metrics_router_exists
+tests/test_dev_swarm.py::TestMetricsAPI::test_swarm_health_endpoint
+tests/test_dev_swarm.py::TestMetricsAPI::test_heatmap_endpoint
+tests/test_dev_swarm.py::TestMetricsAPI::test_radar_endpoint
+tests/test_dev_swarm.py::TestMetricsAPI::test_latency_endpoint
+tests/test_dev_swarm.py::TestMetricsAPI::test_breach_log_endpoint
+tests/test_dev_swarm.py::TestMetricsAPI::test_record_latency_function
+tests/test_dev_swarm.py::TestMetricsAPI::test_record_breach_function
+tests/test_dev_swarm.py::TestMarketDataAPI::test_market_data_router_exists
+tests/test_dev_swarm.py::TestMarketDataAPI::test_snapshot_endpoint
+tests/test_dev_swarm.py::TestMarketDataAPI::test_watchlist_endpoint
+tests/test_dev_swarm.py::TestMarketDataAPI::test_dxfeed_adapter_import
+tests/test_dev_swarm.py::TestMarketDataAPI::test_dxfeed_adapter_watchlist_management
+tests/test_dev_swarm.py::TestMarketDataAPI::test_tick_data_to_dict
+tests/test_dev_swarm.py::TestMarketHeatmapHelper::test_build_heatmap_snapshot_basic
+tests/test_dev_swarm.py::TestMarketHeatmapHelper::test_build_heatmap_snapshot_empty
+tests/test_dev_swarm.py::TestMarketHeatmapHelper::test_build_radar_snapshot_category_filter
+tests/test_dev_swarm.py::TestMarketHeatmapHelper::test_build_radar_snapshot_all
+tests/test_dev_swarm.py::TestMarketHeatmapHelper::test_sector_map_coverage
+tests/test_dev_swarm.py::TestRouterRegistration::test_operator_router_in_main
+tests/test_dev_swarm.py::TestRouterRegistration::test_metrics_router_in_main
+tests/test_dev_swarm.py::TestRouterRegistration::test_market_data_router_in_main
+tests/test_dev_swarm.py::TestRouterRegistration::test_latency_middleware_in_main
+tests/test_dev_swarm.py::TestLatencyRegression::test_record_latency_buffer_works
+tests/test_dev_swarm.py::TestLatencyRegression::test_record_latency_buffer_cap
+tests/test_dev_swarm.py::TestLatencyRegression::test_latency_percentile_calculation
+tests/test_dev_swarm.py::TestLatencyRegression::test_breach_log_buffer_works
+tests/test_dev_swarm.py::TestLatencyRegression::test_breach_log_buffer_cap
+tests/test_dev_swarm.py::TestLatencyRegression::test_simulated_load_latency_under_target
+tests/test_dev_swarm.py::TestLatencyRegression::test_market_heatmap_helper_performance
+tests/test_dev_swarm.py::TestWebSocketMarketData::test_ws_router_exists_in_market_data
+tests/test_dev_swarm.py::TestWebSocketMarketData::test_ws_router_registered_in_main
+tests/test_dev_swarm.py::TestWebSocketMarketData::test_ws_endpoint_path
+tests/test_dev_swarm.py::TestWebSocketMarketData::test_lightweight_price_chart_exists
+tests/test_dev_swarm.py::TestWebSocketMarketData::test_lightweight_price_chart_has_ws_support
+tests/test_dev_swarm.py::TestWebSocketMarketData::test_ws_poll_interval_defined
+tests/test_dev_swarm.py::TestE2ELatencyPipeline::test_adapter_snapshot_to_candle_latency
+tests/test_dev_swarm.py::TestE2ELatencyPipeline::test_watchlist_full_scan_latency
+tests/test_dev_swarm.py::TestE2ELatencyPipeline::test_heatmap_pipeline_e2e_latency
+tests/test_dev_swarm.py::TestE2ELatencyPipeline::test_radar_pipeline_e2e_latency
+tests/test_dev_swarm.py::TestE2ELatencyPipeline::test_candle_json_serialization_overhead
+tests/test_dev_swarm.py::TestRiskLimits::test_risk_limit_no_breach
+tests/test_dev_swarm.py::TestRiskLimits::test_risk_limit_breach_detected
+tests/test_dev_swarm.py::TestRiskLimits::test_risk_limit_breach_clears
+tests/test_dev_swarm.py::TestRiskLimits::test_risk_limit_to_dict
+tests/test_dev_swarm.py::TestRiskLimits::test_risk_control_type_enum_values
+tests/test_dev_swarm.py::TestRiskLimits::test_position_risk_score_calculation
+tests/test_dev_swarm.py::TestRiskLimits::test_position_risk_to_dict
+tests/test_dev_swarm.py::TestRiskLimits::test_portfolio_risk_manager_init
+tests/test_dev_swarm.py::TestRiskLimits::test_portfolio_risk_manager_add_remove_position
+tests/test_dev_swarm.py::TestRiskLimits::test_portfolio_risk_manager_leverage_tracking
+tests/test_dev_swarm.py::TestRiskLimits::test_risk_level_enum
+
+=================================== ERRORS ====================================
+____________ ERROR collecting tests/logging/test_merid_logging.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_logging.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_logging.py:19: in <module>
+    import merid_logging
+E   ModuleNotFoundError: No module named 'merid_logging'
+------------------------------- Captured stderr -------------------------------
+Redis unavailable (Error 10061 connecting to 127.0.0.1:6379. No connection could be made because the target machine actively refused it.). Using in-memory cache.
+Neo4j unavailable ù running without graph memory: Couldn't connect to localhost:7687 (resolved to ()):
+Timed out trying to establish connection to ResolvedIPv6Address(('::1', 7687, 0, 0))
+Failed to establish connection to ResolvedIPv4Address(('127.0.0.1', 7687)) (reason [WinError 10061] No connection could be made because the target machine actively refused it)
+_______________ ERROR collecting tests/test_consensus_loop2.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_consensus_loop2.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_consensus_loop2.py:16: in <module>
+    from consensus.consensus_coordinator import (
+E   ImportError: cannot import name 'AgentIncentiveLedger' from 'consensus.consensus_coordinator' (C:\Dev\MERID\consensus\consensus_coordinator.py)
+_________________ ERROR collecting tests/test_forecasters.py __________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_forecasters.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_forecasters.py:13: in <module>
+    from merid.prediction.forecasters.momentum import MomentumForecaster, _momentum_history
+E   ImportError: cannot import name '_momentum_history' from 'merid.prediction.forecasters.momentum' (C:\Dev\MERID\merid\prediction\forecasters\momentum.py)
+============================== warnings summary ===============================
+..\..\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\neo4j\_sync\driver.py:547
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\neo4j\_sync\driver.py:547: DeprecationWarning: Relying on Driver's destructor to close the session is deprecated. Please make sure to close the session. Use it as a context (`with` statement) or make sure to call `.close()` explicitly. Future versions of the driver will not close drivers automatically.
+    _deprecation_warn(
+
+tests\test_dev_swarm.py:16
+  C:\Dev\MERID\tests\test_dev_swarm.py:16: PytestUnknownMarkWarning: Unknown pytest.mark.dev_swarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.dev_swarm
+
+tests\test_dev_swarm.py:300
+  C:\Dev\MERID\tests\test_dev_swarm.py:300: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_dev_swarm.py:3083
+  C:\Dev\MERID\tests\test_dev_swarm.py:3083: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3090
+  C:\Dev\MERID\tests\test_dev_swarm.py:3090: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3104
+  C:\Dev\MERID\tests\test_dev_swarm.py:3104: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3110
+  C:\Dev\MERID\tests\test_dev_swarm.py:3110: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3119
+  C:\Dev\MERID\tests\test_dev_swarm.py:3119: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3126
+  C:\Dev\MERID\tests\test_dev_swarm.py:3126: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3131
+  C:\Dev\MERID\tests\test_dev_swarm.py:3131: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3143
+  C:\Dev\MERID\tests\test_dev_swarm.py:3143: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3157
+  C:\Dev\MERID\tests\test_dev_swarm.py:3157: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3171
+  C:\Dev\MERID\tests\test_dev_swarm.py:3171: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3186
+  C:\Dev\MERID\tests\test_dev_swarm.py:3186: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3195
+  C:\Dev\MERID\tests\test_dev_swarm.py:3195: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3205
+  C:\Dev\MERID\tests\test_dev_swarm.py:3205: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3216
+  C:\Dev\MERID\tests\test_dev_swarm.py:3216: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3217
+  C:\Dev\MERID\tests\test_dev_swarm.py:3217: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3231
+  C:\Dev\MERID\tests\test_dev_swarm.py:3231: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3232
+  C:\Dev\MERID\tests\test_dev_swarm.py:3232: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3504
+  C:\Dev\MERID\tests\test_dev_swarm.py:3504: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3513
+  C:\Dev\MERID\tests\test_dev_swarm.py:3513: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3520
+  C:\Dev\MERID\tests\test_dev_swarm.py:3520: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3531
+  C:\Dev\MERID\tests\test_dev_swarm.py:3531: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3536
+  C:\Dev\MERID\tests\test_dev_swarm.py:3536: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3550
+  C:\Dev\MERID\tests\test_dev_swarm.py:3550: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3582
+  C:\Dev\MERID\tests\test_dev_swarm.py:3582: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3627
+  C:\Dev\MERID\tests\test_dev_swarm.py:3627: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3655
+  C:\Dev\MERID\tests\test_dev_swarm.py:3655: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3672
+  C:\Dev\MERID\tests\test_dev_swarm.py:3672: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3702
+  C:\Dev\MERID\tests\test_dev_swarm.py:3702: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3703
+  C:\Dev\MERID\tests\test_dev_swarm.py:3703: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3722
+  C:\Dev\MERID\tests\test_dev_swarm.py:3722: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3723
+  C:\Dev\MERID\tests\test_dev_swarm.py:3723: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3767
+  C:\Dev\MERID\tests\test_dev_swarm.py:3767: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3768
+  C:\Dev\MERID\tests\test_dev_swarm.py:3768: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3776
+  C:\Dev\MERID\tests\test_dev_swarm.py:3776: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3777
+  C:\Dev\MERID\tests\test_dev_swarm.py:3777: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3786
+  C:\Dev\MERID\tests\test_dev_swarm.py:3786: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3811
+  C:\Dev\MERID\tests\test_dev_swarm.py:3811: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3832
+  C:\Dev\MERID\tests\test_dev_swarm.py:3832: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3841
+  C:\Dev\MERID\tests\test_dev_swarm.py:3841: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3852
+  C:\Dev\MERID\tests\test_dev_swarm.py:3852: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3868
+  C:\Dev\MERID\tests\test_dev_swarm.py:3868: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3869
+  C:\Dev\MERID\tests\test_dev_swarm.py:3869: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3886
+  C:\Dev\MERID\tests\test_dev_swarm.py:3886: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3907
+  C:\Dev\MERID\tests\test_dev_swarm.py:3907: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3920
+  C:\Dev\MERID\tests\test_dev_swarm.py:3920: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3951
+  C:\Dev\MERID\tests\test_dev_swarm.py:3951: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3971
+  C:\Dev\MERID\tests\test_dev_swarm.py:3971: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:3985
+  C:\Dev\MERID\tests\test_dev_swarm.py:3985: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:3994
+  C:\Dev\MERID\tests\test_dev_swarm.py:3994: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:4022
+  C:\Dev\MERID\tests\test_dev_swarm.py:4022: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:4058
+  C:\Dev\MERID\tests\test_dev_swarm.py:4058: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:4067
+  C:\Dev\MERID\tests\test_dev_swarm.py:4067: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:4093
+  C:\Dev\MERID\tests\test_dev_swarm.py:4093: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:4102
+  C:\Dev\MERID\tests\test_dev_swarm.py:4102: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+tests\test_dev_swarm.py:4112
+  C:\Dev\MERID\tests\test_dev_swarm.py:4112: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:4125
+  C:\Dev\MERID\tests\test_dev_swarm.py:4125: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.devswarm
+
+tests\test_dev_swarm.py:4138
+  C:\Dev\MERID\tests\test_dev_swarm.py:4138: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.auditor
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+ERROR tests/logging/test_merid_logging.py
+ERROR tests/test_consensus_loop2.py
+ERROR tests/test_forecasters.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 3 errors during collection !!!!!!!!!!!!!!!!!!!
+440 tests collected, 3 errors in 3.38s

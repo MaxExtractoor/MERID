@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\optimization.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.5, 0.7, 0.95, 1.0, 2.0, 50.0, 100.0, 300.0, 500.0, 1000.0, 100, 500, 1000, 1024, 'T', 'adaptive', 'agent_id', 'agents', 'agents.optimization', 'allocator', 'avg_memory_mb', 'avg_time_ms', 'avg_trust', 'batch_optimizers', 'budgets', 'caches', 'evictions', 'hit_rate', 'hits', 'lfu', 'lru', 'max_memory_bytes', 'max_size', 'max_time_ms', 'memory_bytes', 'misses', 'p95_time_ms', 'priority', 'profilers', 'size', 'strategy', 'success_rate', 'total_calls', 'trust', 'ttl']

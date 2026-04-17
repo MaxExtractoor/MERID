@@ -1,0 +1,134 @@
+# Synthetic Trace Analysis: KXBTC Order Veto Chain
+# Based on kalshi_continuous_trader.py code structure
+
+# ═══ Continuous Trader Cycle N ═══ (assets=['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'])
+# Config at cycle start:
+#   dry_run: False (or True - CRITICAL CHECK)
+#   min_edge: 0.08 (8%)
+#   max_contract_price_cents: 35
+#   min_contract_price_cents: 2
+#   kelly_fraction: 0.25 (quarter-Kelly)
+#   max_position_per_market: 3
+#   max_open_positions: 5
+#   max_total_exposure_pct: 0.20 (20% of bankroll)
+#   initial_bankroll_cents: 574 ($5.74)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIGNAL → EDGE COMPUTATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# For market: KXBTC-15M-T79200 (BTC 15min strike $79,200, spot ~$79,500)
+# _compute_edge() logic:
+#   spot = 79500.00
+#   strike = 79200.00
+#   dist_pct = (79500 - 79200) / 79500 = 0.00377 (0.38% from strike)
+#   
+#   # Vol-aware logistic model
+#   vol_ann = 0.65 (65% annualized vol from indicator stack)
+#   tte_hours = 0.25 (15 minutes)
+#   hourly_vol = 0.65 / sqrt(365.25 * 24) = 0.0219
+#   expected_move = 0.0219 * sqrt(0.25) = 0.0110 (1.1%)
+#   
+#   z = 0.00377 / 0.0110 = 0.343
+#   yes_prob_f = 1 / (1 + exp(-0.343)) = 0.585
+#   yes_prob = 0.585
+#   
+#   # Orderbook prices (example)
+#   best_yes_ask = 0.62 (62 cents)
+#   implied_yes = 0.62
+#   
+#   # Fee calculation
+#   _actual_fee = ceil(0.07 * 1 * 0.62 * 0.38) / 100 = 0.0002 (0.02 cents)
+#   yes_edge = 0.585 - 0.62 - 0.0002 - 0.01 (slippage) = -0.0452 (-4.5%)
+#   
+#   # Edge is NEGATIVE → c.best_side = "" (empty)
+#   c.best_edge = -0.0452
+#   c.best_side = ""  # ← VETO 1: No positive edge side
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIGNAL TO SIZING TRACE (would be logged as DRY-RUN-TRACE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# [DRY-RUN-TRACE] signal_to_sizing | cycle=N asset=BTC market=KXBTC-15M-T79200 side=none |
+#   edge=-0.0452 win_prob=0.535 payout=0.61 | kelly_raw=-0.083 kelly_frac=-0.021 (k=25.0%)
+#
+# Kelly goes NEGATIVE because edge is negative:
+#   win_prob = 0.5 + (-0.0452) = 0.4548
+#   payout_ratio = (100 - 62) / 62 = 0.61
+#   q = 1 - 0.4548 = 0.5452
+#   raw_kelly = (0.4548 * 0.61 - 0.5452) / 0.61 = -0.083 (NEGATIVE)
+#   frac_kelly = -0.083 * 0.25 = -0.021 (NEGATIVE)
+#
+# Since Kelly is negative, order_count will be 0 after gates
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CALCULATE_ORDER_SIZE GATES (kalshi_risk_engine.py:585-678)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Gate 1: Halted? No (assuming not halted)
+# Gate 2: Balance < min_balance_cents? 
+#   balance_cents = 574, min_balance_cents = 200 → PASS
+# Gate 3: Existing position >= max_position_per_market?
+#   existing = 0, max = 3 → PASS
+# Gate 4: Total open >= max_open_positions?
+#   total_open = 0 (assuming), max = 5 → PASS
+# Gate 5: Contract price filter
+#   limit_price_cents = 62, max = 35 → VETO 2: Price > max_contract_price_cents!
+#
+# Even if edge were positive, this market would be rejected at Gate 5.
+# Contract trading at 62¢ exceeds the 35¢ max price cap.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOWNSTREAM TRADER LOGIC (kalshi_continuous_trader.py:1899-1910)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# After _compute_edge():
+#   c.best_edge = -0.0452
+#   min_edge_required = 0.08 (or higher if fee_drag_tightening)
+#   
+#   if c.best_edge < min_edge_required:
+#       ob_stats["edge_too_low"] += 1  # ← VETO 3: Logged but may not be visible
+#       continue  # Skip this market
+#
+#   if not c.best_side:
+#       ob_stats["no_side"] += 1  # ← VETO 4: No side determined (empty string)
+#       continue
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SUMMARY: WHY ORDERS AREN'T FLOWING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# For a typical near-spot BTC market:
+# 1. Edge is too low or negative (yes_prob vs market price + fees)
+# 2. Contract price exceeds max_contract_price_cents (35¢ cap)
+# 3. Kelly fraction goes negative, sizing drops to 0
+#
+# For cheaper contracts (within 2-35¢ range):
+# - Edge requirement of 8% min_edge is very high for efficient markets
+# - Quarter-Kelly (0.25) with small bankroll ($5.74) produces tiny sizes
+# - Expected Kelly risk per trade: $5.74 * 0.25 * 0.02 = $0.029 (2.9 cents)
+# - At 10¢ contract price, that's 0 contracts after integer division
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# THE FIX
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Option A: Lower edge threshold for near-spot directional markets
+#   min_edge: 0.08 → 0.04 (4% edge requirement)
+#
+# Option B: Raise max contract price for 15m markets
+#   max_contract_price_cents: 35 → 65 (covers 60¢ mid-curve range)
+#
+# Option C: Increase Kelly fraction or max_risk_per_trade_pct
+#   kelly_fraction: 0.25 → 0.50 (half-Kelly)
+#   max_risk_per_trade_pct: 0.02 → 0.05 (5% of bankroll)
+#
+# Option D: Increase initial bankroll (if this is test capital)
+#   initial_bankroll_cents: 574 → 2000 ($20)
+#   This directly scales all position sizes proportionally
+
+# RECOMMENDED: Combination of B + C for near-spot 15m markets
+#   max_contract_price_cents: 65 (or use tiered: 15m=65, 1h=55, daily=45)
+#   kelly_fraction: 0.40 (40% Kelly)
+# This keeps safety intact while allowing the 60¢ mid-curve zone where
+# liquidity is best and Kalshi fee structure is most favorable.

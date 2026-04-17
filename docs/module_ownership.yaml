@@ -1,0 +1,46 @@
+#
+# Module Ownership Registry
+#
+# This registry is the single source of truth for who "owns" which
+# modules/packages in MERID. It is intentionally lightweight and can
+# be expanded over time.
+#
+# Keys are Python module paths; values are simple owner identifiers
+# (GitHub handle, team name, or email).
+#
+# This file implements the "module ownership registry" recommendation
+# from DUPLICATES_COLLISIONS_REPORT.md §6.3.4.
+#
+
+owners:
+  # Core prediction-market / Kalshi stack
+  merid.event_venues.kalshi: "trading-core"
+  merid.prediction: "trading-core"
+  merid.reconciliation: "trading-core"
+  merid.resilience: "platform"
+
+  # Settings and configuration
+  merid.settings: "platform"
+  config.settings: "platform"
+
+  # Risk and safety
+  merid.risk: "risk"
+  merid.risk.kill_switches: "risk"
+  core.error_handling: "platform"
+  core.notifications: "platform"
+
+  # Agent framework and registry
+  agents.agent_framework: "agents"
+  agents.manifest: "agents"
+  swarm.agent_registry: "agents"
+
+  # Web API surface
+  web.api.system_endpoints: "platform"
+  web.api.production_status: "platform"
+  web.api.missing_endpoints: "platform"
+
+  # Legacy / compat layers
+  trading.reconciliation: "trading-core"
+  trading.integrations.kalshi_client: "trading-core"
+  archive.legacy_scripts: "archived"
+

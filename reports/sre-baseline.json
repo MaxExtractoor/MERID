@@ -1,0 +1,21 @@
+[
+  {
+    "timestamp": "2026-03-19T20:34:55+00:00",
+    "profile": "kalshi-only",
+    "port": 8011,
+    "spawn_mode": "manual",
+    "note": "First baseline — server started manually, measurements taken after full boot + 60s settle",
+    "cold_start_s": 92,
+    "cold_start_note": "spawn → first /api/v1/system/status 200 (~92s including lifespan init, agent grid, WS connect)",
+    "memory_after_settle": {
+      "rss_mb": 508.9,
+      "vms_mb": 921.3,
+      "pid": 14324
+    },
+    "first_kalshi_call": {
+      "latency_ms": 233.1,
+      "status": 200,
+      "endpoint": "/api/v1/kalshi/markets?limit=1"
+    }
+  }
+]

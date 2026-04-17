@@ -1,0 +1,25 @@
+# MERID PM strategy profiles — merged after per-agent YAML ``strategy:`` overrides.
+# Activate with: MERID_PM_PROFILE=<name>
+#
+# crypto_low_edge_dev — tiny sizes + lower min-edge bars for proving end-to-end
+# execution in development. Does NOT make negative net_edge tradable; use synthetic
+# tests or wait for positive edge from the model.
+#
+# Env vars MERID_PM_MIN_EDGE_* still override profile values (highest ops priority).
+
+profiles:
+  crypto_low_edge_dev:
+    min_edge_early: 0.01
+    min_edge_mid: 0.008
+    min_edge_late: 0.006
+    min_edge_terminal: 0.005
+    min_arb_edge: 0.002
+    min_confidence: 0.35
+    max_contracts_per_order: 3
+    contrarian_sentiment_min: 75
+    vol_breakout_neutral_low: 35
+    vol_breakout_neutral_high: 65
+    # MM (15m crypto — tiny quotes; override per agent YAML if needed)
+    mm_max_spread_cents: 12
+    mm_target_spread_cents: 3
+    mm_inventory_limit: 8

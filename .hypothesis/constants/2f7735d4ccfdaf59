@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\monitoring\metrics_collector.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 60.0, 100, 3600, 10000, '-inf', 'Agent cycle duration', 'Agent decisions made', 'CPU usage percentage', 'MetricTimer', 'Price feed latency', 'Total HTTP errors', 'Total HTTP requests', 'Total trade volume', 'USD', 'agent_cycle_time', 'agent_decisions', 'average', 'connections', 'counter', 'cpu_usage', 'current_value', 'decisions', 'description', 'disk_usage', 'errors', 'gauge', 'histogram', 'http_errors_total', 'http_requests_total', 'inf', 'max_value', 'memory_usage', 'messages', 'metrics', 'min_value', 'monitoring.metrics', 'ms', 'name', 'p50', 'p95', 'p99', 'percent', 'price_feed_latency', 'price_updates', 'requests', 'retention_hours', 'seconds', 'timer', 'total_count', 'total_metrics', 'total_sum', 'trade_latency', 'trade_volume_usd', 'trades', 'trades_total', 'type', 'unit', 'updates', 'ws_connections', 'ws_messages_sent']

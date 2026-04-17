@@ -1,0 +1,24 @@
+{
+  "gate_id": "iter4-streaming-v3",
+  "timestamp": "2026-04-02T17:52:09.783552+00:00",
+  "duration_seconds": 300,
+  "dry_run": false,
+  "samples_total": 10,
+  "samples_valid": 10,
+  "p95_min": 187.0,
+  "p95_max": 4782.0,
+  "p95_avg": 1395.3,
+  "degraded_count": 1,
+  "high_lag_profiles": 10,
+  "verdict": "FAIL",
+  "passed": false,
+  "failures": [
+    "2026-04-02T17:47:32.199833+00:00: P95=4782ms >= 500ms",
+    "2026-04-02T17:48:02.219822+00:00: P95=4782ms >= 500ms",
+    "2026-04-02T17:51:35.591871+00:00: P95=672ms >= 500ms",
+    "2026-04-02T17:51:35.591871+00:00: degraded=true",
+    "2026-04-02T17:52:05.624327+00:00: P95=1922ms >= 500ms",
+    "10 high-lag profiles captured"
+  ],
+  "sample_data": null
+}

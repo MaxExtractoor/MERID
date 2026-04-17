@@ -1,0 +1,308 @@
+﻿..............................................sss....................... [  0%]
+........................................................................ [  0%]
+........................................................................ [  1%]
+................................................ss...................... [  1%]
+........sss............................................................. [  2%]
+........................................................................ [  2%]
+.................EEEEEEEEEEFEEEEEEEEEEEEEEEEEEEEEEF..................... [  2%]
+....................................F
+=================================== ERRORS ====================================
+_________ ERROR at setup of TestAgentOrchestrator.test_initialization _________
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_________ ERROR at setup of TestAgentOrchestrator.test_agent_registry _________
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+________ ERROR at setup of TestAgentOrchestrator.test_get_system_stats ________
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+______ ERROR at setup of TestAgentOrchestrator.test_get_recent_decisions ______
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_____ ERROR at setup of TestAgentOrchestrator.test_get_consensus_history ______
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_________ ERROR at setup of TestAgentOrchestrator.test_form_consensus _________
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestrator.test_evaluate_agent_vote_price_feed _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestrator.test_evaluate_agent_vote_arbitrage __
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestrator.test_evaluate_agent_vote_execution __
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+__ ERROR at setup of TestAgentOrchestrator.test_evaluate_agent_vote_slippage __
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorInit.test_orchestrator_initializes_all_agents _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+___ ERROR at setup of TestAgentOrchestratorInit.test_agent_registry_mapping ___
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorLifecycle.test_start_creates_background_tasks _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+___ ERROR at setup of TestAgentOrchestratorLifecycle.test_stop_halts_agents ___
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorConsensus.test_form_consensus_with_approval _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorConsensus.test_form_consensus_rejected _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorConsensus.test_form_consensus_handles_errors _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorStatsAndQueries.test_get_system_stats _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorStatsAndQueries.test_get_recent_decisions _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorStatsAndQueries.test_get_consensus_history _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+___ ERROR at setup of TestEvaluateAgentVote.test_price_feed_vote_with_data ____
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+__ ERROR at setup of TestEvaluateAgentVote.test_price_feed_vote_without_data __
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+___ ERROR at setup of TestEvaluateAgentVote.test_arbitrage_vote_good_spread ___
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+__ ERROR at setup of TestEvaluateAgentVote.test_execution_vote_valid_amount ___
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+__ ERROR at setup of TestEvaluateAgentVote.test_execution_vote_large_amount ___
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+__ ERROR at setup of TestEvaluateAgentVote.test_slippage_vote_high_liquidity __
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+____ ERROR at setup of TestEvaluateAgentVote.test_news_vote_with_sentiment ____
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+______ ERROR at setup of TestEvaluateAgentVote.test_twitter_vote_enabled ______
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_____ ERROR at setup of TestEvaluateAgentVote.test_telegram_vote_enabled ______
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorArbitrage.test_check_arbitrage_detects_opportunity _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorArbitrage.test_check_arbitrage_no_opportunity _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+_ ERROR at setup of TestAgentOrchestratorArbitrage.test_check_arbitrage_handles_errors _
+E   AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+================================== FAILURES ===================================
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:1419: AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_slippage_agent'
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\unittest\mock.py:1419: AttributeError: <module 'core.agent_orchestrator'> does not have the attribute 'get_twitter_agent'
+C:\Dev\MERID\tests\core\test_assertion_framework.py:340: TypeError: 'coroutine' object is not subscriptable
+============================== warnings summary ===============================
+..\..\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_hypothesis_pytestplugin.py:469
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_hypothesis_pytestplugin.py:469: UserWarning: Skipping collection of '.hypothesis' directory - this usually means you've explicitly set the `norecursedirs` pytest config option, replacing rather than extending the default ignores.
+    warnings.warn(
+
+tests\agents\test_social_bots.py:11
+  C:\Dev\MERID\tests\agents\test_social_bots.py:11: PytestUnknownMarkWarning: Unknown pytest.mark.quarantine - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.quarantine
+
+tests\api\test_mock_responses.py:5
+  C:\Dev\MERID\tests\api\test_mock_responses.py:5: PytestUnknownMarkWarning: Unknown pytest.mark.quarantine - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.quarantine
+
+tests\chaos\test_chaos_engineering.py:391
+  C:\Dev\MERID\tests\chaos\test_chaos_engineering.py:391: PytestUnknownMarkWarning: Unknown pytest.mark.chaos - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.chaos
+
+config\__init__.py:3
+  C:\Dev\MERID\config\__init__.py:3: DeprecationWarning: config.settings is deprecated ù use merid.settings instead (T-060)
+    from config.settings import (
+
+tests\consensus\test_consensus_coordinator.py:16
+  C:\Dev\MERID\tests\consensus\test_consensus_coordinator.py:16: PytestUnknownMarkWarning: Unknown pytest.mark.windows_flaky_async - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.windows_flaky_async
+
+..\..\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\great_expectations\data_context\types\base.py:1098
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\great_expectations\data_context\types\base.py:1098: ChangedInMarshmallow4Warning: `Number` field should not be instantiated. Use `Integer`, `Float`, or `Decimal` instead.
+    config_version: fields.Number = fields.Number(
+
+tests\e2e\test_circuit_breaker_chaos.py:29
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:29: PytestUnknownMarkWarning: Unknown pytest.mark.e2e - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.e2e
+
+tests\e2e\test_circuit_breaker_chaos.py:30
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:30: PytestUnknownMarkWarning: Unknown pytest.mark.safety_critical - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.safety_critical
+
+tests\e2e\test_circuit_breaker_chaos.py:292
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:292: PytestUnknownMarkWarning: Unknown pytest.mark.e2e - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.e2e
+
+tests\e2e\test_circuit_breaker_chaos.py:293
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:293: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\event_venues\test_kalshi_crypto_series.py:630
+  C:\Dev\MERID\tests\event_venues\test_kalshi_crypto_series.py:630: PytestUnknownMarkWarning: Unknown pytest.mark.coverage - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.coverage
+
+tests\integration\test_contracts.py:12
+  C:\Dev\MERID\tests\integration\test_contracts.py:12: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_contracts.py:36
+  C:\Dev\MERID\tests\integration\test_contracts.py:36: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_contracts.py:54
+  C:\Dev\MERID\tests\integration\test_contracts.py:54: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_kalshi_e2e_stress.py:65
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:65: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:90
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:90: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:105
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:105: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:120
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:120: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+testing\final_validation.py:29
+  C:\Dev\MERID\testing\final_validation.py:29: PytestCollectionWarning: cannot collect test class 'TestType' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+    class TestType(Enum):
+
+testing\final_validation.py:39
+  C:\Dev\MERID\testing\final_validation.py:39: PytestCollectionWarning: cannot collect test class 'TestStatus' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+    class TestStatus(Enum):
+
+tests\smoke\test_paper_trading_smoke.py:14
+  C:\Dev\MERID\tests\smoke\test_paper_trading_smoke.py:14: PytestUnknownMarkWarning: Unknown pytest.mark.smoke - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.smoke
+
+tests\smoke\test_paper_trading_smoke.py:149
+  C:\Dev\MERID\tests\smoke\test_paper_trading_smoke.py:149: PytestUnknownMarkWarning: Unknown pytest.mark.smoke - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.smoke
+
+tests\streaming\test_stream_bus.py:8
+  C:\Dev\MERID\tests\streaming\test_stream_bus.py:8: PytestUnknownMarkWarning: Unknown pytest.mark.windows_flaky_async - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.windows_flaky_async
+
+tests\test_capital_ladder.py:88
+  C:\Dev\MERID\tests\test_capital_ladder.py:88: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:96
+  C:\Dev\MERID\tests\test_capital_ladder.py:96: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:117
+  C:\Dev\MERID\tests\test_capital_ladder.py:117: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:125
+  C:\Dev\MERID\tests\test_capital_ladder.py:125: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:133
+  C:\Dev\MERID\tests\test_capital_ladder.py:133: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:149
+  C:\Dev\MERID\tests\test_capital_ladder.py:149: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:159
+  C:\Dev\MERID\tests\test_capital_ladder.py:159: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:167
+  C:\Dev\MERID\tests\test_capital_ladder.py:167: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:184
+  C:\Dev\MERID\tests\test_capital_ladder.py:184: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:192
+  C:\Dev\MERID\tests\test_capital_ladder.py:192: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:208
+  C:\Dev\MERID\tests\test_capital_ladder.py:208: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:224
+  C:\Dev\MERID\tests\test_capital_ladder.py:224: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:233
+  C:\Dev\MERID\tests\test_capital_ladder.py:233: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:243
+  C:\Dev\MERID\tests\test_capital_ladder.py:243: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:256
+  C:\Dev\MERID\tests\test_capital_ladder.py:256: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_dev_swarm_xdist_invariants.py:21
+  C:\Dev\MERID\tests\test_dev_swarm_xdist_invariants.py:21: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = [pytest.mark.devswarm, pytest.mark.auditor]
+
+tests\test_dev_swarm_xdist_invariants.py:21
+  C:\Dev\MERID\tests\test_dev_swarm_xdist_invariants.py:21: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = [pytest.mark.devswarm, pytest.mark.auditor]
+
+tests\test_profile_guard.py:307
+  C:\Dev\MERID\tests\test_profile_guard.py:307: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+tests\trading\test_spectator.py:9
+  C:\Dev\MERID\tests\trading\test_spectator.py:9: PytestCollectionWarning: cannot collect test class 'TestEvent' because it has a __init__ constructor (from: tests/trading/test_spectator.py)
+    @dataclass
+
+tests/analytics/test_scorecard_fix.py::test_scorecard_generation
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\python.py:163: PytestReturnNotNoneWarning: Expected None, but tests/analytics/test_scorecard_fix.py::test_scorecard_generation returned True, which will be an error in a future version of pytest.  Did you mean to use `assert` instead of `return`?
+    warnings.warn(
+
+tests/api/test_api_directly.py::test_api_directly
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\python.py:163: PytestReturnNotNoneWarning: Expected None, but tests/api/test_api_directly.py::test_api_directly returned False, which will be an error in a future version of pytest.  Did you mean to use `assert` instead of `return`?
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+SKIPPED [3] tests\agents\test_social_bots.py: quarantined ù pass --run-quarantine to include
+SKIPPED [1] tests\analytics\test_time_series.py:417: Statsmodels not available
+SKIPPED [1] tests\analytics\test_time_series.py:429: Statsmodels not available
+SKIPPED [3] tests\api\test_mock_responses.py: quarantined ù pass --run-quarantine to include
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_initialization
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_agent_registry
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_get_system_stats
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_get_recent_decisions
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_get_consensus_history
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_form_consensus
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_evaluate_agent_vote_price_feed
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_evaluate_agent_vote_arbitrage
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_evaluate_agent_vote_execution
+ERROR tests/core/test_agent_orchestrator_batch19.py::TestAgentOrchestrator::test_evaluate_agent_vote_slippage
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorInit::test_orchestrator_initializes_all_agents
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorInit::test_agent_registry_mapping
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorLifecycle::test_start_creates_background_tasks
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorLifecycle::test_stop_halts_agents
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorConsensus::test_form_consensus_with_approval
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorConsensus::test_form_consensus_rejected
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorConsensus::test_form_consensus_handles_errors
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorStatsAndQueries::test_get_system_stats
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorStatsAndQueries::test_get_recent_decisions
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorStatsAndQueries::test_get_consensus_history
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_price_feed_vote_with_data
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_price_feed_vote_without_data
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_arbitrage_vote_good_spread
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_execution_vote_valid_amount
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_execution_vote_large_amount
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_slippage_vote_high_liquidity
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_news_vote_with_sentiment
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_twitter_vote_enabled
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestEvaluateAgentVote::test_telegram_vote_enabled
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorArbitrage::test_check_arbitrage_detects_opportunity
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorArbitrage::test_check_arbitrage_no_opportunity
+ERROR tests/core/test_agent_orchestrator_batch_b.py::TestAgentOrchestratorArbitrage::test_check_arbitrage_handles_errors
+FAILED tests/core/test_agent_orchestrator_batch19.py::TestGetAgentOrchestrator::test_singleton
+FAILED tests/core/test_agent_orchestrator_batch_b.py::TestGetAgentOrchestrator::test_get_agent_orchestrator_singleton
+FAILED tests/core/test_assertion_framework.py::TestAssertionRegistryAPI::test_register_assertion_endpoint
+!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 35 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+3 failed, 498 passed, 8 skipped, 45 warnings, 32 errors in 203.61s (0:03:23)
+py : sys:1: RuntimeWarning: coroutine 'register_assertion' was never awaited
+At C:\Users\Chris\AppData\Local\Temp\ps-script-949f79cc-1992-4549-bcfa-ad5a68c7e42e.ps1:78 char:28
++ ... \Dev\MERID; py -3 -m pytest tests/ -q --tb=line --maxfail=35 2>&1 | O ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (sys:1: RuntimeW...s never awaited:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

@@ -1,0 +1,1146 @@
+venue:
+  name: kalshi
+  base_url: https://api.elections.kalshi.com/trade-api/v2
+  use_demo: false
+  max_notional_per_expiry_usd: 1000
+  max_open_markets_per_asset: 20
+session:
+  maintenance_day: 3
+  maintenance_start_et: 03:00
+  maintenance_end_et: 05:00
+agents:
+- name: BTC_15M
+  assets:
+  - BTC
+  timeframes:
+  - 15m
+  archetype: directional
+  strategy:
+    # Aggressively conservative: 15m BTC is highest-frequency, highest noise.
+    # Terminal phase kept at 3% to avoid chasing near-expiry momentum traps.
+    min_edge_early: 0.08   # 8% — matches market_filter global floor
+    min_edge_mid:   0.07   # 7%
+    min_edge_late:  0.06   # 6%
+    min_edge_terminal: 0.05  # 5%
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 2
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.5         # close at +50% of entry risk
+    min_cents: 5                    # need at least 5¢ profit to trigger
+    scale_out_fraction: 0.5         # sell half at primary TP
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.5
+    trailing_giveback_cents: 5      # close remainder if price gives back 5¢
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 5
+    min_edge_after_fees_cents: 2.0
+  strike_selection:
+    max_spot_to_strike_pct: 0.05   # 5% max distance for 15m BTC
+    target_spot_band_pct: 0.02     # prefer contracts within 2% of spot
+    deep_otm_allowed: false
+- name: BTC_HOURLY
+  assets:
+  - BTC
+  timeframes:
+  - 1h
+  archetype: directional
+  strategy:
+    # Slightly relaxed vs 15m (hourly contracts are less noisy).
+    min_edge_early: 0.07
+    min_edge_mid:   0.06
+    min_edge_late:  0.05
+    min_edge_terminal: 0.04
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.6
+    min_cents: 6
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.6
+    trailing_giveback_cents: 8
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 6
+    min_edge_after_fees_cents: 2.0
+- name: BTC_DAILY
+  assets:
+  - BTC
+  timeframes:
+  - daily
+  archetype: directional
+  strategy:
+    min_edge_early: 0.07
+    min_edge_mid:   0.06
+    min_edge_late:  0.05
+    min_edge_terminal: 0.04
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.65
+    min_cents: 8
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.65
+    trailing_giveback_cents: 10
+    max_round_trips_per_contract: 1
+    min_price_move_for_reentry: 8
+    min_edge_after_fees_cents: 3.0
+- name: BTC_WEEKLY
+  assets:
+  - BTC
+  timeframes:
+  - weekly
+  archetype: directional
+  strategy:
+    min_edge_early: 0.06
+    min_edge_mid:   0.05
+    min_edge_late:  0.04
+    min_edge_terminal: 0.03
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.7
+    min_cents: 10
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.7
+    trailing_giveback_cents: 12
+    max_round_trips_per_contract: 1
+    min_price_move_for_reentry: 10
+    min_edge_after_fees_cents: 3.0
+- name: ETH_15M
+  assets:
+  - ETH
+  timeframes:
+  - 15m
+  archetype: directional
+  strategy:
+    # ETH 15m: slightly more volatile than BTC — bump each tier by 1%
+    min_edge_early: 0.09
+    min_edge_mid:   0.08
+    min_edge_late:  0.07
+    min_edge_terminal: 0.06
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 2
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.5
+    min_cents: 5
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.5
+    trailing_giveback_cents: 6
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 5
+    min_edge_after_fees_cents: 2.0
+  strike_selection:
+    max_spot_to_strike_pct: 0.07   # 7% max distance for 15m ETH
+    target_spot_band_pct: 0.03     # prefer contracts within 3% of spot
+    deep_otm_allowed: false
+- name: ETH_HOURLY
+  assets:
+  - ETH
+  timeframes:
+  - 1h
+  archetype: directional
+  strategy:
+    min_edge_early: 0.08
+    min_edge_mid:   0.07
+    min_edge_late:  0.06
+    min_edge_terminal: 0.05
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.6
+    min_cents: 6
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.6
+    trailing_giveback_cents: 8
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 6
+    min_edge_after_fees_cents: 2.0
+- name: ETH_DAILY
+  assets:
+  - ETH
+  timeframes:
+  - daily
+  archetype: directional
+  strategy:
+    min_edge_early: 0.08
+    min_edge_mid:   0.07
+    min_edge_late:  0.06
+    min_edge_terminal: 0.05
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.65
+    min_cents: 8
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.65
+    trailing_giveback_cents: 10
+    max_round_trips_per_contract: 1
+    min_price_move_for_reentry: 8
+    min_edge_after_fees_cents: 3.0
+- name: ETH_WEEKLY
+  assets:
+  - ETH
+  timeframes:
+  - weekly
+  archetype: directional
+  strategy:
+    min_edge_early: 0.07
+    min_edge_mid:   0.06
+    min_edge_late:  0.05
+    min_edge_terminal: 0.04
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.7
+    min_cents: 10
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.7
+    trailing_giveback_cents: 12
+    max_round_trips_per_contract: 1
+    min_price_move_for_reentry: 10
+    min_edge_after_fees_cents: 3.0
+- name: SOL_15M
+  assets:
+  - SOL
+  timeframes:
+  - 15m
+  archetype: directional
+  strike_selection:
+    max_spot_to_strike_pct: 0.10
+    target_spot_band_pct: 0.04
+    deep_otm_allowed: false
+  strategy:
+    # SOL 15m: higher vol asset — 2% above BTC 15m thresholds
+    min_edge_early: 0.10
+    min_edge_mid:   0.09
+    min_edge_late:  0.08
+    min_edge_terminal: 0.07
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 2
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.6
+    min_cents: 6
+    scale_out_fraction: 0.6
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.6
+    trailing_giveback_cents: 7
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 6
+    min_edge_after_fees_cents: 2.5
+- name: SOL_HOURLY
+  assets:
+  - SOL
+  timeframes:
+  - 1h
+  archetype: directional
+  strategy:
+    min_edge_early: 0.09
+    min_edge_mid:   0.08
+    min_edge_late:  0.07
+    min_edge_terminal: 0.06
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.7
+    min_cents: 6
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.7
+    trailing_giveback_cents: 10
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 6
+    min_edge_after_fees_cents: 2.5
+- name: SOL_DAILY
+  assets:
+  - SOL
+  timeframes:
+  - daily
+  archetype: directional
+  strategy:
+    min_edge_early: 0.09
+    min_edge_mid:   0.08
+    min_edge_late:  0.07
+    min_edge_terminal: 0.06
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.65
+    min_cents: 8
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.65
+    trailing_giveback_cents: 10
+    max_round_trips_per_contract: 1
+    min_price_move_for_reentry: 8
+    min_edge_after_fees_cents: 3.0
+- name: SOL_WEEKLY
+  assets:
+  - SOL
+  timeframes:
+  - weekly
+  archetype: directional
+  strategy:
+    min_edge_early: 0.08
+    min_edge_mid:   0.07
+    min_edge_late:  0.06
+    min_edge_terminal: 0.05
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.7
+    min_cents: 10
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.7
+    trailing_giveback_cents: 12
+    max_round_trips_per_contract: 1
+    min_price_move_for_reentry: 10
+    min_edge_after_fees_cents: 3.0
+- name: XRP_15M
+  assets:
+  - XRP
+  strike_selection:
+    max_spot_to_strike_pct: 0.10
+    target_spot_band_pct: 0.04
+    deep_otm_allowed: false
+  timeframes:
+  - 15m
+  archetype: directional
+  strategy:
+    # XRP 15m: regulatory-event risk + liquidity gaps require extra edge cushion
+    min_edge_early: 0.11
+    min_edge_mid:   0.10
+    min_edge_late:  0.09
+    min_edge_terminal: 0.08
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 2
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.65
+    min_cents: 6
+    scale_out_fraction: 0.6
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.65
+    trailing_giveback_cents: 8
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 6
+    min_edge_after_fees_cents: 2.5
+- name: XRP_HOURLY
+  assets:
+  - XRP
+  timeframes:
+  - 1h
+  archetype: directional
+  strategy:
+    min_edge_early: 0.10
+    min_edge_mid:   0.09
+    min_edge_late:  0.08
+    min_edge_terminal: 0.07
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.7
+    min_cents: 6
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.7
+    trailing_giveback_cents: 10
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 6
+    min_edge_after_fees_cents: 2.5
+- name: XRP_DAILY
+  assets:
+  - XRP
+  timeframes:
+  - daily
+  archetype: directional
+  strategy:
+    min_edge_early: 0.10
+    min_edge_mid:   0.09
+    min_edge_late:  0.08
+    min_edge_terminal: 0.07
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.65
+    min_cents: 8
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.65
+    trailing_giveback_cents: 10
+    max_round_trips_per_contract: 1
+    min_price_move_for_reentry: 8
+    min_edge_after_fees_cents: 3.0
+- name: XRP_WEEKLY
+  assets:
+  - XRP
+  timeframes:
+  - weekly
+  archetype: directional
+  strategy:
+    min_edge_early: 0.09
+    min_edge_mid:   0.08
+    min_edge_late:  0.07
+    min_edge_terminal: 0.06
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+  take_profit:
+    enabled: true
+    r_multiple_primary: 0.7
+    min_cents: 10
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.7
+    trailing_giveback_cents: 12
+    max_round_trips_per_contract: 1
+    min_price_move_for_reentry: 10
+    min_edge_after_fees_cents: 3.0
+- name: BTC_MONTHLY
+  assets:
+  - BTC
+  timeframes:
+  - monthly
+  archetype: directional
+  strategy:
+    # BTC monthly: long-tenor, mean-reverting regime — lower edge requirement
+    min_edge_early: 0.06
+    min_edge_mid:   0.05
+    min_edge_late:  0.04
+    min_edge_terminal: 0.03
+  market_filter:
+    category: crypto
+    frequency: monthly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 360
+- name: BTC_ANNUAL
+  assets:
+  - BTC
+  timeframes:
+  - annual
+  archetype: directional
+  strategy:
+    # BTC annual: lowest noise tenor — tightest edge floors still viable
+    min_edge_early: 0.05
+    min_edge_mid:   0.04
+    min_edge_late:  0.03
+    min_edge_terminal: 0.02
+  market_filter:
+    category: crypto
+    frequency: annual
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 3
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 43200
+    cutoff_minutes_before_expiry: 1440
+- name: ETH_MONTHLY
+  assets:
+  - ETH
+  timeframes:
+  - monthly
+  archetype: directional
+  strategy:
+    # ETH monthly: more vol than BTC — edge floors 1% above BTC
+    min_edge_early: 0.07
+    min_edge_mid:   0.06
+    min_edge_late:  0.05
+    min_edge_terminal: 0.04
+  market_filter:
+    category: crypto
+    frequency: monthly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 360
+- name: ETH_ANNUAL
+  assets:
+  - ETH
+  timeframes:
+  - annual
+  archetype: directional
+  strategy:
+    min_edge_early: 0.06
+    min_edge_mid:   0.05
+    min_edge_late:  0.04
+    min_edge_terminal: 0.03
+  market_filter:
+    category: crypto
+    frequency: annual
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 3
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 43200
+    cutoff_minutes_before_expiry: 1440
+- name: SOL_MONTHLY
+  assets:
+  - SOL
+  timeframes:
+  - monthly
+  archetype: directional
+  strategy:
+    # SOL monthly: higher vol than ETH — extra 1% edge buffer
+    min_edge_early: 0.08
+    min_edge_mid:   0.07
+    min_edge_late:  0.06
+    min_edge_terminal: 0.05
+  market_filter:
+    category: crypto
+    frequency: monthly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 360
+- name: SOL_ANNUAL
+  assets:
+  - SOL
+  timeframes:
+  - annual
+  archetype: directional
+  strategy:
+    min_edge_early: 0.07
+    min_edge_mid:   0.06
+    min_edge_late:  0.05
+    min_edge_terminal: 0.04
+  market_filter:
+    category: crypto
+    frequency: annual
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 3
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 43200
+    cutoff_minutes_before_expiry: 1440
+- name: XRP_MONTHLY
+  assets:
+  - XRP
+  timeframes:
+  - monthly
+  archetype: directional
+  strategy:
+    # XRP monthly: regulatory-event risk persists even at long tenor
+    min_edge_early: 0.09
+    min_edge_mid:   0.08
+    min_edge_late:  0.07
+    min_edge_terminal: 0.06
+  market_filter:
+    category: crypto
+    frequency: monthly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 360
+- name: XRP_ANNUAL
+  assets:
+  - XRP
+  timeframes:
+  - annual
+  archetype: directional
+  strategy:
+    min_edge_early: 0.08
+    min_edge_mid:   0.07
+    min_edge_late:  0.06
+    min_edge_terminal: 0.05
+  market_filter:
+    category: crypto
+    frequency: annual
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 3
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 43200
+    cutoff_minutes_before_expiry: 1440
+- name: DOGE_MONTHLY
+  assets:
+  - DOGE
+  timeframes:
+  - monthly
+  archetype: directional
+  strategy:
+    # DOGE monthly: meme-vol persists long-term — highest monthly edge floor
+    min_edge_early: 0.10
+    min_edge_mid:   0.09
+    min_edge_late:  0.08
+    min_edge_terminal: 0.07
+  market_filter:
+    category: crypto
+    frequency: monthly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 360
+- name: DOGE_ANNUAL
+  assets:
+  - DOGE
+  timeframes:
+  - annual
+  archetype: directional
+  strategy:
+    min_edge_early: 0.09
+    min_edge_mid:   0.08
+    min_edge_late:  0.07
+    min_edge_terminal: 0.06
+  market_filter:
+    category: crypto
+    frequency: annual
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 3
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 43200
+    cutoff_minutes_before_expiry: 1440
+- name: DOGE_15M
+  assets:
+  - DOGE
+  strike_selection:
+    max_spot_to_strike_pct: 0.12
+    target_spot_band_pct: 0.05
+    deep_otm_allowed: false
+  timeframes:
+  - 15m
+  archetype: directional
+  strategy:
+    # DOGE 15m: meme-vol, social-media-driven spikes. Maximum edge requirement.
+    min_edge_early: 0.13
+    min_edge_mid:   0.12
+    min_edge_late:  0.11
+    min_edge_terminal: 0.10
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 2
+- name: DOGE_HOURLY
+  assets:
+  - DOGE
+  timeframes:
+  - 1h
+  archetype: directional
+  strategy:
+    min_edge_early: 0.12
+    min_edge_mid:   0.11
+    min_edge_late:  0.10
+    min_edge_terminal: 0.09
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+- name: DOGE_DAILY
+  assets:
+  - DOGE
+  timeframes:
+  - daily
+  archetype: directional
+  strategy:
+    min_edge_early: 0.12
+    min_edge_mid:   0.11
+    min_edge_late:  0.10
+    min_edge_terminal: 0.09
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+- name: DOGE_WEEKLY
+  assets:
+  - DOGE
+  timeframes:
+  - weekly
+  archetype: directional
+  strategy:
+    min_edge_early: 0.11
+    min_edge_mid:   0.10
+    min_edge_late:  0.09
+    min_edge_terminal: 0.08
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+# Multi-asset 15m crypto MM. ``pm_spot_hard_gate: true`` = do not emit QUOTE without healthy
+# Coinbase/LivePriceFeed PM spot (see merid.prediction.trading_agent._apply_pm_spot_hard_gate).
+# Add the same flag to any future market_maker agent that requires spot-aligned quoting.
+- name: CRYPTO_15M_MM
+  assets: []
+  timeframes:
+  - 15m
+  archetype: market_maker
+  pm_spot_hard_gate: true
+  strategy:
+    # MM quotes both sides — slightly lower threshold than directional because spread capture
+    # compensates, but still aggressively conservative vs original 1-2.5%
+    min_edge_early: 0.06
+    min_edge_mid:   0.05
+    min_edge_late:  0.04
+    min_edge_terminal: 0.03
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 14
+    cutoff_minutes_before_expiry: 2
+# QUARANTINED: KALSHI_ARB_SCANNER — arbitrage archetype with no assets/timeframes.
+# Dead in Kalshi-only mode: no crypto exchange connections for cross-venue arb.
+# Preserved as a placeholder only; the ``archetype: arbitrage`` branch in strategy.py
+# is gated out. Re-enable only when cross-venue opportunity scanner is wired.
+# - name: KALSHI_ARB_SCANNER
+#   assets: []
+#   timeframes: []
+#   archetype: arbitrage
+#   ...disabled...
+- name: MACRO_DIRECTIONAL
+  assets: []
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: economics
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: FINANCIALS_DIRECTIONAL
+  assets:
+  - SPX
+  - NDX
+  - DJI
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: financials
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: POLITICS_DIRECTIONAL
+  assets:
+  - ELECTION
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: politics
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 1440
+- name: CLIMATE_DIRECTIONAL
+  assets:
+  - WEATHER
+  - CLIMATE
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: climate
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: SPORTS_DIRECTIONAL
+  assets: []
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: sports
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 30
+- name: TECH_DIRECTIONAL
+  assets: []
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: tech
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 1440
+- name: SENTIMENT_CONTRARIAN_CRYPTO
+  category: crypto
+  assets:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
+  - DOGE
+  timeframes: []
+  archetype: contrarian
+  market_filter:
+    category: crypto
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 8
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 30
+- name: SENTIMENT_CONTRARIAN_MACRO
+  category: economics
+  assets: []
+  timeframes: []
+  archetype: contrarian
+  market_filter:
+    category: economics
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 1440
+- name: SENTIMENT_REGIME_SWITCH_CRYPTO
+  category: crypto
+  assets:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
+  - DOGE
+  timeframes: []
+  archetype: regime_switch
+  market_filter:
+    category: crypto
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 8
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 30
+- name: SENTIMENT_REGIME_SWITCH_FINANCIALS
+  category: financials
+  assets: []
+  timeframes: []
+  archetype: regime_switch
+  market_filter:
+    category: financials
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: SENTIMENT_VOL_BREAKOUT_CRYPTO
+  category: crypto
+  assets:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
+  - DOGE
+  timeframes:
+  - 1h
+  - 15m
+  archetype: vol_breakout
+  market_filter:
+    category: crypto
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 240
+    cutoff_minutes_before_expiry: 5
+- name: SENTIMENT_VOL_BREAKOUT_GLOBAL
+  category: all
+  assets: []
+  timeframes: []
+  archetype: vol_breakout
+  market_filter:
+    category: all
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 8
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 480
+    cutoff_minutes_before_expiry: 20
+- name: KALSHI_CATCH_ALL
+  category: all
+  archetype: directional
+  market_filter:
+    category: all
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 200
+  entry_window:
+    minutes_before_expiry: 60
+    cutoff_minutes_before_expiry: 5
+strike_selection_defaults:
+  # Global defaults for spot-to-strike distance thresholds.
+  # These are used when an agent doesn't have per-asset/timeframe overrides.
+  # Per-agent YAML blocks override these; these override hardcoded Python defaults.
+  max_spot_to_strike_pct: 0.08     # max |spot-strike|/strike (fraction)
+  target_spot_band_pct: 0.03       # preferred ATM band (fraction)
+  deep_otm_allowed: false
+  deep_otm_max_risk_pct: 0.005    # max risk per trade when deep OTM (0.5%)
+  rejection_log_throttle_seconds: 30  # throttle STRIKE_REJECT logs
+
+portfolio_risk:
+  # BANKROLL SCALING: All USD limits derived from merid.settings bankroll percentages.
+  # Set 0 (or omit) to auto-derive from KALSHI_PORTFOLIO_BANKROLL_CENTS × PCT env vars.
+  # Override env vars: KALSHI_PORTFOLIO_BANKROLL_CENTS, KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT, etc.
+  max_total_notional_usd: 0         # 0 = derive from settings (bankroll × 50%)
+  max_notional_per_asset_usd: 0     # 0 = derive from settings (bankroll × 16%)
+  max_open_markets: 50
+  max_daily_loss_usd: 0             # 0 = derive from settings (bankroll × 10%)
+  max_margin_utilization_pct: 0     # 0 = derive from settings (default 75%)
+  rebalance_check_interval_seconds: 30

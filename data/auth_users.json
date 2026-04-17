@@ -1,0 +1,18 @@
+[
+  {
+    "user_id": "user_0bf1466552aae1cd",
+    "username": "chris",
+    "email": "surflkcrzy@gmail.com",
+    "wallet_address": null,
+    "twitter_handle": null,
+    "password_hash": null,
+    "role": "viewer",
+    "created_at": 1772952597.7129116,
+    "last_login": 1772952597.7129116,
+    "referral_code": "CHRISBA36",
+    "referred_by": null,
+    "total_referrals": 0,
+    "is_active": true,
+    "is_verified": false
+  }
+]

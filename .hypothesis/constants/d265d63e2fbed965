@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\trading\agents\arbitrage_agent.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.0001, 0.0005, 0.001, 0.1, 0.3, 0.7, 0.85, 0.9, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 5000.0, 10000.0, 365, 10000, '451', '; ', 'avg_profit_per_trade', 'binance', 'binanceus', 'cross_venue', 'dex', 'fetch_funding_rate', 'filled', 'fundingRate', 'funding_rate', 'last', 'pending', 'restricted', 'total_executed', 'total_profit', 'win_rate']

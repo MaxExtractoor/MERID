@@ -1,0 +1,17 @@
+{
+  "gate_id": "infra_gate_2_20260402",
+  "timestamp": "2026-04-02T15:09:02.129698+00:00",
+  "duration_seconds": 1800,
+  "dry_run": false,
+  "samples_total": 60,
+  "samples_valid": 60,
+  "p95_min": 0.0,
+  "p95_max": 31.0,
+  "p95_avg": 14.7,
+  "degraded_count": 0,
+  "high_lag_profiles": 0,
+  "verdict": "PASS",
+  "passed": true,
+  "failures": [],
+  "sample_data": null
+}

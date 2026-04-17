@@ -1,0 +1,292 @@
+"""
+Crypto Spot ↔ Kalshi Configuration System — Architecture Diagram
+
+This diagram shows how the components fit together:
+"""
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │                    CRYPTO SURFACE ARCHITECTURE (2026-03-21)                 │
+# └─────────────────────────────────────────────────────────────────────────────┘
+
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │                          CANONICAL CONFIGURATION                            │
+# │                   (config/crypto_spot_kalshi_config.py)                    │
+# ├──────────────────────────────────────────────────────────────────────────────┤
+# │                                                                              │
+# │  ┌─────────────────────────┐    ┌──────────────────────┐                   │
+# │  │  CRYPTO_CONFIG          │    │ NEAR_SPOT_CONFIG      │                   │
+# │  ├─────────────────────────┤    ├──────────────────────┤                   │
+# │  │ BTC:                    │    │ (BTC, 15M): {        │                   │
+# │  │   spot: binance         │    │    pct_band: 2.0%    │                   │
+# │  │   15M: KXBTC15M         │    │    max_markets: 10   │                   │
+# │  │   1H: KXBTCH1           │    │ }                    │                   │
+# │  │   1D: KXBTCD1           │    │ (BTC, 1H): {...}     │                   │
+# │  │                         │    │ ...14 combos total...│                   │
+# │  │ ETH, SOL, XRP, DOGE...  │    │                      │                   │
+# │  │                         │    │                      │                   │
+# │  └─────────────────────────┘    └──────────────────────┘                   │
+# │                                                                              │
+# │  ┌─────────────────────────────────────────────────────────────────────┐   │
+# │  │  DATA STRUCTURES (DTOs)                                             │   │
+# │  ├─────────────────────────────────────────────────────────────────────┤   │
+# │  │ • KalshiMarketView: market_id, target_price, yes/no_price, status  │   │
+# │  │ • CryptoSurfaceEntry: symbol, timeframe, spot_price, markets[]    │   │
+# │  │ • CryptoSurfaceSnapshot: timestamp, entries[]                      │   │
+# │  └─────────────────────────────────────────────────────────────────────┘   │
+# │                                                                              │
+# │  ┌─────────────────────────────────────────────────────────────────────┐   │
+# │  │  FUNCTIONS                                                          │   │
+# │  ├─────────────────────────────────────────────────────────────────────┤   │
+# │  │ • build_crypto_surface(spot_snapshot, kalshi_markets)              │   │
+# │  │   → CryptoSurfaceSnapshot                                           │   │
+# │  │                                                                     │   │
+# │  │ • select_markets_near_spot(entry)                                  │   │
+# │  │   → List[KalshiMarketView] (filtered by % band)                   │   │
+# │  │                                                                     │   │
+# │  │ • log_markets_near_spot(entry, markets)                            │   │
+# │  │   → Audit logs with full context                                   │   │
+# │  └─────────────────────────────────────────────────────────────────────┘   │
+# │                                                                              │
+# └──────────────────────────────────────────────────────────────────────────────┘
+#                                    ▼
+#                           (initialization)
+#
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │                       ASYNC LOADER SERVICE (SEAM)                            │
+# │                 (services/crypto_surface_loader.py)                         │
+# ├──────────────────────────────────────────────────────────────────────────────┤
+# │                                                                              │
+# │  ┌─────────────────────────────────────────────────────────────────────┐   │
+# │  │  CryptoSurfaceLoader (Main Service)                                 │   │
+# │  ├─────────────────────────────────────────────────────────────────────┤   │
+# │  │                                                                     │   │
+# │  │  async update_surface():                                           │   │
+# │  │    1. Fetch spot prices via spot_feed_resolver()                  │   │
+# │  │    2. Fetch Kalshi markets via kalshi_market_fetcher()            │   │
+# │  │    3. Call build_crypto_surface()                                 │   │
+# │  │    4. Cache result                                                │   │
+# │  │    5. Notify subscribers                                          │   │
+# │  │                                                                     │   │
+# │  │  Methods:                                                          │   │
+# │  │    • get_latest_surface() → CryptoSurfaceSnapshot                │   │
+# │  │    • get_entry(sym, tf) → CryptoSurfaceEntry                     │   │
+# │  │    • get_near_spot_markets(sym, tf) → List[Market]               │   │
+# │  │    • subscribe_updates(callback) → None                          │   │
+# │  │    • run_forever() → (background loop)                           │   │
+# │  │                                                                     │   │
+# │  └─────────────────────────────────────────────────────────────────────┘   │
+# │                                                                              │
+# │  ┌─────────────────────────────────────────────────────────────────────┐   │
+# │  │  SurfaceLoaderConfig                                                │   │
+# │  ├─────────────────────────────────────────────────────────────────────┤   │
+# │  │ • update_interval_s: 10.0       (poll every N seconds)            │   │
+# │  │ • kalshi_category: "crypto"     (filter)                          │   │
+# │  │ • kalshi_frequencies: [15_min, hourly, daily]  (filter)           │   │
+# │  │ • max_age_s: 60.0               (staleness check)                 │   │
+# │  └─────────────────────────────────────────────────────────────────────┘   │
+# │                                                                              │
+# └──────────────────────────────────────────────────────────────────────────────┘
+#        ▲                                ▼
+#        │                         (updates every 10s)
+#        │
+#    SUBSCRIBE                     LOOP CYCLE:
+#   (agents)                    ┌─────────────────────┐
+#        │                      │ Fetch spot prices   │
+#        │                      ├─────────────────────┤
+#        │                      │ Fetch Kalshi mkts   │
+#        │                      ├─────────────────────┤
+#        │                      │ Build surface       │
+#        │                      ├─────────────────────┤
+#        │                      │ Notify subscribers  │
+#        │                      ├─────────────────────┤
+#        ▼                      │ Cache surface       │
+#                               └─────────────────────┘
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │                      AGENT INTEGRATION PATTERNS                              │
+# │              (agents/crypto_surface_agent_integration.py)                   │
+# ├──────────────────────────────────────────────────────────────────────────────┤
+# │                                                                              │
+# │  ┌─────────────────────┐  ┌──────────────────┐  ┌─────────────────┐        │
+# │  │  Btc15mMakerAgent   │  │  ScalperAgent    │  │  RiskMonitor    │        │
+# │  ├─────────────────────┤  ├──────────────────┤  ├─────────────────┤        │
+# │  │ MM Pattern:         │  │ Scalper Pattern: │  │ Risk Pattern:   │        │
+# │  │                     │  │                  │  │                 │        │
+# │  │ 1. Get entry        │  │ 1. Get entry     │  │ 1. Track pos.   │        │
+# │  │ 2. Select markets   │  │ 2. Filter:       │  │ 2. Verify band  │        │
+# │  │ 3. Generate quotes  │  │    • Expiry<5m   │  │ 3. Alert on     │        │
+# │  │ 4. Submit orders    │  │    • Dist<1%     │  │    drift        │        │
+# │  │                     │  │ 3. Market orders │  │                 │        │
+# │  │ Tight bands for     │  │ 4. Hold to exit  │  │ Ensures pos.    │        │
+# │  │ scalping venue      │  │                  │  │ stay near spot  │        │
+# │  │                     │  │                  │  │                 │        │
+# │  └─────────────────────┘  └──────────────────┘  └─────────────────┘        │
+# │                                                                              │
+# │  ┌──────────────────────────────────────────────────────────────────────┐  │
+# │  │  Agent Query Pattern:                                                │  │
+# │  │                                                                      │  │
+# │  │  entry = loader.get_entry("BTC", "15M")                            │  │
+# │  │  markets = select_markets_near_spot(entry)                         │  │
+# │  │  log_markets_near_spot(entry, markets)                             │  │
+# │  │                                                                      │  │
+# │  │  for market in markets:                                            │  │
+# │  │      submit_order(market.market_id, ...)                           │  │
+# │  └──────────────────────────────────────────────────────────────────────┘  │
+# │                                                                              │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │                          DATA FLOW EXAMPLE                                   │
+# ├──────────────────────────────────────────────────────────────────────────────┤
+# │                                                                              │
+# │  TIME: 10:55:38.517865                                                      │
+# │                                                                              │
+# │  SOURCES:                                                                    │
+# │  ┌─────────────────┐                ┌──────────────────────┐               │
+# │  │ Binance API     │                │ Kalshi API           │               │
+# │  ├─────────────────┤                ├──────────────────────┤               │
+# │  │ BTC: 70743.69   │                │ KXBTC15M:            │               │
+# │  │ ETH: 3850.12    │                │   - Market A (70.5k) │               │
+# │  │ SOL: 185.43     │                │   - Market B (71.0k) │               │
+# │  │ XRP: 2.45       │                │   - Market C (71.5k) │               │
+# │  │ DOGE: 0.10      │                │   - Market D (72.0k) │               │
+# │  └─────────────────┘                │ KXETH15M:            │               │
+# │         │                           │   - Market E (3.8k)  │               │
+# │         │                           │   ...                │               │
+# │         └───────────┬───────────────┘                      │               │
+# │                     ▼                                      │               │
+# │         ┌──────────────────────────┐                      │               │
+# │         │  CryptoSurfaceLoader     │                      │               │
+# │         │  update_surface()        │                      │               │
+# │         └──────────────────────────┘                      │               │
+# │                     ▼                                      │               │
+# │         ┌──────────────────────────────────────────────┐  │               │
+# │         │  CryptoSurfaceSnapshot                       │  │               │
+# │         ├──────────────────────────────────────────────┤  │               │
+# │         │ Entry: timestamp = 10:55:38.517865          │  │               │
+# │         │                                              │  │               │
+# │         │ [BTC-15M Entry]                              │  │               │
+# │         │   spot_price: 70743.69 (binance)             │  │               │
+# │         │   kalshi_series: KXBTC15M                    │  │               │
+# │         │   markets: [                                 │  │               │
+# │         │     {id: A, target: 70.5k, dist: 0.35%}    │  │               │
+# │         │     {id: B, target: 71.0k, dist: 0.36%}    │  │               │
+# │         │     {id: C, target: 71.5k, dist: 1.06%}    │  │               │
+# │         │     {id: D, target: 72.0k, dist: 1.74%}    │  │               │
+# │         │   ]                                          │  │               │
+# │         │                                              │  │               │
+# │         │ [ETH-15M Entry]                              │  │               │
+# │         │   spot_price: 3850.12 (binance)              │  │               │
+# │         │   ...                                        │  │               │
+# │         │                                              │  │               │
+# │         │ ...12 more entries (SOL, XRP, DOGE *2)...   │  │               │
+# │         └──────────────────────────────────────────────┘  │               │
+# │                     ▼                                      │               │
+# │         ┌──────────────────────────────────────────────┐  │               │
+# │         │  Agent Query: select_markets_near_spot()     │  │               │
+# │         ├──────────────────────────────────────────────┤  │               │
+# │         │ Input: entry = BTC-15M                       │  │               │
+# │         │ Config: band = ±2.0%, max = 10              │  │               │
+# │         │                                              │  │               │
+# │         │ Output: [Market A, Market B, Market C]       │  │               │
+# │         │         (filtered by distance ≤ 2.0%)        │  │               │
+# │         └──────────────────────────────────────────────┘  │               │
+# │                                                            │               │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │                    CONFIGURATION & VALIDATION                                │
+# ├──────────────────────────────────────────────────────────────────────────────┤
+# │                                                                              │
+# │  Consistency Check (run_self_test):                                         │
+# │                                                                              │
+# │  CRYPTO_CONFIG            NEAR_SPOT_CONFIG         Validation              │
+# │  ┌─────────────┐          ┌──────────────────┐     ┌─────────────────┐    │
+# │  │ 5 assets    │          │ 14 combos        │     │ ✓ Every combo   │    │
+# │  │ 14 combos   │   ──┬──→  │ with bands       │  ── │   has band      │    │
+# │  │             │    │      │                  │     │                 │    │
+# │  └─────────────┘    │      └──────────────────┘     │ ✓ Files are     │    │
+# │                     │                               │   consistent    │    │
+# │                     └───────────────────────────────┤                 │    │
+# │                                                     │ ✓ Can add new   │    │
+# │                                                     │   assets safely │    │
+# │                                                     └─────────────────┘    │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │                       EXAMPLE LOG OUTPUT                                     │
+# ├──────────────────────────────────────────────────────────────────────────────┤
+# │                                                                              │
+# │ 2026-03-21 10:55:38 [INFO] Crypto surface snapshot at 10:55:38:            │
+# │   14 asset/timeframe entries                                                │
+# │                                                                              │
+# │ 2026-03-21 10:55:38 [DEBUG]                                                 │
+# │   BTC-15M: spot=70743.69 (binance), 5 open markets, series=KXBTC15M       │
+# │   ETH-15M: spot=3850.12 (binance), 4 open markets, series=KXETH15M        │
+# │   ...                                                                       │
+# │                                                                              │
+# │ 2026-03-21 10:55:38 [INFO]                                                  │
+# │   Scanning 5 BTC-15M Kalshi markets within ±2.0% of spot 70743.69         │
+# │   (series=KXBTC15M, status=open, selector=mm_active_selection);            │
+# │   selected 4.                                                               │
+# │                                                                              │
+# │ 2026-03-21 10:55:38 [DEBUG]                                                 │
+# │   [1] KXBTC15M-A: target=70500.00, distance=0.35%, mid=0.4900              │
+# │   [2] KXBTC15M-B: target=71000.00, distance=0.36%, mid=0.5000              │
+# │   [3] KXBTC15M-C: target=71500.00, distance=1.06%, mid=0.5100              │
+# │   [4] KXBTC15M-D: target=72000.00, distance=1.74%, mid=0.5200              │
+# │                                                                              │
+# │ 2026-03-21 10:55:38 [INFO] MM tick: 4 orders for 4 near-spot mkts          │
+# │                                                                              │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+
+# ┌──────────────────────────────────────────────────────────────────────────────┐
+# │                    INTEGRATION SEQUENCE                                      │
+# ├──────────────────────────────────────────────────────────────────────────────┤
+# │                                                                              │
+# │  INIT:                                                                       │
+# │  ┌─────────────────────────────────────────────────────────────────────┐   │
+# │  │ 1. Backend service starts                                           │   │
+# │  │ 2. Creates CryptoSurfaceLoader(spot_fetcher, kalshi_fetcher)        │   │
+# │  │ 3. Registers agent callbacks: loader.subscribe_updates(agent.cb)    │   │
+# │  │ 4. Starts background loop: asyncio.create_task(loader.run_forever)  │   │
+# │  └─────────────────────────────────────────────────────────────────────┘   │
+# │                                                                              │
+# │  RUNTIME (every 10s):                                                       │
+# │  ┌─────────────────────────────────────────────────────────────────────┐   │
+# │  │ ┌────────────────────────────────────────────────────────────────┐ │   │
+# │  │ │ Loader tick()                                                  │ │   │
+# │  │ ├────────────────────────────────────────────────────────────────┤ │   │
+# │  │ │ 1. fetch spot_prices() → {"BTC": {...}, ...}                 │ │   │
+# │  │ │ 2. fetch kalshi_markets() → {"KXBTC15M": [...], ...}         │ │   │
+# │  │ │ 3. build_crypto_surface() → CryptoSurfaceSnapshot            │ │   │
+# │  │ │ 4. cache snapshot                                             │ │   │
+# │  │ │ 5. notify_subscribers(snapshot)                               │ │   │
+# │  │ └────────────────────────────────────────────────────────────────┘ │   │
+# │  │         │                                                             │   │
+# │  │         └──────────────────┬─────────────────┬──────────────────┐   │   │
+# │  │                            ▼                 ▼                  ▼   │   │
+# │  │                      ┌─────────────┐   ┌──────────────┐  ┌────────┐ │   │
+# │  │                      │ MM Agent CB │   │ Scalper CB   │  │ Risk CB│ │   │
+# │  │                      └─────────────┘   └──────────────┘  └────────┘ │   │
+# │  │                            │                 │              │       │   │
+# │  │                            ▼                 ▼              ▼       │   │
+# │  │                      ┌─────────────────────────────────────────┐   │   │
+# │  │                      │ Agent Logic:                            │   │   │
+# │  │                      │  entry = snapshot.get_entry(...)       │   │   │
+# │  │                      │  markets = select_near_spot(entry)     │   │   │
+# │  │                      │  for m in markets: trade()            │   │   │
+# │  │                      └─────────────────────────────────────────┘   │   │
+# │  │                                                                     │   │
+# │  └─────────────────────────────────────────────────────────────────────┘   │
+# │                                                                              │
+# │  EXIT:                                                                       │
+# │  ┌─────────────────────────────────────────────────────────────────────┐   │
+# │  │ • Graceful shutdown: cancel loader task, close positions            │   │
+# │  │ • Loader logs: "Surface loader cancelled"                           │   │
+# │  └─────────────────────────────────────────────────────────────────────┘   │
+# │                                                                              │
+# └──────────────────────────────────────────────────────────────────────────────┘

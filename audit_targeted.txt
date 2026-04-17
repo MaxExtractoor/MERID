@@ -1,0 +1,52 @@
+﻿.............FFFFFFF.F.............F.....                                [100%]
+================================== FAILURES ===================================
+_________ TestForecasterRegistry.test_default_forecasters_registered __________
+tests\test_forecasters.py:194: in setUp
+    _momentum_history.clear()
+E   NameError: name '_momentum_history' is not defined
+__________ TestForecasterRegistry.test_ensemble_logs_to_calibration ___________
+tests\test_forecasters.py:194: in setUp
+    _momentum_history.clear()
+E   NameError: name '_momentum_history' is not defined
+__________ TestForecasterRegistry.test_ensemble_probability_bounded ___________
+tests\test_forecasters.py:194: in setUp
+    _momentum_history.clear()
+E   NameError: name '_momentum_history' is not defined
+________________ TestForecasterRegistry.test_ensemble_to_dict _________________
+tests\test_forecasters.py:194: in setUp
+    _momentum_history.clear()
+E   NameError: name '_momentum_history' is not defined
+________ TestForecasterRegistry.test_ensemble_uses_calibration_weights ________
+tests\test_forecasters.py:194: in setUp
+    _momentum_history.clear()
+E   NameError: name '_momentum_history' is not defined
+__________ TestForecasterRegistry.test_predict_all_produces_ensemble __________
+tests\test_forecasters.py:194: in setUp
+    _momentum_history.clear()
+E   NameError: name '_momentum_history' is not defined
+_________________ TestForecasterRegistry.test_register_custom _________________
+tests\test_forecasters.py:194: in setUp
+    _momentum_history.clear()
+E   NameError: name '_momentum_history' is not defined
+_ TestConsensusCalibrationFeedback.test_no_calibration_falls_back_gracefully __
+tests\test_forecasters.py:378: in test_no_calibration_falls_back_gracefully
+    self.assertAlmostEqual(vote.trust, 1.0)  # Default trust
+E   AssertionError: 0.3 != 1.0 within 7 places (0.7 difference)
+___ TestKillSwitchAndLockdown.test_guard_simulates_when_global_mode_offline ___
+tests\risk\test_risk_limits.py:410: in test_guard_simulates_when_global_mode_offline
+    assert "offline" in decision.reason.lower()
+E   AssertionError: assert 'offline' in 'global mode mock'
+E    +  where 'global mode mock' = <built-in method lower of str object at 0x00000235CA9AAB50>()
+E    +    where <built-in method lower of str object at 0x00000235CA9AAB50> = 'Global mode mock'.lower
+E    +      where 'Global mode mock' = GuardDecision(status=<GuardDecisionStatus.SIMULATE: 'simulate'>, reason='Global mode mock', metadata={'venue': 'test_v...tional_usd': 5000.0, 'global_mode': 'mock', 'spectator_mode': False, 'runtime_allow_live': True, 'venue_mode': 'live'}).reason
+=========================== short test summary info ===========================
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_default_forecasters_registered
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_ensemble_logs_to_calibration
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_ensemble_probability_bounded
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_ensemble_to_dict
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_ensemble_uses_calibration_weights
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_predict_all_produces_ensemble
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_register_custom
+FAILED tests/test_forecasters.py::TestConsensusCalibrationFeedback::test_no_calibration_falls_back_gracefully
+FAILED tests/risk/test_risk_limits.py::TestKillSwitchAndLockdown::test_guard_simulates_when_global_mode_offline
+9 failed, 32 passed in 3.58s

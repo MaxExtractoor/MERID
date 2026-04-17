@@ -1,0 +1,131 @@
+MERID Track A — Kalshi / core contract backlog (freeze snapshot)
+================================================================
+Purpose: Epic-ready backlog. "Done" for each row = Done-when criteria + full
+`python -m pytest tests` green. Refresh failing node IDs after each full suite.
+
+Standard CI slice (also runs in GitHub Actions job kalshi-contract-pipeline):
+  python -m pytest \
+    tests/event_venues/kalshi \
+    tests/test_kalshi_crypto_multi_asset.py \
+    tests/test_execution_audit_regressions.py \
+    tests/core/test_celery_tasks.py \
+    tests/web/test_canonical_lifespan_and_tickers.py
+
+Quarantined legacy enhanced suites (Track B — not in Track A acceptance):
+  See tests/QUARANTINE_INDEX.txt (pytest default skips them).
+
+
+Cluster table (authoritative backlog)
+-------------------------------------
+Order | Cluster              | Done when
+------|----------------------|--------------------------------------------------
+1     | Shared plumbing      | get_circuit_breaker contract stable; retry_with_backoff
+      |                      | never double-passes max_retries; OperationResult +
+      |                      | CircuitBreaker shapes agreed. Spot-check with
+      |                      | `pytest --run-quarantine -m kalshi_enhanced` if
+      |                      | reviving enhanced path.
+2     | Product / API        | web.main: canonical app, _app_lifespan, export
+      | contracts            | compute_kalshi_ws_tickers. Kalshi: _resolve_tif
+      |                      | public home; VenueOrder/OrderIntent fields;
+      |                      | deployment/promotion messages vs tests aligned.
+3     | Execution / risk /   | BUG-02/03/08 + risk singleton match spec; universe
+      | signal               | API; RSA cache; rate limits; WS reconnect; settlement
+      |                      | poller; continuous trader multi-asset + anchored model;
+      |                      | risk callbacks/events; signal get_metrics (+ store);
+      |                      | agent mocks + AGENT_LLM_MODE if required.
+4     | Celery               | tests/core/test_celery_tasks.py 100% green.
+5     | Full tree            | `python -m pytest tests` green; update this file's
+      |                      | node list from that run.
+
+
+Failing test nodes — snapshot 2026-04-09 (pytest --lf + spot checks)
+--------------------------------------------------------------------
+Note: Enhanced client/manager/trading/adapter files were later quarantined; omit
+those from Track A unless un-quarantining. Remaining high-signal nodes:
+
+tests/api/test_mock_responses.py::test_mock_response_structure
+tests/api/test_mock_responses.py::test_mock_response_deterministic
+tests/api/test_mock_responses.py::test_llm_mode_logging
+
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestPromoteToShadow::test_promote_paper_to_shadow
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestPromoteToShadow::test_readiness_ready_accepted
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestPromoteToShadow::test_max_live_agents_blocks
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestPromoteToLive::test_promote_paper_to_live
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestPromoteToLive::test_shadow_to_live_with_enough_trades
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestPromoteToLive::test_is_live_true_after_promotion
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestPromoteToLive::test_shadow_counts_as_live
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestRollback::test_rollback_live_to_paper
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestRollback::test_rollback_increments_counter
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestAutoRollback::test_pf_below_threshold
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestAutoRollback::test_drawdown_above_threshold
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestAutoRollback::test_consecutive_losses
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestAutoRollback::test_no_rollback_when_ok
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestStatus::test_status_structure
+tests/event_venues/kalshi/test_kalshi_deployment.py::TestStatus::test_transition_log
+
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestKalshiMarketState::test_defaults
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestResolveTif::test_ioc_when_near_expiry
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestResolveTif::test_ioc_strips_expiration_ts_when_near_expiry
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestResolveTif::test_gtt_when_expiration_ts_provided
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestResolveTif::test_ioc_intent_stays_ioc_no_expiry
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestResolveTif::test_ioc_with_expiration_ts_drops_ts
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestResolveTif::test_unknown_tif_normalises_to_gtc
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestResolveTif::test_no_market_state_passes_through
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestVenueOrderExpirationTs::test_default_is_none
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestVenueOrderExpirationTs::test_can_set_gtt
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestOrderIntentExpirationTs::test_default_is_none
+tests/event_venues/kalshi/test_kalshi_market_state.py::TestOrderIntentExpirationTs::test_can_set
+
+tests/event_venues/kalshi/test_kalshi_rsa_signing.py::TestKalshiRSACacheIsolation::test_cache_invalidated_on_different_path
+tests/event_venues/kalshi/test_kalshi_universe.py::TestUniverseSingleton::test_singleton_returns_same_instance
+tests/event_venues/kalshi/test_market_candidate_trading_enrichment.py::test_compute_edge_on_filter_pipeline_candidate
+
+tests/event_venues/kalshi/test_rate_limits.py::TestRateLimitIntegration::test_client_uses_token_bucket_for_all_requests
+tests/event_venues/kalshi/test_rate_limits.py::TestRateLimitIntegration::test_429_handling_does_not_consume_extra_tokens
+
+tests/event_venues/kalshi/test_settlement_poller_boundary_probe.py::TestSettlementPollerIdempotencyBoundaries::test_eviction_boundary
+tests/event_venues/kalshi/test_settlement_poller_boundary_probe.py::TestSettlementPollerSizeBoundaries::test_processed_set_memory_pressure
+tests/event_venues/kalshi/test_settlement_poller_boundary_probe.py::TestSettlementPollerFailureModes::test_zero_lookback_window
+
+tests/event_venues/kalshi/test_ws_reconnect.py::TestKalshiWebSocketReconnect::test_reconnect_restores_subscriptions
+tests/event_venues/kalshi/test_ws_reconnect.py::TestKalshiWebSocketReconnect::test_reconnect_skips_orderbook_in_quotes
+tests/event_venues/kalshi/test_ws_reconnect.py::TestKalshiWebSocketAuth::test_connect_sends_kalshi_auth_headers
+
+tests/test_execution_audit_regressions.py::TestBUG02_GTCAcceptedNotFill::test_fill_accounting_guarded_by_accepted_only
+tests/test_execution_audit_regressions.py::TestBUG03_NoBernoulliPnL::test_open_exposure_delta_present
+tests/test_execution_audit_regressions.py::TestBUG04_SharedRiskSingleton::test_singleton_returns_same_object
+tests/test_execution_audit_regressions.py::TestBUG04_SharedRiskSingleton::test_singleton_is_same_across_two_agent_inits
+tests/test_execution_audit_regressions.py::TestBUG08_DegradedModeCap::test_constants_exist
+tests/test_execution_audit_regressions.py::TestBUG08_DegradedModeCap::test_trade_cap_is_positive_integer
+tests/test_execution_audit_regressions.py::TestBUG08_DegradedModeCap::test_wall_clock_limit_is_positive_float
+tests/test_execution_audit_regressions.py::TestBUG08_DegradedModeCap::test_trade_cap_enforcement_in_source
+tests/test_execution_audit_regressions.py::TestBUG08_DegradedModeCap::test_wall_clock_enforcement_in_source
+tests/test_execution_audit_regressions.py::TestBUG08_DegradedModeCap::test_agent_disabled_on_wall_clock_breach
+
+tests/test_kalshi_crypto_multi_asset.py::TestNoBtcOnlyRegression::test_no_hardcoded_btc_in_spot_fetch
+
+tests/test_risk_manager_hardening.py::TestRiskControllerCallbacks::test_callback_fires_on_kill
+tests/test_risk_manager_hardening.py::TestRiskControllerEvents::test_events_recorded
+
+tests/test_signal_layer.py::TestSignalLayerAPI::test_get_metrics
+
+tests/web/test_canonical_lifespan_and_tickers.py::test_repo_root_main_delegates_to_web_main_app
+tests/web/test_canonical_lifespan_and_tickers.py::test_canonical_lifespan_marker_runs_in_test_mode
+tests/web/test_canonical_lifespan_and_tickers.py::test_compute_kalshi_ws_tickers_non_empty_and_dedupes
+
+tests/core/test_celery_tasks.py::TestRunBacktest::test_run_backtest_success
+tests/core/test_celery_tasks.py::TestCalculateRiskMetrics::test_calculate_risk_metrics
+tests/core/test_celery_tasks.py::TestSyncMarketData::test_sync_market_data
+tests/core/test_celery_tasks.py::TestCleanupOldData::test_cleanup_old_data
+
+
+Progress log (local validation)
+-------------------------------
+2026-04-09: Standard CI slice (kalshi-contract-pipeline test list) green locally:
+  1242 passed, 108 skipped (quarantine). Fixes in this pass included: multi-asset
+  _run_cycle BTC literal audit (_CT_ASSET_KEY_FALLBACK + vol-benchmark stack key),
+  order_manager tests autouse kill-switch/venue-gate bypass, RSA cache test aligned
+  to instance-level BUG-3 cache, rate-limit integration initializes lazy bucket,
+  settlement poller mock FIFO eviction + zero lookback semantics, WS reconnect/auth
+  tests aligned to BUG-6 subscription fields and websockets additional_headers.
+  Full-tree ``py -3 -m pytest tests`` not re-run in this session — run for Cluster 5.

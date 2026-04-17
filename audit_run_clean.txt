@@ -1,0 +1,167 @@
+﻿
+=================================== ERRORS ====================================
+___________________ ERROR collecting tests/test_metrics.py ____________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_metrics.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_metrics.py:14: in <module>
+    from merid.metrics.calibration import (
+E   ImportError: cannot import name 'BrierStats' from 'merid.metrics.calibration' (unknown location)
+============================== warnings summary ===============================
+..\..\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\neo4j\_sync\driver.py:547
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\neo4j\_sync\driver.py:547: DeprecationWarning: Relying on Driver's destructor to close the session is deprecated. Please make sure to close the session. Use it as a context (`with` statement) or make sure to call `.close()` explicitly. Future versions of the driver will not close drivers automatically.
+    _deprecation_warn(
+
+tests\chaos\test_chaos_engineering.py:391
+  C:\Dev\MERID\tests\chaos\test_chaos_engineering.py:391: PytestUnknownMarkWarning: Unknown pytest.mark.chaos - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.chaos
+
+config\__init__.py:3
+  C:\Dev\MERID\config\__init__.py:3: DeprecationWarning: config.settings is deprecated ù use merid.settings instead (T-060)
+    from config.settings import (
+
+tests\consensus\test_consensus_coordinator.py:16
+  C:\Dev\MERID\tests\consensus\test_consensus_coordinator.py:16: PytestUnknownMarkWarning: Unknown pytest.mark.windows_flaky_async - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.windows_flaky_async
+
+..\..\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\great_expectations\data_context\types\base.py:1098
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\great_expectations\data_context\types\base.py:1098: ChangedInMarshmallow4Warning: `Number` field should not be instantiated. Use `Integer`, `Float`, or `Decimal` instead.
+    config_version: fields.Number = fields.Number(
+
+tests\e2e\test_circuit_breaker_chaos.py:29
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:29: PytestUnknownMarkWarning: Unknown pytest.mark.e2e - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.e2e
+
+tests\e2e\test_circuit_breaker_chaos.py:30
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:30: PytestUnknownMarkWarning: Unknown pytest.mark.safety_critical - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.safety_critical
+
+tests\e2e\test_circuit_breaker_chaos.py:292
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:292: PytestUnknownMarkWarning: Unknown pytest.mark.e2e - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.e2e
+
+tests\e2e\test_circuit_breaker_chaos.py:293
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:293: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_contracts.py:12
+  C:\Dev\MERID\tests\integration\test_contracts.py:12: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_contracts.py:36
+  C:\Dev\MERID\tests\integration\test_contracts.py:36: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_contracts.py:54
+  C:\Dev\MERID\tests\integration\test_contracts.py:54: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_kalshi_e2e_stress.py:65
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:65: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:90
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:90: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:105
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:105: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:120
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:120: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+testing\final_validation.py:29
+  C:\Dev\MERID\testing\final_validation.py:29: PytestCollectionWarning: cannot collect test class 'TestType' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+    class TestType(Enum):
+
+testing\final_validation.py:39
+  C:\Dev\MERID\testing\final_validation.py:39: PytestCollectionWarning: cannot collect test class 'TestStatus' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+    class TestStatus(Enum):
+
+tests\smoke\test_paper_trading_smoke.py:14
+  C:\Dev\MERID\tests\smoke\test_paper_trading_smoke.py:14: PytestUnknownMarkWarning: Unknown pytest.mark.smoke - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.smoke
+
+tests\smoke\test_paper_trading_smoke.py:149
+  C:\Dev\MERID\tests\smoke\test_paper_trading_smoke.py:149: PytestUnknownMarkWarning: Unknown pytest.mark.smoke - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.smoke
+
+tests\streaming\test_stream_bus.py:8
+  C:\Dev\MERID\tests\streaming\test_stream_bus.py:8: PytestUnknownMarkWarning: Unknown pytest.mark.windows_flaky_async - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.windows_flaky_async
+
+tests\test_capital_ladder.py:88
+  C:\Dev\MERID\tests\test_capital_ladder.py:88: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:96
+  C:\Dev\MERID\tests\test_capital_ladder.py:96: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:117
+  C:\Dev\MERID\tests\test_capital_ladder.py:117: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:125
+  C:\Dev\MERID\tests\test_capital_ladder.py:125: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:133
+  C:\Dev\MERID\tests\test_capital_ladder.py:133: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:149
+  C:\Dev\MERID\tests\test_capital_ladder.py:149: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:159
+  C:\Dev\MERID\tests\test_capital_ladder.py:159: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:167
+  C:\Dev\MERID\tests\test_capital_ladder.py:167: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:184
+  C:\Dev\MERID\tests\test_capital_ladder.py:184: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:192
+  C:\Dev\MERID\tests\test_capital_ladder.py:192: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:208
+  C:\Dev\MERID\tests\test_capital_ladder.py:208: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:224
+  C:\Dev\MERID\tests\test_capital_ladder.py:224: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:233
+  C:\Dev\MERID\tests\test_capital_ladder.py:233: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:243
+  C:\Dev\MERID\tests\test_capital_ladder.py:243: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:256
+  C:\Dev\MERID\tests\test_capital_ladder.py:256: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_dev_swarm_xdist_invariants.py:21
+  C:\Dev\MERID\tests\test_dev_swarm_xdist_invariants.py:21: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = [pytest.mark.devswarm, pytest.mark.auditor]
+
+tests\test_dev_swarm_xdist_invariants.py:21
+  C:\Dev\MERID\tests\test_dev_swarm_xdist_invariants.py:21: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = [pytest.mark.devswarm, pytest.mark.auditor]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+ERROR tests/test_metrics.py
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+38 warnings, 1 error in 61.01s (0:01:01)

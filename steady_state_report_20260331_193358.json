@@ -1,0 +1,17 @@
+{
+  "duration_seconds": 60,
+  "health_checks_total": 17,
+  "health_checks_healthy": 13,
+  "health_healthy_percentage": 76.47058823529412,
+  "status_503_after_ready_count": 0,
+  "lag_spikes_over_2s": 0,
+  "lag_spike_details": [],
+  "lag_statistics": {
+    "min_ms": 0,
+    "max_ms": 0,
+    "avg_ms": 0,
+    "p95_ms": 0,
+    "above_target_500ms_percentage": 0
+  },
+  "verification_passed": true
+}

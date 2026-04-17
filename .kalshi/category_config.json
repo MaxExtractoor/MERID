@@ -1,0 +1,14 @@
+{
+  "crypto": "live",
+  "economics": "live",
+  "financials": "live",
+  "politics": "live",
+  "climate": "live",
+  "sports": "read-only",
+  "tech": "live",
+  "culture": "read-only",
+  "science": "live",
+  "macro": "live",
+  "equities": "live",
+  "other": "live"
+}

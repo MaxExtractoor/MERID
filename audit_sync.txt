@@ -1,0 +1,65 @@
+﻿py : C:\Dev\MERID\testing\final_validation.py:29: PytestCollectionWarning: cannot collect test class 'TestType' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+At line:1 char:1
++ py -m pytest tests/test_metrics.py tests/test_forecasters.py tests/te ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Dev\MERID\te..._validation.py):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  class TestType(Enum):
+C:\Dev\MERID\testing\final_validation.py:39: PytestCollectionWarning: cannot collect test class 'TestStatus' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+  class TestStatus(Enum):
+............................................................FFFFFFF.F... [ 12%]
+..ssssssssssssssssss..........................FFFFFFFFFFF............... [ 24%]
+..s......ssssssss............FFFFF......sss..sFF.FF.F....FFFF.....F..... [ 36%]
+......F................................................................. [ 48%]
+........................................................................ [ 60%]
+......................................................................FF [ 72%]
+FF.........F........................ssssss........ssssss................ [ 84%]
+.ss..s...............F.........ssssss................................... [ 96%]
+....sssss..ssss....                                                      [100%]
+=========================== short test summary info ===========================
+SKIPPED [59] ..\..\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\python.py:149: async def function and no async plugin installed (see warnings)
+SKIPPED [1] tests\risk\test_agent_metrics.py:167: API router may not be available in all environments
+SKIPPED [1] tests\risk\test_agent_metrics.py:172: API router may not be available in all environments
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_default_forecasters_registered
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_ensemble_logs_to_calibration
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_ensemble_probability_bounded
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_ensemble_to_dict
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_ensemble_uses_calibration_weights
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_predict_all_produces_ensemble
+FAILED tests/test_forecasters.py::TestForecasterRegistry::test_register_custom
+FAILED tests/test_forecasters.py::TestConsensusCalibrationFeedback::test_no_calibration_falls_back_gracefully
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_get_stats - assert 401 ==...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_list_agents - assert 401 ...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_list_tasks_empty - assert...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_create_task - assert 401 ...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_create_task_validation_error
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_get_task_not_found - asse...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_cancel_task_not_found - a...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_health_check - assert 401...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_update_config - assert 40...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_update_config_no_changes
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_create_and_get_task - ass...
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_list_tasks_with_status_filter
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_get_task_from_history
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_get_running_task_duration
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_cancel_active_task
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_update_config_cost
+FAILED tests/test_dev_swarm.py::TestAPIShutdownAndSingleton::test_get_swarm_singleton_init
+FAILED tests/test_dev_swarm.py::TestAPIShutdownAndSingleton::test_shutdown_endpoint
+FAILED tests/test_dev_swarm.py::TestReadinessAuditor::test_all_checks_pass_in_current_repo
+FAILED tests/test_dev_swarm.py::TestReadinessAuditor::test_report_passed_property
+FAILED tests/test_dev_swarm.py::TestReadinessAuditor::test_create_drift_tasks_empty_when_passing
+FAILED tests/test_dev_swarm.py::TestReadinessAuditor::test_cli_entrypoint_exit_zero
+FAILED tests/test_dev_swarm.py::TestReadinessEndpoint::test_readiness_endpoint_returns_json
+FAILED tests/test_dev_swarm.py::TestReadinessEndpoint::test_readiness_endpoint_all_ok
+FAILED tests/test_dev_swarm.py::TestSLOTracking::test_record_and_load - asser...
+FAILED tests/test_dev_swarm.py::TestSLOEndpoint::test_slo_endpoint_returns_json
+FAILED tests/test_dev_swarm.py::TestCodebaseDriftEndpoint::test_codebase_drift_endpoint
+FAILED tests/test_dev_swarm.py::TestMarketHeatmapHelper::test_sector_map_coverage
+FAILED tests/test_dev_swarm.py::TestRouterRegistration::test_operator_router_in_main
+FAILED tests/test_dev_swarm.py::TestRouterRegistration::test_metrics_router_in_main
+FAILED tests/test_dev_swarm.py::TestRouterRegistration::test_market_data_router_in_main
+FAILED tests/test_dev_swarm.py::TestWebSocketMarketData::test_ws_router_registered_in_main
+FAILED tests/risk/test_risk_limits.py::TestKillSwitchAndLockdown::test_guard_simulates_when_global_mode_offline
+41 failed, 493 passed, 61 skipped in 1499.82s (0:24:59)

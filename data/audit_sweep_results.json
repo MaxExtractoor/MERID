@@ -1,0 +1,6026 @@
+{
+  "HARDCODED_SECRET": [
+    {
+      "file": "merid\\governance_notifier.py",
+      "line": 91,
+      "detail": "url = f\"https://api.telegram.org/bot{self.token}/sendMessage\""
+    },
+    {
+      "file": "merid\\governance_notifier.py",
+      "line": 276,
+      "detail": "_notifier.add_channel(TelegramChannel(token=tg_token, chat_id=tg_chat))"
+    },
+    {
+      "file": "merid\\settings.py",
+      "line": 45,
+      "detail": "NEO4J_PASSWORD: str = Field(default=\"change_me\", description=\"Neo4j password\")"
+    },
+    {
+      "file": "merid\\settings.py",
+      "line": 245,
+      "detail": "ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, description=\"Access token expiration\")"
+    },
+    {
+      "file": "merid\\whales.py",
+      "line": 105,
+      "detail": "spl_token_program: str = \"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA\""
+    },
+    {
+      "file": "merid\\whales.py",
+      "line": 295,
+      "detail": "with get_sentry_span(op=\"parse\", description=\"parse_token_update\"):"
+    },
+    {
+      "file": "merid\\whales.py",
+      "line": 311,
+      "detail": "amount = account_data.get(\"tokenAmount\", {}).get(\"uiAmount\")"
+    },
+    {
+      "file": "merid\\alerts\\webhook_client.py",
+      "line": 51,
+      "detail": "token, chat_id = _tg_creds()"
+    },
+    {
+      "file": "merid\\alerts\\webhook_client.py",
+      "line": 55,
+      "detail": "url = f\"https://api.telegram.org/bot{token}/sendMessage\""
+    },
+    {
+      "file": "merid\\blockchain\\compliance.py",
+      "line": 26,
+      "detail": "NOT_TOKEN_ISSUER = \"not_token_issuer\""
+    },
+    {
+      "file": "merid\\blockchain\\gateway.py",
+      "line": 221,
+      "detail": "async def get_balance(self, chain: str, address: str, asset: str = \"native\") -> Optional[TokenBalanc"
+    },
+    {
+      "file": "merid\\blockchain\\gateway.py",
+      "line": 234,
+      "detail": "balance = TokenBalance(chain=chain, address=address, asset=asset)"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 117,
+      "detail": "env_var_name=\"BINANCE_API_KEY\","
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 185,
+      "detail": "def rotate_key(self, key_id: str, service: str = \"secrets_manager\") -> bool:"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 206,
+      "detail": "def revoke_key(self, key_id: str, service: str = \"secrets_manager\", reason: str = \"\") -> bool:"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 250,
+      "detail": "env = SecretEnvironment.DEV"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 254,
+      "detail": "SecretEntry(key_id=\"binance-api\", venue=\"binance\", env_var_name=\"BINANCE_API_KEY\", permission=KeyPer"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 255,
+      "detail": "SecretEntry(key_id=\"binance-secret\", venue=\"binance\", env_var_name=\"BINANCE_API_SECRET\", permission="
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 256,
+      "detail": "SecretEntry(key_id=\"coinbase-api\", venue=\"coinbase\", env_var_name=\"COINBASE_API_KEY\", permission=Key"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 257,
+      "detail": "SecretEntry(key_id=\"coinbase-secret\", venue=\"coinbase\", env_var_name=\"COINBASE_API_SECRET\", permissi"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 258,
+      "detail": "SecretEntry(key_id=\"kraken-api\", venue=\"kraken\", env_var_name=\"KRAKEN_API_KEY\", permission=KeyPermis"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 259,
+      "detail": "SecretEntry(key_id=\"kraken-secret\", venue=\"kraken\", env_var_name=\"KRAKEN_PRIVATE_KEY\", permission=Ke"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 260,
+      "detail": "SecretEntry(key_id=\"okx-api\", venue=\"okx\", env_var_name=\"OKX_KEY\", permission=KeyPermission.TRADE),"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 261,
+      "detail": "SecretEntry(key_id=\"okx-secret\", venue=\"okx\", env_var_name=\"OKX_SECRET\", permission=KeyPermission.TR"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 262,
+      "detail": "SecretEntry(key_id=\"alpaca-api\", venue=\"alpaca\", env_var_name=\"ALPACA_API_KEY\", permission=KeyPermis"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 263,
+      "detail": "SecretEntry(key_id=\"alpaca-secret\", venue=\"alpaca\", env_var_name=\"ALPACA_API_SECRET\", permission=Key"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 264,
+      "detail": "SecretEntry(key_id=\"kalshi-api\", venue=\"kalshi\", env_var_name=\"KALSHI_API_KEY_ID\", permission=KeyPer"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 265,
+      "detail": "SecretEntry(key_id=\"kalshi-pk\", venue=\"kalshi\", env_var_name=\"KALSHI_PRIVATE_KEY_PATH\", permission=K"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 266,
+      "detail": "SecretEntry(key_id=\"helius-api\", venue=\"helius\", env_var_name=\"HELIUS_API_KEY\", permission=KeyPermis"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 267,
+      "detail": "SecretEntry(key_id=\"the-graph-api\", venue=\"the_graph\", env_var_name=\"THE_GRAPH_API_KEY\", permission="
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 268,
+      "detail": "SecretEntry(key_id=\"nansen-api\", venue=\"nansen\", env_var_name=\"NANSEN_API_KEY\", permission=KeyPermis"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 269,
+      "detail": "SecretEntry(key_id=\"polygon-api\", venue=\"polygon\", env_var_name=\"POLYGON_API_KEY\", permission=KeyPer"
+    },
+    {
+      "file": "merid\\blockchain\\secrets.py",
+      "line": 270,
+      "detail": "SecretEntry(key_id=\"finnhub-api\", venue=\"finnhub\", env_var_name=\"FINNHUB_API_KEY\", permission=KeyPer"
+    },
+    {
+      "file": "merid\\blockchain\\signing.py",
+      "line": 39,
+      "detail": "key_id: str = \"\"           # References a SecretEntry in SecretsManager"
+    },
+    {
+      "file": "merid\\blockchain\\signing.py",
+      "line": 150,
+      "detail": "signature = self._do_sign(request, secret_val)"
+    },
+    {
+      "file": "merid\\blockchain\\wallet.py",
+      "line": 128,
+      "detail": "key_id: str = \"\"       # References SecretsManager key_id for signing"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 173,
+      "detail": "self._read_tokens: float = self.read_rate"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 174,
+      "detail": "self._write_tokens: float = self.write_rate"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 180,
+      "detail": "self._read_tokens = min(self.read_rate, self._read_tokens + elapsed * self.read_rate)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 181,
+      "detail": "self._write_tokens = min(self.write_rate, self._write_tokens + elapsed * self.write_rate)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 187,
+      "detail": "tokens = self._write_tokens if is_write else self._read_tokens"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 197,
+      "detail": "wait = (1.0 - tokens) / rate if rate > 0 else 1.0"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 201,
+      "detail": "self._write_tokens = max(0, self._write_tokens - 1.0)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 203,
+      "detail": "self._read_tokens = max(0, self._read_tokens - 1.0)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 244,
+      "detail": "self._rate_limiter = KalshiTokenBucket(tier=rate_tier)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 297,
+      "detail": "self._auth_token = data.get(\"token\")"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 301,
+      "detail": "self._http_client.headers[\"Authorization\"] = f\"Bearer {self._auth_token}\""
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 347,
+      "detail": "_cached_key_id = self.config.api_key[:8] if self.config.api_key else \"unknown\""
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\models.py",
+      "line": 151,
+      "detail": "_password = _s.KALSHI_PASSWORD"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\models.py",
+      "line": 183,
+      "detail": "_api_key = _env_key or _api_key"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\models.py",
+      "line": 191,
+      "detail": "_api_key = _env_key or _api_key"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\volume_monitor.py",
+      "line": 476,
+      "detail": "url = f\"https://api.telegram.org/bot{token}/sendMessage\""
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\ws.py",
+      "line": 98,
+      "detail": "headers[\"Authorization\"] = f\"Bearer {self._auth_token}\""
+    },
+    {
+      "file": "merid\\event_venues\\polymarket\\client.py",
+      "line": 103,
+      "detail": "api_key=self.config.api_key,"
+    },
+    {
+      "file": "merid\\event_venues\\polymarket\\client.py",
+      "line": 104,
+      "detail": "api_secret=self.config.api_secret,"
+    },
+    {
+      "file": "merid\\execution\\router.py",
+      "line": 291,
+      "detail": "anti_rug = self._solana_guard.evaluate(metadata.get(\"token_context\", {}))"
+    },
+    {
+      "file": "merid\\execution\\executors\\cronos_onchain.py",
+      "line": 29,
+      "detail": "base, quote_token = symbol.split(\"-\")"
+    },
+    {
+      "file": "merid\\execution\\executors\\cronos_onchain.py",
+      "line": 30,
+      "detail": "price = await self._fetch_price(base, quote_token)"
+    },
+    {
+      "file": "merid\\execution\\executors\\cronos_onchain.py",
+      "line": 52,
+      "detail": "base, quote_token = symbol.split(\"-\")"
+    },
+    {
+      "file": "merid\\execution\\executors\\cronos_onchain.py",
+      "line": 55,
+      "detail": "exec_price = price or await self._fetch_price(base, quote_token)"
+    },
+    {
+      "file": "merid\\execution\\executors\\cronos_onchain.py",
+      "line": 71,
+      "detail": "usdc_balance = await self._token_balance(\"USDC\")"
+    },
+    {
+      "file": "merid\\execution\\executors\\fulcrom.py",
+      "line": 30,
+      "detail": "base, quote_token = symbol.split(\"-\")"
+    },
+    {
+      "file": "merid\\execution\\executors\\fulcrom.py",
+      "line": 64,
+      "detail": "base, quote_token = symbol.split(\"-\")"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 158,
+      "detail": "event_type=FlowEventType.TOKEN_LAUNCH.value,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 159,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 168,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 183,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 198,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 208,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 231,
+      "detail": "self._is_configured = bool(HELIUS_API_KEY or THE_GRAPH_API_KEY)"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 274,
+      "detail": "event_type=FlowEventType.TOKEN_LAUNCH.value,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 275,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 282,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 303,
+      "detail": "self._is_configured = bool(NANSEN_API_KEY or HELIUS_API_KEY)"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 351,
+      "detail": "all_events = _synth_flow_events(tokens, entities)"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 367,
+      "detail": "self._is_configured = bool(self._x_api_key)"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 418,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 428,
+      "detail": "chain=tok.chain, token_id=tok.id, token_symbol=tok.symbol,"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 447,
+      "detail": "self.token_detector = TokenDetector()"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 469,
+      "detail": "token_results = self.token_detector.detect_new_tokens(chain)"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 470,
+      "detail": "tokens = [t for t, _ in token_results]"
+    },
+    {
+      "file": "merid\\flow\\ingestion.py",
+      "line": 471,
+      "detail": "token_events = [e for _, evs in token_results for e in evs]"
+    },
+    {
+      "file": "merid\\flow\\models.py",
+      "line": 46,
+      "detail": "TOKEN_LAUNCH = \"token_launch\""
+    },
+    {
+      "file": "merid\\flow\\models.py",
+      "line": 177,
+      "detail": "base_token: str = \"\"  # e.g., \"SOL\", \"ETH\", \"USDC\""
+    },
+    {
+      "file": "merid\\flow\\risk.py",
+      "line": 34,
+      "detail": "max_per_token_pct: float = 0.02  # 2% of NAV"
+    },
+    {
+      "file": "merid\\flow\\risk.py",
+      "line": 49,
+      "detail": "min_flow_score: float = 30.0  # minimum flow score for a token to allow plans"
+    },
+    {
+      "file": "merid\\flow\\risk.py",
+      "line": 67,
+      "detail": "per_token_exposure: Dict[str, float] = field(default_factory=dict)"
+    },
+    {
+      "file": "merid\\flow\\risk.py",
+      "line": 183,
+      "detail": "token_exposure = self.state.per_token_exposure.get(token_id, 0.0)"
+    },
+    {
+      "file": "merid\\flow\\risk.py",
+      "line": 187,
+      "detail": "reason=f\"Per-token exposure ${token_exposure + size_usd:,.0f} exceeds ${self.config.max_per_token_us"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 187,
+      "detail": "pool_liq = token.best_liquidity_usd"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 224,
+      "detail": "price = token.current_price_usd"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 233,
+      "detail": "estimated_output_tokens=est_output,"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 246,
+      "detail": "sim = self.simulate(order, token)"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 250,
+      "detail": "token_id=order.token_id, token_symbol=order.token_symbol,"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 267,
+      "detail": "price = token.current_price_usd"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 272,
+      "detail": "filled_tokens = order.size_usd / max(fill_price, 1e-12)"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 280,
+      "detail": "token_id=order.token_id, token_symbol=order.token_symbol,"
+    },
+    {
+      "file": "merid\\flow\\sniper.py",
+      "line": 283,
+      "detail": "filled_tokens=filled_tokens,"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 346,
+      "detail": "\"SELECT * FROM flow_tokens WHERE id = ?\", (token_id,)"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 358,
+      "detail": "query = \"SELECT * FROM flow_tokens WHERE 1=1\""
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 373,
+      "detail": "cols = [d[0] for d in conn.execute(\"SELECT * FROM flow_tokens LIMIT 0\").description]"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 513,
+      "detail": "query += \" AND token_id = ?\""
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 534,
+      "detail": "token_id=d.get(\"token_id\", \"\"), token_symbol=d.get(\"token_symbol\", \"\"),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 537,
+      "detail": "size_usd=d.get(\"size_usd\", 0), size_tokens=d.get(\"size_tokens\", 0),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 582,
+      "detail": "\"SELECT * FROM flow_opinions WHERE token_id = ? ORDER BY timestamp DESC\","
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 594,
+      "detail": "id=d[\"id\"], agent_id=d[\"agent_id\"], token_id=d[\"token_id\"],"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 595,
+      "detail": "token_symbol=d.get(\"token_symbol\", \"\"), chain=d.get(\"chain\", \"solana\"),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 657,
+      "detail": "id=d[\"id\"], token_id=d[\"token_id\"], token_symbol=d.get(\"token_symbol\", \"\"),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 729,
+      "detail": "id=d[\"id\"], token_id=d[\"token_id\"], token_symbol=d.get(\"token_symbol\", \"\"),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 806,
+      "detail": "id=d[\"id\"], token_id=d[\"token_id\"], token_symbol=d.get(\"token_symbol\", \"\"),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 919,
+      "detail": "token_id=d.get(\"token_id\", \"\"), token_symbol=d.get(\"token_symbol\", \"\"),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 922,
+      "detail": "size_usd=d.get(\"size_usd\", 0), size_tokens=d.get(\"size_tokens\", 0),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 932,
+      "detail": "sim_output_tokens=d.get(\"sim_output_tokens\", 0),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 944,
+      "detail": "plan_id=d.get(\"plan_id\", \"\"), token_id=d.get(\"token_id\", \"\"),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 945,
+      "detail": "token_symbol=d.get(\"token_symbol\", \"\"),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 948,
+      "detail": "filled_tokens=d.get(\"filled_tokens\", 0),"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 1007,
+      "detail": "events = self.list_events(token_id=token_id, since_hours=24)"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 1025,
+      "detail": "opinions = self.list_opinions(token_id)"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 1037,
+      "detail": "meme_plans = [p for p in self.list_meme_plans() if p.token_id == token_id]"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 1038,
+      "detail": "whale_plans = [p for p in self.list_whale_plans() if p.token_id == token_id]"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 1039,
+      "detail": "kol_plans = [p for p in self.list_kol_plans() if p.token_id == token_id]"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 1087,
+      "detail": "tokens = self.list_tokens(chain=chain)"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 1090,
+      "detail": "c = self.build_token_consensus(tok.id)"
+    },
+    {
+      "file": "merid\\flow\\store.py",
+      "line": 1103,
+      "detail": "token_count = conn.execute("
+    },
+    {
+      "file": "merid\\llm\\client.py",
+      "line": 88,
+      "detail": "tokens_prompt = len(prompt.split())"
+    },
+    {
+      "file": "merid\\llm\\client.py",
+      "line": 128,
+      "detail": "tokens_completion = len(response_text.split())"
+    },
+    {
+      "file": "merid\\llm\\client.py",
+      "line": 135,
+      "detail": "tokens_prompt=tokens_prompt,"
+    },
+    {
+      "file": "merid\\llm\\client.py",
+      "line": 136,
+      "detail": "tokens_completion=tokens_completion,"
+    },
+    {
+      "file": "merid\\llm\\governance.py",
+      "line": 413,
+      "detail": "tokens_window += (row[\"tokens_prompt\"] or 0) + (row[\"tokens_completion\"] or 0)"
+    },
+    {
+      "file": "merid\\llm\\governance.py",
+      "line": 495,
+      "detail": "tokens_prompt=row[\"tokens_prompt\"],"
+    },
+    {
+      "file": "merid\\llm\\governance.py",
+      "line": 496,
+      "detail": "tokens_completion=row[\"tokens_completion\"],"
+    },
+    {
+      "file": "merid\\pipeline\\adapter.py",
+      "line": 106,
+      "detail": "_api_key = _s.KALSHI_API_KEY_ID"
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 32,
+      "detail": "api_key_env: str = \"\"              # Env var name for API key"
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 33,
+      "detail": "api_secret_env: str = \"\"           # Env var name for API secret"
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 63,
+      "detail": "api_key_env=\"KALSHI_API_KEY_ID\", api_secret_env=\"KALSHI_PRIVATE_KEY_PATH\","
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 70,
+      "detail": "api_key_env=\"BINANCE_API_KEY\", api_secret_env=\"BINANCE_API_SECRET\","
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 76,
+      "detail": "api_key_env=\"COINBASE_API_KEY\", api_secret_env=\"COINBASE_API_SECRET\","
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 81,
+      "detail": "api_key_env=\"KRAKEN_API_KEY\", api_secret_env=\"KRAKEN_PRIVATE_KEY\","
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 87,
+      "detail": "api_key_env=\"OKX_KEY\", api_secret_env=\"OKX_SECRET\","
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 94,
+      "detail": "api_key_env=\"ALPACA_API_KEY\", api_secret_env=\"ALPACA_API_SECRET\","
+    },
+    {
+      "file": "merid\\pipeline\\mode_manager.py",
+      "line": 99,
+      "detail": "api_key_env=\"IBKR_PAPER_TRADING_USERNAME\","
+    },
+    {
+      "file": "merid\\prediction\\fear_greed_context.py",
+      "line": 40,
+      "detail": "_CFGI_URL        = f\"https://api.cfgi.io/api/v1/data?token={_CFGI_KEY}\" if _CFGI_KEY else \"\""
+    },
+    {
+      "file": "merid\\prediction\\finnhub_context.py",
+      "line": 173,
+      "detail": "p[\"token\"] = _FINNHUB_KEY"
+    },
+    {
+      "file": "merid\\prediction\\mcp_market_feed.py",
+      "line": 192,
+      "detail": "headers[\"Authorization\"] = f\"Bearer {self._config.api_key}\""
+    },
+    {
+      "file": "merid\\sentiment\\news_ingestion_agent.py",
+      "line": 494,
+      "detail": "keywords = list(cfg.newsapi_keywords[:6])"
+    },
+    {
+      "file": "merid\\sentiment\\news_ingestion_agent.py",
+      "line": 518,
+      "detail": "asset_kws = list(acfg.newsapi_keywords[:4])"
+    },
+    {
+      "file": "merid\\sentiment\\news_ingestion_agent.py",
+      "line": 572,
+      "detail": "keywords = [title] + (list(cfg.newsapi_keywords[:3]) if cfg else [])"
+    },
+    {
+      "file": "merid\\sentiment\\news_sentiment.py",
+      "line": 38,
+      "detail": "_finbert_tokenizer = AutoTokenizer.from_pretrained(\"ProsusAI/finbert\")"
+    },
+    {
+      "file": "merid\\sentiment\\reddit_scraper.py",
+      "line": 157,
+      "detail": "auth = requests.auth.HTTPBasicAuth(self.client_id, self.client_secret)"
+    },
+    {
+      "file": "merid\\sentiment\\reddit_scraper.py",
+      "line": 172,
+      "detail": "token_data = resp.json()"
+    },
+    {
+      "file": "merid\\sentiment\\reddit_scraper.py",
+      "line": 173,
+      "detail": "self.access_token = token_data.get(\"access_token\")"
+    },
+    {
+      "file": "merid\\sentiment\\reddit_scraper.py",
+      "line": 174,
+      "detail": "expires_in = token_data.get(\"expires_in\", 3600)"
+    },
+    {
+      "file": "merid\\sentiment\\reddit_scraper.py",
+      "line": 175,
+      "detail": "self.token_expires = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 60)"
+    },
+    {
+      "file": "merid\\signals\\features.py",
+      "line": 222,
+      "detail": "key = f\"{chain}:{token}\""
+    },
+    {
+      "file": "merid\\signals\\features.py",
+      "line": 229,
+      "detail": "key = f\"{chain}:{token}\""
+    },
+    {
+      "file": "merid\\signals\\features.py",
+      "line": 234,
+      "detail": "points = self._synthetic_onchain(chain, token, now)"
+    },
+    {
+      "file": "merid\\signals\\features.py",
+      "line": 246,
+      "detail": "symbol=f\"{chain}:{token}\", domain=SignalDomain.ONCHAIN.value,"
+    },
+    {
+      "file": "core\\blockchain_arbitrage.py",
+      "line": 119,
+      "detail": "opportunity_id=f\"evm_{token_address[:8]}_{buy_chain}_{sell_chain}_{int(datetime.now().timestamp())}\""
+    },
+    {
+      "file": "core\\blockchain_arbitrage.py",
+      "line": 120,
+      "detail": "token_symbol=token_address[:8],"
+    },
+    {
+      "file": "core\\blockchain_arbitrage.py",
+      "line": 137,
+      "detail": "token=token_address[:8],"
+    },
+    {
+      "file": "core\\blockchain_arbitrage.py",
+      "line": 165,
+      "detail": "output_mint=self.solana.KNOWN_TOKENS[\"USDC\"].mint,"
+    },
+    {
+      "file": "core\\blockchain_arbitrage.py",
+      "line": 185,
+      "detail": "opportunity_id=f\"cross_{token_symbol}_{int(datetime.now().timestamp())}\","
+    },
+    {
+      "file": "core\\blockchain_arbitrage.py",
+      "line": 186,
+      "detail": "token_symbol=token_symbol,"
+    },
+    {
+      "file": "core\\blockchain_arbitrage.py",
+      "line": 204,
+      "detail": "token=token_symbol,"
+    },
+    {
+      "file": "core\\blockchain_arbitrage.py",
+      "line": 463,
+      "detail": "token=top.token_symbol,"
+    },
+    {
+      "file": "core\\blockchain_dex.py",
+      "line": 32,
+      "detail": "self.base_token = Web3.to_checksum_address(self.base_token)"
+    },
+    {
+      "file": "core\\blockchain_dex.py",
+      "line": 33,
+      "detail": "self.quote_token = Web3.to_checksum_address(self.quote_token)"
+    },
+    {
+      "file": "core\\blockchain_dex.py",
+      "line": 162,
+      "detail": "address=Web3.to_checksum_address(token_address),"
+    },
+    {
+      "file": "core\\blockchain_dex.py",
+      "line": 173,
+      "detail": "balance = token.functions.balanceOf(address).call()"
+    },
+    {
+      "file": "core\\blockchain_dex.py",
+      "line": 174,
+      "detail": "decimals = token.functions.decimals().call()"
+    },
+    {
+      "file": "core\\blockchain_dex.py",
+      "line": 205,
+      "detail": "path = [pair.base_token, pair.quote_token]"
+    },
+    {
+      "file": "core\\blockchain_dex.py",
+      "line": 280,
+      "detail": "approve_tx = token_in.functions.approve("
+    },
+    {
+      "file": "core\\blockchain_dex.py",
+      "line": 302,
+      "detail": "swap_tx = self.router.functions.swapExactTokensForTokens("
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 159,
+      "detail": "token_account = response.value[0]"
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 161,
+      "detail": "data = base64.b64decode(token_account.account.data[0])"
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 165,
+      "detail": "token_info = self.KNOWN_TOKENS.get(mint)"
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 166,
+      "detail": "decimals = token_info.decimals if token_info else 6"
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 171,
+      "detail": "self.logger.error(\"token_balance_error\", mint=mint, error=str(e))"
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 191,
+      "detail": "input_token = self.KNOWN_TOKENS.get(input_mint)"
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 192,
+      "detail": "decimals = input_token.decimals if input_token else 6"
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 215,
+      "detail": "output_token = self.KNOWN_TOKENS.get(output_mint)"
+    },
+    {
+      "file": "core\\blockchain_solana.py",
+      "line": 216,
+      "detail": "out_decimals = output_token.decimals if output_token else 6"
+    },
+    {
+      "file": "core\\codebase_drift_auditor.py",
+      "line": 228,
+      "detail": "fix_plan=\"Expand .gitignore to cover secrets, build artifacts, IDE configs\","
+    },
+    {
+      "file": "core\\compliance_report.py",
+      "line": 72,
+      "detail": "secrets_status: Dict[str, Any] = field(default_factory=dict)"
+    },
+    {
+      "file": "core\\compliance_report.py",
+      "line": 129,
+      "detail": "tracked = scan_for_tracked_secrets()"
+    },
+    {
+      "file": "core\\compliance_report.py",
+      "line": 176,
+      "detail": "secrets = build_secrets_status()"
+    },
+    {
+      "file": "core\\compliance_report.py",
+      "line": 193,
+      "detail": "if secrets.get(\"status\") == \"PASS\" and gitignore.get(\"status\") != \"ERROR\""
+    },
+    {
+      "file": "core\\compliance_report.py",
+      "line": 239,
+      "detail": "sec = report.secrets_status"
+    },
+    {
+      "file": "core\\constitution_enforcer.py",
+      "line": 28,
+      "detail": "SECRET_ACCESS = \"secret_access\""
+    },
+    {
+      "file": "core\\constitution_enforcer.py",
+      "line": 147,
+      "detail": "prohibited_actions=[\"execute_order\", \"access_secrets\", \"modify_limits\"],"
+    },
+    {
+      "file": "core\\constitution_enforcer.py",
+      "line": 162,
+      "detail": "prohibited_actions=[\"initiate_trade\", \"access_secrets\"],"
+    },
+    {
+      "file": "core\\constitution_enforcer.py",
+      "line": 176,
+      "detail": "prohibited_actions=[\"bypass_guard\", \"access_secrets_directly\"],"
+    },
+    {
+      "file": "core\\constitution_enforcer.py",
+      "line": 203,
+      "detail": "prohibited_actions=[\"initiate_trade\", \"change_parameters\", \"access_secrets\"],"
+    },
+    {
+      "file": "core\\data_permissions.py",
+      "line": 58,
+      "detail": "if policy.classification == DataClassification.SECRET and policy.mask_function:"
+    },
+    {
+      "file": "core\\data_permissions.py",
+      "line": 60,
+      "detail": "if policy.classification == DataClassification.SECRET:"
+    },
+    {
+      "file": "core\\defi_adapters.py",
+      "line": 186,
+      "detail": "route=[token_in, token_out],"
+    },
+    {
+      "file": "core\\defi_adapters.py",
+      "line": 275,
+      "detail": "route=[token_in, token_out],"
+    },
+    {
+      "file": "core\\dev_swarm.py",
+      "line": 676,
+      "detail": "description=\"[RG-01] Rotate all leaked secrets and purge from git history\","
+    },
+    {
+      "file": "core\\dev_swarm.py",
+      "line": 677,
+      "detail": "target_files=[\"kalshi_private_key.pem\", \".env\", \"config/credentials.yaml\", \"tests/test_secrets_guard"
+    },
+    {
+      "file": "core\\dev_swarm.py",
+      "line": 678,
+      "detail": "success_criteria=\"No secrets in git log; all API keys rotated and tested\","
+    },
+    {
+      "file": "core\\graph_service.py",
+      "line": 118,
+      "detail": "self.driver = GraphDatabase.driver(uri, auth=(user, password))"
+    },
+    {
+      "file": "core\\graph_service.py",
+      "line": 958,
+      "detail": "_graph_service = GraphService(uri, user, password, database)"
+    },
+    {
+      "file": "core\\llm_governance.py",
+      "line": 894,
+      "detail": "trace.output_tokens = output_tokens"
+    },
+    {
+      "file": "core\\llm_governance.py",
+      "line": 895,
+      "detail": "trace.total_tokens = trace.input_tokens + output_tokens"
+    },
+    {
+      "file": "core\\llm_governance.py",
+      "line": 975,
+      "detail": "total_tokens = sum(t.total_tokens for t in traces)"
+    },
+    {
+      "file": "core\\llm_governance.py",
+      "line": 1011,
+      "detail": "total_tokens=total_tokens,"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 103,
+      "detail": "share = lp_tokens / lp_supply"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 105,
+      "detail": "token0_value = token0_reserve * share"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 106,
+      "detail": "token1_value = token1_reserve * share * price_token1_in_token0"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 152,
+      "detail": "token0=str(token0_amount),"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 153,
+      "detail": "token1=str(token1_amount)"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 157,
+      "detail": "lp_tokens = (token0_amount * token1_amount).sqrt()"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 161,
+      "detail": "token0=pair.split(\"-\")[0],"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 162,
+      "detail": "token1=pair.split(\"-\")[1],"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 163,
+      "detail": "token0_amount=token0_amount,"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 164,
+      "detail": "token1_amount=token1_amount,"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 166,
+      "detail": "entry_price=token1_amount / token0_amount,"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 196,
+      "detail": "current_price = position.token1_amount / position.token0_amount"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 224,
+      "detail": "current_ratio = position.token1_amount / position.token0_amount"
+    },
+    {
+      "file": "core\\market_maker_crypto.py",
+      "line": 436,
+      "detail": "current_price = position.token1_amount / position.token0_amount"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 195,
+      "detail": "contract_verified = self._contract_analyzer.check_verified(token_address)"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 199,
+      "detail": "honeypot_detected = self._contract_analyzer.check_honeypot(token_address)"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 204,
+      "detail": "ownership = self._contract_analyzer.analyze_ownership(token_address)"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 210,
+      "detail": "volatility_24h = self._volatility_analyzer.calculate_volatility_24h(token_address)"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 222,
+      "detail": "token_address=token_address,"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 223,
+      "detail": "token_symbol=token_symbol,"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 266,
+      "detail": "safety_check = self.check_token_safety(token_address, \"MEME\")"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 332,
+      "detail": "allowed, reason = self._safety_filter.is_trade_allowed(token_address, size_usd)"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 339,
+      "detail": "if len(self._positions) >= limits.max_tokens_held:"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 343,
+      "detail": "daily_vol = self._daily_volume.get(token_address, 0.0)"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 358,
+      "detail": "allowed, reason = self.can_open_position(token_address, size_usd)"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 365,
+      "detail": "self._daily_volume[token_address] = self._daily_volume.get(token_address, 0.0) + size_usd"
+    },
+    {
+      "file": "core\\memecoin_safety.py",
+      "line": 373,
+      "detail": "size = self._positions[token_address]"
+    },
+    {
+      "file": "core\\merid_readiness_auditor.py",
+      "line": 316,
+      "detail": "secret_tracked = _git_tracks(\"kalshi_private_key.pem\") or _git_tracks(\".env.backup\")"
+    },
+    {
+      "file": "core\\merid_readiness_auditor.py",
+      "line": 411,
+      "detail": "cost_track = _file_contains(\"core/dev_swarm.py\", r\"daily_cost_usd|cost_per_token\")"
+    },
+    {
+      "file": "core\\merid_readiness_auditor.py",
+      "line": 553,
+      "detail": "s_secret_tracked = _git_tracks(\"kalshi_private_key.pem\") or _git_tracks(\".env.backup\")"
+    },
+    {
+      "file": "core\\merid_readiness_auditor.py",
+      "line": 556,
+      "detail": "s9_score = 0 if s_secret_tracked else (2 if (s_env and s_gitignore_ok) else (1 if s_env else 0))"
+    },
+    {
+      "file": "core\\prompt_eval.py",
+      "line": 139,
+      "detail": "tokens_used=len(response.split())  # Approximate"
+    },
+    {
+      "file": "core\\prompt_eval.py",
+      "line": 199,
+      "detail": "tokens_used=len(response.split())"
+    },
+    {
+      "file": "core\\resource_manager.py",
+      "line": 171,
+      "detail": "max_tokens=max_tokens,"
+    },
+    {
+      "file": "core\\resource_manager.py",
+      "line": 173,
+      "detail": "tokens=float(max_tokens)"
+    },
+    {
+      "file": "core\\resource_manager.py",
+      "line": 238,
+      "detail": "def acquire_rate_limit(self, name: str, tokens: int = 1) -> bool:"
+    },
+    {
+      "file": "core\\resource_manager.py",
+      "line": 255,
+      "detail": "limiter.tokens = min(limiter.max_tokens, limiter.tokens + refill_amount)"
+    },
+    {
+      "file": "core\\scraper_social.py",
+      "line": 65,
+      "detail": "client_secret=client_secret,"
+    },
+    {
+      "file": "core\\scraper_social.py",
+      "line": 230,
+      "detail": "bearer_token=bearer_token,"
+    },
+    {
+      "file": "core\\scraper_social.py",
+      "line": 232,
+      "detail": "consumer_secret=api_secret,"
+    },
+    {
+      "file": "core\\scraper_social.py",
+      "line": 233,
+      "detail": "access_token=access_token,"
+    },
+    {
+      "file": "core\\scraper_social.py",
+      "line": 234,
+      "detail": "access_token_secret=access_secret"
+    },
+    {
+      "file": "core\\scraper_social.py",
+      "line": 239,
+      "detail": "auth = tweepy.OAuthHandler(api_key, api_secret)"
+    },
+    {
+      "file": "core\\search_integration.py",
+      "line": 35,
+      "detail": "self.client = meilisearch.Client(self.host, self.api_key)"
+    },
+    {
+      "file": "core\\search_integration.py",
+      "line": 191,
+      "detail": "auth = (self.username, self.password)"
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 86,
+      "detail": "findings: List[SecretFinding] = field(default_factory=list)"
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 143,
+      "detail": "detail=f\"Known secret file tracked in git: {basename}\","
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 153,
+      "detail": "detail=f\"File matches secret pattern '{pattern}'\","
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 184,
+      "detail": "detail=f\"Content matches secret pattern: {pattern.pattern[:40]}...\","
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 199,
+      "detail": "result = scan_for_tracked_secrets(repo_root)"
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 215,
+      "detail": "detail=\"No vault/KMS integration detected (VAULT_ADDR, vault-config.hcl, AWS_SECRET_ACCESS_KEY)\","
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 242,
+      "detail": "\"covers_secrets\": len(covered) == len(required_patterns),"
+    },
+    {
+      "file": "core\\sentiment_nlp.py",
+      "line": 138,
+      "detail": "tokenizer=model_name,"
+    },
+    {
+      "file": "core\\solana_sniper.py",
+      "line": 158,
+      "detail": "token_mint=p[\"token_mint\"],"
+    },
+    {
+      "file": "core\\solana_sniper.py",
+      "line": 159,
+      "detail": "token_symbol=p[\"symbol\"],"
+    },
+    {
+      "file": "core\\solana_sniper.py",
+      "line": 161,
+      "detail": "token_pool=Decimal(str(p[\"token_pool\"])),"
+    },
+    {
+      "file": "core\\solana_sniper.py",
+      "line": 265,
+      "detail": "token=pool.token_symbol,"
+    },
+    {
+      "file": "core\\solana_sniper.py",
+      "line": 284,
+      "detail": "output_mint=pool.token_mint,"
+    },
+    {
+      "file": "core\\structured_prompts.py",
+      "line": 135,
+      "detail": "OpenAI(api_key=self.api_key, base_url=self.base_url)"
+    },
+    {
+      "file": "core\\swarm_market_maker.py",
+      "line": 253,
+      "detail": "token0_amount=Decimal(\"1000\"),"
+    },
+    {
+      "file": "core\\swarm_market_maker.py",
+      "line": 254,
+      "detail": "token1_amount=Decimal(\"1000\")"
+    },
+    {
+      "file": "core\\swarm_sniper.py",
+      "line": 83,
+      "detail": "self.logger.warning(\"trade_rejected_safety\", token=token_mint[:8])"
+    },
+    {
+      "file": "core\\swarm_sniper.py",
+      "line": 100,
+      "detail": "result = await self._execute_snipe(token_mint, amount)"
+    },
+    {
+      "file": "core\\swarm_sniper.py",
+      "line": 107,
+      "detail": "self.logger.info(\"executing_snipe\", token=token[:8], amount=str(amount))"
+    },
+    {
+      "file": "core\\telegram_bot.py",
+      "line": 92,
+      "detail": "self.application = Application.builder().token(self.bot_token).build()"
+    },
+    {
+      "file": "core\\telegram_bot.py",
+      "line": 236,
+      "detail": "self.bot = Bot(token=self.bot_token)"
+    },
+    {
+      "file": "core\\venue_wrapper.py",
+      "line": 149,
+      "detail": "self.tokens = self.config.burst_size"
+    },
+    {
+      "file": "core\\x402_payments.py",
+      "line": 226,
+      "detail": "access_token = hashlib.sha256("
+    },
+    {
+      "file": "core\\x402_payments.py",
+      "line": 237,
+      "detail": "access_token=access_token,"
+    },
+    {
+      "file": "core\\x402_payments.py",
+      "line": 243,
+      "detail": "self._access_tokens[request.resource_url] = access_token"
+    },
+    {
+      "file": "core\\x402_payments.py",
+      "line": 265,
+      "detail": "token = self._access_tokens.get(url)"
+    },
+    {
+      "file": "core\\x402_payments.py",
+      "line": 301,
+      "detail": "headers[\"Authorization\"] = f\"L402 {token}\""
+    },
+    {
+      "file": "core\\xstocks_adapters.py",
+      "line": 23,
+      "detail": "TOKENIZED_EQUITY = \"tokenized_equity\""
+    },
+    {
+      "file": "core\\xstocks_adapters.py",
+      "line": 86,
+      "detail": "asset = TokenizedAsset("
+    },
+    {
+      "file": "core\\xstocks_adapters.py",
+      "line": 190,
+      "detail": "asset = TokenizedAsset("
+    },
+    {
+      "file": "core\\xstocks_adapters.py",
+      "line": 194,
+      "detail": "asset_type=AssetType.TOKENIZED_EQUITY,"
+    },
+    {
+      "file": "core\\xstocks_adapters.py",
+      "line": 326,
+      "detail": "self._equity_adapter = TokenizedEquityAdapter()"
+    },
+    {
+      "file": "core\\xstocks_adapters.py",
+      "line": 367,
+      "detail": "elif preferred_type == AssetType.TOKENIZED_EQUITY:"
+    },
+    {
+      "file": "core\\xstocks_adapters.py",
+      "line": 382,
+      "detail": "elif asset_type == AssetType.TOKENIZED_EQUITY:"
+    },
+    {
+      "file": "core\\venues\\alpaca_adapter.py",
+      "line": 75,
+      "detail": "api_key=self.api_key,"
+    },
+    {
+      "file": "core\\venues\\alpaca_adapter.py",
+      "line": 76,
+      "detail": "secret_key=self.api_secret,"
+    },
+    {
+      "file": "core\\venues\\coinbase_advanced_adapter.py",
+      "line": 81,
+      "detail": "sig = _sign_request(self.api_secret, ts, method, path, body)"
+    },
+    {
+      "file": "trading\\polymarket_adapter.py",
+      "line": 95,
+      "detail": "tokens = market.get(\"tokens\", [])"
+    },
+    {
+      "file": "trading\\adapters\\coinbase.py",
+      "line": 38,
+      "detail": "config[\"password\"] = self.passphrase"
+    },
+    {
+      "file": "trading\\adapters\\pumpfun.py",
+      "line": 28,
+      "detail": "token_address = request.metadata.get(\"token_address\") or request.metadata.get(\"mint\")"
+    },
+    {
+      "file": "trading\\adapters\\pumpfun.py",
+      "line": 32,
+      "detail": "token_info = self._fetch_last_trade(token_address)"
+    },
+    {
+      "file": "trading\\adapters\\pumpfun.py",
+      "line": 33,
+      "detail": "executed_price = token_info.get(\"price_sol\", 0.0)"
+    },
+    {
+      "file": "trading\\adapters\\pumpfun.py",
+      "line": 46,
+      "detail": "symbol=request.symbol or token_address,"
+    },
+    {
+      "file": "trading\\adapters\\pumpfun.py",
+      "line": 56,
+      "detail": "resp = self._http.get(f\"{self.api_base}/trades/token/{token_address}\", params={\"limit\": 1})"
+    },
+    {
+      "file": "trading\\guards\\trading_guard.py",
+      "line": 327,
+      "detail": "max_token_risk: TokenRisk = TokenRisk.MEDIUM"
+    },
+    {
+      "file": "trading\\guards\\trading_guard.py",
+      "line": 385,
+      "detail": "token_risk = metadata[\"token_risk\"]"
+    },
+    {
+      "file": "trading\\guards\\trading_guard.py",
+      "line": 390,
+      "detail": "token_risk_enum = token_risk if isinstance(token_risk, TokenRisk) else TokenRisk(token_risk)"
+    },
+    {
+      "file": "trading\\guards\\trading_guard.py",
+      "line": 392,
+      "detail": "token_risk_enum = TokenRisk.HIGH"
+    },
+    {
+      "file": "trading\\guards\\trading_guard.py",
+      "line": 397,
+      "detail": "ranking = [TokenRisk.SAFE, TokenRisk.LOW, TokenRisk.MEDIUM, TokenRisk.HIGH, TokenRisk.EXTREME]"
+    },
+    {
+      "file": "trading\\integrations\\alpaca_client.py",
+      "line": 39,
+      "detail": "key, secret = _resolve_credentials()"
+    },
+    {
+      "file": "trading\\perp\\base.py",
+      "line": 85,
+      "detail": "self.use_mock = use_mock or not self.api_key"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 553,
+      "detail": "token = set_correlation_id(cid)"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 615,
+      "detail": "provided = request.headers.get(\"x-api-key\") or request.query_params.get(\"api_key\")"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 664,
+      "detail": "await websocket.close(code=1008, reason=\"Token required\")"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 675,
+      "detail": "user = token[:8] + \"...\" if token and len(token) > 8 else \"anonymous\""
+    },
+    {
+      "file": "web\\main.py",
+      "line": 1281,
+      "detail": "_: None = Depends(_require_api_key),"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 1300,
+      "detail": "async def simulate_payment(payload: PaymentRequest, _: None = Depends(_require_api_key)):"
+    },
+    {
+      "file": "web\\websocket_factory.py",
+      "line": 130,
+      "detail": "await websocket.close(code=1008, reason=\"Token required\")"
+    },
+    {
+      "file": "web\\websocket_factory.py",
+      "line": 140,
+      "detail": "user = token[:8] + \"...\" if token and len(token) > 8 else \"anonymous\""
+    },
+    {
+      "file": "web\\api\\assistant_api.py",
+      "line": 248,
+      "detail": "tokens_prompt=len(req.query.split()),"
+    },
+    {
+      "file": "web\\api\\assistant_api.py",
+      "line": 249,
+      "detail": "tokens_completion=len(answer.split()),"
+    },
+    {
+      "file": "web\\api\\auth.py",
+      "line": 37,
+      "detail": "password: str = Field(..., min_length=8)"
+    },
+    {
+      "file": "web\\api\\auth.py",
+      "line": 155,
+      "detail": "password=request.password"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 144,
+      "detail": "tokens = data[\"tokens\"]"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 150,
+      "detail": "tok_events = [e for e in events if e.token_id == tok.id]"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 203,
+      "detail": "token_summaries.sort(key=lambda x: x[\"flow_score\"], reverse=True)"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 223,
+      "detail": "tokens = store.list_tokens(chain=chain)"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 249,
+      "detail": "tokens = store.list_tokens(chain=chain)"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 268,
+      "detail": "consensus = store.build_token_consensus(token_id)"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 273,
+      "detail": "raise HTTPException(status_code=404, detail=f\"Token {token_id} not found\")"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 304,
+      "detail": "token_id=token_id, entity_id=entity_id,"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 316,
+      "detail": "events = [e for e in events if e.token_id == token_id]"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 393,
+      "detail": "agent_id=req.agent_id, token_id=req.token_id,"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 394,
+      "detail": "token_symbol=req.token_symbol, chain=req.chain,"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 413,
+      "detail": "token_id=req.token_id, token_symbol=req.token_symbol,"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 435,
+      "detail": "token_id=req.token_id, token_symbol=req.token_symbol,"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 458,
+      "detail": "token_id=req.token_id, token_symbol=req.token_symbol,"
+    },
+    {
+      "file": "web\\api\\intelligence.py",
+      "line": 88,
+      "detail": "url = \"https://cryptopanic.com/api/v1/posts/?auth_token=free&public=true\""
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 4765,
+      "detail": "token = secrets.token_hex(8)"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 4766,
+      "detail": "_CONFIRM_TOKENS[token] = (action, _time.monotonic() + _CONFIRM_TTL)"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 4768,
+      "detail": "expired = [t for t, (_, exp) in _CONFIRM_TOKENS.items() if _time.monotonic() > exp]"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 4854,
+      "detail": "confirm_token = body.get(\"confirm_token\", \"\")"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 4856,
+      "detail": "token = _issue_confirm_token(\"set_trade_mode_live\")"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 4869,
+      "detail": "detail=\"Invalid or expired confirm_token. Request a new one.\","
+    },
+    {
+      "file": "web\\api\\kalshi_grid_api.py",
+      "line": 229,
+      "detail": "write_tokens = rate_limits_raw.get(\"write\", 10)"
+    },
+    {
+      "file": "web\\api\\kalshi_rate_limit.py",
+      "line": 40,
+      "detail": "self.tokens_per_second = tokens_per_second"
+    },
+    {
+      "file": "web\\api\\kalshi_rate_limit.py",
+      "line": 44,
+      "detail": "def consume(self, tokens: float = 1.0) -> bool:"
+    },
+    {
+      "file": "web\\api\\kalshi_rate_limit.py",
+      "line": 48,
+      "detail": "self.tokens = min(self.max_tokens, self.tokens + elapsed * self.tokens_per_second)"
+    },
+    {
+      "file": "web\\api\\kalshi_rate_limit.py",
+      "line": 60,
+      "detail": "self.tokens = min(self.max_tokens, self.tokens + elapsed * self.tokens_per_second)"
+    },
+    {
+      "file": "web\\api\\kalshi_rate_limit.py",
+      "line": 83,
+      "detail": "self.tokens_per_second = max_requests / window_seconds"
+    },
+    {
+      "file": "web\\api\\kalshi_rate_limit.py",
+      "line": 101,
+      "detail": "self._buckets[key] = TokenBucket("
+    },
+    {
+      "file": "web\\api\\kalshi_rate_limit.py",
+      "line": 102,
+      "detail": "max_tokens=self.burst_size,"
+    },
+    {
+      "file": "web\\api\\kalshi_rate_limit.py",
+      "line": 103,
+      "detail": "tokens_per_second=self.tokens_per_second,"
+    },
+    {
+      "file": "web\\api\\llm_governance_api.py",
+      "line": 112,
+      "detail": "tokens_prompt=req.tokens_prompt,"
+    },
+    {
+      "file": "web\\api\\llm_governance_api.py",
+      "line": 113,
+      "detail": "tokens_completion=req.tokens_completion,"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 18,
+      "detail": "expected = capabilities.moat_service_token"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 22,
+      "detail": "detail=\"Moat service token not configured\","
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 27,
+      "detail": "raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=\"Missing token\")"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 29,
+      "detail": "token = auth_header.split(\" \", 1)[1]"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 31,
+      "detail": "raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=\"Invalid token\")"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 39,
+      "detail": "async def moat_status(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 47,
+      "detail": "_: None = Depends(_require_service_token),"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 55,
+      "detail": "async def moat_stop(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 62,
+      "detail": "async def moat_measure(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\api\\moat.py",
+      "line": 76,
+      "detail": "_: None = Depends(_require_service_token),"
+    },
+    {
+      "file": "web\\api\\modes.py",
+      "line": 95,
+      "detail": "user_id = \"user\"  # In real implementation, extract from auth token"
+    },
+    {
+      "file": "web\\api\\operator_endpoints.py",
+      "line": 87,
+      "detail": "raise HTTPException(status_code=401, detail=\"Missing operator token\")"
+    },
+    {
+      "file": "web\\api\\operator_endpoints.py",
+      "line": 88,
+      "detail": "token = auth_header.split(\" \", 1)[1]"
+    },
+    {
+      "file": "web\\api\\operator_endpoints.py",
+      "line": 90,
+      "detail": "raise HTTPException(status_code=403, detail=\"Invalid operator token\")"
+    },
+    {
+      "file": "web\\api\\production_status.py",
+      "line": 261,
+      "detail": "if not api_key or api_key == 'change_me':"
+    },
+    {
+      "file": "web\\api\\production_status.py",
+      "line": 311,
+      "detail": "if not api_key or api_key == 'change_me':"
+    },
+    {
+      "file": "web\\api\\production_status.py",
+      "line": 316,
+      "detail": "f\"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM&apikey={api_key}\","
+    },
+    {
+      "file": "web\\api\\production_status.py",
+      "line": 453,
+      "detail": "if not api_key or api_key == 'change_me':"
+    },
+    {
+      "file": "web\\api\\production_status.py",
+      "line": 515,
+      "detail": "if not api_key or api_key == 'change_me':"
+    },
+    {
+      "file": "web\\api\\production_status.py",
+      "line": 656,
+      "detail": "driver = GraphDatabase.driver(uri, auth=(user, password))"
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 77,
+      "detail": "risk_filter = TokenRisk(risk_level)"
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 93,
+      "detail": "risk_level, alert = engine.analyze_token("
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 94,
+      "detail": "token_address=request.token_address,"
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 95,
+      "detail": "token_symbol=request.token_symbol,"
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 118,
+      "detail": "token_address=request.token_address,"
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 119,
+      "detail": "token_name=request.token_name,"
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 120,
+      "detail": "token_symbol=request.token_symbol,"
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 161,
+      "detail": "token_address=token_address,"
+    },
+    {
+      "file": "web\\api\\sniping.py",
+      "line": 196,
+      "detail": "token_address=token_address,"
+    },
+    {
+      "file": "web\\api\\trading_suite.py",
+      "line": 319,
+      "detail": "await websocket.close(code=1008, reason=\"Token required\")"
+    },
+    {
+      "file": "web\\api\\trading_suite.py",
+      "line": 325,
+      "detail": "user = token[:8] + \"...\" if token and len(token) > 8 else \"anonymous\""
+    },
+    {
+      "file": "web\\api\\wallet.py",
+      "line": 107,
+      "detail": "raise HTTPException(status_code=401, detail=\"Invalid password\")"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 31,
+      "detail": "expected = capabilities.x_bot_service_token"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 35,
+      "detail": "detail=\"X bot service token not configured\","
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 40,
+      "detail": "raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=\"Missing token\")"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 42,
+      "detail": "token = auth_header.split(\" \", 1)[1]"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 46,
+      "detail": "raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=\"Invalid token\")"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 50,
+      "detail": "async def get_x_status(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 139,
+      "detail": "async def get_x_portfolio(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 172,
+      "detail": "async def get_x_risk(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 231,
+      "detail": "async def get_x_incidents(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 237,
+      "detail": "async def get_x_social_intel(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\api\\x_bot.py",
+      "line": 249,
+      "detail": "async def get_x_help(_: None = Depends(_require_service_token)) -> Dict[str, Any]:"
+    },
+    {
+      "file": "web\\react\\src\\utils\\jwtRotation.py",
+      "line": 46,
+      "detail": "access_token = sign_access(payload)"
+    },
+    {
+      "file": "web\\react\\src\\utils\\jwtRotation.py",
+      "line": 47,
+      "detail": "refresh_token = create_refresh_token(payload)"
+    },
+    {
+      "file": "agents\\telegram_agent.py",
+      "line": 54,
+      "detail": "self.bot = Bot(token=self.bot_token)"
+    },
+    {
+      "file": "agents\\twitter_agent.py",
+      "line": 71,
+      "detail": "bearer_token=self.bearer_token,"
+    },
+    {
+      "file": "agents\\twitter_agent.py",
+      "line": 72,
+      "detail": "consumer_key=self.api_key,"
+    },
+    {
+      "file": "agents\\twitter_agent.py",
+      "line": 73,
+      "detail": "consumer_secret=self.api_secret,"
+    },
+    {
+      "file": "agents\\twitter_agent.py",
+      "line": 74,
+      "detail": "access_token=self.access_token,"
+    },
+    {
+      "file": "agents\\twitter_agent.py",
+      "line": 75,
+      "detail": "access_token_secret=self.access_token_secret,"
+    },
+    {
+      "file": "agents\\polymarket\\graphql_scanner.py",
+      "line": 32,
+      "detail": "tokens = market.get(\"tokens\", [])"
+    },
+    {
+      "file": "agents\\polymarket\\graphql_scanner.py",
+      "line": 37,
+      "detail": "yes_price = float(yes_token[\"price\"])"
+    },
+    {
+      "file": "agents\\polymarket\\graphql_scanner.py",
+      "line": 38,
+      "detail": "no_price = float(no_token[\"price\"])"
+    },
+    {
+      "file": "agents\\polymarket\\graphql_scanner.py",
+      "line": 64,
+      "detail": "yes_price = float(yes_token[\"price\"]) if yes_token else 0.0"
+    },
+    {
+      "file": "execution\\fix_feed.py",
+      "line": 442,
+      "detail": "fields[554] = self.config.password  # Password"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 223,
+      "detail": "token_usage=token_usage,"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 312,
+      "detail": "total_token_usage=total_token_usage,"
+    },
+    {
+      "file": "swarm\\cost_optimizer.py",
+      "line": 39,
+      "detail": "if cheaper.cost_per_token_usd < expensive.cost_per_token_usd and cheaper.success_rate >= min_success"
+    },
+    {
+      "file": "swarm\\federated_learning.py",
+      "line": 354,
+      "detail": "update_id = f\"update_{int(time.time() * 1000)}_{secrets.token_hex(4)}\""
+    },
+    {
+      "file": "swarm\\gamified_security.py",
+      "line": 28,
+      "detail": "SCAM_TOKEN_DETECTION = \"scam_token_detection\""
+    },
+    {
+      "file": "swarm\\gamified_security.py",
+      "line": 76,
+      "detail": "reward_tokens: Decimal = Decimal(\"0\")"
+    },
+    {
+      "file": "swarm\\gamified_security.py",
+      "line": 123,
+      "detail": "reward_tokens: Decimal = Decimal(\"0\")"
+    },
+    {
+      "file": "swarm\\gamified_security.py",
+      "line": 234,
+      "detail": "quest_type=QuestType.SCAM_TOKEN_DETECTION,"
+    },
+    {
+      "file": "swarm\\gamified_security.py",
+      "line": 235,
+      "detail": "title=\"Scam Token Hunter\","
+    },
+    {
+      "file": "swarm\\gamified_security.py",
+      "line": 270,
+      "detail": "reward_tokens: Decimal = Decimal(\"0\"),"
+    },
+    {
+      "file": "swarm\\gamified_security.py",
+      "line": 288,
+      "detail": "reward_tokens=reward_tokens,"
+    },
+    {
+      "file": "swarm\\gamified_security.py",
+      "line": 382,
+      "detail": "report.reward_tokens = reward_tokens"
+    },
+    {
+      "file": "swarm\\invariants_enforcement.py",
+      "line": 186,
+      "detail": "description=\"Risk logic, tokenomics, agent powers go through on-chain, auditable processes with time"
+    },
+    {
+      "file": "swarm\\invariants_enforcement.py",
+      "line": 230,
+      "detail": "description=\"New contracts/tokens/protocols must pass security scanning\","
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 80,
+      "detail": "cost_per_1k_input_tokens: Decimal = Decimal(\"0.01\")"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 81,
+      "detail": "cost_per_1k_output_tokens: Decimal = Decimal(\"0.03\")"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 237,
+      "detail": "api_key=\"sk-...\",  # Mock"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 251,
+      "detail": "api_key=\"sk-ant-...\",  # Mock"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 276,
+      "detail": "cost_per_1k_input_tokens=Decimal(\"0.0\"),"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 277,
+      "detail": "cost_per_1k_output_tokens=Decimal(\"0.0\"),"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 310,
+      "detail": "replacement=\"[API_KEY_REDACTED]\","
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 351,
+      "detail": "cost_per_1k_input_tokens: Decimal = Decimal(\"0.01\"),"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 352,
+      "detail": "cost_per_1k_output_tokens: Decimal = Decimal(\"0.03\"),"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 365,
+      "detail": "max_context_tokens=max_context_tokens,"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 367,
+      "detail": "cost_per_1k_input_tokens=cost_per_1k_input_tokens,"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 368,
+      "detail": "cost_per_1k_output_tokens=cost_per_1k_output_tokens,"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 517,
+      "detail": "input_tokens = len(redacted_prompt.split())"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 518,
+      "detail": "output_tokens = len(response_content.split())"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 519,
+      "detail": "total_tokens = input_tokens + output_tokens"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 536,
+      "detail": "input_tokens=input_tokens,"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 537,
+      "detail": "output_tokens=output_tokens,"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 538,
+      "detail": "total_tokens=total_tokens,"
+    },
+    {
+      "file": "swarm\\llm_gateway.py",
+      "line": 545,
+      "detail": "provider.token_count += total_tokens"
+    },
+    {
+      "file": "swarm\\local_llm_gateway.py",
+      "line": 154,
+      "detail": "tokens_used = len(response_text.split())"
+    },
+    {
+      "file": "swarm\\local_llm_gateway.py",
+      "line": 156,
+      "detail": "self._tokens_used_today += tokens_used"
+    },
+    {
+      "file": "swarm\\local_llm_gateway.py",
+      "line": 163,
+      "detail": "tokens_used=tokens_used,"
+    },
+    {
+      "file": "swarm\\local_llm_gateway.py",
+      "line": 211,
+      "detail": "self._token_budget_daily = daily_limit"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 89,
+      "detail": "cost_per_1k_tokens: Decimal = Decimal(\"0\")"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 276,
+      "detail": "cost_per_1k_tokens=Decimal(\"0\"),"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 290,
+      "detail": "cost_per_1k_tokens=Decimal(\"0.002\"),"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 304,
+      "detail": "cost_per_1k_tokens=Decimal(\"0\"),"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 368,
+      "detail": "cost_per_1k_tokens: Decimal = Decimal(\"0\"),"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 379,
+      "detail": "cost_per_1k_tokens=cost_per_1k_tokens,"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 470,
+      "detail": "candidates.sort(key=lambda p: (p.avg_latency_ms, float(p.cost_per_1k_tokens)))"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 472,
+      "detail": "candidates.sort(key=lambda p: (float(p.cost_per_1k_tokens), p.avg_latency_ms))"
+    },
+    {
+      "file": "swarm\\orchestrator.py",
+      "line": 475,
+      "detail": "candidates.sort(key=lambda p: (p.avg_latency_ms * float(p.cost_per_1k_tokens)))"
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 40,
+      "detail": "RUG_PULL_TOKEN = \"rug_pull_token\""
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 453,
+      "detail": "indicators = TokenScamIndicators("
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 454,
+      "detail": "token_address=token_address,"
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 455,
+      "detail": "token_name=token_name,"
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 456,
+      "detail": "token_symbol=token_symbol,"
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 543,
+      "detail": "scam_type=ScamType.RUG_PULL_TOKEN,"
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 545,
+      "detail": "description=f\"High-risk token detected: {token_name} ({token_symbol})\","
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 547,
+      "detail": "token_address=token_address,"
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 628,
+      "detail": "token_address=contract_address,"
+    },
+    {
+      "file": "swarm\\scam_protection.py",
+      "line": 732,
+      "detail": "token_address=token_address,"
+    },
+    {
+      "file": "swarm\\secure_messaging.py",
+      "line": 195,
+      "detail": "session_id = f\"session_{int(time.time() * 1000)}_{secrets.token_hex(8)}\""
+    },
+    {
+      "file": "swarm\\secure_messaging.py",
+      "line": 226,
+      "detail": "binding_input = f\"{token}:{session.session_key}\""
+    },
+    {
+      "file": "swarm\\secure_messaging.py",
+      "line": 227,
+      "detail": "token_binding_id = hashlib.sha256(binding_input.encode()).hexdigest()"
+    },
+    {
+      "file": "swarm\\secure_messaging.py",
+      "line": 229,
+      "detail": "session.token_binding_id = token_binding_id"
+    },
+    {
+      "file": "swarm\\secure_messaging.py",
+      "line": 244,
+      "detail": "message_id = f\"msg_{int(time.time() * 1000)}_{secrets.token_hex(8)}\""
+    },
+    {
+      "file": "swarm\\secure_messaging.py",
+      "line": 245,
+      "detail": "nonce = secrets.token_hex(32)"
+    },
+    {
+      "file": "swarm\\secure_messaging.py",
+      "line": 261,
+      "detail": "message.token_binding_id = session.token_binding_id"
+    },
+    {
+      "file": "swarm\\secure_messaging.py",
+      "line": 319,
+      "detail": "if message.token_binding_id != session.token_binding_id:"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 28,
+      "detail": "API_KEY_COMPROMISE = \"api_key_compromise\""
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 30,
+      "detail": "SECRET_EXFILTRATION = \"secret_exfiltration\""
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 137,
+      "detail": "self._secret_patterns = self._compile_secret_patterns()"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 146,
+      "detail": "\"api_key\": re.compile(r'(?i)(api[_-]?key|apikey)[\"\\s:=]+([a-zA-Z0-9_-]{20,})'),"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 172,
+      "detail": "rule_id=\"detect_secret_exfiltration\","
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 173,
+      "detail": "attack_vector=AttackVector.SECRET_EXFILTRATION,"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 174,
+      "detail": "name=\"Secret Exfiltration Detection\","
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 175,
+      "detail": "description=\"Detect secrets in logs or outbound messages\","
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 176,
+      "detail": "detection_function=self._detect_secret_exfiltration,"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 208,
+      "detail": "control_id=\"prevent_secret_logging\","
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 209,
+      "detail": "attack_vector=AttackVector.SECRET_EXFILTRATION,"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 210,
+      "detail": "name=\"Secret Logging Prevention\","
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 211,
+      "detail": "description=\"Redact secrets from logs\","
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 212,
+      "detail": "prevention_function=self._prevent_secret_logging,"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 256,
+      "detail": "attack_vector=AttackVector.API_KEY_COMPROMISE,"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 567,
+      "detail": "detected, _, _ = self._detect_secret_exfiltration(data)"
+    },
+    {
+      "file": "swarm\\security_defense_system.py",
+      "line": 714,
+      "detail": "redacted = pattern.sub(f\"[REDACTED_{secret_type.upper()}]\", redacted)"
+    },
+    {
+      "file": "swarm\\swarm_lab.py",
+      "line": 78,
+      "detail": "CRITICAL = \"critical\"  # Tokenomics, custody, governance"
+    },
+    {
+      "file": "swarm\\integration\\task_runner.py",
+      "line": 133,
+      "detail": "metrics.total_tokens += result[\"tokens_used\"]"
+    },
+    {
+      "file": "swarm\\integration\\task_runner.py",
+      "line": 180,
+      "detail": "result[\"tokens_used\"] += 50  # Simulate token usage"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 120,
+      "detail": "metrics.total_tokens += span.tags[\"tokens_used\"]"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 193,
+      "detail": "metrics.developer_efficiency = metrics.total_tokens / metrics.total_turns"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 265,
+      "detail": "normalized_efficiency = min(efficiency / 100, 1.0)  # Assume 100 tokens/turn as max efficiency"
+    },
+    {
+      "file": "swarm\\watchdog\\enhanced_monitor.py",
+      "line": 25,
+      "detail": "SECRETS_ACCESS = \"secrets_access\""
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 346,
+      "detail": "config = self._token_configs.get(token_type, {\"ttl_seconds\": 300})"
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 349,
+      "detail": "token = Honeytoken("
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 350,
+      "detail": "token_id=f\"honey_{token_type}_{self._token_count}_{int(now)}\","
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 351,
+      "detail": "token_type=token_type,"
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 372,
+      "detail": "token = self._active_tokens.get(token_id)"
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 381,
+      "detail": "token.triggered_at = time.time()"
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 382,
+      "detail": "token.triggered_by = trigger_source"
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 411,
+      "detail": "def get_triggered_tokens(self, limit: int = 50) -> List[Honeytoken]:"
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 417,
+      "detail": "total = self._token_count"
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 418,
+      "detail": "triggered = len(self._triggered_tokens)"
+    },
+    {
+      "file": "governance\\adversarial.py",
+      "line": 785,
+      "detail": "self.honeytoken_manager = HoneytokenManager()"
+    },
+    {
+      "file": "security\\breach_detection.py",
+      "line": 535,
+      "detail": "description=\"Potential key/secret exposure detected\","
+    },
+    {
+      "file": "security\\quantum_cold_storage.py",
+      "line": 29,
+      "detail": "seed = secrets.token_hex(64)"
+    },
+    {
+      "file": "security\\quantum_resistant_keys.py",
+      "line": 32,
+      "detail": "seed = secrets.token_hex(64)"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 38,
+      "detail": "OAUTH_TOKEN = \"oauth_token\""
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 39,
+      "detail": "WEBHOOK_SECRET = \"webhook_secret\""
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 135,
+      "detail": "(re.compile(r'api[_-]?key[\"\\s:=]+[\"\\']?([a-zA-Z0-9_-]{20,})[\"\\']?', re.I), 'api_key=REDACTED'),"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 136,
+      "detail": "(re.compile(r'secret[_-]?key[\"\\s:=]+[\"\\']?([a-zA-Z0-9_-]{20,})[\"\\']?', re.I), 'secret_key=REDACTED')"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 137,
+      "detail": "(re.compile(r'password[\"\\s:=]+[\"\\']?([^\\s\"\\']+)[\"\\']?', re.I), 'password=REDACTED'),"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 169,
+      "detail": "secret_id = f\"sec_{hashlib.sha256(name.encode()).hexdigest()[:12]}\""
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 174,
+      "detail": "self._metadata[secret_id] = SecretMetadata("
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 177,
+      "detail": "secret_type=secret_type,"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 199,
+      "detail": "meta = self._metadata[secret_id]"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 221,
+      "detail": "meta = self._metadata.get(secret_id)"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 225,
+      "detail": "secret_name=meta.name if meta else \"unknown\","
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 234,
+      "detail": "audit.denial_reason = \"Secret not found\""
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 282,
+      "detail": "meta = self._metadata.get(secret_id)"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 295,
+      "detail": "meta = self._metadata.get(secret_id)"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 305,
+      "detail": "meta = self._metadata.get(secret_id)"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 364,
+      "detail": "entries = [e for e in entries if e.secret_id == secret_id]"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 388,
+      "detail": "\"SECRET ROTATION OVERDUE: %s (type=%s) \u2014 rotate immediately\","
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 407,
+      "detail": "total_secrets = len(self._secrets)"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 496,
+      "detail": "secret_type=secret_type,"
+    },
+    {
+      "file": "monitoring\\dashboard.py",
+      "line": 200,
+      "detail": "message=f\"Large whale activity: {signal.token} ${signal.amount:,.0f}\","
+    },
+    {
+      "file": "monitoring\\liquidation_monitor.py",
+      "line": 34,
+      "detail": "self.use_mock = not bool(self.api_key)"
+    },
+    {
+      "file": "monitoring\\liquidation_monitor.py",
+      "line": 42,
+      "detail": "response = self._client.get(self.BASE_URL, params=params, headers={\"coinglassSecret\": self.api_key})"
+    },
+    {
+      "file": "monitoring\\news_feeds.py",
+      "line": 344,
+      "detail": "params[\"api_key\"] = self.api_key"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 508,
+      "detail": "tokens = data[\"tokens\"]"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 510,
+      "detail": "outcome = token.get(\"outcome\", \"\").lower()"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 511,
+      "detail": "price = float(token.get(\"price\", 0.5))"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 524,
+      "detail": "if yes_price == 0.5 and \"clobTokenIds\" in data:"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 130,
+      "detail": "url = f\"https://api.telegram.org/bot{token}/sendMessage\""
+    },
+    {
+      "file": "memory\\neo4j_graph.py",
+      "line": 66,
+      "detail": "auth=(self.config.username, self.config.password)"
+    },
+    {
+      "file": "memory\\patterns.py",
+      "line": 13,
+      "detail": "tokens = [token for token in cleaned.split() if len(token) > 3]"
+    },
+    {
+      "file": "streams\\market_data_stream.py",
+      "line": 61,
+      "detail": "self.api_key = config.get(\"api_key\", \"\")"
+    },
+    {
+      "file": "streams\\market_data_stream_simple.py",
+      "line": 61,
+      "detail": "self.api_key = config.get(\"api_key\", \"\")"
+    },
+    {
+      "file": "streams\\news_stream.py",
+      "line": 34,
+      "detail": "\"https://cryptopanic.com/api/v1/posts/?auth_token=&public=true&kind=news\""
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 208,
+      "detail": "is_token_tx = random.random() < 0.6  # 60% token transactions"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 212,
+      "detail": "token_symbol = random.choice([\"USDC\", \"USDT\", \"WBTC\", \"WETH\", \"UNI\", \"LINK\"])"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 262,
+      "detail": "token_symbol=token_symbol,"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 332,
+      "detail": "symbol = tx.token_symbol or chain.upper()"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 391,
+      "detail": "symbol = tx.token_symbol or chain.upper()"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 434,
+      "detail": "symbol = tx.token_symbol or chain.upper()"
+    },
+    {
+      "file": "streams\\x_scanner.py",
+      "line": 7,
+      "detail": "api = TwitterAPI(consumer_key=capabilities.x_api_key, consumer_secret=capabilities.x_api_secret, acc"
+    },
+    {
+      "file": "arbitrage\\cost_model.py",
+      "line": 198,
+      "detail": "native_token_price=native_price,"
+    },
+    {
+      "file": "arbitrage\\cost_models.py",
+      "line": 295,
+      "detail": "native_token_price_usd=native_price,"
+    },
+    {
+      "file": "arbitrage\\dex_cex_scanner.py",
+      "line": 166,
+      "detail": "base_token = symbol.split(\"/\")[0]"
+    },
+    {
+      "file": "arbitrage\\dex_cex_scanner.py",
+      "line": 176,
+      "detail": "key = f\"{config['chain']}:{base_token}\""
+    }
+  ],
+  "UNBOUNDED_COLLECTION": [
+    {
+      "file": "merid\\loop.py",
+      "line": 89,
+      "detail": "price_symbols.append(short)"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 395,
+      "detail": "summary[\"actions\"].append(f\"features_refreshed:{len(self.config.active_symbols)}symbols\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 411,
+      "detail": "summary[\"actions\"].append(f\"kalshi_signals:{len(signals)}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 426,
+      "detail": "summary[\"actions\"].append(f\"agent_cycles:{len(results)}agents\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 439,
+      "detail": "summary[\"actions\"].append(\"agent_cycles:timeout\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 442,
+      "detail": "summary[\"actions\"].append(f\"agent_cycles:error:{e}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 471,
+      "detail": "summary[\"actions\"].append(f\"kalshi_agents:{signal_count}signals\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 519,
+      "detail": "summary[\"actions\"].append(f\"consensus_opinions_submitted:{opinions_submitted}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 560,
+      "detail": "critical_agents.append({"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 570,
+      "detail": "summary[\"actions\"].append("
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 578,
+      "detail": "summary[\"actions\"].append(f\"reflection_cycle:error:{exc}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 592,
+      "detail": "reloaded.append(f\"reality_auditor:{'ok' if ok else 'noop'}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 601,
+      "detail": "reloaded.append(\"rebalancer:bootstrapped\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 609,
+      "detail": "reloaded.append(\"reward_engine:ok\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 614,
+      "detail": "summary[\"actions\"].append(\"config_reload:\" + \",\".join(reloaded))"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 711,
+      "detail": "summary[\"actions\"].append("
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 741,
+      "detail": "summary[\"actions\"].append(\"liquidity_sweep:no_active_tickers\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 791,
+      "detail": "summary[\"actions\"].append("
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 810,
+      "detail": "summary[\"actions\"].append(f\"arb_scan:{len(signals)}signals\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 825,
+      "detail": "summary[\"actions\"].append(\"execution:blocked_by_kill_switch\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 836,
+      "detail": "summary[\"actions\"].append(\"execution:blocked_by_reconciliation\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 866,
+      "detail": "summary[\"actions\"].append("
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 881,
+      "detail": "summary[\"actions\"].append(f\"blocked:{plan.symbol}:{verdict.reason}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 891,
+      "detail": "summary[\"actions\"].append("
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 898,
+      "detail": "summary[\"actions\"].append(f\"plan_failed:{plan.plan_id}:{plan.symbol}:{e}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1007,
+      "detail": "summary[\"actions\"].append(f\"cqi_updated:{len(self.config.active_domains)}domains\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1021,
+      "detail": "summary[\"actions\"].append("
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1031,
+      "detail": "summary[\"actions\"].append(f\"promotion_sync:error:{e}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1053,
+      "detail": "summary[\"actions\"].append("
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1081,
+      "detail": "summary[\"actions\"].append("
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1100,
+      "detail": "summary[\"actions\"].append(f\"reconciliation:CRITICAL:blocked_prediction_domain\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1103,
+      "detail": "summary[\"actions\"].append(f\"reconciliation:WARNING:{warning_count}issues\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1105,
+      "detail": "summary[\"actions\"].append(\"reconciliation:OK\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1118,
+      "detail": "summary[\"actions\"].append(\"reconciliation:skipped\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1122,
+      "detail": "summary[\"actions\"].append(f\"reconciliation:failed:{exc}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1136,
+      "detail": "summary[\"actions\"].append(\"order_groups:lifecycle_started\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1153,
+      "detail": "summary[\"actions\"].append(f\"order_groups:triggered:{len(triggered)}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1155,
+      "detail": "summary[\"actions\"].append(\"order_groups:synced\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1159,
+      "detail": "summary[\"actions\"].append(f\"order_groups:sync_failed:{exc}\")"
+    },
+    {
+      "file": "merid\\loop.py",
+      "line": 1253,
+      "detail": "tick_log.append(record)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\collector.py",
+      "line": 135,
+      "detail": "result.error_details.append(f\"Unknown asset: {asset}\")"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\collector.py",
+      "line": 175,
+      "detail": "result.error_details.append(f\"{ticker}: {exc}\")"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\collector.py",
+      "line": 204,
+      "detail": "results.append(r)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\collector.py",
+      "line": 231,
+      "detail": "closed.append({"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\collector.py",
+      "line": 239,
+      "detail": "closed.append({"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\collector.py",
+      "line": 322,
+      "detail": "snapshots.append(snap)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\collector.py",
+      "line": 346,
+      "detail": "result.append(HistoricalTrade("
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\liquidity_monitor.py",
+      "line": 148,
+      "detail": "alerts.append(LiquidityAlert("
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\liquidity_monitor.py",
+      "line": 161,
+      "detail": "alerts.append(LiquidityAlert("
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\liquidity_monitor.py",
+      "line": 175,
+      "detail": "alerts.append(LiquidityAlert("
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\liquidity_monitor.py",
+      "line": 189,
+      "detail": "alerts.append(LiquidityAlert("
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\liquidity_monitor.py",
+      "line": 206,
+      "detail": "self._alert_log.append(alert)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\liquidity_monitor.py",
+      "line": 207,
+      "detail": "emitted.append(alert)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\ticker_collector.py",
+      "line": 150,
+      "detail": "self._buffer.append(record.to_dict())"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\volume_monitor.py",
+      "line": 148,
+      "detail": "preds.append(pred_before)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\volume_monitor.py",
+      "line": 198,
+      "detail": "self._alert_callbacks.append(callback)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\volume_monitor.py",
+      "line": 214,
+      "detail": "self._alerts_fired.append(alert_record)"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\volume_monitor.py",
+      "line": 357,
+      "detail": "results.append({"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\volume_monitor.py",
+      "line": 401,
+      "detail": "anomalies.append({"
+    },
+    {
+      "file": "merid\\monitoring\\polymarket_adapter.py",
+      "line": 62,
+      "detail": "prediction_markets.append(pred_market)"
+    },
+    {
+      "file": "merid\\prediction\\mcp_market_feed.py",
+      "line": 240,
+      "detail": "snapshots.append(MCPMarketSnapshot("
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus.py",
+      "line": 277,
+      "detail": "self._subscribers[asset].append(callback)"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus.py",
+      "line": 428,
+      "detail": "lines.append(f\"**Suggested Prob Adjustment:** {adj_sign}{context['kalshi_adjustment']:.2%}\")"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus.py",
+      "line": 431,
+      "detail": "lines.append(\"\u26a0\ufe0f **Risk Signal:** Extreme fear/greed - reduce position sizes\")"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus.py",
+      "line": 434,
+      "detail": "lines.append(\"\ud83c\udfaf **Contrarian Signal:** Social sentiment diverges from fear/greed\")"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus_v2.py",
+      "line": 283,
+      "detail": "groups[key].append(s)"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus_v2.py",
+      "line": 302,
+      "detail": "prov[i.provider].append(i.score)"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus_v2.py",
+      "line": 583,
+      "detail": "scores.append(asset_ctx.combined_score)"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus_v2.py",
+      "line": 584,
+      "detail": "confs.append(asset_ctx.confidence)"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus_v2.py",
+      "line": 586,
+      "detail": "scores.append(event_ctx.combined_score)"
+    },
+    {
+      "file": "merid\\sentiment\\sentiment_bus_v2.py",
+      "line": 587,
+      "detail": "confs.append(event_ctx.confidence)"
+    },
+    {
+      "file": "merid\\signals\\live_feeds.py",
+      "line": 289,
+      "detail": "ids.append(cg_id)"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 99,
+      "detail": "lines.append(f\"**Swarm:** {self.swarm_consensus_direction} @ {self.swarm_consensus_prob:.1%} (conf {"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 101,
+      "detail": "lines.append(f\"**Tags:** {', '.join(self.tags)}\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 103,
+      "detail": "lines.append(f\"**RISK:** {self.risk_regime.upper()} regime active\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 194,
+      "detail": "lines.append(f\"\ud83c\udfaf {self.final_mode.upper()}: {self.contracts} contracts @ {self.entry_price:.0%}\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 222,
+      "detail": "lines.append(f\"\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 223,
+      "detail": "lines.append(f\"*Key Factors:*\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 225,
+      "detail": "lines.append(f\"  \u2022 {factor}\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 384,
+      "detail": "tags.append(\"high_volume\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 387,
+      "detail": "tags.append(\"trending\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 390,
+      "detail": "tags.append(\"volatile\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 394,
+      "detail": "tags.append(\"50_50\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 397,
+      "detail": "tags.append(\"closing_soon\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 400,
+      "detail": "tags.append(\"extreme_fg\")"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 505,
+      "detail": "self._subscribers.append(callback)"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 514,
+      "detail": "self._insights.append(insight)"
+    },
+    {
+      "file": "core\\drift_monitor.py",
+      "line": 61,
+      "detail": "bucket.append(value)"
+    },
+    {
+      "file": "core\\drift_monitor.py",
+      "line": 78,
+      "detail": "signals.append(DriftSignal(metric, value, ref, threshold))"
+    },
+    {
+      "file": "core\\drift_monitor.py",
+      "line": 91,
+      "detail": "self._events.append(event)"
+    },
+    {
+      "file": "core\\drift_monitoring_pipeline.py",
+      "line": 408,
+      "detail": "self._events.append(event)"
+    },
+    {
+      "file": "core\\drift_monitoring_pipeline.py",
+      "line": 504,
+      "detail": "self._events.append(event)"
+    },
+    {
+      "file": "core\\drift_monitoring_pipeline.py",
+      "line": 632,
+      "detail": "self._events.append(event)"
+    },
+    {
+      "file": "core\\drift_reward_loop.py",
+      "line": 150,
+      "detail": "self._processed_events.append(event.event_id)"
+    },
+    {
+      "file": "core\\drift_reward_loop.py",
+      "line": 165,
+      "detail": "self._derisk_decisions.append(decision)"
+    },
+    {
+      "file": "core\\drift_reward_loop.py",
+      "line": 392,
+      "detail": "self._reward_adjustments.append(adjustment)"
+    },
+    {
+      "file": "core\\drift_reward_loop.py",
+      "line": 408,
+      "detail": "decisions.append(decision)"
+    },
+    {
+      "file": "core\\feed_staleness_monitor.py",
+      "line": 129,
+      "detail": "self._on_stale_callbacks.append(callback)"
+    },
+    {
+      "file": "core\\feed_staleness_monitor.py",
+      "line": 132,
+      "detail": "self._on_critical_callbacks.append(callback)"
+    },
+    {
+      "file": "core\\feed_staleness_monitor.py",
+      "line": 135,
+      "detail": "self._on_recovered_callbacks.append(callback)"
+    },
+    {
+      "file": "core\\feed_staleness_monitor.py",
+      "line": 213,
+      "detail": "stale_feeds.append(status)"
+    },
+    {
+      "file": "core\\feed_staleness_monitor.py",
+      "line": 236,
+      "detail": "all_statuses.append(self.check_feed(parts[0], parts[1]).to_dict())"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 297,
+      "detail": "errors.append(f\"Critical check '{name}' is unhealthy\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 299,
+      "detail": "warnings.append(f\"Check '{name}' is unhealthy\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 301,
+      "detail": "warnings.append(f\"Check '{name}' is degraded\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 309,
+      "detail": "errors.append(f\"CPU usage critical: {system_metrics['cpu']['percent']:.1f}%\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 311,
+      "detail": "warnings.append(f\"CPU usage high: {system_metrics['cpu']['percent']:.1f}%\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 315,
+      "detail": "errors.append(f\"Memory usage critical: {system_metrics['memory']['percent']:.1f}%\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 317,
+      "detail": "warnings.append(f\"Memory usage high: {system_metrics['memory']['percent']:.1f}%\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 321,
+      "detail": "errors.append(f\"Disk usage critical: {system_metrics['disk']['percent']:.1f}%\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 323,
+      "detail": "warnings.append(f\"Disk usage high: {system_metrics['disk']['percent']:.1f}%\")"
+    },
+    {
+      "file": "core\\health_monitor.py",
+      "line": 343,
+      "detail": "self._history.append(report)"
+    },
+    {
+      "file": "core\\market_data_dxfeed.py",
+      "line": 144,
+      "detail": "self.watchlist_symbols.append(symbol)"
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 239,
+      "detail": "simulated_decisions.append({"
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 271,
+      "detail": "actual_decisions.append({"
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 302,
+      "detail": "divergences[divergence_type.value].append({"
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 446,
+      "detail": "impact_assessment[\"recommendations\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 458,
+      "detail": "impact_assessment[\"recommendations\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 657,
+      "detail": "insights[\"top_models_insights\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 661,
+      "detail": "insights[\"top_models_insights\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 671,
+      "detail": "insights[\"bottom_models_insights\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 675,
+      "detail": "insights[\"bottom_models_insights\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 681,
+      "detail": "insights[\"overall_patterns\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 687,
+      "detail": "insights[\"recommendations\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 692,
+      "detail": "insights[\"recommendations\"].append("
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 740,
+      "detail": "alerts.append(promotion_alert)"
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 745,
+      "detail": "alerts.append(demotion_alert)"
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 750,
+      "detail": "alerts.append(degradation_alert)"
+    },
+    {
+      "file": "core\\merid_feedback.py",
+      "line": 755,
+      "detail": "alerts.append(calibration_alert)"
+    },
+    {
+      "file": "core\\streaming_api.py",
+      "line": 32,
+      "detail": "self.active_connections.append(websocket)"
+    },
+    {
+      "file": "core\\streaming_api.py",
+      "line": 59,
+      "detail": "self.subscriptions[channel].append(websocket)"
+    },
+    {
+      "file": "core\\streaming_api.py",
+      "line": 75,
+      "detail": "disconnected.append(websocket)"
+    },
+    {
+      "file": "core\\streaming_api.py",
+      "line": 90,
+      "detail": "disconnected.append(websocket)"
+    },
+    {
+      "file": "web\\api\\feedback.py",
+      "line": 172,
+      "detail": "recent_alerts.append(alert)"
+    },
+    {
+      "file": "web\\api\\feedback.py",
+      "line": 324,
+      "detail": "simulated_decisions.append({"
+    },
+    {
+      "file": "web\\api\\streams.py",
+      "line": 294,
+      "detail": "all_positions.append({"
+    },
+    {
+      "file": "web\\api\\ws_dedicated_streams.py",
+      "line": 54,
+      "detail": "self._recent_trades.append(trade_event)"
+    },
+    {
+      "file": "web\\api\\ws_dedicated_streams.py",
+      "line": 65,
+      "detail": "dead_sockets.append(ws)"
+    },
+    {
+      "file": "web\\api\\ws_dedicated_streams.py",
+      "line": 208,
+      "detail": "dead_sockets.append(ws)"
+    },
+    {
+      "file": "web\\api\\ws_dedicated_streams.py",
+      "line": 357,
+      "detail": "dead_sockets.append(ws)"
+    },
+    {
+      "file": "agents\\news_monitor_agent.py",
+      "line": 128,
+      "detail": "new_important_news.append(news_item)"
+    },
+    {
+      "file": "agents\\news_monitor_agent.py",
+      "line": 216,
+      "detail": "self.telegram_queue.append(news_item)"
+    },
+    {
+      "file": "agents\\news_monitor_agent.py",
+      "line": 221,
+      "detail": "self.posted_news.append(news_item)"
+    },
+    {
+      "file": "agents\\news_monitor_agent.py",
+      "line": 263,
+      "detail": "agent_dialogue.append({"
+    },
+    {
+      "file": "agents\\news_monitor_agent.py",
+      "line": 346,
+      "detail": "agent_votes.append({"
+    },
+    {
+      "file": "agents\\streaming\\archivist_agent.py",
+      "line": 88,
+      "detail": "self.decision_history.append({"
+    },
+    {
+      "file": "agents\\streaming\\archivist_agent.py",
+      "line": 129,
+      "detail": "self.pattern_matches.append(pattern)"
+    },
+    {
+      "file": "agents\\streaming\\archivist_agent.py",
+      "line": 141,
+      "detail": "self.pattern_matches.append(pattern)"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 107,
+      "detail": "signals.append(\"bullish\")"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 108,
+      "detail": "confidence_factors.append(0.3)"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 110,
+      "detail": "signals.append(\"bearish\")"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 111,
+      "detail": "confidence_factors.append(0.3)"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 115,
+      "detail": "signals.append(\"bullish\")"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 116,
+      "detail": "confidence_factors.append(min(momentum * 10, 0.4))"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 118,
+      "detail": "signals.append(\"bearish\")"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 119,
+      "detail": "confidence_factors.append(min(abs(momentum) * 10, 0.4))"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 123,
+      "detail": "signals.append(\"bullish\")"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 124,
+      "detail": "confidence_factors.append(0.2)"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 126,
+      "detail": "signals.append(\"bearish\")"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 127,
+      "detail": "confidence_factors.append(0.2)"
+    },
+    {
+      "file": "agents\\streaming\\meta_audit_agent.py",
+      "line": 134,
+      "detail": "agent_summaries.append({"
+    },
+    {
+      "file": "agents\\streaming\\risk_agent.py",
+      "line": 73,
+      "detail": "self.price_history[symbol].append(price)"
+    },
+    {
+      "file": "agents\\streaming\\skeptic_agent.py",
+      "line": 57,
+      "detail": "self.recent_outputs.append({"
+    },
+    {
+      "file": "agents\\streaming\\skeptic_agent.py",
+      "line": 74,
+      "detail": "issues.append({"
+    },
+    {
+      "file": "agents\\streaming\\skeptic_agent.py",
+      "line": 84,
+      "detail": "issues.append(contradiction)"
+    },
+    {
+      "file": "agents\\streaming\\skeptic_agent.py",
+      "line": 89,
+      "detail": "issues.append(groupthink)"
+    },
+    {
+      "file": "agents\\streaming\\skeptic_agent.py",
+      "line": 145,
+      "detail": "recent_signals.append(signal.lower())"
+    },
+    {
+      "file": "agents\\streaming\\synthesizer_agent.py",
+      "line": 80,
+      "detail": "signals.append(signal.lower())"
+    },
+    {
+      "file": "agents\\streaming\\synthesizer_agent.py",
+      "line": 83,
+      "detail": "confidences.append(confidence)"
+    },
+    {
+      "file": "agents\\streaming\\synthesizer_agent.py",
+      "line": 87,
+      "detail": "reasonings.append(f\"{source}: {reasoning}\")"
+    },
+    {
+      "file": "risk\\risk_monitor.py",
+      "line": 194,
+      "detail": "self.risk_metrics_history.append(risk_metrics)"
+    },
+    {
+      "file": "risk\\risk_monitor.py",
+      "line": 350,
+      "detail": "self.risk_alerts.append(alert)"
+    },
+    {
+      "file": "risk\\risk_monitor.py",
+      "line": 437,
+      "detail": "self.stress_test_results.append(result)"
+    },
+    {
+      "file": "risk\\risk_monitor.py",
+      "line": 544,
+      "detail": "self.risk_callbacks.append(callback)"
+    },
+    {
+      "file": "execution\\fix_feed.py",
+      "line": 134,
+      "detail": "message_parts.append(f\"{tag}={all_fields[tag]}\")"
+    },
+    {
+      "file": "execution\\fix_feed.py",
+      "line": 208,
+      "detail": "self._callbacks.append(callback)"
+    },
+    {
+      "file": "execution\\fix_feed.py",
+      "line": 318,
+      "detail": "md_entries.append(md_entry)"
+    },
+    {
+      "file": "execution\\fix_feed.py",
+      "line": 339,
+      "detail": "md_entries.append(md_entry)"
+    },
+    {
+      "file": "execution\\fix_feed.py",
+      "line": 540,
+      "detail": "tasks.append(task)"
+    },
+    {
+      "file": "execution\\fix_feed.py",
+      "line": 555,
+      "detail": "tasks.append(task)"
+    },
+    {
+      "file": "execution\\multicast_feed.py",
+      "line": 150,
+      "detail": "self._callbacks.append(callback)"
+    },
+    {
+      "file": "execution\\multicast_feed.py",
+      "line": 361,
+      "detail": "tasks.append(task)"
+    },
+    {
+      "file": "execution\\multicast_feed.py",
+      "line": 376,
+      "detail": "tasks.append(task)"
+    },
+    {
+      "file": "swarm\\adversarial_robustness.py",
+      "line": 43,
+      "detail": "self._results.append(result)"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 235,
+      "detail": "self._agent_metrics[agent_id].append(metrics)"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 278,
+      "detail": "self._workflow_metrics[workflow_id].append(metrics)"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 323,
+      "detail": "self._swarm_metrics.append(metrics)"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 360,
+      "detail": "self._security_metrics.append(metrics)"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 385,
+      "detail": "ts.values.append(value)"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 386,
+      "detail": "ts.timestamps.append(datetime.utcnow())"
+    },
+    {
+      "file": "swarm\\agent_monitoring_metrics.py",
+      "line": 493,
+      "detail": "self._alerts.append(alert)"
+    },
+    {
+      "file": "swarm\\coverage_loop.py",
+      "line": 84,
+      "detail": "failures.append({"
+    },
+    {
+      "file": "swarm\\coverage_loop.py",
+      "line": 96,
+      "detail": "failures.append({"
+    },
+    {
+      "file": "swarm\\coverage_loop.py",
+      "line": 144,
+      "detail": "history.append(result)"
+    },
+    {
+      "file": "swarm\\coverage_loop.py",
+      "line": 150,
+      "detail": "failure_logs.append({\"stage\": \"initial\", \"path\": log_path})"
+    },
+    {
+      "file": "swarm\\coverage_loop.py",
+      "line": 157,
+      "detail": "history.append(retry_result)"
+    },
+    {
+      "file": "swarm\\coverage_loop.py",
+      "line": 166,
+      "detail": "failure_logs.append({\"stage\": f\"retry_{attempts}\", \"path\": retry_log_path})"
+    },
+    {
+      "file": "swarm\\coverage_loop.py",
+      "line": 175,
+      "detail": "history.append(improved_result)"
+    },
+    {
+      "file": "swarm\\predictive_health_monitor.py",
+      "line": 32,
+      "detail": "series.append((datetime.utcnow(), value))"
+    },
+    {
+      "file": "swarm\\self_evolution_loop.py",
+      "line": 57,
+      "detail": "self._iterations.append(iteration)"
+    },
+    {
+      "file": "swarm\\self_evolution_loop.py",
+      "line": 63,
+      "detail": "iteration.reflection_notes.append(note)"
+    },
+    {
+      "file": "swarm\\self_evolution_loop.py",
+      "line": 67,
+      "detail": "iteration.optimization_actions.append(action)"
+    },
+    {
+      "file": "swarm\\ci\\reliability_monitor.py",
+      "line": 15,
+      "detail": "sys.path.append(str(Path(__file__).parent.parent))"
+    },
+    {
+      "file": "swarm\\ci\\reliability_monitor.py",
+      "line": 98,
+      "detail": "results.append(metrics)"
+    },
+    {
+      "file": "swarm\\ci\\reliability_monitor.py",
+      "line": 115,
+      "detail": "results.append(failure_metrics)"
+    },
+    {
+      "file": "swarm\\ci\\reliability_monitor.py",
+      "line": 199,
+      "detail": "violations.append(f\"Success rate {metrics['success_rate']:.3f} < {self.thresholds['min_success_rate'"
+    },
+    {
+      "file": "swarm\\ci\\reliability_monitor.py",
+      "line": 202,
+      "detail": "violations.append(f\"Avg cascade size {metrics['avg_cascade_size']:.3f} > {self.thresholds['max_casca"
+    },
+    {
+      "file": "swarm\\ci\\reliability_monitor.py",
+      "line": 205,
+      "detail": "violations.append(f\"Avg branching factor {metrics['avg_branching_factor']:.3f} > {self.thresholds['m"
+    },
+    {
+      "file": "swarm\\ci\\reliability_monitor.py",
+      "line": 208,
+      "detail": "violations.append(f\"Avg misalignment {metrics['avg_misalignment']:.3f} > {self.thresholds['max_misal"
+    },
+    {
+      "file": "swarm\\ci\\reliability_monitor.py",
+      "line": 211,
+      "detail": "violations.append(f\"Avg retry index {metrics['avg_retry_index']:.3f} > {self.thresholds['max_retry_i"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 347,
+      "detail": "recommendations.append(\"Increase test coverage - target >80%\")"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 349,
+      "detail": "recommendations.append(\"Good test coverage, consider targeting >90%\")"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 353,
+      "detail": "recommendations.append(\"High defect rate detected - implement better code review\")"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 355,
+      "detail": "recommendations.append(\"Moderate defect rate - consider additional quality gates\")"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 359,
+      "detail": "recommendations.append(\"Low developer efficiency - investigate tooling or process issues\")"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 361,
+      "detail": "recommendations.append(\"Moderate efficiency - consider optimization opportunities\")"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 366,
+      "detail": "recommendations.append(\"Security violations detected - implement security scanning\")"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 371,
+      "detail": "recommendations.append(\"Performance regressions detected - implement performance testing\")"
+    },
+    {
+      "file": "swarm\\quality\\metrics_collector.py",
+      "line": 374,
+      "detail": "recommendations.append(\"Quality metrics look good - continue current practices\")"
+    },
+    {
+      "file": "swarm\\watchdog\\enhanced_monitor.py",
+      "line": 338,
+      "detail": "self.enhanced_violations.append(violation)"
+    },
+    {
+      "file": "swarm\\watchdog\\monitor.py",
+      "line": 295,
+      "detail": "context.message_history.append(message)"
+    },
+    {
+      "file": "swarm\\watchdog\\monitor.py",
+      "line": 393,
+      "detail": "self.violations.append(violation)"
+    },
+    {
+      "file": "swarm\\watchdog\\monitor.py",
+      "line": 440,
+      "detail": "state_history.append(state_hash)"
+    },
+    {
+      "file": "security\\threat_intelligence_feed.py",
+      "line": 32,
+      "detail": "self._subscribers.append(handler)"
+    },
+    {
+      "file": "security\\threat_intelligence_feed.py",
+      "line": 35,
+      "detail": "self._history.append(alert)"
+    },
+    {
+      "file": "monitoring\\brier_metrics.py",
+      "line": 149,
+      "detail": "self._resolved.append(prediction)"
+    },
+    {
+      "file": "monitoring\\brier_metrics.py",
+      "line": 252,
+      "detail": "leaderboard.append({"
+    },
+    {
+      "file": "monitoring\\dashboard.py",
+      "line": 152,
+      "detail": "self.liquidation_events.append(event)"
+    },
+    {
+      "file": "monitoring\\dashboard.py",
+      "line": 157,
+      "detail": "self.whale_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\dashboard.py",
+      "line": 169,
+      "detail": "self.liquidation_events.append(event)"
+    },
+    {
+      "file": "monitoring\\dashboard.py",
+      "line": 193,
+      "detail": "self.whale_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\dashboard.py",
+      "line": 235,
+      "detail": "self.system_health_history.append(health)"
+    },
+    {
+      "file": "monitoring\\dashboard.py",
+      "line": 286,
+      "detail": "self.risk_metrics_history.append(risk)"
+    },
+    {
+      "file": "monitoring\\dashboard.py",
+      "line": 317,
+      "detail": "self.alerts.append(alert)"
+    },
+    {
+      "file": "monitoring\\enhanced_prediction_markets.py",
+      "line": 165,
+      "detail": "self._drift_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\enhanced_prediction_markets.py",
+      "line": 178,
+      "detail": "question_groups[key].append(market)"
+    },
+    {
+      "file": "monitoring\\enhanced_prediction_markets.py",
+      "line": 224,
+      "detail": "self._arbitrage_opps.append(arb)"
+    },
+    {
+      "file": "monitoring\\federated_anomaly_detection.py",
+      "line": 37,
+      "detail": "self._updates.append(update)"
+    },
+    {
+      "file": "monitoring\\health_checker.py",
+      "line": 321,
+      "detail": "self._status_callbacks.append(callback)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 214,
+      "detail": "self._signal_history.append(signal)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 304,
+      "detail": "self._whale_alerts.append(signal)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 388,
+      "detail": "self._signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 478,
+      "detail": "self._all_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 498,
+      "detail": "self._all_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 515,
+      "detail": "self._all_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 539,
+      "detail": "self._all_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 564,
+      "detail": "self._alerts.append(alert)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 569,
+      "detail": "self._all_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 576,
+      "detail": "self._callbacks.append(callback)"
+    },
+    {
+      "file": "monitoring\\liquidation_monitor.py",
+      "line": 60,
+      "detail": "events.append("
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 91,
+      "detail": "results.append(MetricValue("
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 144,
+      "detail": "results.append(MetricValue("
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 206,
+      "detail": "results.append(MetricValue("
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 214,
+      "detail": "results.append(MetricValue("
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 222,
+      "detail": "results.append(MetricValue("
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 298,
+      "detail": "self._collectors.append(collector)"
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 323,
+      "detail": "metrics_by_name[metric.name].append(metric)"
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 327,
+      "detail": "lines.append(f\"# HELP {name} {values[0].help_text}\")"
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 329,
+      "detail": "lines.append(f\"# TYPE {name} {values[0].metric_type.value}\")"
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 336,
+      "detail": "lines.append(f\"{name}{{{label_str}}} {value.value}\")"
+    },
+    {
+      "file": "monitoring\\metrics.py",
+      "line": 338,
+      "detail": "lines.append(f\"{name} {value.value}\")"
+    },
+    {
+      "file": "monitoring\\metrics_collector.py",
+      "line": 67,
+      "detail": "self.values.append(mv)"
+    },
+    {
+      "file": "monitoring\\metrics_collector.py",
+      "line": 270,
+      "detail": "lines.append(f\"# HELP {name} {metric.description}\")"
+    },
+    {
+      "file": "monitoring\\metrics_collector.py",
+      "line": 271,
+      "detail": "lines.append(f\"# TYPE {name} {metric.metric_type.value}\")"
+    },
+    {
+      "file": "monitoring\\metrics_collector.py",
+      "line": 276,
+      "detail": "lines.append(f'{name}_bucket{{le=\"{bucket}\"}} {count}')"
+    },
+    {
+      "file": "monitoring\\metrics_collector.py",
+      "line": 277,
+      "detail": "lines.append(f'{name}_bucket{{le=\"+Inf\"}} {metric.total_count}')"
+    },
+    {
+      "file": "monitoring\\metrics_collector.py",
+      "line": 278,
+      "detail": "lines.append(f\"{name}_sum {metric.total_sum}\")"
+    },
+    {
+      "file": "monitoring\\metrics_collector.py",
+      "line": 279,
+      "detail": "lines.append(f\"{name}_count {metric.total_count}\")"
+    },
+    {
+      "file": "monitoring\\metrics_collector.py",
+      "line": 281,
+      "detail": "lines.append(f\"{name} {metric.current_value}\")"
+    },
+    {
+      "file": "monitoring\\mev_opportunity_scanner.py",
+      "line": 49,
+      "detail": "signals.append("
+    },
+    {
+      "file": "monitoring\\news_agent.py",
+      "line": 78,
+      "detail": "items.append(NewsItem("
+    },
+    {
+      "file": "monitoring\\news_feeds.py",
+      "line": 84,
+      "detail": "articles.append(NewsArticle("
+    },
+    {
+      "file": "monitoring\\news_feeds.py",
+      "line": 176,
+      "detail": "articles.append(NewsArticle("
+    },
+    {
+      "file": "monitoring\\news_feeds.py",
+      "line": 279,
+      "detail": "categories.append(cat.text.lower())"
+    },
+    {
+      "file": "monitoring\\news_feeds.py",
+      "line": 284,
+      "detail": "articles.append(NewsArticle("
+    },
+    {
+      "file": "monitoring\\news_feeds.py",
+      "line": 353,
+      "detail": "articles.append(NewsArticle("
+    },
+    {
+      "file": "monitoring\\performance_tracker.py",
+      "line": 188,
+      "detail": "self._trades.append(trade)"
+    },
+    {
+      "file": "monitoring\\performance_tracker.py",
+      "line": 200,
+      "detail": "self._equity_curve.append({"
+    },
+    {
+      "file": "monitoring\\performance_tracker.py",
+      "line": 311,
+      "detail": "by_symbol[trade.symbol].append(trade)"
+    },
+    {
+      "file": "monitoring\\prediction_analytics.py",
+      "line": 90,
+      "detail": "opportunities.append(opportunity)"
+    },
+    {
+      "file": "monitoring\\prediction_analytics.py",
+      "line": 135,
+      "detail": "api_opportunities.append(api_opportunity)"
+    },
+    {
+      "file": "monitoring\\prediction_analytics.py",
+      "line": 170,
+      "detail": "question_groups[key].append(market)"
+    },
+    {
+      "file": "monitoring\\prediction_analytics.py",
+      "line": 207,
+      "detail": "venue_probs.append((venue, prob))"
+    },
+    {
+      "file": "monitoring\\prediction_analytics.py",
+      "line": 208,
+      "detail": "market_details.append({"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 480,
+      "detail": "markets.append(market)"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 593,
+      "detail": "prediction_markets.append(prediction_market)"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 891,
+      "detail": "markets.append(market)"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 1209,
+      "detail": "deltas.append("
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 1302,
+      "detail": "self._drift_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 1318,
+      "detail": "question_groups[key].append(market)"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 1354,
+      "detail": "self._arbitrage_opps.append(arb)"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 1457,
+      "detail": "results.append((market, metrics))"
+    },
+    {
+      "file": "monitoring\\predictive_incident_prevention.py",
+      "line": 40,
+      "detail": "self._signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\predictive_incident_prevention.py",
+      "line": 51,
+      "detail": "recommendations.append(playbook)"
+    },
+    {
+      "file": "monitoring\\real_prediction_markets.py",
+      "line": 285,
+      "detail": "markets.append(market)"
+    },
+    {
+      "file": "monitoring\\real_prediction_markets.py",
+      "line": 385,
+      "detail": "markets.append(market)"
+    },
+    {
+      "file": "monitoring\\real_prediction_markets.py",
+      "line": 472,
+      "detail": "markets.append(market)"
+    },
+    {
+      "file": "monitoring\\real_prediction_markets.py",
+      "line": 554,
+      "detail": "markets.append(pm)"
+    },
+    {
+      "file": "monitoring\\real_prediction_markets.py",
+      "line": 717,
+      "detail": "self._drift_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\real_prediction_markets.py",
+      "line": 732,
+      "detail": "question_groups[key].append(market)"
+    },
+    {
+      "file": "monitoring\\real_prediction_markets.py",
+      "line": 765,
+      "detail": "self._arbitrage_opps.append(arb)"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 91,
+      "detail": "supporting_indicators.append(\"extreme_volatility\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 97,
+      "detail": "supporting_indicators.append(\"high_volatility\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 103,
+      "detail": "supporting_indicators.append(\"very_low_volatility\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 109,
+      "detail": "supporting_indicators.append(\"low_volatility\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 118,
+      "detail": "supporting_indicators.append(\"strong_breakout\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 121,
+      "detail": "supporting_indicators.append(\"strong_breakdown\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 128,
+      "detail": "supporting_indicators.append(\"strong_uptrend\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 131,
+      "detail": "supporting_indicators.append(\"strong_downtrend\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 138,
+      "detail": "supporting_indicators.append(\"moderate_uptrend\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 141,
+      "detail": "supporting_indicators.append(\"moderate_downtrend\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 149,
+      "detail": "supporting_indicators.append(\"range_bound\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 160,
+      "detail": "supporting_indicators.append(\"high_volume_confirmation\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 164,
+      "detail": "supporting_indicators.append(\"low_volume_warning\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 178,
+      "detail": "supporting_indicators.append(\"momentum_divergence\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 181,
+      "detail": "supporting_indicators.append(\"momentum_alignment\")"
+    },
+    {
+      "file": "monitoring\\regime_classifier.py",
+      "line": 208,
+      "detail": "self.classification_history.append(classification)"
+    },
+    {
+      "file": "monitoring\\silent_failure_detector.py",
+      "line": 56,
+      "detail": "self._alerts.append(alert)"
+    },
+    {
+      "file": "monitoring\\simulation_prediction_markets.py",
+      "line": 195,
+      "detail": "self._drift_signals.append(signal)"
+    },
+    {
+      "file": "monitoring\\simulation_prediction_markets.py",
+      "line": 211,
+      "detail": "question_groups[key].append(market)"
+    },
+    {
+      "file": "monitoring\\simulation_prediction_markets.py",
+      "line": 240,
+      "detail": "self._arbitrage_opps.append(arb)"
+    },
+    {
+      "file": "monitoring\\system_monitor.py",
+      "line": 162,
+      "detail": "self._history.append(stats)"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 37,
+      "detail": "issues.append(f\"Missing top-level key: {key}\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 42,
+      "detail": "issues.append(\"Route missing default receiver\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 48,
+      "detail": "issues.append(f\"Default receiver '{default_receiver}' not defined\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 53,
+      "detail": "issues.append(f\"Route receiver '{recv}' not defined\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 69,
+      "detail": "issues.append(f\"Receiver '{name}' has no notification channels\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 74,
+      "detail": "issues.append(\"Inhibit rule missing source_match\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 76,
+      "detail": "issues.append(\"Inhibit rule missing target_match\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 85,
+      "detail": "issues.append(f\"Alert rules file not found: {path}\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 91,
+      "detail": "issues.append(\"No alert rule groups defined\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 95,
+      "detail": "issues.append(f\"Only {total_rules} alert rules defined (expected >= 5)\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 104,
+      "detail": "issues.append(f\"Prometheus config not found: {path}\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 111,
+      "detail": "issues.append(\"Prometheus config has no alertmanager targets\")"
+    },
+    {
+      "file": "monitoring\\verify-alertmanager.py",
+      "line": 179,
+      "detail": "all_issues.append(\"alertmanager.yml not found\")"
+    },
+    {
+      "file": "memory\\federated_memory_bus.py",
+      "line": 45,
+      "detail": "state.clusters.append(packet.origin_cluster)"
+    },
+    {
+      "file": "streaming\\stream_bus.py",
+      "line": 243,
+      "detail": "self._topics[event.topic].append(event)"
+    },
+    {
+      "file": "streaming\\stream_bus.py",
+      "line": 583,
+      "detail": "events.append(event)"
+    },
+    {
+      "file": "streams\\base_stream.py",
+      "line": 292,
+      "detail": "self._subscribers.append(callback)"
+    },
+    {
+      "file": "streams\\base_stream.py",
+      "line": 306,
+      "detail": "self._async_subscribers.append(callback)"
+    },
+    {
+      "file": "streams\\base_stream.py",
+      "line": 447,
+      "detail": "self._buffer.append(event)"
+    },
+    {
+      "file": "streams\\market_data_stream.py",
+      "line": 203,
+      "detail": "self._error_times.append(time.time())"
+    },
+    {
+      "file": "streams\\market_data_stream.py",
+      "line": 260,
+      "detail": "mock_data.append({"
+    },
+    {
+      "file": "streams\\market_data_stream.py",
+      "line": 289,
+      "detail": "events.append(event)"
+    },
+    {
+      "file": "streams\\market_data_stream.py",
+      "line": 294,
+      "detail": "events.append(event)"
+    },
+    {
+      "file": "streams\\market_data_stream.py",
+      "line": 363,
+      "detail": "self._event_times.append(current_time)"
+    },
+    {
+      "file": "streams\\market_data_stream_simple.py",
+      "line": 153,
+      "detail": "self._error_times.append(time.time())"
+    },
+    {
+      "file": "streams\\market_data_stream_simple.py",
+      "line": 180,
+      "detail": "mock_data.append({"
+    },
+    {
+      "file": "streams\\market_data_stream_simple.py",
+      "line": 209,
+      "detail": "events.append(event)"
+    },
+    {
+      "file": "streams\\market_data_stream_simple.py",
+      "line": 214,
+      "detail": "events.append(event)"
+    },
+    {
+      "file": "streams\\market_data_stream_simple.py",
+      "line": 284,
+      "detail": "self._event_times.append(current_time)"
+    },
+    {
+      "file": "streams\\market_stream.py",
+      "line": 89,
+      "detail": "self._tasks.append(task)"
+    },
+    {
+      "file": "streams\\market_stream.py",
+      "line": 95,
+      "detail": "self._tasks.append(task)"
+    },
+    {
+      "file": "streams\\news.py",
+      "line": 355,
+      "detail": "categories.append(cat_elem.text.lower())"
+    },
+    {
+      "file": "streams\\news.py",
+      "line": 368,
+      "detail": "items.append(item)"
+    },
+    {
+      "file": "streams\\news.py",
+      "line": 426,
+      "detail": "matched.append(keyword.lower())"
+    },
+    {
+      "file": "streams\\news_sentiment_stream.py",
+      "line": 149,
+      "detail": "articles.append(article._asdict())"
+    },
+    {
+      "file": "streams\\news_sentiment_stream.py",
+      "line": 167,
+      "detail": "articles.append(article)"
+    },
+    {
+      "file": "streams\\news_sentiment_stream.py",
+      "line": 168,
+      "detail": "self.articles.append(article)"
+    },
+    {
+      "file": "streams\\news_sentiment_stream.py",
+      "line": 194,
+      "detail": "events.append(event)"
+    },
+    {
+      "file": "streams\\news_sentiment_stream.py",
+      "line": 195,
+      "detail": "self.sentiment_signals.append(signal)"
+    },
+    {
+      "file": "streams\\news_sentiment_stream.py",
+      "line": 281,
+      "detail": "symbol_articles[symbol].append(article)"
+    },
+    {
+      "file": "streams\\news_sentiment_stream.py",
+      "line": 324,
+      "detail": "signals.append(signal)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 141,
+      "detail": "transactions.append(tx._asdict())"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 159,
+      "detail": "transactions.append(tx)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 160,
+      "detail": "self.transactions.append(tx)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 187,
+      "detail": "events.append(event)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 188,
+      "detail": "self.onchain_signals.append(signal)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 280,
+      "detail": "chain_transactions[tx.chain].append(tx)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 322,
+      "detail": "whale_txs.append((tx, usd_value))"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 357,
+      "detail": "signals.append(signal)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 376,
+      "detail": "protocol_txs[tx.protocol].append(tx)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 413,
+      "detail": "signals.append(signal)"
+    },
+    {
+      "file": "streams\\onchain_stream.py",
+      "line": 456,
+      "detail": "signals.append(signal)"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 170,
+      "detail": "posts.append(post._asdict())"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 188,
+      "detail": "posts.append(post)"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 189,
+      "detail": "self.posts.append(post)"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 217,
+      "detail": "events.append(event)"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 218,
+      "detail": "self.social_signals.append(signal)"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 358,
+      "detail": "symbol_platform_posts[key].append(post)"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 408,
+      "detail": "signals.append(signal)"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 502,
+      "detail": "platform_breakdown[signal.platform][\"sentiment\"].append(signal.sentiment_score)"
+    },
+    {
+      "file": "streams\\social_media_stream.py",
+      "line": 503,
+      "detail": "platform_breakdown[signal.platform][\"influence\"].append(signal.influence_score)"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 329,
+      "detail": "recommendations.append(\"Consider retraining the model with fresh data\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 330,
+      "detail": "recommendations.append(\"Review feature engineering and data preprocessing\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 333,
+      "detail": "recommendations.append(\"Investigate potential data quality issues\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 334,
+      "detail": "recommendations.append(\"Consider model architecture changes\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 337,
+      "detail": "recommendations.append(\"Immediate model retraining required\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 338,
+      "detail": "recommendations.append(\"Consider rolling back to previous model version\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 349,
+      "detail": "recommendations.append(f\"Monitor features: {', '.join([f[0] for f in most_drifted])}\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 352,
+      "detail": "recommendations.append(\"Update training data with recent samples\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 353,
+      "detail": "recommendations.append(\"Consider adaptive feature scaling\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 356,
+      "detail": "recommendations.append(\"Implement online learning capabilities\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 357,
+      "detail": "recommendations.append(\"Review data collection pipeline\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 365,
+      "detail": "recommendations.append(\"Review model assumptions and feature relationships\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 368,
+      "detail": "recommendations.append(\"Consider ensemble methods for robustness\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 369,
+      "detail": "recommendations.append(\"Implement concept drift adaptation mechanisms\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 372,
+      "detail": "recommendations.append(\"Redesign model architecture for new patterns\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 373,
+      "detail": "recommendations.append(\"Increase monitoring frequency\")"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 539,
+      "detail": "alerts.append(alert)"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 552,
+      "detail": "alerts.append(alert)"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 565,
+      "detail": "alerts.append(alert)"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 569,
+      "detail": "self.alerts.append(alert)"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 601,
+      "detail": "self.alerts.append(alert)"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 624,
+      "detail": "triggers.append(trigger)"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 637,
+      "detail": "triggers.append(trigger)"
+    },
+    {
+      "file": "ml\\model_monitor.py",
+      "line": 641,
+      "detail": "self.retraining_triggers.append(trigger)"
+    }
+  ],
+  "SILENT_EXCEPT_PASS": [
+    {
+      "file": "merid\\tick_log.py",
+      "line": 185,
+      "detail": "except (ValueError, IndexError):"
+    },
+    {
+      "file": "merid\\tick_log.py",
+      "line": 196,
+      "detail": "except (ValueError, IndexError):"
+    },
+    {
+      "file": "merid\\tick_log.py",
+      "line": 201,
+      "detail": "except (ValueError, IndexError):"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\auto_promoter.py",
+      "line": 126,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\client.py",
+      "line": 3074,
+      "detail": "except (ValueError, TypeError):"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\fix_client.py",
+      "line": 124,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\fix_client.py",
+      "line": 131,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\fix_client.py",
+      "line": 411,
+      "detail": "except (ValueError, TypeError):"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\market_cache.py",
+      "line": 78,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\market_catalog.py",
+      "line": 218,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\order_group_lifecycle.py",
+      "line": 110,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\order_group_lifecycle.py",
+      "line": 118,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\order_group_manager.py",
+      "line": 510,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\sentiment.py",
+      "line": 419,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\ws.py",
+      "line": 125,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\ws.py",
+      "line": 131,
+      "detail": "except (ConnectionError, RuntimeError):"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\ws.py",
+      "line": 387,
+      "detail": "except asyncio.QueueEmpty:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\ws_bridge.py",
+      "line": 142,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\ws_bridge.py",
+      "line": 186,
+      "detail": "except asyncio.QueueEmpty:"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\ws_bridge.py",
+      "line": 449,
+      "detail": "except (AttributeError, RuntimeError):"
+    },
+    {
+      "file": "merid\\event_venues\\polymarket\\ws.py",
+      "line": 61,
+      "detail": "except (ConnectionError, RuntimeError):"
+    },
+    {
+      "file": "merid\\execution\\router.py",
+      "line": 223,
+      "detail": "except ImportError:"
+    },
+    {
+      "file": "merid\\lanes\\btc15m_lane.py",
+      "line": 679,
+      "detail": "except (TypeError, ValueError):"
+    },
+    {
+      "file": "merid\\lanes\\btc15m_lane.py",
+      "line": 1801,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\lanes\\btc15m_lane.py",
+      "line": 1808,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\metrics\\outcome_resolver.py",
+      "line": 334,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\prediction\\agent_grid.py",
+      "line": 312,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\prediction\\agent_grid.py",
+      "line": 320,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\prediction\\consensus.py",
+      "line": 990,
+      "detail": "except (json.JSONDecodeError, TypeError):"
+    },
+    {
+      "file": "merid\\prediction\\consensus.py",
+      "line": 1086,
+      "detail": "except (json.JSONDecodeError, TypeError):"
+    },
+    {
+      "file": "merid\\prediction\\debate.py",
+      "line": 945,
+      "detail": "except (json.JSONDecodeError, TypeError):"
+    },
+    {
+      "file": "merid\\prediction\\edge_model.py",
+      "line": 67,
+      "detail": "except (ImportError, Exception):"
+    },
+    {
+      "file": "merid\\prediction\\edge_recalibrator.py",
+      "line": 98,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\prediction\\edge_recalibrator.py",
+      "line": 119,
+      "detail": "except asyncio.TimeoutError:"
+    },
+    {
+      "file": "merid\\prediction\\mcp_market_feed.py",
+      "line": 148,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\prediction\\mcp_market_feed.py",
+      "line": 172,
+      "detail": "except asyncio.TimeoutError:"
+    },
+    {
+      "file": "merid\\prediction\\portfolio_risk_agent.py",
+      "line": 120,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\prediction\\portfolio_risk_agent.py",
+      "line": 139,
+      "detail": "except asyncio.TimeoutError:"
+    },
+    {
+      "file": "merid\\prediction\\social_broadcaster.py",
+      "line": 66,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\prediction\\trading_agent.py",
+      "line": 160,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\risk\\kill_switches.py",
+      "line": 111,
+      "detail": "except (ImportError, AttributeError):"
+    },
+    {
+      "file": "merid\\signals\\ws_price_feed.py",
+      "line": 144,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\swarm\\critic_agent.py",
+      "line": 73,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\swarm\\critic_agent.py",
+      "line": 91,
+      "detail": "except asyncio.TimeoutError:"
+    },
+    {
+      "file": "merid\\swarm\\execution_subscriber.py",
+      "line": 101,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "merid\\swarm\\market_mood_bus.py",
+      "line": 289,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\alerts.py",
+      "line": 138,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\audit_trail.py",
+      "line": 165,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\automated_risk_controls.py",
+      "line": 730,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\cache.py",
+      "line": 86,
+      "detail": "except (ConnectionError, TimeoutError, redis.RedisError):"
+    },
+    {
+      "file": "core\\collaboration_framework.py",
+      "line": 373,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\consensus_engine.py",
+      "line": 121,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\consensus_graph.py",
+      "line": 97,
+      "detail": "\"\"\"Base exception for consensus errors.\"\"\""
+    },
+    {
+      "file": "core\\error_handling.py",
+      "line": 568,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\health.py",
+      "line": 79,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 111,
+      "detail": "except (subprocess.TimeoutExpired, FileNotFoundError, OSError):"
+    },
+    {
+      "file": "core\\secrets_guard.py",
+      "line": 187,
+      "detail": "except (OSError, UnicodeDecodeError):"
+    },
+    {
+      "file": "core\\self_recovery.py",
+      "line": 355,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\state_recovery.py",
+      "line": 259,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\streaming_bus.py",
+      "line": 148,
+      "detail": "except asyncio.QueueEmpty:"
+    },
+    {
+      "file": "core\\system_orchestrator.py",
+      "line": 192,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "core\\x402_payments.py",
+      "line": 159,
+      "detail": "except (ValueError, IndexError):"
+    },
+    {
+      "file": "trading\\execution.py",
+      "line": 217,
+      "detail": "\"\"\"Base exception for execution errors.\"\"\""
+    },
+    {
+      "file": "trading\\execution.py",
+      "line": 386,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "trading\\agents\\bookie_agent.py",
+      "line": 71,
+      "detail": "except (ValueError, IndexError):"
+    },
+    {
+      "file": "trading\\agents\\bookie_agent.py",
+      "line": 119,
+      "detail": "except (ValueError, IndexError):"
+    },
+    {
+      "file": "trading\\agents\\bookie_agent.py",
+      "line": 406,
+      "detail": "except ValueError:"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 708,
+      "detail": "except WebSocketDisconnect:"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 884,
+      "detail": "except WebSocketDisconnect:"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 983,
+      "detail": "except WebSocketDisconnect:"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 1039,
+      "detail": "except WebSocketDisconnect:"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 1109,
+      "detail": "except Exception:"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 1113,
+      "detail": "except Exception:"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 2808,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\main.py",
+      "line": 3096,
+      "detail": "except Exception:"
+    },
+    {
+      "file": "web\\startup_agents.py",
+      "line": 243,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\websocket_factory.py",
+      "line": 179,
+      "detail": "except WebSocketDisconnect:"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 528,
+      "detail": "except Exception:"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 649,
+      "detail": "except Exception:"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 1522,
+      "detail": "except (ImportError, ModuleNotFoundError):"
+    },
+    {
+      "file": "web\\api\\kalshi_api.py",
+      "line": 2751,
+      "detail": "except (AttributeError, TypeError):"
+    },
+    {
+      "file": "web\\api\\live_stream.py",
+      "line": 122,
+      "detail": "except (json.JSONDecodeError, TypeError):"
+    },
+    {
+      "file": "web\\api\\operator.py",
+      "line": 531,
+      "detail": "except (ImportError, Exception):"
+    },
+    {
+      "file": "web\\api\\operator_endpoints.py",
+      "line": 291,
+      "detail": "except (ImportError, AttributeError, Exception):"
+    },
+    {
+      "file": "web\\api\\streams.py",
+      "line": 385,
+      "detail": "except WebSocketDisconnect:"
+    },
+    {
+      "file": "web\\api\\ws_kafka_bridge.py",
+      "line": 119,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\services\\commodities_publisher.py",
+      "line": 44,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\services\\forex_publisher.py",
+      "line": 44,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\services\\portfolio_publisher.py",
+      "line": 46,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\services\\prediction_publisher.py",
+      "line": 49,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\services\\price_publisher.py",
+      "line": 47,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\services\\stocks_publisher.py",
+      "line": 46,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "web\\services\\swarm_publishers.py",
+      "line": 61,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "agents\\agent_framework.py",
+      "line": 150,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "agents\\agent_framework.py",
+      "line": 202,
+      "detail": "except asyncio.TimeoutError:"
+    },
+    {
+      "file": "agents\\output_validator.py",
+      "line": 380,
+      "detail": "except json.JSONDecodeError:"
+    },
+    {
+      "file": "agents\\streaming_agent.py",
+      "line": 96,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "agents\\swarm_mixin.py",
+      "line": 175,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "agents\\watchdog_agents.py",
+      "line": 477,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "agents\\prompts\\react_templates.py",
+      "line": 429,
+      "detail": "except json.JSONDecodeError:"
+    },
+    {
+      "file": "risk\\position_sizing.py",
+      "line": 492,
+      "detail": "except (ValueError, IndexError):"
+    },
+    {
+      "file": "risk\\risk_monitor.py",
+      "line": 175,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "execution\\book_builder.py",
+      "line": 265,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "execution\\execution_coordinator.py",
+      "line": 82,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "execution\\multicast_feed.py",
+      "line": 144,
+      "detail": "except (socket.error, OSError):"
+    },
+    {
+      "file": "execution\\order_router.py",
+      "line": 30,
+      "detail": "\"\"\"Base exception for order router errors.\"\"\""
+    },
+    {
+      "file": "execution\\service.py",
+      "line": 187,
+      "detail": "except (ConnectionError, RuntimeError):"
+    },
+    {
+      "file": "execution\\service.py",
+      "line": 202,
+      "detail": "except (ConnectionError, RuntimeError):"
+    },
+    {
+      "file": "swarm\\structural_weaknesses_analysis.py",
+      "line": 322,
+      "detail": "except nx.NetworkXNoPath:"
+    },
+    {
+      "file": "security\\secrets_manager.py",
+      "line": 401,
+      "detail": "except Exception:"
+    },
+    {
+      "file": "monitoring\\health_checker.py",
+      "line": 206,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "monitoring\\intelligence_layer.py",
+      "line": 434,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "monitoring\\prediction_markets.py",
+      "line": 1027,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "monitoring\\real_prediction_markets.py",
+      "line": 629,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "monitoring\\simulation_prediction_markets.py",
+      "line": 130,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "monitoring\\system_monitor.py",
+      "line": 151,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "streaming\\stream_bus.py",
+      "line": 526,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "streaming\\stream_bus.py",
+      "line": 585,
+      "detail": "except asyncio.TimeoutError:"
+    },
+    {
+      "file": "streams\\base_stream.py",
+      "line": 362,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "streams\\base_stream.py",
+      "line": 369,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "streams\\market.py",
+      "line": 408,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "streams\\market.py",
+      "line": 416,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "streams\\news.py",
+      "line": 210,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "streams\\news.py",
+      "line": 496,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "streams\\news_stream.py",
+      "line": 72,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "analytics\\analytics_dashboard.py",
+      "line": 629,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "arbitrage\\scanner_base.py",
+      "line": 173,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "prediction\\cross_hedge.py",
+      "line": 385,
+      "detail": "except Exception:"
+    },
+    {
+      "file": "prediction\\oracle_latency.py",
+      "line": 187,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "prediction\\resolution_tracker.py",
+      "line": 199,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "prediction\\time_exploit_scanner.py",
+      "line": 189,
+      "detail": "except asyncio.CancelledError:"
+    },
+    {
+      "file": "ai_signals\\signal_generator.py",
+      "line": 655,
+      "detail": "except Exception:"
+    }
+  ],
+  "HTTP_NO_TIMEOUT": [
+    {
+      "file": "merid\\betting\\odds_client.py",
+      "line": 146,
+      "detail": "resp = requests.get(url, params={"
+    },
+    {
+      "file": "merid\\event_venues\\kalshi\\metrics.py",
+      "line": 244,
+      "detail": "history = self._requests.get(endpoint, [])"
+    },
+    {
+      "file": "merid\\sentiment\\cfgi_client.py",
+      "line": 196,
+      "detail": "resp = requests.get("
+    },
+    {
+      "file": "merid\\sentiment\\reddit_scraper.py",
+      "line": 163,
+      "detail": "resp = requests.post("
+    },
+    {
+      "file": "merid\\sentiment\\reddit_scraper.py",
+      "line": 233,
+      "detail": "resp = requests.get("
+    },
+    {
+      "file": "merid\\sentiment\\reddit_scraper.py",
+      "line": 243,
+      "detail": "resp = requests.get("
+    },
+    {
+      "file": "merid\\sentiment\\twitter_fetcher.py",
+      "line": 173,
+      "detail": "resp = requests.get("
+    },
+    {
+      "file": "merid\\sentiment\\twitter_fetcher.py",
+      "line": 507,
+      "detail": "requests.post("
+    },
+    {
+      "file": "merid\\sentiment\\twitter_fetcher.py",
+      "line": 515,
+      "detail": "resp = requests.post("
+    },
+    {
+      "file": "merid\\sentiment\\twitter_fetcher.py",
+      "line": 608,
+      "detail": "with requests.get("
+    },
+    {
+      "file": "core\\assertion_framework.py",
+      "line": 254,
+      "detail": "response = requests.post(f\"{self.registry_url}/register\", json=payload)"
+    },
+    {
+      "file": "core\\assertion_framework.py",
+      "line": 256,
+      "detail": "response = requests.put(f\"{self.registry_url}/update\", json=payload)"
+    },
+    {
+      "file": "core\\assertion_framework.py",
+      "line": 258,
+      "detail": "response = requests.post(f\"{self.registry_url}/record\", json=payload)"
+    },
+    {
+      "file": "core\\assertion_framework.py",
+      "line": 260,
+      "detail": "response = requests.get(f\"{self.registry_url}/list\", params=payload)"
+    },
+    {
+      "file": "core\\assertion_framework.py",
+      "line": 262,
+      "detail": "response = requests.get(f\"{self.registry_url}/templates/{payload['template_id']}\")"
+    },
+    {
+      "file": "swarm\\hsm_key_management.py",
+      "line": 405,
+      "detail": "request = self._signing_requests.get(request_id)"
+    },
+    {
+      "file": "swarm\\hsm_key_management.py",
+      "line": 457,
+      "detail": "request = self._signing_requests.get(request_id)"
+    },
+    {
+      "file": "swarm\\local_llm_gateway.py",
+      "line": 129,
+      "detail": "active = self._active_requests.get(provider.name, 0)"
+    },
+    {
+      "file": "swarm\\local_llm_gateway.py",
+      "line": 146,
+      "detail": "self._active_requests[provider.name] = self._active_requests.get(provider.name, 0) + 1"
+    },
+    {
+      "file": "swarm\\local_llm_gateway.py",
+      "line": 196,
+      "detail": "\"active_requests\": self._active_requests.get(name, 0),"
+    }
+  ],
+  "NO_LATENCY_TRACKING": [
+    {
+      "file": "merid\\event_venues\\kalshi\\order_group_recovery.py",
+      "line": 0,
+      "detail": "Execution path without latency measurement"
+    },
+    {
+      "file": "execution\\execution_coordinator.py",
+      "line": 0,
+      "detail": "Execution path without latency measurement"
+    },
+    {
+      "file": "execution\\service.py",
+      "line": 0,
+      "detail": "Execution path without latency measurement"
+    }
+  ],
+  "NO_DRAWDOWN_CHECK": [
+    {
+      "file": "merid\\event_venues\\polymarket\\trading.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "merid\\execution\\base.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "trading\\merid_adapter.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "trading\\adapters\\alpaca.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "trading\\adapters\\base.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "trading\\adapters\\coinbase.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "trading\\adapters\\kalshi.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "trading\\adapters\\paper.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "trading\\adapters\\pumpfun.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "web\\api\\trading.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "execution\\simulator_adapter.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    },
+    {
+      "file": "execution\\venue_adapter.py",
+      "line": 0,
+      "detail": "Order submission without drawdown/risk check"
+    }
+  ],
+  "MEMORY_NO_EVICTION": [
+    {
+      "file": "merid\\rag\\service.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "merid\\sentiment\\kalshi_arbitrage_bot.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "core\\antifragile_patterns.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "web\\api\\arbitrage.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "web\\api\\mock_arbitrage.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "swarm\\coverage_loop.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "security\\quantum_cold_storage.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "memory\\federated_memory_bus.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "memory\\long_term_knowledge_base.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "memory\\semantic_memory_search.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "arbitrage\\cross_chain_arbitrage.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    },
+    {
+      "file": "arbitrage\\cross_venue_detector.py",
+      "line": 0,
+      "detail": "Memory/RAG store without eviction policy"
+    }
+  ],
+  "OVER_AUTONOMY": [
+    {
+      "file": "core\\autonomous_fixer.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    },
+    {
+      "file": "core\\domain_priority_manager.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    },
+    {
+      "file": "web\\api\\ws_paper.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    },
+    {
+      "file": "agents\\agent_mesh.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    },
+    {
+      "file": "agents\\streaming\\market_analyst.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    },
+    {
+      "file": "agents\\streaming\\__init__.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    },
+    {
+      "file": "swarm\\swarm_lab_orchestrator.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    },
+    {
+      "file": "swarm\\test_agents.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    },
+    {
+      "file": "swarm\\test_swarm_planner.py",
+      "line": 0,
+      "detail": "Autonomous execution without human gate"
+    }
+  ],
+  "BARE_EXCEPT": [
+    {
+      "file": "core\\merid_dashboard.py",
+      "line": 254,
+      "detail": ""
+    },
+    {
+      "file": "trading\\merid_adapter.py",
+      "line": 341,
+      "detail": ""
+    },
+    {
+      "file": "swarm\\operations\\cadence.py",
+      "line": 164,
+      "detail": ""
+    },
+    {
+      "file": "governance\\production_governance_schedule.py",
+      "line": 193,
+      "detail": ""
+    },
+    {
+      "file": "monitoring\\health_checker.py",
+      "line": 138,
+      "detail": ""
+    },
+    {
+      "file": "monitoring\\health_checker.py",
+      "line": 147,
+      "detail": ""
+    },
+    {
+      "file": "monitoring\\health_checker.py",
+      "line": 156,
+      "detail": ""
+    },
+    {
+      "file": "monitoring\\reality_metrics.py",
+      "line": 268,
+      "detail": ""
+    },
+    {
+      "file": "monitoring\\reality_metrics.py",
+      "line": 277,
+      "detail": ""
+    },
+    {
+      "file": "monitoring\\reality_metrics.py",
+      "line": 286,
+      "detail": ""
+    },
+    {
+      "file": "monitoring\\reality_metrics.py",
+      "line": 295,
+      "detail": ""
+    }
+  ],
+  "SQL_INJECTION_RISK": [
+    {
+      "file": "web\\main.py",
+      "line": 1902,
+      "detail": "_pc.execute(f\"DELETE FROM [{tbl[0]}]\")"
+    }
+  ],
+  "API_NO_AUTH": [
+    {
+      "file": "web\\api\\agents_health.py",
+      "line": 0,
+      "detail": "web/api/agents_health.py"
+    },
+    {
+      "file": "web\\api\\analytics.py",
+      "line": 0,
+      "detail": "web/api/analytics.py"
+    },
+    {
+      "file": "web\\api\\api_status.py",
+      "line": 0,
+      "detail": "web/api/api_status.py"
+    },
+    {
+      "file": "web\\api\\auto_promoter_api.py",
+      "line": 0,
+      "detail": "web/api/auto_promoter_api.py"
+    },
+    {
+      "file": "web\\api\\benchmarks_api.py",
+      "line": 0,
+      "detail": "web/api/benchmarks_api.py"
+    },
+    {
+      "file": "web\\api\\blockchain_health_api.py",
+      "line": 0,
+      "detail": "web/api/blockchain_health_api.py"
+    },
+    {
+      "file": "web\\api\\dashboard.py",
+      "line": 0,
+      "detail": "web/api/dashboard.py"
+    },
+    {
+      "file": "web\\api\\dashboard_data.py",
+      "line": 0,
+      "detail": "web/api/dashboard_data.py"
+    },
+    {
+      "file": "web\\api\\dashboard_ws.py",
+      "line": 0,
+      "detail": "web/api/dashboard_ws.py"
+    },
+    {
+      "file": "web\\api\\data_endpoints.py",
+      "line": 0,
+      "detail": "web/api/data_endpoints.py"
+    },
+    {
+      "file": "web\\api\\degraded.py",
+      "line": 0,
+      "detail": "web/api/degraded.py"
+    },
+    {
+      "file": "web\\api\\explainability.py",
+      "line": 0,
+      "detail": "web/api/explainability.py"
+    },
+    {
+      "file": "web\\api\\flow_api.py",
+      "line": 0,
+      "detail": "web/api/flow_api.py"
+    },
+    {
+      "file": "web\\api\\guardrails_api.py",
+      "line": 0,
+      "detail": "web/api/guardrails_api.py"
+    },
+    {
+      "file": "web\\api\\health.py",
+      "line": 0,
+      "detail": "web/api/health.py"
+    },
+    {
+      "file": "web\\api\\kalshi_agent_grid_api.py",
+      "line": 0,
+      "detail": "web/api/kalshi_agent_grid_api.py"
+    },
+    {
+      "file": "web\\api\\kalshi_ui.py",
+      "line": 0,
+      "detail": "web/api/kalshi_ui.py"
+    },
+    {
+      "file": "web\\api\\live_data.py",
+      "line": 0,
+      "detail": "web/api/live_data.py"
+    },
+    {
+      "file": "web\\api\\live_stream.py",
+      "line": 0,
+      "detail": "web/api/live_stream.py"
+    },
+    {
+      "file": "web\\api\\loop_api.py",
+      "line": 0,
+      "detail": "web/api/loop_api.py"
+    },
+    {
+      "file": "web\\api\\markets_data.py",
+      "line": 0,
+      "detail": "web/api/markets_data.py"
+    },
+    {
+      "file": "web\\api\\metrics.py",
+      "line": 0,
+      "detail": "web/api/metrics.py"
+    },
+    {
+      "file": "web\\api\\orchestrator_api.py",
+      "line": 0,
+      "detail": "web/api/orchestrator_api.py"
+    },
+    {
+      "file": "web\\api\\orders_api.py",
+      "line": 0,
+      "detail": "web/api/orders_api.py"
+    },
+    {
+      "file": "web\\api\\predictions.py",
+      "line": 0,
+      "detail": "web/api/predictions.py"
+    },
+    {
+      "file": "web\\api\\production_status.py",
+      "line": 0,
+      "detail": "web/api/production_status.py"
+    },
+    {
+      "file": "web\\api\\real_data_endpoints.py",
+      "line": 0,
+      "detail": "web/api/real_data_endpoints.py"
+    },
+    {
+      "file": "web\\api\\reflection.py",
+      "line": 0,
+      "detail": "web/api/reflection.py"
+    },
+    {
+      "file": "web\\api\\sidebar_config.py",
+      "line": 0,
+      "detail": "web/api/sidebar_config.py"
+    },
+    {
+      "file": "web\\api\\signals_api.py",
+      "line": 0,
+      "detail": "web/api/signals_api.py"
+    },
+    {
+      "file": "web\\api\\signal_layer_api.py",
+      "line": 0,
+      "detail": "web/api/signal_layer_api.py"
+    },
+    {
+      "file": "web\\api\\streams.py",
+      "line": 0,
+      "detail": "web/api/streams.py"
+    },
+    {
+      "file": "web\\api\\swarm_bus_api.py",
+      "line": 0,
+      "detail": "web/api/swarm_bus_api.py"
+    },
+    {
+      "file": "web\\api\\swarm_routes.py",
+      "line": 0,
+      "detail": "web/api/swarm_routes.py"
+    },
+    {
+      "file": "web\\api\\system_observability.py",
+      "line": 0,
+      "detail": "web/api/system_observability.py"
+    },
+    {
+      "file": "web\\api\\test_page.py",
+      "line": 0,
+      "detail": "web/api/test_page.py"
+    },
+    {
+      "file": "web\\api\\us_compliant_markets.py",
+      "line": 0,
+      "detail": "web/api/us_compliant_markets.py"
+    },
+    {
+      "file": "web\\api\\websocket_health.py",
+      "line": 0,
+      "detail": "web/api/websocket_health.py"
+    },
+    {
+      "file": "web\\api\\ws_dedicated_streams.py",
+      "line": 0,
+      "detail": "web/api/ws_dedicated_streams.py"
+    },
+    {
+      "file": "web\\api\\ws_paper.py",
+      "line": 0,
+      "detail": "web/api/ws_paper.py"
+    },
+    {
+      "file": "web\\api\\ws_trade_events.py",
+      "line": 0,
+      "detail": "web/api/ws_trade_events.py"
+    }
+  ],
+  "NO_CROSS_VALIDATION": [
+    {
+      "file": "web\\api\\cost_models.py",
+      "line": 0,
+      "detail": "ML training without validation split"
+    },
+    {
+      "file": "analytics\\volatility_models.py",
+      "line": 0,
+      "detail": "ML training without validation split"
+    },
+    {
+      "file": "arbitrage\\cost_models.py",
+      "line": 0,
+      "detail": "ML training without validation split"
+    },
+    {
+      "file": "ml\\feature_engineering.py",
+      "line": 0,
+      "detail": "ML training without validation split"
+    }
+  ]
+}

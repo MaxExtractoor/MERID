@@ -1,0 +1,75 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Kalshi Crypto Hedging Configuration
+# ═══════════════════════════════════════════════════════════════════════════
+# Rule-based deterministic hedge engine — same exposure + same config = same
+# hedge orders.  No black-box optimizers.
+#
+# Wired between SIZE and EXECUTE in the MERID life-loop.
+# See: merid/hedging/engine.py, merid/hedging/exposure.py
+
+hedging:
+  enabled: true
+  use_cross_asset_hedging: false   # start false, flip later for BTC↔ETH
+  max_drawdown_pct: 40.0           # portfolio belt-and-suspenders
+
+  # ── Per asset slice caps ──────────────────────────────────────────────
+  asset_slices:
+    BTC:
+      slice_pct_of_bankroll: 0.25
+      per_trade_risk_pct_of_slice: 1.0
+      max_drawdown_pct_of_slice: 3.0
+    ETH:
+      slice_pct_of_bankroll: 0.25
+      per_trade_risk_pct_of_slice: 1.0
+      max_drawdown_pct_of_slice: 3.0
+    SOL:
+      slice_pct_of_bankroll: 0.10
+      per_trade_risk_pct_of_slice: 0.75
+      max_drawdown_pct_of_slice: 2.0
+    XRP:
+      slice_pct_of_bankroll: 0.10
+      per_trade_risk_pct_of_slice: 0.75
+      max_drawdown_pct_of_slice: 2.0
+    DOGE:
+      slice_pct_of_bankroll: 0.10
+      per_trade_risk_pct_of_slice: 0.5
+      max_drawdown_pct_of_slice: 1.5
+
+  # ── Timeframe-specific hedge rules (shared across all five coins) ─────
+  timeframes:
+    "15m":
+      max_net_exposure_pct_of_slice: 5.0
+      target_hedge_ratio: 0.5          # partial hedge
+      prefer_same_timeframe: true
+      allow_adjacent_horizons: ["1h"]
+    "1h":
+      max_net_exposure_pct_of_slice: 7.5
+      target_hedge_ratio: 0.5
+      prefer_same_timeframe: true
+      allow_adjacent_horizons: ["15m", "daily"]
+    "daily":
+      max_net_exposure_pct_of_slice: 10.0
+      target_hedge_ratio: 1.0          # neutralize if heavy
+      prefer_same_timeframe: true
+      allow_adjacent_horizons: ["1h", "weekly"]
+    "weekly":
+      max_net_exposure_pct_of_slice: 15.0
+      target_hedge_ratio: 1.0
+      prefer_same_timeframe: true
+      allow_adjacent_horizons: ["daily"]
+    "monthly":
+      max_net_exposure_pct_of_slice: 20.0
+      target_hedge_ratio: 0.5
+      prefer_same_timeframe: true
+      allow_adjacent_horizons: ["weekly"]
+
+  # ── Optional cross-asset (disabled by default) ────────────────────────
+  cross_asset:
+    enabled: false
+    max_pair_correlation: 0.85
+    max_cross_hedge_pct_of_base: 0.20
+    pairs:
+      - base: BTC
+        hedge: ETH
+      - base: SOL
+        hedge: BTC

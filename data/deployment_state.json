@@ -1,0 +1,49 @@
+{
+  "agents": {
+    "mature-shadow-agent": {
+      "agent_name": "mature-shadow-agent",
+      "mode": "PAPER",
+      "promoted_at": "2026-03-15T20:31:22.675637+00:00",
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 1000
+    },
+    "BTC_HOURLY": {
+      "agent_name": "BTC_HOURLY",
+      "mode": "HALTED",
+      "promoted_at": "2026-03-26T19:42:35.080150+00:00",
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    },
+    "ETH_HOURLY": {
+      "agent_name": "ETH_HOURLY",
+      "mode": "PAPER",
+      "promoted_at": "2026-03-26T19:42:35.113612+00:00",
+      "rollback_count": 0,
+      "last_rollback_reason": null,
+      "last_rollback_at": null,
+      "live_trades": 0,
+      "shadow_trades": 0
+    }
+  },
+  "restart_pending_ack": [
+    "BTC_HOURLY",
+    "ETH_HOURLY",
+    "mature-shadow-agent"
+  ],
+  "log": [
+    {
+      "ts": "2026-03-28T17:54:00.525075+00:00",
+      "agent": "BTC_HOURLY",
+      "from": "PAPER",
+      "to": "HALTED",
+      "reason": "Halted: emergency"
+    }
+  ],
+  "persisted_at": "2026-03-28T17:54:00.525075+00:00"
+}

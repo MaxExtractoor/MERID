@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\consensus_graph.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.6, 0.65, 0.7, 0.75, 0.8, 30.0, -500, 1000, 3600, 'Callback error: %s', 'abstain', 'active_rounds', 'agent_id', 'approval_ratio', 'approve', 'approved', 'audit_log_count', 'collecting', 'completed_rounds', 'confidence', 'cooldown_active', 'core.consensus', 'created_at', 'deadlocked', 'decision', 'duration_ms', 'event_type', 'expired', 'final_result', 'partial_quorum', 'pending', 'proposal_id', 'proposal_type', 'quorum_reached', 'reason', 'reject', 'rejected', 'resolution_reason', 'resolved_at', 'round_created', 'round_id', 'round_resolved', 'skeptic-agent-01', 'state', 'timeout', 'timeout_no_quorum', 'timestamp', 'total', 'unanimous_abstain', 'unresolved', 'veto_blocked', 'vetoed', 'vote_count', 'vote_received', 'vote_summary']

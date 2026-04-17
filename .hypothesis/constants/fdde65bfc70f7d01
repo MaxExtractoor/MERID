@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\energy.py
+# hypothesis_version: 6.151.4
+
+['energy_id', 'entropy', 'novelty', 'payload', 'source', 'status', 'timestamp', 'unprocessed']

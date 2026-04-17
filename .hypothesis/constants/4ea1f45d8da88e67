@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\monitoring\news_feeds.py
+# hypothesis_version: 6.151.4
+
+[15.0, 300, 401, 403, 404, 500, '%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%SZ', './/item', 'Binance', 'Binance US', 'CoinDesk', 'CoinTelegraph', 'CryptoCompare', 'Data', 'EN', 'User-Agent', 'alert', 'api_key', 'binance-us', 'bitcoin', 'body', 'breaking', 'categories', 'category', 'critical', 'defi', 'delisting', 'description', 'etf', 'ethereum', 'exchange', 'exploit', 'hack', 'headline', 'high', 'importance', 'incident', 'lang', 'link', 'listing', 'low', 'maintenance', 'major', 'market', 'medium', 'new asset', 'price', 'pubDate', 'published_at', 'published_on', 'regulation', 'regulatory', 'resume', 'sec', 'security', 'source', 'summary', 'suspend', 'title', 'trading', 'urgent', 'url', '|']

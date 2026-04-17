@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\reflection_layer.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.1, 0.5, 0.8, 100, 500, '\nRecent Learnings:', 'abstain', 'agent_id', 'agent_stats', 'agents.reflection', 'avg_confidence', 'avg_reality_gap', 'confidence', 'correct_predictions', 'decision', 'energy_id', 'invalidated', 'learning', 'learning_insight', 'learnings', 'outcome', 'reality_gap', 'reasoning', 'reflections', 'timestamp', 'total_decisions', 'unknown', 'utc_iso', 'utf-8', 'v1', 'v2', 'validated']

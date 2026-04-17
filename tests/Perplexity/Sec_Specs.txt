@@ -1,0 +1,171 @@
+MERID’s security spec can be refined by explicitly wiring ML-KEM (key exchange) and ML-DSA (signatures) into the bus/port architecture as concrete, governance-enforced primitives, while preserving hostile-port doctrine and uncertainty-first quantum rules. The goal is not “crypto buzzwords,” but crisp, mechanical contracts for how keys, signatures, and comparison gates behave at each tier.[1][2][3]
+
+## PQC roles in MERID
+
+- **ML-KEM**: Quantum-safe key encapsulation to derive symmetric session keys between MERID and external ports (remote services, onchain bridges, quantum backends), replacing RSA key transport/ECDH. It lives at the *bus/port boundary* as a capability-enabler, never inside core cognition.[2][3][1]
+- **ML-DSA**: Quantum-safe signatures to authenticate high-impact governance messages, port operations, and audit logs (Layer 3), replacing RSA/ECDSA. It binds decisions to Maker and MERID identities without granting autonomous execution.[4][5][1]
+
+## Bus-level PQC integration
+
+Governance and master buses become explicit PQC “rails” rather than abstract security hints.[1]
+
+- **Governance Bus – ML-DSA signing lane**  
+  - Maker’s high-impact directives (Charter edits, kill switch, bus config, port policy) are wrapped as messages \(M\) with ML-DSA signatures \(\text{sig}_\text{Maker}(H(M))\).[4][1]
+  - MERID validates:  
+    - Signature with Maker’s ML-DSA public key pinned in immutable Layer 4.[5][1]
+    - Maker Signature (stylometry) score ≥ threshold; on conflict, Charter demands out-of-band confirmation (God Key) rather than silent acceptance.[1]
+
+- **Master Integrity Bus – ML-DSA + ML-KEM**  
+  - All bus configuration changes, SLP-1 events, and distillation metadata are logged as append-only records, each signed by MERID’s “System” ML-DSA key and optionally encrypted under ML-KEM-derived symmetric keys when logs cross devices.[3][1]
+  - When a remote monitor or backup node subscribes, master bus performs:  
+    - ML-KEM key exchange to derive \(K_\text{session}\).[6][3]
+    - Stream logs encrypted under AEAD with \(K_\text{session}\), but Charter forbids external subscriber from writing back into core; they can only observe and request human-mediated actions.[1]
+
+## Port-tier PQC contracts
+
+Each trust tier gets a precise PQC pattern, consistent with hostile-by-default ports and candidate-only quantum doctrine.[1]
+
+### Tier 1 – Read-only (internal)
+
+- Internal structures (local memory, EKG, immutable logs) do **not** require PQC over the loopback boundary, but any *export* (backup, cross-device replication) uses ML-KEM + symmetric AEAD for confidentiality and MERID ML-DSA signatures for integrity.[2][1]
+- Model fingerprints and dependency manifests are signed with ML-DSA; verification failure → SLP-1.[1]
+
+### Tier 2 – Ephemeral (simulation / quantum candidates)
+
+- Quantum backends and simulators are treated as hostile ports; they never see core secrets.[1]
+- Optional pattern when the backend supports PQC:  
+  - One-shot ML-KEM exchange to protect candidate payloads (e.g., QAOA parameters, portfolio scenarios), acknowledging that even encrypted traffic is untrusted for semantics.[6][1]
+  - Backend outputs are never trusted; they enter MERID as **unsigned, unprivileged candidates** subject to comparison gates and EKG checks.[1]
+
+### Tier 3 – State-writing (learning tools)
+
+- Any tool that can mutate Layer 2 or 3 must present ML-DSA-signed change proposals: \(\text{sig}_\text{Tool}(H(\Delta))\).[4][1]
+- Governance bus enforces:  
+  - Peer-review requirement: at least N independent tool signatures or one Maker-signed approval before applying \(\Delta\).[1]
+  - Hash of pre- and post-state logged; mismatch or signature failure → SLP-1.[1]
+
+### Tier 4 – Execution-capable (onchain / quantum)
+
+- Onchain:  
+  - Outgoing transactions are never composed autonomously; governance bus builds a transaction template, hashes it, and requires Maker ML-DSA signature plus Maker Signature behavioral verification.[5][1]
+  - Bridges or remote signers use ML-KEM to derive keys for transport, but the signing authority for critical actions stays anchored in Maker or an explicitly-authorized hardware enclave.[7][1]
+
+- Quantum execution:  
+  - Ports use ML-KEM to protect configuration and result streams where supported, but doctrine still treats all quantum results as untrusted candidates.[6][1]
+  - No quantum backend receives raw credentials; all access is mediated by the credential proxy capability interface.[1]
+
+## Credential proxy with PQC
+
+The credential proxy becomes the sole entity that touches ML-KEM and ML-DSA *keys* for external communications.[1]
+
+- **Key management rules**  
+  - Proxy maintains a per-port ML-KEM key pair, stored in an encrypted keystore, never exposed to agents.[2][1]
+  - When a port session starts, proxy:  
+    - Uses port’s ML-KEM public key to encapsulate a shared secret (client mode) or decapsulates using its own ML-KEM private key (server mode).[8][3]
+    - Derives short-lived symmetric keys (HKDF) for the session; expiration tied to EKG metrics (entropy, anomaly score).[1]
+
+- **Signature mediation**  
+  - Agents request “sign this message for port X with profile Y”; proxy:  
+    - Checks Charter constraints and port policy (e.g., Tier 4 requires explicit human approval).[1]
+    - Signs only the approved, distilled message hash with the appropriate ML-DSA key.[9][4]
+
+- **Failure semantics**  
+  - Any ML-KEM/ML-DSA error (verification failure, parameter mismatch, unexpected key size) is treated as a hard capability denial, not silently retried with weaker crypto.[2][1]
+  - Repeated anomalies from a port (e.g., malformed ML-KEM ciphertexts, signature replay) raise tamper flags and can contribute to SLP-1 triggers.[1]
+
+## Quantum doctrine and comparison gate
+
+PQC is integrated without relaxing MERID’s skepticism about quantum and external influence.[1]
+
+- **Hostile ports + epistemic uncertainty**  
+  - PQC protects transport but does not confer trust; ports remain hostile by default.[1]
+  - Quantum and remote candidates always pass through a **comparison gate** that:  
+    - Compares port-proposed actions vs classical baselines on risk, variance, and alignment with Charter.[1]
+    - Logs the divergence, confidence intervals, and chosen path in the immutable audit trail, signed with ML-DSA.[10][1]
+
+- **No slop, no hype constraints**  
+  - Cryptographic parameter sets are explicit per use: e.g., ML-KEM-768 for most buses, ML-KEM-1024 for long-lived identity keys; ML-DSA security levels mapped to Charter-defined risk tiers.[11][6]
+  - No automatic downgrade to pre-quantum algorithms; if PQC not available, execution-capable ports require human override or abstention per “fail closed” doctrine.[1]
+
+If you want, the next step can be a concrete “03-Security” wiki section rewrite that drops directly into your repo, with headings mirroring your existing Security folder tree and explicit parameter defaults for each bus/port.
+
+[1](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/158301208/cf7a56a6-b0cb-4e4f-a755-f219cce34ff9/MERID_perplexity_prompt.txt)
+[2](https://devblogs.microsoft.com/dotnet/post-quantum-cryptography-in-dotnet/)
+[3](https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.203.pdf)
+[4](https://learn.microsoft.com/en-us/windows/win32/seccng/cng-mldsa-examples)
+[5](https://kivicore.com/en/embedded-security-blog/ml-dsa-explained-quantum-safe-digital-signatures-for-secure-embedded-systems)
+[6](https://www.design-reuse.com/blog/56217-ml-kem-explained-quantum-safe-key-exchange-for-secure-embedded-hardware/)
+[7](https://www.cast-inc.com/security/encryption-primitives/kivipqc-kem)
+[8](https://learn.microsoft.com/en-us/windows/win32/seccng/cng-mlkem-examples)
+[9](https://www.strathweb.com/2025/08/ml-kem-and-ml-dsa-post-quantum-cryptography-in-windows/)
+[10](https://pqshield.com/wp-content/uploads/2024/10/High-Performance-NTT-Hardware-Accelerator-to-Support-ML-KEM-and-ML-DSA.pdf)
+[11](https://www.thalesdocs.com/gphsm/luna/7/docs/network/Content/sdk/extensions/pqc/ML-DSA_examples_csr_44-65-87.htm)
+
+MERID’s quantum optimization doctrine is already structurally sound; the remaining refinement is to make the “high‑variance candidate generator” role, JSON contract, and comparison gate maximally explicit and mechanically enforceable, while keeping quantum entirely subordinate to classical and governance logic. Quantum remains optional and never a source of authority, only of additional candidate diversity.[1][2][3]
+
+## Role and scope clarifications
+
+- **Simulation-only, never authoritative**  
+  - QAOA, VQE, and annealing live strictly on the simulation bus; they generate candidate portfolios or risk configurations that are treated as hypotheses, not instructions.[4][1]
+  - Doctrine forbids routing quantum outputs directly to execution or memory buses; all flows must pass through the comparison gate and distillation gate under governance bus oversight.[1]
+
+- **High-variance exploration, not speedup claims**  
+  - Quantum is framed as expanding the search space for combinatorial problems (e.g., portfolio selection as QUBO) with different biases than classical heuristics, without claiming superiority over MILP, simulated annealing, or Monte Carlo.[5][1]
+  - This aligns with NISQ literature showing noise, sampling error, and hardware imperfections can significantly affect performance.[2][3]
+
+## Output JSON contract enforcement
+
+- **Fixed schema as protocol, not suggestion**  
+  - Every quantum port must produce the exact JSON shape you specified, including `candidates`, `sampling_entropy`, `noise_estimate`, `backend_metadata`, `reproducibility_score`, `classical_baseline_delta`, `variance`, and `confidence_intervals`.[6][1]
+  - Master bus rejects any response with missing fields, incorrect types, or out‑of‑range values (e.g., reproducibility outside \([0,1]\)); rejection is logged with port id and request hash for forensics.[1]
+
+- **EKG tie-in to variance and reproducibility**  
+  - High variance \(>0.5\) or low reproducibility \(<0.8\) automatically marks the port as “noisy” in the EKG, generates an alert, and quarantines that response; quarantined candidates are available for post‑mortem analysis but cannot influence decisions.[6][1]
+  - Repeated noisy episodes from the same quantum backend can increment a tamper counter that contributes to SLP‑1 triggers and eventual port disablement.[1]
+
+## Mandatory comparison gate behavior
+
+- **Classical baseline always-on**  
+  - For each quantum request, a paired classical baseline run (e.g., MILP, simulated annealing, or Monte Carlo) is executed on the same abstracted problem instance, producing its own candidate set and metrics.[5][1]
+  - Governance bus computes `classical_baseline_delta` as a clear metric (e.g., risk reduction or objective improvement) and enforces your rule: accept quantum candidates only if delta exceeds 0.1 and uncertainty thresholds are met.[1]
+
+- **Explain-or-abstain integration**  
+  - If quantum candidates are used in any advisory output, MERID must expose:  
+    - The classical baseline outcome.  
+    - The quantum delta and uncertainty (variance, confidence interval).  
+    - The reason for accepting or discarding quantum suggestions.[7][1]
+  - If thresholds fail, quantum is treated as an internal experiment: logged, possibly used for future learning, but never surfaced as actionable advice.[1]
+
+## Threat model and failure semantics
+
+- **Hostile backends and poisoning**  
+  - Quantum providers (cloud or local hardware) are assumed capable of side‑channel leakage, result poisoning, and parameter inference; no sensitive raw portfolio or identity data is sent, only abstracted or obfuscated instances.[2][1]
+  - Credential proxy owns all keys and provider credentials; agents only express intent (“optimize this abstract QUBO”) and receive candidates through the simulation bus.[1]
+
+- **Anomaly handling and SLP‑1 hooks**  
+  - Unexpected noise levels, inconsistent backend metadata, or reproducibility collapse are treated as potential poisoning, immediately quarantining results and emitting tamper flags.[6][1]
+  - If anomalies coincide with other EKG abnormalities (entropy spikes, bias shifts), governance can escalate to SLP‑1, freezing execution while preserving cognition and forensic logs.[1]
+
+## Example mappings: QAOA and VQE
+
+- **QAOA for portfolio QUBO**  
+  - Mean‑variance portfolio optimization is mapped to a QUBO or Ising Hamiltonian, with quadratic terms encoding covariances and penalties enforcing budget/return constraints, as in standard QAOA portfolio work.[4][1]
+  - MERID’s doctrine adds: quantum solutions are sampled to produce 5–10 candidate portfolios with associated energies and variances, but only those passing the comparison gate against classical solvers are considered in advisory narratives.[3][1]
+
+- **VQE for CVaR-like objectives**  
+  - Tail‑risk (CVaR) is encoded in a Hamiltonian; a variational ansatz and classical optimizer approximate low‑risk states, analogous in spirit to CVaR‑based VQE frameworks studied for other domains.[8][1]
+  - MERID requires multiple runs to estimate variance and reproducibility of CVaR estimates, with wide intervals or instability causing the quantum candidate set to be downgraded to “for reflection only.”[9][1]
+
+If you want a ready-to-drop text, the next step can be a compact `wiki/12-Optimization/Quantum-Optimization-Doctrine.md` rewrite using exactly this structure and incorporating your JSON schema and thresholds verbatim.
+
+[1](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/158301208/cf7a56a6-b0cb-4e4f-a755-f219cce34ff9/MERID_perplexity_prompt.txt)
+[2](https://arxiv.org/abs/2207.10555)
+[3](https://d-nb.info/1286570565/34)
+[4](https://docs.classiq.io/latest/explore/applications/finance/portfolio_optimization/portfolio_optimization/)
+[5](https://mediatum.ub.tum.de/doc/1795604/1795604.pdf)
+[6](https://link.aps.org/doi/10.1103/PhysRevResearch.4.033217)
+[7](https://www.nature.com/articles/s43588-024-00709-1)
+[8](https://arxiv.org/abs/2501.08418)
+[9](https://www.sciencedirect.com/science/article/abs/pii/S0927538X25001945)
+[10](https://zbjob.github.io/QCE25-HUBO-QAOA.pdf)
+[11](https://tensorcircuit.readthedocs.io/en/latest/tutorials/portfolio_optimization.html)

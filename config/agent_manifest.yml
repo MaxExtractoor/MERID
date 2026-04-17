@@ -1,0 +1,259 @@
+# MERID Agent Capability Manifest
+# Declarative registry mapping agent roles → capabilities → allowed actions.
+# Used by CanonicalAgentRegistry and DevSwarm for capability discovery.
+
+version: "1.0"
+last_updated: "2026-02-07"
+
+agents:
+  # ── Section 1: Research ──────────────────────────────────────────
+  market_research:
+    role: research
+    category: research
+    module: agents.research.MarketResearchAgent
+    description: "Multi-API market research — thesis generation from news, sentiment, and fundamentals"
+    capabilities:
+      - market_scanning
+      - thesis_generation
+      - sentiment_analysis
+      - news_aggregation
+    allowed_actions:
+      - read_market_data
+      - read_news_feeds
+      - publish_thesis
+    data_access:
+      - polygon
+      - finnhub
+      - alpha_vantage
+      - messari
+    risk_level: read_only
+
+  prediction_market:
+    role: research
+    category: research
+    module: agents.research.PredictionMarketAgentV2
+    description: "Kalshi prediction market scanner — event discovery and probability estimation"
+    capabilities:
+      - kalshi_scanning
+      - probability_estimation
+      - event_discovery
+    allowed_actions:
+      - read_market_data
+      - publish_thesis
+    data_access:
+      - kalshi
+    risk_level: read_only
+
+  crypto_signals:
+    role: research
+    category: research
+    module: agents.research.CryptoSignalsAgent
+    description: "CEX spread, funding rate, and basis analysis"
+    capabilities:
+      - spread_analysis
+      - funding_rate_tracking
+      - basis_computation
+    allowed_actions:
+      - read_market_data
+      - publish_signal
+    data_access:
+      - binance
+      - coinbase
+      - kraken
+    risk_level: read_only
+
+  # ── Section 2: Strategy ──────────────────────────────────────────
+  strategy_designer:
+    role: strategy
+    category: strategy
+    module: agents.strategy.StrategyDesignerAgent
+    description: "Converts research theses into executable strategy definitions"
+    capabilities:
+      - thesis_to_strategy
+      - parameter_optimization
+      - backtest_design
+    allowed_actions:
+      - read_thesis
+      - publish_strategy
+    risk_level: read_only
+
+  arbitrage:
+    role: strategy
+    category: strategy
+    module: agents.strategy.ArbitrageAgent
+    description: "Cross-exchange arbitrage opportunity detection and trade proposal generation"
+    capabilities:
+      - arb_detection
+      - trade_proposal_generation
+      - spread_monitoring
+    allowed_actions:
+      - read_market_data
+      - publish_trade_proposal
+    data_access:
+      - binance
+      - coinbase
+      - kraken
+      - okx
+    risk_level: proposal_only
+
+  execution_optimizer:
+    role: strategy
+    category: strategy
+    module: agents.strategy.ExecutionOptimizerAgent
+    description: "Venue-specific execution optimization — tick sizes, fees, rate limits for 7 venues"
+    capabilities:
+      - venue_fee_analysis
+      - order_routing_optimization
+      - slippage_estimation
+    allowed_actions:
+      - read_venue_config
+      - optimize_execution_plan
+    venues:
+      - kalshi
+      - binance
+      - coinbase
+      - kraken
+      - okx
+      - alpaca
+      - ibkr
+    risk_level: read_only
+
+  # ── Section 3: Risk ──────────────────────────────────────────────
+  risk_manager:
+    role: risk
+    category: risk
+    module: agents.risk_agents.RiskManagerAgent
+    description: "Wraps GlobalRiskManager — 7-point risk check, veto power on proposals"
+    capabilities:
+      - risk_assessment
+      - position_limit_check
+      - drawdown_monitoring
+      - veto
+    allowed_actions:
+      - read_positions
+      - read_risk_limits
+      - veto_proposal
+      - halt_trading
+    risk_level: can_halt
+
+  capital_allocator:
+    role: risk
+    category: risk
+    module: agents.risk_agents.CapitalAllocatorAgent
+    description: "Portfolio-level capital allocation and rebalance detection"
+    capabilities:
+      - capital_allocation
+      - rebalance_detection
+      - domain_budget_enforcement
+    allowed_actions:
+      - read_positions
+      - publish_allocation_plan
+    risk_level: read_only
+
+  anomaly_detector:
+    role: risk
+    category: risk
+    module: agents.risk_agents.AnomalyDetectorAgent
+    description: "Detects stale data, price spikes, and spread anomalies"
+    capabilities:
+      - stale_data_detection
+      - price_spike_detection
+      - spread_anomaly_detection
+    allowed_actions:
+      - read_market_data
+      - publish_alert
+    risk_level: read_only
+
+  # ── Section 4: Coordination ─────────────────────────────────────
+  consensus_coordinator:
+    role: coordination
+    category: coordination
+    module: agents.coordination.ConsensusCoordinatorAgent
+    description: "Weighted voting with 2/3 quorum, risk agent veto, skeptic re-round"
+    capabilities:
+      - weighted_voting
+      - quorum_enforcement
+      - veto_handling
+      - skeptic_reround
+    allowed_actions:
+      - collect_votes
+      - publish_decision
+    risk_level: decision_maker
+
+  explainability:
+    role: coordination
+    category: coordination
+    module: agents.coordination.ExplainabilityAgent
+    description: "What/why/why-now explanations for every decision"
+    capabilities:
+      - decision_explanation
+      - rationale_generation
+      - audit_trail_annotation
+    allowed_actions:
+      - read_decisions
+      - publish_explanation
+    risk_level: read_only
+
+  governance:
+    role: coordination
+    category: coordination
+    module: agents.coordination.GovernanceAgent
+    description: "US compliance enforcement — forbidden venues, leverage limits"
+    capabilities:
+      - compliance_check
+      - venue_classification
+      - leverage_enforcement
+    allowed_actions:
+      - read_proposals
+      - veto_proposal
+      - publish_compliance_report
+    policies:
+      forbidden_venues:
+        - polymarket
+        - augur
+        - predictit
+      max_leverage:
+        crypto: 3.0
+        equity: 2.0
+        prediction: 1.0
+    risk_level: can_veto
+
+  # ── Section 5: Ops ──────────────────────────────────────────────
+  ops_runbook:
+    role: ops
+    category: ops
+    module: agents.ops.OpsRunbookAgent
+    description: "Alert → runbook action mapping for 6 runbook types"
+    capabilities:
+      - alert_triage
+      - runbook_execution
+      - incident_response
+    allowed_actions:
+      - read_alerts
+      - execute_runbook
+      - publish_incident_report
+    risk_level: can_execute_ops
+
+  backtest:
+    role: ops
+    category: ops
+    module: agents.ops.BacktestAgent
+    description: "Strategy backtesting with promote/demote decisions"
+    capabilities:
+      - strategy_backtest
+      - performance_evaluation
+      - promote_demote
+    allowed_actions:
+      - read_strategy
+      - run_backtest
+      - publish_backtest_result
+    risk_level: read_only
+
+# ── Risk Level Definitions ────────────────────────────────────────
+risk_levels:
+  read_only: "Can only read data, no side effects"
+  proposal_only: "Can generate proposals but not execute"
+  decision_maker: "Can make binding decisions via consensus"
+  can_veto: "Can block proposals (governance/risk)"
+  can_halt: "Can halt trading system-wide"
+  can_execute_ops: "Can execute operational runbooks"

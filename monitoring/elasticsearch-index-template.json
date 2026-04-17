@@ -1,0 +1,41 @@
+PUT _index_template/merid-agent-runs-template
+{
+  "index_patterns": ["merid-agent-runs-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "ts":              { "type": "date" },
+        "service":         { "type": "keyword" },
+        "logger":          { "type": "keyword" },
+        "msg":             { "type": "keyword" },
+
+        "agent_id":        { "type": "keyword" },
+        "run_id":          { "type": "keyword" },
+        "agent_version":   { "type": "keyword" },
+        "run_type":        { "type": "keyword" },
+        "experiment_id":   { "type": "keyword" },
+
+        "filters":         { "type": "object", "enabled": true },
+        "filters.min_spread":    { "type": "float" },
+        "filters.min_liquidity": { "type": "float" },
+
+        "brier_score":     { "type": "float" },
+        "estimates_only":  { "type": "boolean" },
+        "total_opportunities":   { "type": "integer" },
+        "recommendations_count": { "type": "integer" },
+        "latency_ms":      { "type": "float" },
+        "status":          { "type": "keyword" },
+
+        "bucket_stats": {
+          "type": "nested",
+          "properties": {
+            "bucket_range":           { "type": "keyword" },
+            "count":                  { "type": "integer" },
+            "avg_forecast":           { "type": "float" },
+            "empirical_success_rate": { "type": "float" }
+          }
+        }
+      }
+    }
+  }
+}

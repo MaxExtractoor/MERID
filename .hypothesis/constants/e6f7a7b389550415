@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\telegram_agent.py
+# hypothesis_version: 6.151.4
+
+[60.0, 100, 4093, 4096, '+', '...', 'APPROVED', 'CRITICAL', 'ERROR', 'HTML', 'NO', 'REJECTED', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_TOKEN', 'WARNING', 'YES', 'chat_id', 'enabled', 'error', 'info', 'last_message_time', 'min_post_interval', 'paper', 'retry_after', 'success', 'telegram_agent', 'telegram_agent_429', 'timed out', 'timeout', 'total_messages', 'value', 'warning', '…', 'ℹ️', '⚠️', '⚪', '✅', '❌', '📈', '📉', '🔴', '🚨', '🟢']

@@ -1,0 +1,480 @@
+"""KalshiUniversalAgent — Market-agnostic swarm agent for all Kalshi categories.
+
+Unlike KalshiTradingAgent (which is hardcoded to specific assets/timeframes),
+this agent:
+  - Pulls its market pool dynamically from KalshiUniverse each cycle.
+  - Is category-aware: respects per-category paper/live mode from env config.
+  - Enforces a configurable max-simultaneous-markets cap (max_per_agent).
+  - Routes orders through the standard route_order path with the category
+    mode injected into each OrderIntent.
+
+Lifecycle::
+
+    agent = KalshiUniversalAgent(UniversalAgentConfig(
+        name="sweep-all",
+        categories=["crypto", "politics", "economics"],
+        max_markets=30,
+    ))
+    await agent.start()
+    await agent.stop()
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
+
+from merid.event_venues.kalshi.market_catalog import CatalogMarket
+from merid.event_venues.kalshi.universe import (
+    KNOWN_CATEGORIES,
+    KalshiUniverse,
+    UniverseConfig,
+    get_category_mode,
+    get_kalshi_universe,
+)
+from merid.prediction.venue_gate import TradingMode, get_venue_gate
+from utils.logger import get_logger
+
+
+# ── Config ────────────────────────────────────────────────────────────────
+
+@dataclass
+class UniversalAgentConfig:
+    """Configuration for a KalshiUniversalAgent instance.
+
+    Attributes:
+        name:           Human-readable agent identifier.
+        categories:     Category list to sweep (empty = all allowed by universe).
+        max_markets:    Hard cap on markets evaluated per cycle.
+        cycle_secs:     Seconds between decision cycles.
+        min_edge:       Minimum edge estimate required to attempt an order (0-1).
+        max_contracts:  Max contracts per single order.
+        max_notional:   Max USD notional per single order.
+        dry_run:        If True, evaluate signals but never place orders.
+    """
+    name: str = "universal-agent"
+    categories: List[str] = field(default_factory=list)
+    max_markets: int = 50
+    cycle_secs: float = 60.0
+    min_edge: float = 0.02
+    max_contracts: int = 50
+    max_notional: float = 500.0
+    dry_run: bool = False
+
+
+# ── State ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class UniversalAgentState:
+    name: str
+    running: bool = False
+    enabled: bool = True
+    cycles_run: int = 0
+    markets_evaluated: int = 0
+    orders_placed: int = 0
+    orders_rejected: int = 0
+    last_cycle_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    errors: List[str] = field(default_factory=list)
+    category_counts: Dict[str, int] = field(default_factory=dict)
+    order_log: List[Dict[str, Any]] = field(default_factory=list)
+    fill_log: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "running": self.running,
+            "enabled": self.enabled,
+            "cycles_run": self.cycles_run,
+            "markets_evaluated": self.markets_evaluated,
+            "orders_placed": self.orders_placed,
+            "orders_rejected": self.orders_rejected,
+            "last_cycle_at": self.last_cycle_at.isoformat() if self.last_cycle_at else None,
+            "last_error": self.last_error,
+            "category_counts": dict(self.category_counts),
+            "order_log_count": len(self.order_log),
+            "fill_log_count": len(self.fill_log),
+        }
+
+
+_MAX_LOG_ENTRIES = 200
+
+
+# ── Agent ──────────────────────────────────────────────────────────────────
+
+class KalshiUniversalAgent:
+    """Sweeps the full Kalshi universe each cycle, one market at a time.
+
+    Signal generation delegates to the existing KalshiStrategy + model stack.
+    Order placement goes through route_order with the per-category mode set.
+    """
+
+    def __init__(self, config: Optional[UniversalAgentConfig] = None) -> None:
+        self.config = config or UniversalAgentConfig()
+        self.state = UniversalAgentState(name=self.config.name)
+        self.logger = get_logger(f"merid.prediction.universal_agent.{self.config.name}")
+
+        self._universe: Optional[KalshiUniverse] = None
+        self._task: Optional[asyncio.Task] = None
+        self._shutdown = asyncio.Event()
+
+        # Lazy-import heavy subsystems to keep module import fast
+        self._model: Any = None
+        self._strategy: Any = None
+        self._risk: Any = None
+
+    # ── Lazy subsystem init ───────────────────────────────────────────────
+
+    def _init_subsystems(self) -> None:
+        if self._model is not None:
+            return
+        try:
+            from merid.prediction.model import PredictionMarketModel
+            from merid.prediction.strategy import KalshiStrategy, StrategyConfig
+            from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig
+            self._model = PredictionMarketModel()
+            self._strategy = KalshiStrategy(
+                StrategyConfig(max_contracts_per_order=self.config.max_contracts),
+                agent_name=getattr(self.config, "name", "universal"),
+            )
+            self._risk = PredictionMarketRisk(PredictionRiskConfig(
+                max_notional_per_market_usd=self.config.max_notional,
+                max_contracts_per_order=self.config.max_contracts,
+            ))
+        except Exception as exc:
+            self.logger.warning("Subsystem init partial: %s", exc)
+
+    # ── Universe ──────────────────────────────────────────────────────────
+
+    def _get_universe(self) -> KalshiUniverse:
+        if self._universe is None:
+            uconf = UniverseConfig(
+                max_per_agent=self.config.max_markets,
+                allowed_categories=list(self.config.categories),
+            )
+            self._universe = get_kalshi_universe(uconf)
+        return self._universe
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        if self.state.running:
+            self.logger.warning("%s already running", self.config.name)
+            return
+        self._init_subsystems()
+        self._shutdown.clear()
+        self.state.running = True
+        self.state.enabled = True
+        self._task = asyncio.create_task(
+            self._run_loop(), name=f"universal-agent-{self.config.name}"
+        )
+        cats = self.config.categories or list(KNOWN_CATEGORIES)
+        self.logger.info(
+            "Started %s: categories=%s, max_markets=%d, dry_run=%s",
+            self.config.name, cats, self.config.max_markets, self.config.dry_run,
+        )
+
+    async def stop(self) -> None:
+        self._shutdown.set()
+        self.state.running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self.logger.info("Stopped %s", self.config.name)
+
+    def pause(self) -> None:
+        self.state.enabled = False
+
+    def resume(self) -> None:
+        self.state.enabled = True
+
+    # ── Decision loop ─────────────────────────────────────────────────────
+
+    async def _run_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                if self.state.enabled:
+                    await self._run_cycle()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                self.state.last_error = str(exc)
+                self.state.errors.append(str(exc))
+                if len(self.state.errors) > 50:
+                    self.state.errors = self.state.errors[-50:]
+                self.logger.error("Cycle error: %s", exc)
+
+            try:
+                await asyncio.wait_for(
+                    self._shutdown.wait(), timeout=self.config.cycle_secs
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    async def _run_cycle(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.state.last_cycle_at = now
+        self.state.cycles_run += 1
+
+        universe = self._get_universe()
+
+        evaluated = 0
+        for cat, mode, pool in universe.iter_categories():
+            if self._shutdown.is_set():
+                break
+
+            for cm in pool:
+                if self._shutdown.is_set():
+                    break
+                evaluated += 1
+                self.state.category_counts[cat] = (
+                    self.state.category_counts.get(cat, 0) + 1
+                )
+                try:
+                    await self._evaluate_market(cm, mode)
+                except Exception as exc:
+                    self.logger.warning(
+                        "Error evaluating %s: %s", cm.market.market_id, exc
+                    )
+
+        self.state.markets_evaluated += evaluated
+        self.logger.debug(
+            "[%s] cycle=%d evaluated=%d",
+            self.config.name, self.state.cycles_run, evaluated,
+        )
+
+    # ── Market evaluation ─────────────────────────────────────────────────
+
+    async def _evaluate_market(self, cm: CatalogMarket, mode: str) -> None:
+        """Evaluate a single market and place an order if signal is strong enough."""
+        mkt = cm.market
+        ticker = mkt.market_id
+
+        if not self._strategy:
+            return
+
+        # BUG-01 fix: enforce category_config block/read-only at the agent level so
+        # the universe mode ("paper"/"live") can never bypass a "blocked" category.
+        try:
+            from merid_core.kalshi.category_config import is_trading_allowed
+            if not is_trading_allowed(cm.category):
+                self.logger.debug(
+                    "Skipping %s: category '%s' is blocked in category_config",
+                    ticker, cm.category,
+                )
+                return
+        except ImportError:
+            pass
+
+        try:
+            snapshot = self._build_snapshot(cm)
+            signal = self._strategy.evaluate(snapshot)
+        except Exception as exc:
+            self.logger.debug("Signal error %s: %s", ticker, exc)
+            return
+
+        from merid.prediction.strategy import SignalAction
+        if signal.action in (SignalAction.NO_ACTION, SignalAction.HOLD):
+            return
+
+        # Edge gate
+        net_edge = float(signal.edge.net_edge) if signal.edge else 0.0
+        if net_edge < self.config.min_edge:
+            return
+
+        side = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+        action = "buy" if signal.action in (SignalAction.BUY_YES, SignalAction.BUY_NO) else "sell"
+        price_cents = int(signal.limit_price_cents or 50)
+        contracts = max(1, min(int(signal.contracts or 1), self.config.max_contracts))
+
+        # Risk check
+        if self._risk:
+            try:
+                event_id = ticker.rsplit("-", 1)[0] if "-" in ticker else ticker
+                check = self._risk.check_order(
+                    market_id=ticker,
+                    event_id=event_id,
+                    side=side,
+                    contracts=contracts,
+                    price_cents=Decimal(str(price_cents)),
+                    edge=Decimal(str(net_edge)),
+                )
+                if not check.allowed:
+                    self.state.orders_rejected += 1
+                    self.logger.debug("Risk block %s: %s", ticker, check.reason)
+                    return
+            except Exception as exc:
+                self.logger.debug("Risk check error %s: %s", ticker, exc)
+
+        # Resolve TradingMode from category mode string.
+        # BUG-10 fix: unknown mode strings must not silently degrade to paper
+        # — a misconfigured live category would paper-trade undetected.
+        _VALID_MODES = {v.value for v in TradingMode}
+        if mode not in _VALID_MODES:
+            self.logger.error(
+                "[universal-agent] Unknown trading mode %r for category %r "
+                "(valid: %s) — skipping market %s",
+                mode, cm.category, sorted(_VALID_MODES), ticker,
+            )
+            self.state.orders_rejected += 1
+            return
+        trading_mode = TradingMode(mode)
+
+        log_entry = {
+            "ticker": ticker,
+            "category": cm.category,
+            "mode": mode,
+            "side": side,
+            "action": action,
+            "price_cents": price_cents,
+            "contracts": contracts,
+            "edge": round(net_edge, 4),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "dry_run": self.config.dry_run,
+        }
+
+        if self.config.dry_run:
+            self.logger.info("[DRY-RUN] Would place %s %s %s %dx@%dc", ticker, mode, side, contracts, price_cents)
+            self._append_log(self.state.order_log, log_entry)
+            return
+
+        # Route through the standard order router with category mode
+        try:
+            from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
+            from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+            intent = OrderIntent(
+                ticker=ticker,
+                side=side,
+                action=action,
+                price_cents=price_cents,
+                count=contracts,
+                mode=trading_mode,
+                edge_pct=net_edge,
+                source=self.config.name,
+                decision_trace_id=new_decision_trace_id("ua"),
+                sentiment_driven=False,
+            )
+            result = await route_order_async(intent)
+            log_entry["result_status"] = result.status
+            log_entry["latency_ms"] = result.latency_ms
+
+            if result.status in ("filled_paper", "filled_live", "filled_mock"):
+                self.state.orders_placed += 1
+                self._append_log(self.state.fill_log, {**log_entry, "fill": result.fill})
+                self.logger.info(
+                    "[%s] %s %s %s %dx@%dc -> %s (%.1fms)",
+                    self.config.name, mode.upper(), ticker, side, contracts,
+                    price_cents, result.status, result.latency_ms,
+                )
+            else:
+                self.state.orders_rejected += 1
+                log_entry["reject_reason"] = result.reason
+                self.logger.debug("Order rejected %s: %s", ticker, result.reason)
+
+            self._append_log(self.state.order_log, log_entry)
+
+        except Exception as exc:
+            self.logger.error("Route error %s: %s", ticker, exc)
+
+    # ── Snapshot builder ──────────────────────────────────────────────────
+
+    def _build_snapshot(self, cm: CatalogMarket) -> Any:
+        """Build a MarketSnapshot from a CatalogMarket for the strategy."""
+        from merid.prediction.model import (
+            MarketSnapshot, ContractState, ImpliedProbability, PredictionMarketModel,
+        )
+        from decimal import Decimal
+        mkt = cm.market
+        raw = mkt.raw_data or {}
+
+        bid = int(raw.get("yes_bid", 0) or 0)
+        ask = int(raw.get("yes_ask", 0) or 0)
+        last = int(raw.get("last_price", 0) or raw.get("yes_bid", 50) or 50)
+        volume = int(mkt.volume or 0)
+        open_interest = int(mkt.open_interest or 0)
+
+        mid = ((bid + ask) // 2) if (bid > 0 and ask > 0) else last or 50
+
+        # BUG-02 fix: resolve the market lifecycle state from the raw API status
+        # field and close_time so the strategy state-filter does not see LISTED
+        # (the dataclass default) for every market and return NO_ACTION.
+        status_str = raw.get("status", "") or getattr(mkt, "status", "") or "active"
+        close_time = cm.expires_at  # datetime or None
+        model = PredictionMarketModel()
+        resolved_state = model.determine_state(str(status_str), close_time=close_time)
+
+        hours_left = None
+        if close_time:
+            from datetime import datetime, timezone
+            now_utc = datetime.now(timezone.utc)
+            if close_time > now_utc:
+                hours_left = Decimal(str(
+                    (close_time - now_utc).total_seconds() / 3600
+                )).quantize(Decimal("0.01"))
+
+        implied = ImpliedProbability(
+            yes_prob=Decimal(str(mid)) / Decimal("100"),
+            no_prob=Decimal(str(100 - mid)) / Decimal("100"),
+            yes_bid=Decimal(bid) if bid else None,
+            yes_ask=Decimal(ask) if ask else None,
+            spread_cents=Decimal(ask - bid) if (bid > 0 and ask > 0) else None,
+        )
+
+        return MarketSnapshot(
+            market_id=mkt.market_id,
+            event_id=raw.get("event_ticker") or mkt.market_id.rsplit("-", 1)[0],
+            title=mkt.question or mkt.market_id,
+            state=resolved_state,
+            implied=implied,
+            volume=Decimal(volume),
+            open_interest=Decimal(open_interest),
+            time_to_expiry_hours=hours_left,
+            close_time=close_time,
+            category=cm.category or "other",
+        )
+
+    @staticmethod
+    def _append_log(log: List[Dict], entry: Dict) -> None:
+        log.append(entry)
+        if len(log) > _MAX_LOG_ENTRIES:
+            del log[: len(log) - _MAX_LOG_ENTRIES]
+
+
+# ── Singleton registry ─────────────────────────────────────────────────────
+
+import threading as _threading
+
+_agents: Dict[str, KalshiUniversalAgent] = {}
+_agents_lock = _threading.Lock()
+
+
+def get_universal_agent(name: str = "default") -> Optional[KalshiUniversalAgent]:
+    """Return a registered universal agent by name."""
+    with _agents_lock:
+        return _agents.get(name)
+
+
+def register_universal_agent(agent: KalshiUniversalAgent) -> None:
+    """Register a universal agent by its config name."""
+    with _agents_lock:
+        _agents[agent.config.name] = agent
+
+
+def get_or_create_universal_agent(
+    name: str = "default",
+    config: Optional[UniversalAgentConfig] = None,
+) -> KalshiUniversalAgent:
+    """Return existing agent or create and register a new one."""
+    with _agents_lock:
+        if name not in _agents:
+            cfg = config or UniversalAgentConfig(name=name)
+            _agents[name] = KalshiUniversalAgent(cfg)
+        return _agents[name]

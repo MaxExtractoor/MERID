@@ -1,0 +1,356 @@
+# MERID Operational SLO/SLA Contract
+# Version: 1.0
+# Last Updated: 2026-01-14
+# Authority: Ops Lead + Infrastructure Team
+
+version: "1.0"
+effective_date: "2026-01-14T00:00:00Z"
+
+# Service Level Objectives by Module
+
+# Market Data Services
+market_data:
+  price_feeds:
+    latency_p50_ms: 50
+    latency_p95_ms: 150
+    latency_p99_ms: 300
+    uptime_pct: 99.9
+    data_freshness_max_age_ms: 1000
+    error_rate_max_pct: 0.1
+    
+  order_book:
+    latency_p50_ms: 100
+    latency_p95_ms: 250
+    latency_p99_ms: 500
+    uptime_pct: 99.5
+    update_frequency_min_hz: 1
+    
+  social_sentiment:
+    latency_p50_ms: 5000
+    latency_p95_ms: 15000
+    uptime_pct: 95.0
+    data_freshness_max_age_seconds: 300
+    error_rate_max_pct: 5.0
+
+# Execution Services
+execution:
+  order_routing:
+    latency_p50_ms: 100
+    latency_p95_ms: 300
+    latency_p99_ms: 1000
+    uptime_pct: 99.95
+    success_rate_min_pct: 95.0
+    
+  execution_guard:
+    latency_p50_ms: 10
+    latency_p95_ms: 50
+    latency_p99_ms: 100
+    uptime_pct: 99.99
+    validation_accuracy_min_pct: 99.9
+    
+  sniper_service:
+    latency_p50_ms: 20
+    latency_p95_ms: 50
+    latency_p99_ms: 100
+    uptime_pct: 99.9
+    opportunity_detection_latency_max_ms: 50
+
+# Agent Services
+agents:
+  strategy_agents:
+    decision_latency_p95_ms: 1000
+    uptime_pct: 99.0
+    error_rate_max_pct: 1.0
+    
+  risk_agents:
+    decision_latency_p95_ms: 100
+    uptime_pct: 99.95
+    error_rate_max_pct: 0.1
+    
+  governor_agent:
+    decision_latency_p95_ms: 500
+    uptime_pct: 99.9
+    error_rate_max_pct: 0.5
+    
+  llm_agents:
+    response_latency_p95_ms: 5000
+    uptime_pct: 95.0
+    error_rate_max_pct: 5.0
+    fallback_available: true
+
+# Infrastructure Services
+infrastructure:
+  database:
+    query_latency_p95_ms: 100
+    uptime_pct: 99.95
+    connection_pool_utilization_max_pct: 80
+    
+  message_bus:
+    publish_latency_p95_ms: 10
+    delivery_latency_p95_ms: 100
+    uptime_pct: 99.95
+    message_loss_rate_max_pct: 0.01
+    
+  cache:
+    get_latency_p95_ms: 5
+    hit_rate_min_pct: 90
+    uptime_pct: 99.9
+    
+  network_client:
+    request_latency_p95_ms: 500
+    uptime_pct: 99.0
+    circuit_breaker_threshold_error_rate: 10.0
+
+# Learning and Simulation
+learning:
+  marl_coordinator:
+    training_episode_max_seconds: 60
+    uptime_pct: 95.0
+    
+  simulation_pipeline:
+    sim_execution_latency_p95_ms: 1000
+    uptime_pct: 99.0
+    
+  paper_trading:
+    order_execution_latency_p95_ms: 500
+    uptime_pct: 99.5
+
+# Monitoring and Observability
+monitoring:
+  metrics_collection:
+    collection_interval_seconds: 10
+    ingestion_latency_p95_ms: 1000
+    uptime_pct: 99.5
+    
+  logging:
+    log_ingestion_latency_p95_ms: 500
+    uptime_pct: 99.0
+    retention_days: 90
+    
+  alerting:
+    alert_delivery_latency_p95_ms: 5000
+    uptime_pct: 99.9
+    false_positive_rate_max_pct: 5.0
+
+# Degradation Behavior
+
+degradation_policies:
+  market_data_degraded:
+    trigger:
+      - "latency_p95 > 2x SLO"
+      - "error_rate > 5%"
+      - "uptime < 95%"
+    actions:
+      - "switch_to_backup_feed"
+      - "increase_cache_ttl"
+      - "reduce_polling_frequency"
+      - "alert_ops"
+    
+  execution_degraded:
+    trigger:
+      - "latency_p95 > 2x SLO"
+      - "success_rate < 90%"
+    actions:
+      - "pause_new_orders"
+      - "switch_to_backup_venue"
+      - "reduce_order_size"
+      - "trigger_safe_mode_if_critical"
+    
+  agent_degraded:
+    trigger:
+      - "error_rate > 10%"
+      - "latency > 3x SLO"
+      - "repeated_failures > 5"
+    actions:
+      - "activate_fallback_agent"
+      - "demote_to_lower_mode"
+      - "switch_to_baseline_policy"
+      - "notify_governor"
+    
+  llm_degraded:
+    trigger:
+      - "latency > 10s"
+      - "error_rate > 20%"
+      - "timeout_rate > 10%"
+    actions:
+      - "use_cached_responses"
+      - "simplify_prompts"
+      - "switch_to_smaller_model"
+      - "disable_non_critical_llm_calls"
+    
+  infrastructure_degraded:
+    trigger:
+      - "database_latency > 500ms"
+      - "message_bus_latency > 1s"
+      - "cache_hit_rate < 70%"
+    actions:
+      - "activate_read_replicas"
+      - "increase_cache_size"
+      - "reduce_non_critical_queries"
+      - "alert_infrastructure_team"
+
+# Circuit Breaker Configuration
+
+circuit_breakers:
+  exchange_api:
+    error_threshold_pct: 10.0
+    timeout_threshold_pct: 20.0
+    latency_threshold_multiplier: 2.0
+    window_seconds: 60
+    min_requests: 10
+    half_open_requests: 3
+    cooldown_seconds: 300
+    
+  rpc_node:
+    error_threshold_pct: 15.0
+    timeout_threshold_pct: 25.0
+    window_seconds: 60
+    min_requests: 5
+    cooldown_seconds: 180
+    
+  x402_service:
+    error_threshold_pct: 20.0
+    timeout_threshold_pct: 30.0
+    window_seconds: 120
+    cooldown_seconds: 600
+    
+  social_api:
+    error_threshold_pct: 25.0
+    timeout_threshold_pct: 30.0
+    window_seconds: 300
+    cooldown_seconds: 900
+
+# Health Check Configuration
+
+health_checks:
+  readiness:
+    interval_seconds: 5
+    timeout_seconds: 2
+    failure_threshold: 3
+    success_threshold: 1
+    
+  liveness:
+    interval_seconds: 10
+    timeout_seconds: 5
+    failure_threshold: 3
+    
+  dependency_checks:
+    interval_seconds: 30
+    timeout_seconds: 10
+    critical_dependencies:
+      - "database"
+      - "message_bus"
+      - "execution_guard"
+      - "risk_monitor"
+
+# Failover Configuration
+
+failover:
+  automatic_failover_enabled: true
+  
+  database:
+    primary_to_replica_seconds: 30
+    replica_lag_max_seconds: 5
+    
+  exchange_connections:
+    primary_to_backup_seconds: 10
+    backup_venues:
+      binance: ["coinbase", "kraken"]
+      coinbase: ["binance", "kraken"]
+    
+  rpc_nodes:
+    primary_to_backup_seconds: 5
+    min_healthy_nodes: 2
+    
+  agent_instances:
+    primary_to_backup_seconds: 60
+    min_healthy_instances: 1
+
+# Monitoring and Alerting
+
+monitoring_requirements:
+  metrics_to_track:
+    - "latency_percentiles"
+    - "error_rates"
+    - "uptime"
+    - "throughput"
+    - "resource_utilization"
+    - "circuit_breaker_states"
+    - "health_check_status"
+    
+  alert_severity_levels:
+    critical:
+      - "uptime < 99%"
+      - "error_rate > 10%"
+      - "circuit_breaker_open"
+      - "safe_mode_triggered"
+      
+    warning:
+      - "latency_p95 > 1.5x SLO"
+      - "error_rate > 5%"
+      - "degraded_mode_active"
+      
+    info:
+      - "latency_p95 > SLO"
+      - "error_rate > 1%"
+      - "failover_occurred"
+
+# SLO Violation Response
+
+slo_violation_response:
+  immediate_actions:
+    - "trigger_circuit_breaker_if_applicable"
+    - "activate_degradation_policy"
+    - "alert_on_call_engineer"
+    - "log_detailed_diagnostics"
+    
+  investigation_required:
+    - "latency_violations > 3 in 1 hour"
+    - "error_rate_violations > 2 in 1 hour"
+    - "uptime_violations > 1 in 24 hours"
+    
+  escalation_path:
+    level_1: "on_call_engineer"
+    level_2: "ops_lead"
+    level_3: "cto"
+    escalation_timeout_minutes: 30
+
+# Capacity Planning
+
+capacity_thresholds:
+  cpu_utilization_warning_pct: 70
+  cpu_utilization_critical_pct: 85
+  memory_utilization_warning_pct: 75
+  memory_utilization_critical_pct: 90
+  disk_utilization_warning_pct: 80
+  disk_utilization_critical_pct: 90
+  network_bandwidth_warning_pct: 70
+  network_bandwidth_critical_pct: 85
+
+# Change Control
+
+change_authority:
+  slo_adjustments:
+    approvers: ["ops_lead", "infrastructure_lead"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 48
+    
+  degradation_policy_changes:
+    approvers: ["ops_lead", "risk_admin"]
+    notification: ["all_stakeholders"]
+    time_lock_hours: 24
+    
+  circuit_breaker_tuning:
+    approvers: ["ops_lead"]
+    notification: ["engineering_team"]
+    time_lock_hours: 12
+
+# Audit and Compliance
+
+audit_requirements:
+  log_all_slo_violations: true
+  log_all_degradations: true
+  log_all_failovers: true
+  log_all_circuit_breaker_events: true
+  monthly_slo_report: true
+  quarterly_capacity_review: true

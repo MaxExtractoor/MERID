@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://merid.io/schemas/RiskDecision.json",
+  "title": "RiskDecision",
+  "description": "Risk manager decision on a trade plan",
+  "type": "object",
+  "required": ["decision", "plan_id", "reason"],
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "description": "Unique decision identifier"
+    },
+    "plan_id": {
+      "type": "string",
+      "description": "ID of the trade plan being reviewed"
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["approve", "approve_reduced", "reject", "veto"],
+      "description": "Risk decision"
+    },
+    "approved_size_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Approved position size in USD"
+    },
+    "original_size_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Originally requested size in USD"
+    },
+    "reduction_percent": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Percentage reduction applied"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 500,
+      "description": "Reason for the decision"
+    },
+    "risk_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Overall risk score"
+    },
+    "limit_breaches": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "List of risk limits that would be breached"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Confidence in the decision"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,92 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Trade-vs-Hold Decision Configuration
+# ═══════════════════════════════════════════════════════════════════════
+# Single source of truth for all gating thresholds that determine whether
+# the system trades or holds on any given cycle.  Every value here was
+# previously a hard-coded constant scattered across trading_agent.py,
+# strategy.py, and risk.py.
+#
+# Override hierarchy (highest wins):
+#   1. Environment variable  (e.g. MERID_TH_WARMUP_MIN_SECONDS=20)
+#   2. Per-agent YAML block  (kalshi_agent_grid.yaml → agent.trade_hold)
+#   3. This file (global defaults)
+#
+# Env var naming convention: MERID_TH_<SNAKE_UPPER_KEY>
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── Feature gate ──────────────────────────────────────────────────────
+# Master switch: when false the Decision pipeline is bypassed and the
+# legacy code path runs unmodified (safe rollback).
+enabled: true
+
+# ── Warmup / lifecycle ────────────────────────────────────────────────
+warmup:
+  min_seconds: 15.0          # Minimum seconds in WARMING_UP before promotion
+  max_seconds: 90.0          # Hard ceiling — promote unconditionally
+  max_stagger_seconds: 30.0  # Per-agent stagger based on name hash
+  min_cycles_for_data_ready: 1  # Cycles required before data-readiness promotion
+
+# ── Session ───────────────────────────────────────────────────────────
+session:
+  maintenance_day: 3           # Thursday (0=Mon)
+  maintenance_start_et: "03:00"
+  maintenance_end_et: "05:00"
+
+# ── Entry window ──────────────────────────────────────────────────────
+entry_window:
+  expiry_proximity_guard_seconds: 90   # Block new entries this close to expiry
+  expiry_caution_zone_seconds: 120     # Warn when within this range
+
+# ── Strategy thresholds (defaults — per-agent overrides in grid YAML) ─
+strategy:
+  min_edge_early: 0.08       # 8% — EARLY phase (>24h)
+  min_edge_mid: 0.07         # 7% — MID (4-24h)
+  min_edge_late: 0.06        # 6% — LATE (1-4h)
+  min_edge_terminal: 0.06    # 6% — TERMINAL (<1h)
+  min_arb_edge: 0.005        # 0.5% for pure arb
+  min_confidence: 0.60       # Model confidence floor
+  min_volume: 0              # 0 = disabled (Kalshi often reports 0 on short-dated)
+  min_open_interest: 0       # 0 = disabled
+  snapshot_stale_seconds: 120  # Max age for market data snapshot
+
+# ── Consensus / swarm ─────────────────────────────────────────────────
+consensus:
+  solo_wait_seconds: 0.0     # Seconds without consensus before solo exec (0=immediate)
+  solo_trades_cap: 3         # Max live orders per agent while swarm degraded
+  solo_wall_seconds: 1800.0  # Wall-clock limit for degraded mode (30min)
+  consensus_wait_timeout_ms: 500  # Wait for FORMING consensus before proceeding
+
+# ── Risk / pre-trade (mirrors PredictionRiskConfig defaults) ──────────
+risk:
+  max_contracts_per_order: 50
+  max_contracts_per_market: 500
+  min_order_size: 1
+  max_order_size: 100
+  max_notional_per_market_usd: 500.0
+  max_notional_per_event_usd: 1000.0
+  max_total_notional_usd: 5000.0
+  max_daily_loss_usd: 500.0
+  max_open_markets: 50
+  max_orders_per_minute: 30
+  max_orders_per_hour: 200
+  min_post_fee_edge: 0.01    # Minimum post-fee edge (fraction)
+  tick_size_cents: 1
+  max_spread_cents: 10
+  max_slippage_cents: 3
+  min_depth_contracts: 1
+
+# ── Per-window limits ─────────────────────────────────────────────────
+order_limits:
+  max_orders_per_window: 10  # Default; overridden per-agent in grid YAML
+
+# ── Consecutive error circuit breaker ─────────────────────────────────
+error_handling:
+  max_consecutive_errors: 5  # Pause agent after this many consecutive cycle errors
+
+# ── Observability ─────────────────────────────────────────────────────
+logging:
+  log_every_decision: true       # Emit [PM_DECISION] for every decision
+  log_hold_detail: true          # Include full detail string in HOLD logs
+  log_config_snapshot: false     # Include config thresholds (verbose — enable for debug)
+  cycle_trace_no_action: true    # Include NO_ACTION buckets in PM_CYCLE_TRACE
+  cycle_trace_consensus: true    # Include consensus hold detail in PM_CYCLE_TRACE

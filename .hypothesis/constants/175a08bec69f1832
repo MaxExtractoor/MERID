@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\trading\agents\bookie_agent.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.5, 0.75, 0.99, 1.0, 1.01, 2.0, 5.0, 10.0, 100.0, 10000.0, 100, 500, ':', 'Pool already settled', 'active_pools', 'actual_payout', 'agent_id', 'allowed_outcomes', 'approved', 'balance', 'bet_id', 'bets_with_coherence', 'block:', 'block_index', 'coherence_score', 'created_at', 'directional', 'distribution', 'high_confidence', 'house_cut_pct', 'house_earnings', 'house_pnl_positive', 'implied_probability', 'locked', 'locked_at', 'low_confidence', 'market_id', 'net_profit', 'no', 'odds', 'one_sided_pools', 'outcome', 'placed_at', 'potential_payout', 'prediction', 'rejected', 'role', 'roles', 'settled', 'settled_at', 'settled_pools', 'stake_amount', 'stated_probability', 'total_agent_rewards', 'total_bets', 'total_bets_placed', 'total_house_earnings', 'total_pool', 'total_pools', 'total_users', 'total_volume', 'total_wagered', 'total_won', 'user_id', 'win_rate_pct', 'won', 'yes']

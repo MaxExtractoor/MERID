@@ -1,0 +1,25 @@
+{
+  "gate_id": "lag_smoke_iter13",
+  "timestamp": "2026-04-01T19:27:47.045314+00:00",
+  "duration_seconds": 300,
+  "dry_run": false,
+  "samples_total": 10,
+  "samples_valid": 9,
+  "p95_min": 265.0,
+  "p95_max": 15421.0,
+  "p95_avg": 5473.666666666667,
+  "degraded_count": 0,
+  "high_lag_profiles": 10,
+  "verdict": "FAIL",
+  "passed": false,
+  "failures": [
+    "2026-04-01T19:23:07.831757+00:00: P95=15421ms >= 500ms",
+    "2026-04-01T19:23:37.832180+00:00: P95=13015ms >= 500ms",
+    "2026-04-01T19:24:11.734173+00:00: Error - ",
+    "2026-04-01T19:24:46.933152+00:00: P95=10984ms >= 500ms",
+    "2026-04-01T19:25:16.934157+00:00: P95=7938ms >= 500ms",
+    "2026-04-01T19:26:16.962237+00:00: P95=672ms >= 500ms",
+    "10 high-lag profiles captured"
+  ],
+  "sample_data": null
+}

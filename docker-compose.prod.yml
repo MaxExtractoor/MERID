@@ -1,0 +1,128 @@
+# MERID Production Compose
+# Usage: docker compose -f docker-compose.prod.yml up -d
+#
+# Required env vars (no fallback defaults — must be set in .env.prod or secrets manager):
+#   IMAGE_TAG          — image tag to deploy (e.g. git SHA or semver)
+#   POSTGRES_PASSWORD  — postgres password
+#   REDIS_PASSWORD     — redis password
+#   GRAFANA_PASSWORD   — grafana admin password
+#   MERID_ENV=production
+#   MERID_TRADE_MODE   — "paper" or "live"
+#   MERID_ALLOW_LIVE_TRADES — "true" only when intentionally going live
+#   KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PEM (or PATH)
+#   SECRET_KEY, NEO4J_PASSWORD, SUPABASE_URL, SUPABASE_ANON_KEY
+#   JAEGER_AGENT_HOST  — hostname of Jaeger agent (if tracing enabled)
+
+version: "3.9"
+
+services:
+
+  # ── MERID API ─────────────────────────────────────────────────────
+  merid-api:
+    image: merid-api:${IMAGE_TAG:?IMAGE_TAG must be set}
+    container_name: merid-api
+    ports:
+      - "8011:8011"
+    env_file:
+      - .env.prod
+    environment:
+      - MERID_ENV=production
+      - HOST=0.0.0.0
+      - PORT=8011
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    mem_limit: 2g
+    cpus: "1.5"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - merid-net
+
+  # ── MERID UI (React) ──────────────────────────────────────────────
+  merid-ui:
+    image: merid-ui:${IMAGE_TAG:?IMAGE_TAG must be set}
+    container_name: merid-ui
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_BASE=http://merid-api:8011
+    depends_on:
+      merid-api:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "0.5"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - merid-net
+
+  # ── Monitoring — Prometheus ───────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: merid-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+    mem_limit: 512m
+    networks:
+      - merid-net
+
+  # ── Monitoring — Grafana ──────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: merid-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?GRAFANA_PASSWORD must be set}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    mem_limit: 256m
+    networks:
+      - merid-net
+
+  # ── Monitoring — AlertManager ─────────────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: merid-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+    restart: unless-stopped
+    mem_limit: 128m
+    networks:
+      - merid-net
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  merid-net:
+    driver: bridge

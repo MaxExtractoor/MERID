@@ -1,0 +1,175 @@
+name: MERID Kalshi Pipeline CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # REQUIRED: Formula Anti-Regression Checks
+  # ═══════════════════════════════════════════════════════════════════════════
+  formula-checks:
+    name: Formula Anti-Regression
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest
+    
+    - name: Run formula anti-regression checks
+      run: |
+        chmod +x scripts/ci_check_formulas.sh
+        ./scripts/ci_check_formulas.sh
+    
+    - name: Run formula tests
+      run: |
+        pytest tests/test_formulas_source_of_truth.py -v
+    
+    - name: Check version constants exported
+      run: |
+        python -c "from merid.formulas import FORMULAS_VERSION, AUDIT_SPEC_VERSION, get_version_info; print(f'FORMULAS_VERSION={FORMULAS_VERSION}'); print(f'AUDIT_SPEC_VERSION={AUDIT_SPEC_VERSION}'); print(get_version_info())"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # REQUIRED: Version Drift Detection
+  # ═══════════════════════════════════════════════════════════════════════════
+  version-drift:
+    name: Version Drift Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Check repo versions parseable
+      run: |
+        python scripts/check_version_drift.py
+    
+    - name: Verify version format
+      run: |
+        python -c "
+        from merid.formulas import FORMULAS_VERSION, AUDIT_SPEC_VERSION
+        import re
+        # Verify K-series format (e.g., 2026-03-K1)
+        assert re.match(r'^\d{4}-\d{2}-K\d+$', FORMULAS_VERSION), f'Invalid FORMULAS_VERSION: {FORMULAS_VERSION}'
+        # Verify A-series format (e.g., 2026-03-A1)
+        assert re.match(r'^\d{4}-\d{2}-A\d+$', AUDIT_SPEC_VERSION), f'Invalid AUDIT_SPEC_VERSION: {AUDIT_SPEC_VERSION}'
+        print(f'✅ Version format valid: {FORMULAS_VERSION}, {AUDIT_SPEC_VERSION}')
+        "
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Full Test Suite
+  # ═══════════════════════════════════════════════════════════════════════════
+  test-suite:
+    name: Full Test Suite
+    runs-on: ubuntu-latest
+    needs: [formula-checks, version-drift]  # Only run if checks pass
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+    
+    - name: Run Kalshi pipeline tests
+      run: |
+        pytest tests/test_formulas_source_of_truth.py tests/test_kalshi_market_consensus.py tests/test_sprint_bc.py -v --cov=merid.formulas --cov-report=xml
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: kalshi-pipeline
+        name: kalshi-pipeline-coverage
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Integration Smoke Test
+  # ═══════════════════════════════════════════════════════════════════════════
+  integration-smoke:
+    name: Integration Smoke Test
+    runs-on: ubuntu-latest
+    needs: [formula-checks]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Verify imports work
+      run: |
+        python -c "
+        from merid.formulas import (
+            FORMULAS_VERSION,
+            AUDIT_SPEC_VERSION,
+            get_version_info,
+            generate_correlation_id,
+            parse_correlation_id,
+            kelly_fraction,
+            quarter_kelly_size,
+            brier_score,
+            debate_lift,
+            volume_weighted_sentiment,
+            drawdown_tier_action,
+            fee_aware_edge,
+        )
+        # Test correlation ID generation
+        corr_id = generate_correlation_id('BTC', '15m')
+        print(f'Generated correlation ID: {corr_id}')
+        parsed = parse_correlation_id(corr_id)
+        print(f'Parsed: {parsed}')
+        assert parsed is not None, 'Failed to parse correlation ID'
+        print('✅ All imports and basic functions working')
+        "
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Documentation Consistency Check
+  # ═══════════════════════════════════════════════════════════════════════════
+  docs-check:
+    name: Documentation Consistency
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Verify audit spec references
+      run: |
+        # Check that all AGENT_AUDIT references in code match sections in the doc
+        echo "Checking AGENT_AUDIT references in codebase..."
+        grep -r "\[AGENT_AUDIT:" --include="*.py" . | wc -l
+        echo "AGENT_AUDIT references found (should be > 0)"
+        
+        # Verify formulas module is referenced in audit spec
+        if grep -q "merid/formulas.py" docs/AGENT_AUDIT_KALSHI_SENTIMENT.md; then
+          echo "✅ merid/formulas.py referenced in audit spec"
+        else
+          echo "❌ merid/formulas.py not referenced in audit spec"
+          exit 1
+        fi

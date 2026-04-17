@@ -1,0 +1,18 @@
+---
+description: MERID — Kalshi multi-domain scan / daily sweep (canonical prompt + output shape)
+alwaysApply: false
+---
+
+# MERID Kalshi multi-domain scan
+
+When the user asks for a **market scan**, **daily sweep**, **multi-domain Kalshi scan**, or similar, use the **canonical prompt** in:
+
+`docs/prompts/kalshi_multi_domain_scan.md`
+
+**Behavior:**
+
+1. Open or follow that file’s instructions exactly (parameter block, all domains 1–3 items, `## Top Opportunities (5–10)`, MERID house rules).
+2. Ask for missing **run parameters** if the user did not fill horizon, risk posture, execution constraints, data snapshot time, or optional account constraints.
+3. Do not skip domains or leave section headers empty; balance crypto/macro with sports, culture, elections, climate.
+
+For coding tasks unrelated to scans, this rule does not apply unless the user invokes it.

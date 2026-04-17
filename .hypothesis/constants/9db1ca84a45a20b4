@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\hardening\circuit_breaker.py
+# hypothesis_version: 6.151.4
+
+[2.0, 30.0, 60.0, 300.0, 'All circuits reset', 'Circuit %s: %s -> %s', 'T', 'closed', 'consecutive_failures', 'failure_count', 'half_open', 'open', 'state', 'success_count', 'total_calls']

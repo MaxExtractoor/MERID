@@ -1,0 +1,10 @@
+{
+  "energy_id": "uuid",
+  "timestamp": "ISO-8601",
+  "source": "market | user | system | swarm | external_api",
+  "type": "signal | proposal | anomaly | question",
+  "payload": {},
+  "entropy_score": 0.0,
+  "confidence": null,
+  "status": "unresolved"
+}

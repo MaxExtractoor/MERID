@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\archivist.py
+# hypothesis_version: 6.151.4
+
+['archivist-01', 'gemma3:1b', 'historical_context', 'payload', 'reasoning']

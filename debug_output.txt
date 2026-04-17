@@ -1,0 +1,11 @@
+--- Dataclass fields ---
+  daily_loss_limit: default=500.0, default_factory=<dataclasses._MISSING_TYPE object at 0x000002785B773310>
+  max_position_value: default=10000.0, default_factory=<dataclasses._MISSING_TYPE object at 0x000002785B773310>
+  error_threshold: default=10, default_factory=<dataclasses._MISSING_TYPE object at 0x000002785B773310>
+
+--- __init__ signature ---
+  (self, daily_loss_limit: 'float' = 500.0, max_position_value: 'float' = 10000.0, error_threshold: 'int' = 10) -> None
+
+--- Creating RiskController with daily_loss_limit=100.0 ---
+ctrl.daily_loss_limit = 500.0
+Positional arg test: ctrl.daily_loss_limit = 500.0

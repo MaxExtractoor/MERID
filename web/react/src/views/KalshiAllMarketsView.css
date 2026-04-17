@@ -1,0 +1,6 @@
+/* KalshiAllMarketsView component styles */
+
+.exposure-bar-fill {
+  width: var(--exposure-width, 0%);
+  transition: width 0.3s ease-in-out;
+}

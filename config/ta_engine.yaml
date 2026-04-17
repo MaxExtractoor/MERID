@@ -1,0 +1,171 @@
+# TA Engine Configuration
+# =======================
+# Technical analysis decision stack for Kalshi crypto markets.
+# This is the canonical configuration for indicator calculations,
+# divergence detection, multi-timeframe fusion, and regime classification.
+
+ta_engine:
+  # Assets and timeframes to compute
+  assets:
+    - BTC
+    - ETH
+    - SOL
+    - XRP
+    - DOGE
+
+  timeframes:
+    - 5m
+    - 15m
+    - 1h
+    - 4h
+    - daily
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Indicator Configuration
+  # ═══════════════════════════════════════════════════════════════════════
+  indicators:
+    # RSI Configuration
+    rsi:
+      period: 14
+      oversold: 30.0
+      overbought: 70.0
+
+    # MACD Configuration
+    macd:
+      fast: 12
+      slow: 26
+      signal: 9
+
+    # EMA Configuration
+    ema:
+      fast: 12
+      slow: 26
+      trend: 50
+
+    # SMA Configuration
+    sma:
+      period_50: 50
+      period_200: 200
+
+    # ATR Configuration
+    atr:
+      period: 14
+
+    # Fibonacci Pivots
+    fib_pivots:
+      lookback_bars: 20
+
+    # Divergence Detection
+    divergence:
+      min_bars_between_pivots: 5
+      confirmation_threshold_pct: 2.0
+      min_strength: 0.3
+      window_for_pivots: 3
+
+    # Volume
+    volume:
+      ma_period: 20
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Multi-Timeframe Fusion
+  # ═══════════════════════════════════════════════════════════════════════
+  fusion:
+    # Confidence thresholds
+    min_higher_tf_alignment: 0.3
+    min_lower_tf_confirmation: 0.3
+
+    # Quality weights for scoring
+    trend_alignment_weight: 0.4
+    divergence_weight: 0.3
+    fib_confluence_weight: 0.2
+    volume_confirm_weight: 0.1
+
+    # Rejection rules
+    reject_if_higher_tf_contra_div: true
+    range_market_min_confluence_tags: 3
+
+    # Contra-trend penalties
+    contra_trend_confidence_cap: 0.6
+    contra_trend_quality_penalty: 0.3
+
+    # Position size multipliers by signal quality
+    size_multipliers:
+      high_quality: 1.2
+      medium_quality: 1.0
+      low_quality: 0.6
+      max: 1.5
+      min: 0.3
+
+    # Alignment bonuses
+    multi_tf_agreement_bonus: 1.1
+    poor_lower_tf_penalty: 0.7
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Regime Engine
+  # ═══════════════════════════════════════════════════════════════════════
+  regime:
+    # Update interval (seconds) - 15 minutes default
+    update_interval_seconds: 900
+
+    # Volatility thresholds (annualized)
+    vol_thresholds:
+      low: 0.15
+      high: 1.20
+      extreme: 2.00
+
+    # Trend strength thresholds (0-1)
+    trend_strength:
+      strong: 0.7
+      weak: 0.3
+
+    # Distance to fib level to be considered "near"
+    near_level_tolerance_pct: 0.005
+
+    # Dynamic distance multipliers
+    distance_multipliers:
+      high_quality_trend_follow: 1.2
+      high_quality_contra_trend: 0.7
+      low_quality_any: 0.5
+      hard_cap: 1.5
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Signal Score Thresholds
+  # ═══════════════════════════════════════════════════════════════════════
+  thresholds:
+    min_confidence_to_trade: 0.6
+    min_quality_to_trade: 0.5
+    min_divergence_strength: 0.5
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Kalshi Integration
+  # ═══════════════════════════════════════════════════════════════════════
+  kalshi_integration:
+    # Enable signal-based contract selection
+    use_signal_context: true
+
+    # Dynamic distance adjustments by regime
+    regime_adjustments:
+      low_volatility:
+        distance_boost: 0.1
+      high_volatility:
+        distance_penalty: -0.3
+      trending:
+        distance_boost: 0.1
+      ranging:
+        distance_penalty: -0.1
+
+    # Hard limits
+    max_distance_hard_cap_pct: 0.25
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Logging
+  # ═══════════════════════════════════════════════════════════════════════
+  logging:
+    # Ring buffer size for dashboard
+    decision_buffer_size: 10000
+
+    # Log all decisions (even rejected)
+    log_all_decisions: true
+
+    # Include raw signal data
+    include_signal_detail: false

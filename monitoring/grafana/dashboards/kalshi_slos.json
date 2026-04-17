@@ -1,0 +1,656 @@
+{
+  "dashboard": {
+    "title": "Kalshi SLOs",
+    "tags": ["kalshi", "slo", "trading"],
+    "timezone": "utc",
+    "schemaVersion": 38,
+    "refresh": "30s",
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "environment",
+          "type": "constant",
+          "current": {"value": "dev", "text": "dev"},
+          "hide": 0
+        },
+        {
+          "name": "venue",
+          "type": "constant", 
+          "current": {"value": "kalshi", "text": "kalshi"},
+          "hide": 0
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Kalshi Alerts",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "ALERTS{alertname=~\"Kalshi.*\"}",
+          "tagKeys": "severity",
+          "textFormat": "{{alertname}}: {{severity}}",
+          "iconColor": "red"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "SLO Overview",
+        "type": "row",
+        "collapsed": false,
+        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+        "panels": []
+      },
+      {
+        "id": 2,
+        "title": "API Availability",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+        "targets": [
+          {
+            "expr": "1 - (sum(rate(kalshi_api_errors_total[30d])) / sum(rate(kalshi_api_requests_total[30d])))",
+            "legendFormat": "Availability (30d)",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "colorMode": "background",
+          "graphMode": "area",
+          "justifyMode": "center"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0.99,
+            "max": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 0.995},
+                {"color": "green", "value": 0.999}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "p99 Latency vs Target",
+        "type": "gauge",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(kalshi_api_latency_seconds_bucket[1h])) by (le)) / 0.5",
+            "legendFormat": "p99 vs 500ms target",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "max": 2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 0.8},
+                {"color": "red", "value": 1.0}
+              ]
+            },
+            "custom": {
+              "neutral": 0
+            }
+          }
+        },
+        "options": {
+          "showThresholdLabels": true,
+          "showThresholdMarkers": true,
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"],
+            "fields": ""
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Order Rejection Rate",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+        "targets": [
+          {
+            "expr": "sum(rate(kalshi_orders_rejected_total[5m])) / sum(rate(kalshi_orders_total[5m]))",
+            "legendFormat": "Rejection Rate (5m)",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "colorMode": "background",
+          "graphMode": "area"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "max": 0.2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 0.05},
+                {"color": "red", "value": 0.1}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Circuit Breaker Status",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+        "targets": [
+          {
+            "expr": "kalshi_circuit_breaker_open{venue=\"$venue\"}",
+            "legendFormat": "CB Open",
+            "refId": "A"
+          },
+          {
+            "expr": "kalshi_circuit_breaker_half_open{venue=\"$venue\"}",
+            "legendFormat": "CB Half-Open",
+            "refId": "B"
+          }
+        ],
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "min": 0,
+            "max": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 0.5},
+                {"color": "red", "value": 1}
+              ]
+            },
+            "mappings": [
+              {"options": {"0": {"text": "CLOSED"}}, "type": "value"},
+              {"options": {"1": {"text": "OPEN"}}, "type": "value"}
+            ]
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Latency Percentiles (Time Series)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(kalshi_api_latency_seconds_bucket[$__rate_interval])) by (le)) * 1000",
+            "legendFormat": "p50",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(kalshi_api_latency_seconds_bucket[$__rate_interval])) by (le)) * 1000",
+            "legendFormat": "p95",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(kalshi_api_latency_seconds_bucket[$__rate_interval])) by (le)) * 1000",
+            "legendFormat": "p99",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms",
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "fillOpacity": 10,
+              "pointSize": 3,
+              "showPoints": "never"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "transparent", "value": null},
+                {"color": "yellow", "value": 500},
+                {"color": "red", "value": 1000}
+              ]
+            }
+          },
+          "overrides": [
+            {
+              "matcher": {"id": "byName", "options": "p99"},
+              "properties": [
+                {"id": "custom.lineWidth", "value": 3},
+                {"id": "custom.fillOpacity", "value": 20}
+              ]
+            }
+          ]
+        },
+        "options": {
+          "legend": {"displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"]},
+          "tooltip": {"mode": "multi"}
+        }
+      },
+      {
+        "id": 7,
+        "title": "API Error Rate (Time Series)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+        "targets": [
+          {
+            "expr": "sum(rate(kalshi_api_errors_total[$__rate_interval])) / sum(rate(kalshi_api_requests_total[$__rate_interval]))",
+            "legendFormat": "Error Rate",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "fillOpacity": 15,
+              "pointSize": 3
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "transparent", "value": null},
+                {"color": "yellow", "value": 0.001},
+                {"color": "red", "value": 0.005}
+              ]
+            }
+          }
+        },
+        "options": {
+          "legend": {"displayMode": "list", "placement": "bottom"}
+        }
+      },
+      {
+        "id": 8,
+        "title": "Burn Rate Analysis",
+        "type": "row",
+        "collapsed": true,
+        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 13},
+        "panels": [
+          {
+            "id": 9,
+            "title": "Latency Burn Rate: Short vs Long Window",
+            "type": "timeseries",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.99, sum(rate(kalshi_api_latency_seconds_bucket[5m])) by (le)) * 1000",
+                "legendFormat": "p99 (5m) - Fast burn",
+                "refId": "A"
+              },
+              {
+                "expr": "histogram_quantile(0.99, sum(rate(kalshi_api_latency_seconds_bucket[1h])) by (le)) * 1000",
+                "legendFormat": "p99 (1h) - Slow burn",
+                "refId": "B"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "ms",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineInterpolation": "smooth"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"color": "transparent", "value": null},
+                    {"color": "green", "value": 0},
+                    {"color": "yellow", "value": 500},
+                    {"color": "red", "value": 1000}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 10,
+            "title": "Error Rate Burn Rate: Short vs Long Window",
+            "type": "timeseries",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+            "targets": [
+              {
+                "expr": "sum(rate(kalshi_api_errors_total[5m])) / sum(rate(kalshi_api_requests_total[5m]))",
+                "legendFormat": "Error rate (5m) - Fast burn",
+                "refId": "A"
+              },
+              {
+                "expr": "sum(rate(kalshi_api_errors_total[1h])) / sum(rate(kalshi_api_requests_total[1h]))",
+                "legendFormat": "Error rate (1h) - Slow burn",
+                "refId": "B"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percentunit",
+                "custom": {
+                  "drawStyle": "line",
+                  "lineInterpolation": "smooth"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"color": "green", "value": 0},
+                    {"color": "yellow", "value": 0.001},
+                    {"color": "red", "value": 0.005}
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "title": "System Health",
+        "type": "row",
+        "collapsed": false,
+        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+        "panels": []
+      },
+      {
+        "id": 12,
+        "title": "Kill Switch Activity",
+        "type": "timeseries",
+        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 15},
+        "targets": [
+          {
+            "expr": "kalshi_kill_switch_active{venue=\"$venue\"}",
+            "legendFormat": "Kill Switch Active",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "min": 0,
+            "max": 1,
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "stepBefore",
+              "fillOpacity": 50
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "red", "value": 1}
+              ]
+            },
+            "mappings": [
+              {"options": {"0": {"text": "Inactive", "color": "green"}}, "type": "value"},
+              {"options": {"1": {"text": "ACTIVE", "color": "red"}}, "type": "value"}
+            ]
+          }
+        },
+        "options": {
+          "legend": {"displayMode": "hidden"}
+        }
+      },
+      {
+        "id": 13,
+        "title": "Order Volume & Rejections",
+        "type": "timeseries",
+        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 15},
+        "targets": [
+          {
+            "expr": "sum(rate(kalshi_orders_total[5m]))",
+            "legendFormat": "Orders/sec",
+            "refId": "A"
+          },
+          {
+            "expr": "sum(rate(kalshi_orders_rejected_total[5m]))",
+            "legendFormat": "Rejections/sec",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "fillOpacity": 10
+            }
+          }
+        }
+      },
+      {
+        "id": 14,
+        "title": "Correlation Risk",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 15},
+        "targets": [
+          {
+            "expr": "kalshi_correlation_max",
+            "legendFormat": "Max Correlation",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "colorMode": "background",
+          "graphMode": "area"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 0.7},
+                {"color": "red", "value": 0.85}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 15,
+        "title": "Latency Distribution (Heatmap)",
+        "type": "heatmap",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+        "targets": [
+          {
+            "expr": "sum(rate(kalshi_api_latency_seconds_bucket[$__rate_interval])) by (le)",
+            "format": "heatmap",
+            "legendFormat": "{{le}}",
+            "refId": "A"
+          }
+        ],
+        "dataFormat": "tsbuckets",
+        "yBucketBound": "auto",
+        "yAxis": {
+          "unit": "ms",
+          "scale": "log",
+          "max": 2000
+        },
+        "options": {
+          "calculate": false,
+          "yAxis": {"unit": "ms", "scale": "log"},
+          "tooltip": {"show": true, "yHistogram": true}
+        }
+      },
+      {
+        "id": 16,
+        "title": "Top Error Codes",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+        "targets": [
+          {
+            "expr": "sum by (error_code) (kalshi_orders_rejected_total)",
+            "format": "table",
+            "instant": true,
+            "refId": "A"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "indexByName": {
+                "error_code": 0,
+                "Value": 1
+              },
+              "renameByName": {
+                "error_code": "Error Code",
+                "Value": "Count"
+              }
+            }
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "displayMode": "auto",
+              "align": "auto"
+            }
+          },
+          "overrides": [
+            {
+              "matcher": {"id": "byName", "options": "Count"},
+              "properties": [
+                {"id": "custom.displayMode", "value": "gradient-gauge"},
+                {"id": "unit", "value": "short"},
+                {"id": "min", "value": 0},
+                {"id": "max", "value": 1000},
+                {"id": "thresholds", "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"color": "green", "value": 0},
+                    {"color": "yellow", "value": 100},
+                    {"color": "red", "value": 500}
+                  ]
+                }}
+              ]
+            }
+          ]
+        }
+      }
+      ,
+      {
+        "id": 17,
+        "title": "Error Taxonomy Breakdown",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29},
+        "targets": [
+          {
+            "expr": "sum by (severity, category) (increase(kalshi_orders_rejected_total[$__rate_interval]))",
+            "format": "table",
+            "instant": true,
+            "refId": "A"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "indexByName": {"severity": 0, "category": 1, "Value": 2}
+            }
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 100},
+                {"color": "red", "value": 500}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 18,
+        "title": "WebSocket Connection State",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 29},
+        "targets": [
+          {
+            "expr": "kalshi_ws_connection_state",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "min": 0,
+            "max": 1,
+            "mappings": [
+              {"options": {"0": {"text": "Disconnected", "color": "red"}}, "type": "value"},
+              {"options": {"1": {"text": "Connected", "color": "green"}}, "type": "value"}
+            ],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "red", "value": 0.5}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 19,
+        "title": "Catalog Freshness (seconds since refresh)",
+        "type": "graph",
+        "gridPos": {"h": 6, "w": 6, "x": 18, "y": 29},
+        "targets": [
+          {
+            "expr": "time() - kalshi_catalog_last_refresh_timestamp",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 900},
+                {"color": "red", "value": 3600}
+              ]
+            }
+          }
+        },
+        "options": {
+          "legend": {"displayMode": "list", "placement": "bottom"}
+        }
+      }
+    ]
+  },
+  "overwrite": true
+}

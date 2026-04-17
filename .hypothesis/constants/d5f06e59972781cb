@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\strategy_versioning.py
+# hypothesis_version: 6.151.4
+
+[0.02, 0.05, 0.15, 0.5, 0.6, 0.95, 100, 200, 'change_ticket', 'changelog', 'config', 'created_at', 'criteria', 'data/versions', 'dependencies', 'deprecated', 'deprecated_at', 'development', 'error_rate', 'from_stage', 'from_version', 'is_social', 'manual_approval', 'max_drawdown', 'meta_audit_runtime', 'metrics', 'performance', 'performance_metrics', 'production', 'promoted_at', 'promotion_pipeline', 'reason', 'retired', 'risk_adjusted', 'risk_tier', 'sharpe_ratio', 'stability', 'staging', 'standard', 'status', 'strategy_id', 'success_rate', 'testing', 'timestamp', 'to_stage', 'to_version', 'uptime', 'var_95', 'version']

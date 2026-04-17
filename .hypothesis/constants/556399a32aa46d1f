@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\synthesizer.py
+# hypothesis_version: 6.151.4
+
+['gemma3:1b', 'synthesizer-01']
