@@ -1,0 +1,410 @@
+# MERID External API Inventory & Rate Limits
+# This file catalogs all third-party API integrations with documented rate limits.
+# Sources: Official API docs, settings.py, client implementations.
+#
+# Last updated: 2026-03-28
+
+providers:
+  # =============================================================================
+  # PREDICTION MARKETS (Kalshi-first)
+  # =============================================================================
+  kalshi:
+    name: Kalshi
+    description: Primary prediction market venue (REST + WebSocket + FIX)
+    base_urls:
+      rest_demo: https://api.elections.kalshi.co/trade-api/v2
+      rest_live: https://api.elections.kalshi.com/trade-api/v2
+      ws_demo: wss://api.elections.kalshi.co/trade-api/v2
+      ws_live: wss://api.elections.kalshi.com/trade-api/v2
+    auth_method: RSA-PSS (key_id + private_key_pem)
+    client_modules:
+      - merid/event_venues/kalshi/client.py
+      - merid/event_venues/kalshi/ws.py
+      - merid/event_venues/kalshi/fix_client.py
+      - merid/strategies/kalshi_rate_limited_client.py
+    rate_limits:
+      # Tier-based limits from docs.kalshi.com
+      basic:
+        read_per_sec: 20
+        write_per_sec: 10
+        note: Default tier for new accounts
+      advanced:
+        read_per_sec: 30
+        write_per_sec: 30
+        note: Requires application + security review
+      premier:
+        read_per_sec: 100
+        write_per_sec: 100
+        note: Requires 3.75% monthly volume
+      prime:
+        read_per_sec: 400
+        write_per_sec: 400
+        note: Requires 7.5% monthly volume
+    # Self-throttling configuration (conservative under basic tier)
+    self_limits:
+      read_per_sec: 18
+      write_per_sec: 8
+      burst_limit: 5
+    error_codes:
+      - 429: Too Many Requests (rate limited)
+      - 401: Unauthorized (bad signature)
+      - 403: Forbidden
+    headers:
+      # Kalshi returns these on 429 responses
+      retry_after: Retry-After
+    notes:
+      - "FIX session messages (logon/heartbeat) excluded from rate limits"
+      - "Order entry has separate account-level limits via FIX"
+      - "Current implementation: KalshiTokenBucket in client.py line 176"
+
+  # =============================================================================
+  # CRYPTO EXCHANGES (Legacy/Secondary)
+  # =============================================================================
+  binance:
+    name: Binance
+    description: Crypto exchange for spot price feeds
+    base_urls:
+      api: https://api.binance.com
+    auth_method: HMAC-SHA256 (api_key + secret)
+    client_modules:
+      - merid/strategies/binance_auth.py
+      - merid/strategies/binance_us_data.py
+    rate_limits:
+      # From Binance API docs
+      raw_limits:
+        # IP-weight based: 1200 per minute per IP
+        ip_weight_per_min: 1200
+        # Order-related: 10 per second per account
+        orders_per_sec: 10
+        # Hard limit: 50 orders per 10 seconds (spot)
+        orders_per_10_sec: 50
+    self_limits:
+      read_per_sec: 15
+      write_per_sec: 5
+    error_codes:
+      - 429: Rate limit exceeded
+      - 418: IP banned (auto-trading violation)
+    headers:
+      # Binance specific
+      x_mbx_used_weight: X-MBX-USED-WEIGHT
+      x_mbx_order_count: X-MBX-ORDER-COUNT
+
+  coinbase:
+    name: Coinbase
+    description: Crypto exchange for price feeds
+    base_urls:
+      api: https://api.exchange.coinbase.com
+    auth_method: ECDSA (key + passphrase + secret)
+    client_modules:
+      - merid/prediction/coingecko_context.py (indirect)
+    rate_limits:
+      public_per_sec: 10
+      private_per_sec: 15
+    self_limits:
+      read_per_sec: 8
+      write_per_sec: 5
+
+  kraken:
+    name: Kraken
+    description: Crypto exchange
+    base_urls:
+      api: https://api.kraken.com
+    auth_method: HMAC-SHA512 (API-Key + API-Secret)
+    rate_limits:
+      # Tier-based
+      starter:
+        calls_per_sec: 1
+        max_counter: 60
+      intermediate:
+        calls_per_sec: 3
+        max_counter: 125
+      pro:
+        calls_per_sec: 6
+        max_counter: 250
+    error_codes:
+      - 429: Rate limit exceeded
+      - EAPI:RateLimitExceeded: API error code
+
+  # =============================================================================
+  # MARKET DATA PROVIDERS
+  # =============================================================================
+  messari:
+    name: Messari
+    description: Crypto fundamentals and metrics
+    base_urls:
+      api: https://data.messari.io/api/v1
+    auth_method: Header (x-messari-api-key)
+    client_modules:
+      - merid/prediction/messari_context.py
+    rate_limits:
+      free_tier:
+        per_min: 20
+        note: "No daily cap"
+    self_limits:
+      read_per_min: 15
+    cache_ttl: 900  # 15 minutes as implemented
+
+  coingecko:
+    name: CoinGecko
+    description: Crypto price feeds
+    base_urls:
+      api: https://api.coingecko.com/api/v3
+    auth_method: Header (x-cg-demo-api-key or x-cg-pro-api-key)
+    client_modules:
+      - merid/prediction/coingecko_context.py
+    rate_limits:
+      demo:
+        per_min: 30
+        per_month: 10000
+      pro:
+        per_min: 500
+        note: "Paid tier"
+    self_limits:
+      read_per_min: 25
+
+  coinmarketcap:
+    name: CoinMarketCap
+    description: Crypto market data
+    base_urls:
+      api: https://pro-api.coinmarketcap.com/v1
+    auth_method: Header (X-CMC_PRO_API_KEY)
+    rate_limits:
+      # Tier-based
+      basic: 10000/month
+      hobbyist: 50000/month
+      startup: 150000/month
+      standard: 350000/month
+      professional: 800000/month
+      enterprise: "custom"
+
+  finnhub:
+    name: Finnhub
+    description: Equities and forex data
+    base_urls:
+      api: https://finnhub.io/api/v1
+    auth_method: Query param (token)
+    client_modules:
+      - merid/prediction/finnhub_context.py
+    rate_limits:
+      free: 60/min
+      basic: 300/min
+      standard: 1000/min
+    self_limits:
+      read_per_min: 50
+
+  polygon:
+    name: Polygon.io
+    description: US equities market data
+    base_urls:
+      api: https://api.polygon.io/v2
+    auth_method: Query param (apiKey)
+    client_modules:
+      - merid/prediction/polygon_context.py
+    rate_limits:
+      # Tier-based
+      starter: 5/min
+      developer: 100/min
+      basic: 100/min
+      pro: 1000/min
+      pro_plus: 1000/min
+      enterprise: "custom"
+
+  alpha_vantage:
+    name: Alpha Vantage
+    description: Equities and forex
+    base_urls:
+      api: https://www.alphavantage.co/query
+    auth_method: Query param (apikey)
+    client_modules:
+      - merid/prediction/alphavantage_context.py
+    rate_limits:
+      free: 25/day
+      premium: 75/min (varies by tier)
+    notes:
+      - "Very restrictive free tier"
+
+  # =============================================================================
+  # AI/LLM PROVIDERS
+  # =============================================================================
+  openai:
+    name: OpenAI
+    description: GPT models
+    base_urls:
+      api: https://api.openai.com/v1
+    auth_method: Bearer token
+    rate_limits:
+      # Tier-based (TPM = tokens per minute)
+      free: 200 RPM / 40000 TPM
+      tier1: 2000 RPM / 400000 TPM
+      tier2: 4000 RPM / 800000 TPM
+      tier3: 6000 RPM / 2000000 TPM
+      tier4: 8000 RPM / 4000000 TPM
+      tier5: 10000 RPM / 6000000 TPM
+    error_codes:
+      - 429: Rate limit exceeded
+      - 400: Context length exceeded
+
+  anthropic:
+    name: Anthropic (Claude)
+    description: Claude models
+    base_urls:
+      api: https://api.anthropic.com/v1
+    auth_method: x-api-key header
+    rate_limits:
+      # Tier-based
+      free: 50 RPM
+      developer: 1000 RPM
+      scale: 2000 RPM
+    error_codes:
+      - 429: Rate limit exceeded
+      - 529: Overloaded
+
+  deepseek:
+    name: DeepSeek
+    description: DeepSeek models
+    base_urls:
+      api: https://api.deepseek.com/v1
+    rate_limits:
+      # From DeepSeek docs
+      default: 100 RPM
+
+  openrouter:
+    name: OpenRouter
+    description: Aggregated LLM access
+    base_urls:
+      api: https://openrouter.ai/api/v1
+    rate_limits:
+      # Varies by model
+      default: 20 RPM (free tier)
+
+  # =============================================================================
+  # SOCIAL/SENTIMENT APIs
+  # =============================================================================
+  twitter:
+    name: X/Twitter API
+    description: Social sentiment and publishing
+    base_urls:
+      api: https://api.twitter.com/2
+    auth_method: OAuth 2.0 (Bearer) + OAuth 1.0a
+    client_modules:
+      - merid/sentiment/twitter_fetcher.py
+      - merid/agents/social_ingestion.py
+      - web/api/x_client.py
+    rate_limits:
+      # Tier-based (per app per month)
+      free:
+        read_per_15min: 500
+        write_per_24hr: 500
+        post_per_24hr: 17
+      basic:
+        read_per_15min: 10000
+        write_per_24hr: 50000
+        post_per_24hr: 1850
+      pro:
+        read_per_15min: 100000
+        write_per_24hr: 500000
+        post_per_24hr: 11750
+      enterprise: "custom"
+    self_limits:
+      read_per_15min: 450  # Conservative under free tier
+      post_per_24hr: 15
+
+  reddit:
+    name: Reddit API
+    description: Social sentiment
+    base_urls:
+      api: https://oauth.reddit.com
+    auth_method: OAuth 2.0
+    client_modules:
+      - merid/sentiment/reddit_scraper.py
+    rate_limits:
+      # 60 requests/minute per OAuth client
+      per_min: 60
+      burst: 30
+    self_limits:
+      read_per_min: 50
+
+  telegram:
+    name: Telegram Bot API
+    description: Alerting and notifications
+    base_urls:
+      api: https://api.telegram.org/bot<token>
+    auth_method: Bot token in URL
+    client_modules:
+      - merid/alerts/webhook_client.py
+      - notifications/telegram_client.py
+      - agents/telegram_agent.py
+    rate_limits:
+      # From Telegram docs
+      per_sec: 30
+      per_min: 20  # For messages to same chat
+      burst: 1
+    self_limits:
+      per_sec: 25
+      per_min: 15  # Per-chat limit
+    notes:
+      - "Global 10s coalescing buffer implemented in webhook_client.py"
+      - "Circuit breaker implemented in tg_circuit_breaker.py"
+
+  newsapi:
+    name: NewsAPI
+    description: News headlines
+    base_urls:
+      api: https://newsapi.org/v2
+    auth_method: Query param (apiKey)
+    rate_limits:
+      developer: 100/day
+      paid: "custom"
+
+  # =============================================================================
+  # INFRASTRUCTURE/SERVICES
+  # =============================================================================
+  supabase:
+    name: Supabase
+    description: Database + auth
+    base_urls:
+      api: <project-specific>
+    rate_limits:
+      # Tier-based
+      free: "unlimited but throttled"
+      pro: "unlimited"
+    notes:
+      - "Connection pooling recommended"
+
+  helius:
+    name: Helius (Solana RPC)
+    description: Solana blockchain RPC
+    base_urls:
+      rpc: <project-specific>
+    auth_method: URL-based API key
+    rate_limits:
+      # Tier-based
+      free: "1000 req/day"
+      developer: "10000 req/day"
+      pro: "unlimited"
+
+  # =============================================================================
+  # SUMMARY STATISTICS
+  # =============================================================================
+inventory_summary:
+  total_providers: 18
+  by_category:
+    prediction_markets: 1  # Kalshi (primary)
+    crypto_exchanges: 4    # Binance, Coinbase, Kraken, OKX, Bybit, Alpaca
+    market_data: 6         # Messari, CoinGecko, CMC, Finnhub, Polygon, Alpha Vantage
+    llm: 4                 # OpenAI, Anthropic, DeepSeek, OpenRouter
+    social: 4              # Twitter, Reddit, Telegram, NewsAPI
+    infrastructure: 2      # Supabase, Helius
+  with_rate_limiting_implemented:
+    - kalshi  # KalshiTokenBucket + KalshiRateLimitedClient
+    - telegram  # Circuit breaker + coalescing
+  needs_implementation:
+    - messari  # Has 20/min limit, no client-side enforcement
+    - coingecko
+    - finnhub
+    - polygon
+    - alpha_vantage
+    - twitter
+    - reddit
+    - openai
+    - anthropic

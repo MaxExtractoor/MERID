@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\observability\feed_parity_checker.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.5, 1.0, 2.0, 60.0, -500, 100, 1000, 'avg_divergence_pct', 'critical', 'high', 'medium', 'missing_symbols', 'recent_violations_1h', 'stale_data', 'symbols_tracked', 'total_violations', 'venues_tracked']

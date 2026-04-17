@@ -1,0 +1,286 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "MERID Infrastructure",
+    "tags": [
+      "merid",
+      "infrastructure",
+      "resources"
+    ],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "CPU Usage",
+        "type": "graph",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "CPU %"
+          },
+          {
+            "expr": "avg by (instance) (rate(node_cpu_seconds_total{mode=\"iowait\"}[5m]))",
+            "legendFormat": "I/O Wait %"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Percentage",
+            "min": 0,
+            "max": 100
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Memory Usage",
+        "type": "graph",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100",
+            "legendFormat": "Memory %"
+          },
+          {
+            "expr": "node_memory_SwapTotal_bytes > 0 and (node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes) / node_memory_SwapTotal_bytes * 100 or 0",
+            "legendFormat": "Swap %"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Percentage",
+            "min": 0,
+            "max": 100
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Disk Usage",
+        "type": "graph",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        },
+        "targets": [
+          {
+            "expr": "100 - ((node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100)",
+            "legendFormat": "Root Disk %"
+          },
+          {
+            "expr": "100 - ((node_filesystem_avail_bytes{mountpoint=\"/data\"} / node_filesystem_size_bytes{mountpoint=\"/data\"}) * 100)",
+            "legendFormat": "Data Disk %"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Percentage",
+            "min": 0,
+            "max": 100
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Network I/O",
+        "type": "graph",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(node_network_receive_bytes_total[5m])",
+            "legendFormat": "RX Bytes/sec"
+          },
+          {
+            "expr": "rate(node_network_transmit_bytes_total[5m])",
+            "legendFormat": "TX Bytes/sec"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Bytes/sec",
+            "min": 0
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "System Load",
+        "type": "graph",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 16
+        },
+        "targets": [
+          {
+            "expr": "node_load1",
+            "legendFormat": "1m Load"
+          },
+          {
+            "expr": "node_load5",
+            "legendFormat": "5m Load"
+          },
+          {
+            "expr": "node_load15",
+            "legendFormat": "15m Load"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Load Average",
+            "min": 0
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Uptime",
+        "type": "stat",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 6,
+          "y": 16
+        },
+        "targets": [
+          {
+            "expr": "time() - node_boot_time_seconds",
+            "legendFormat": "Uptime"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 86400
+                },
+                {
+                  "color": "yellow",
+                  "value": 259200
+                },
+                {
+                  "color": "red",
+                  "value": 864000
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Process Count",
+        "type": "stat",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 12,
+          "y": 16
+        },
+        "targets": [
+          {
+            "expr": "node_processes",
+            "legendFormat": "Processes"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 100
+                },
+                {
+                  "color": "yellow",
+                  "value": 200
+                },
+                {
+                  "color": "red",
+                  "value": 500
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "File Descriptors",
+        "type": "stat",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 18,
+          "y": 16
+        },
+        "targets": [
+          {
+            "expr": "node_filefd_allocated",
+            "legendFormat": "FD Used"
+          },
+          {
+            "expr": "node_filefd_maximum",
+            "legendFormat": "FD Max"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 1000
+                },
+                {
+                  "color": "yellow",
+                  "value": 5000
+                },
+                {
+                  "color": "red",
+                  "value": 10000
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "refresh": "30s"
+  }
+}

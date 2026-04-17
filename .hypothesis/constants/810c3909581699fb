@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\streaming_bus.py
+# hypothesis_version: 6.151.4
+
+[100, 500, 'Subscriber removed', 'agent_output', 'article', 'audit', 'channel', 'channel_subscribers', 'confidence', 'consensus', 'consensus_engine', 'content', 'core.streaming_bus', 'data', 'decision', 'dropped_events', 'event_counts', 'event_type', 'execution', 'global_subscribers', 'market_data', 'news', 'onchain', 'price', 'sentiment', 'simulation', 'social', 'source', 'symbol', 'system', 'ticker', 'timestamp', 'title', 'total_subscribers', 'unknown', 'volume', 'votes']

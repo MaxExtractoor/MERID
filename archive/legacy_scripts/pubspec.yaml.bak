@@ -1,0 +1,32 @@
+name: merid
+description: MERID v2.0 - Sovereign Decision Organism
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter_animate: ^4.5.0
+  flutter:
+    sdk: flutter
+  google_fonts: ^6.1.0
+  web_socket_channel: ^3.0.3
+  http: ^1.6.0
+
+dev_dependencies:
+  flutter_animate: ^4.5.0
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/
+  fonts:
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Regular.ttf
+        - asset: assets/fonts/JetBrainsMono-Bold.ttf
+          weight: 700

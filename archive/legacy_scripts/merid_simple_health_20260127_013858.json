@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-01-27T06:38:58.460120",
+  "duration_seconds": 0.53,
+  "overall_status": "healthy",
+  "checks": {
+    "logging_backend": {
+      "status": "healthy",
+      "log_file_exists": true,
+      "log_file_writable": true,
+      "content_valid": true,
+      "queue_listener_active": true
+    },
+    "environment_configuration": {
+      "status": "healthy",
+      "default_path": "logs\\merid.log",
+      "environment_override": true,
+      "explicit_override": true,
+      "default_log_path_constant": "logs\\merid.log"
+    },
+    "rotation_configuration": {
+      "status": "healthy",
+      "handler_class": "logging.handlers.TimedRotatingFileHandler",
+      "when": "midnight",
+      "interval": 1,
+      "backup_count": 7,
+      "encoding": "utf-8",
+      "is_timed_rotating": true,
+      "valid_when": true,
+      "valid_encoding": true,
+      "valid_backup_count": true
+    }
+  },
+  "summary": {
+    "total_checks": 3,
+    "healthy_checks": 3,
+    "unhealthy_checks": 0,
+    "degraded_checks": 0
+  }
+}

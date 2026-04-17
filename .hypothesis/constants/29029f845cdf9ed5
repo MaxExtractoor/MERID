@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\governance\time_decay.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.001, 0.05, 0.1, 1.0, 80.0, 300, 3600, 86400, 604800, 2592000, 'Authority expired', 'Authority not found', 'Unknown decay type', 'active', 'age_seconds', 'agent_trust', 'authority_id', 'by_type', 'config', 'count', 'current_value', 'decay_rate_per_day', 'decay_type', 'disabled', 'disabled_reason', 'expired_count', 'expiring_soon', 'granted_at', 'granted_by', 'human_veto', 'inf', 'initial_value', 'is_expired', 'max_age_seconds', 'model_validity', 'remaining_seconds', 'renewal_count', 'renewed_at', 'risk_override', 'strategy_active', 'strategy_approval', 'total_authorities', 'trade_approval', 'yield_allocation']

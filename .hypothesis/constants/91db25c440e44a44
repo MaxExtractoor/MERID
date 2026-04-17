@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\news_monitor_agent.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.5, 0.66, 0.7, 0.9, 280, 300, '100x', '<[^>]+>', 'No reasoning', 'Unknown', '[*_~`#]', 'act fast', 'agent', 'agent_count', 'agent_dialogue', 'agent_role', 'agent_votes', 'agents', 'approve', 'approved', 'breaking_news_post', 'buy now', 'confidence', 'consensus', 'consensus_complete', 'data', 'decisions', 'energy', 'free money', 'guaranteed', 'headline', 'high', 'importance', 'importance_threshold', 'insider', 'medium', 'moon', 'news', 'news_monitor', 'posts_last_hour', 'proceed', 'published_at', 'pump', 'reason', 'reasoning', 'reasoning_summary', 'reject', 'rug', 'running', 'scam', 'sell now', 'simulation', 'simulation_approved', 'simulation_complete', 'source', 'sources_monitored', 'summaries', 'summary', 'telegram_posts', 'telegram_queue_size', 'timestamp', 'title', 'total_posted', 'twitter_posts', 'type', 'url', 'validation_error', 'vote', 'votes', '✅', '❌']

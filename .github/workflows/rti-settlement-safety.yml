@@ -1,0 +1,59 @@
+name: RTI Settlement Safety Gate
+# CI gate for RTI settlement invariants + abuse tests
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'merid/data/settlement_*.py'
+      - 'merid/data/rti_*'
+      - 'merid/signals/cfb_rti_adapter.py'
+      - 'merid/signals/settlement_view.py'
+      - 'merid/event_venues/kalshi/settlement_execution_guard.py'
+      - 'core/execution_gate.py'
+      - 'web/api/kalshi_grid_api.py'
+      - 'scripts/validate_settlement_replay.py'
+      - 'tests/rti/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'merid/data/settlement_*.py'
+      - 'merid/data/rti_*'
+      - 'merid/signals/cfb_rti_adapter.py'
+      - 'merid/signals/settlement_view.py'
+      - 'merid/event_venues/kalshi/settlement_execution_guard.py'
+      - 'core/execution_gate.py'
+      - 'web/api/kalshi_grid_api.py'
+      - 'scripts/validate_settlement_replay.py'
+      - 'tests/rti/**'
+  workflow_dispatch: {}
+
+env:
+  PYTHON_VERSION: "3.11"
+  MERID_ENV: "test"
+
+jobs:
+  rti-settlement:
+    name: RTI settlement tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run RTI settlement test suite
+        run: |
+          python -m pytest tests/rti -q --tb=short
+

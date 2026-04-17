@@ -1,0 +1,331 @@
+name: Red Team Invariant Testing
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+    - cron: '0 2 * * *'    # Daily at 2 AM UTC (nightly fuzz replay)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guardrail-venue-touchpoints:
+    name: Guardrail - Venue Touchpoints
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      
+      - name: Run venue touchpoint guardrail
+        timeout-minutes: 2
+        run: |
+          chmod +x scripts/ci_guardrail_venue_touchpoints.sh
+          scripts/ci_guardrail_venue_touchpoints.sh
+
+  unit-invariant-tests:
+    name: Unit Invariant Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine@sha256:024f2975c7427644ace025e2ad2a6b5e440723766b0ce81b7b0f09af7184b71c
+        ports:
+          - 6379:6379
+        options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=3s --health-retries=5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      
+      - name: Set up Python
+        uses: actions/setup-python@8d9ed6ac6c5836ef24792d3f4e8e1e4c3b8c2e2f # v5.5.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        timeout-minutes: 3
+        run: |
+          pip install --disable-pip-version-check -r requirements.txt
+          pip install pytest pytest-asyncio httpx
+      
+      - name: Run invariant tests
+        timeout-minutes: 10
+        run: |
+          pytest tests/test_cross_view_invariants.py -v --tb=short --strict-markers
+          pytest tests/test_invariants_hypothesis.py -v --tb=short --strict-markers --hypothesis-profile=ci
+          pytest tests/test_chaos_compound_failures.py -v --tb=short --strict-markers --hypothesis-profile=ci
+          pytest tests/test_race_condition_invariants.py -v --tb=short --strict-markers --hypothesis-profile=ci
+          pytest tests/test_profile_guard_live_mode.py -v --tb=short
+        env:
+          KALSHI_ENV: demo
+          REDIS_URL: redis://localhost:6379
+          MERID_PROFILE: kalshi-only
+
+  red-team-smoke-test:
+    name: Red Team Smoke Test (60s)
+    runs-on: ubuntu-latest
+    services:
+      api:
+        image: merid/api:latest
+        ports:
+          - 8000:8000
+        env:
+          KALSHI_ENV: demo
+          MERID_PROFILE: kalshi-only
+        options: --health-cmd="curl -f http://localhost:8000/api/v1/health" --health-interval=5s --health-timeout=3s --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install aiohttp
+      
+      - name: Run red team smoke test
+        run: |
+          python scripts/ci_red_team.py \
+            --base-url http://localhost:8000 \
+            --duration 60 \
+            --burst-interval 20 \
+            --invariant-interval 15
+
+  reconciliation-stress-test:
+    name: Reconciliation Stress Test
+    runs-on: ubuntu-latest
+    services:
+      api:
+        image: merid/api:latest
+        ports:
+          - 8000:8000
+        env:
+          KALSHI_ENV: demo
+          MERID_PROFILE: kalshi-only
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install aiohttp
+      
+      - name: Run reconciliation stress tests
+        run: |
+          python scripts/stress_test_reconciliation.py --scenario all
+
+  integration-lineage-check:
+    name: Integration - Lineage Verification
+    runs-on: ubuntu-latest
+    services:
+      api:
+        image: merid/api:latest
+        ports:
+          - 8000:8000
+        env:
+          KALSHI_ENV: demo
+          MERID_PROFILE: kalshi-only
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Place test orders and verify lineage
+        run: |
+          python << 'EOF'
+          import asyncio
+          import aiohttp
+          import sys
+          
+          async def test_lineage():
+              async with aiohttp.ClientSession() as session:
+                  # Place a test order
+                  resp = await session.post(
+                      'http://localhost:8000/api/v1/kalshi-grid/canary-trade',
+                      json={
+                          'ticker': 'KXBTC15M-25MAR26',
+                          'side': 'yes',
+                          'action': 'buy',
+                          'price_cents': 50,
+                          'count': 1,
+                          'mode': 'paper'
+                      }
+                  )
+                  
+                  if resp.status not in (200, 201):
+                      print(f"❌ Failed to place test order: {resp.status}")
+                      return False
+                  
+                  data = await resp.json()
+                  order_id = data.get('order_id')
+                  
+                  if not order_id:
+                      print("❌ No order_id in response")
+                      return False
+                  
+                  print(f"✓ Placed test order: {order_id}")
+                  
+                  # Check lineage
+                  lineage_resp = await session.get(
+                      f'http://localhost:8000/api/v1/kalshi/orders/{order_id}/lineage'
+                  )
+                  
+                  if lineage_resp.status != 200:
+                      print(f"❌ Lineage endpoint failed: {lineage_resp.status}")
+                      return False
+                  
+                  lineage = await lineage_resp.json()
+                  
+                  # Verify explicit flags
+                  assert 'found' in lineage, "Missing 'found' field"
+                  assert 'chain_complete' in lineage, "Missing 'chain_complete' field"
+                  assert 'manual_or_external' in lineage, "Missing 'manual_or_external' field"
+                  assert 'synthetic' in lineage, "Missing 'synthetic' field"
+                  
+                  print(f"✓ Lineage flags explicit: found={lineage['found']}, "
+                        f"chain_complete={lineage['chain_complete']}, "
+                        f"manual_or_external={lineage['manual_or_external']}, "
+                        f"synthetic={lineage['synthetic']}")
+                  
+                  return True
+          
+          passed = asyncio.run(test_lineage())
+          sys.exit(0 if passed else 1)
+          EOF
+
+  invariant-checks-complete:
+    name: All Invariant Checks Complete
+    needs: [guardrail-venue-touchpoints, unit-invariant-tests, red-team-smoke-test, reconciliation-stress-test, integration-lineage-check]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [ "${{ needs.guardrail-venue-touchpoints.result }}" != "success" ] || \
+             [ "${{ needs.unit-invariant-tests.result }}" != "success" ] || \
+             [ "${{ needs.red-team-smoke-test.result }}" != "success" ] || \
+             [ "${{ needs.reconciliation-stress-test.result }}" != "success" ] || \
+             [ "${{ needs.integration-lineage-check.result }}" != "success" ]; then
+            echo "❌ One or more invariant checks failed"
+            exit 1
+          fi
+          echo "✓ All invariant checks passed"
+
+  # ===== NIGHTLY JOBS (do not block PRs, page on failure) =====
+  
+  fuzz-replay-nightly:
+    name: Fuzz Replay — Historical Order Regression
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 2 * * *'  # Only run on nightly schedule
+    timeout-minutes: 30
+    services:
+      api:
+        image: merid/api:latest
+        ports:
+          - 8000:8000
+        env:
+          KALSHI_ENV: demo
+          MERID_PROFILE: kalshi-only
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      
+      - name: Set up Python
+        uses: actions/setup-python@8d9ed6ac6c5836ef24792d3f4e8e1e4c3b8c2e2f # v5.5.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        timeout-minutes: 3
+        run: |
+          pip install --disable-pip-version-check -r requirements.txt
+          pip install aiohttp
+      
+      - name: Run fuzz replay (last 30 days, 100 orders)
+        timeout-minutes: 25
+        run: |
+          python scripts/invariant_fuzz_replay.py \
+            --days 30 \
+            --limit 100 \
+            --stratified \
+            --output-stubs ./fuzz-incidents/ \
+            --base-url http://localhost:8000
+      
+      - name: Upload incident stubs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-incident-stubs-${{ github.run_id }}
+          path: ./fuzz-incidents/
+          retention-days: 30
+      
+      - name: Notify on failure
+        if: failure()
+        uses: slackapi/slack-github-action@6c661e3620ef1e9fa2eb5d37570e7da98c42a44c # v1.25.0
+        with:
+          payload: |
+            {
+              "text": "🚨 MERID Fuzz Replay detected invariant violations on ${{ github.repository }}\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.INVARIANT_ALERT_WEBHOOK }}
+
+  hypothesis-nightly:
+    name: Hypothesis — Thorough Property Testing
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 2 * * *'  # Only run on nightly schedule
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis:7-alpine@sha256:024f2975c7427644ace025e2ad2a6b5e440723766b0ce81b7b0f09af7184b71c
+        ports:
+          - 6379:6379
+        options: --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=3s --health-retries=5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      
+      - name: Set up Python
+        uses: actions/setup-python@8d9ed6ac6c5836ef24792d3f4e8e1e4c3b8c2e2f # v5.5.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        timeout-minutes: 3
+        run: |
+          pip install --disable-pip-version-check -r requirements.txt
+          pip install pytest pytest-asyncio hypothesis
+      
+      - name: Run thorough hypothesis tests
+        timeout-minutes: 40
+        run: |
+          pytest tests/test_invariants_hypothesis.py -v --tb=short --hypothesis-profile=nightly --hypothesis-seed=42
+          pytest tests/test_chaos_compound_failures.py -v --tb=short --hypothesis-profile=nightly --hypothesis-seed=42
+          pytest tests/test_race_condition_invariants.py -v --tb=short --hypothesis-profile=nightly --hypothesis-seed=42
+        env:
+          KALSHI_ENV: demo
+          REDIS_URL: redis://localhost:6379
+          MERID_PROFILE: kalshi-only

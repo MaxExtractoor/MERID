@@ -1,0 +1,28 @@
+{
+  "gate_id": "lag_smoke_iter10",
+  "timestamp": "2026-04-01T18:44:03.327983+00:00",
+  "duration_seconds": 300,
+  "dry_run": false,
+  "samples_total": 10,
+  "samples_valid": 9,
+  "p95_min": 266.0,
+  "p95_max": 11266.0,
+  "p95_avg": 4894.111111111111,
+  "degraded_count": 3,
+  "high_lag_profiles": 10,
+  "verdict": "FAIL",
+  "passed": false,
+  "failures": [
+    "2026-04-01T18:39:25.774347+00:00: P95=11266ms >= 500ms",
+    "2026-04-01T18:39:25.774347+00:00: degraded=true",
+    "2026-04-01T18:39:55.793744+00:00: P95=11266ms >= 500ms",
+    "2026-04-01T18:39:55.793744+00:00: degraded=true",
+    "2026-04-01T18:40:25.894654+00:00: P95=11266ms >= 500ms",
+    "2026-04-01T18:40:57.294060+00:00: Error - ",
+    "2026-04-01T18:41:32.918019+00:00: P95=8484ms >= 500ms",
+    "2026-04-01T18:42:02.929164+00:00: P95=531ms >= 500ms",
+    "2026-04-01T18:42:32.939284+00:00: degraded=true",
+    "10 high-lag profiles captured"
+  ],
+  "sample_data": null
+}

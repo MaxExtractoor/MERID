@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\consensus_engine.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.3, 0.5, 0.67, 0.7, 1.0, 5.0, 10.0, 100, '?', 'EXECUTE_LONG', 'EXECUTE_SHORT', 'HOLD', 'NO_ACTION', 'abstain', 'abstention_count', 'accepted', 'action', 'agent_id', 'agents', 'asset', 'authoritative_for', 'bearish', 'block', 'bucket', 'bullish', 'buy', 'category', 'confidence', 'consensus-engine', 'consensus_decision', 'consensus_engine', 'constraints', 'core.consensus', 'crypto', 'decision', 'direction', 'domain', 'force_reround', 'market_consensus', 'neutral', 'news_impact', 'outcome', 'performance_audit', 'price_signal', 'proposal', 'quorum_met', 'reason', 'reasoning', 'risk_veto', 'signal', 'size_multiplier', 'skeptic challenge', 'skeptic_challenge', 'synthesis_proposal', 'timestamp', 'trade_plan', 'trust_score', 'type', 'unknown', 'unspecified', 'vetoed', 'vote_count', 'votes', 'votes_count', 'weight']

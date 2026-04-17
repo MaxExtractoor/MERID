@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\monitoring\metrics.py
+# hypothesis_version: 6.151.4
+
+[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, ',', 'Agent trust score', 'Collector error: %s', 'Open positions count', 'Portfolio equity', 'Stream buffer size', 'Total agent votes', 'Total orders', 'Total stream errors', 'Total stream events', 'Unrealized P&L', 'agent_id', 'collect', 'counter', 'decision', 'event_type', 'gauge', 'histogram', 'le', 'merid_oracle_status', 'merid_orders_total', 'monitoring.metrics', 'oracle_id', 'side', 'state', 'status', 'stream_id', 'summary']

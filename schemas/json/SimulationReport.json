@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://merid.io/schemas/v1.0/SimulationReport.json",
+  "title": "SimulationReport",
+  "description": "Canonical schema for MERID simulation reports - Proof-of-Useful-Simulation outputs",
+  "version": "1.0.0",
+  "type": "object",
+  "required": ["report_id", "simulation_id", "intent_id", "timestamp", "scenarios", "summary", "checksum"],
+  "properties": {
+    "report_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this report"
+    },
+    "simulation_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to the simulation run"
+    },
+    "intent_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to the IntentEnvelope being simulated"
+    },
+    "timestamp": {
+      "type": "number",
+      "description": "Unix timestamp when simulation completed"
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Time taken to run simulation"
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["scenario_id", "name", "probability", "outcome"],
+        "properties": {
+          "scenario_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable scenario name"
+          },
+          "probability": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Estimated probability of this scenario"
+          },
+          "market_conditions": {
+            "type": "object",
+            "properties": {
+              "volatility": {
+                "type": "string",
+                "enum": ["low", "normal", "high", "extreme"]
+              },
+              "trend": {
+                "type": "string",
+                "enum": ["bullish", "neutral", "bearish"]
+              },
+              "liquidity": {
+                "type": "string",
+                "enum": ["thin", "normal", "deep"]
+              }
+            }
+          },
+          "outcome": {
+            "type": "object",
+            "required": ["pnl_usd", "success"],
+            "properties": {
+              "pnl_usd": {
+                "type": "number",
+                "description": "Simulated profit/loss in USD"
+              },
+              "pnl_pct": {
+                "type": "number",
+                "description": "Simulated profit/loss percentage"
+              },
+              "success": {
+                "type": "boolean",
+                "description": "Whether the trade would succeed"
+              },
+              "fill_rate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Expected fill rate"
+              },
+              "slippage_bps": {
+                "type": "number",
+                "description": "Expected slippage in basis points"
+              },
+              "execution_time_ms": {
+                "type": "number",
+                "description": "Expected execution time"
+              },
+              "fees_usd": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Expected fees"
+              },
+              "gas_cost_usd": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Expected gas costs (for on-chain)"
+              }
+            }
+          },
+          "risk_metrics": {
+            "type": "object",
+            "properties": {
+              "max_drawdown_pct": {
+                "type": "number"
+              },
+              "var_95_usd": {
+                "type": "number"
+              },
+              "sharpe_ratio": {
+                "type": "number"
+              },
+              "sortino_ratio": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["expected_pnl", "win_probability", "recommendation"],
+      "properties": {
+        "expected_pnl": {
+          "type": "number",
+          "description": "Probability-weighted expected PnL"
+        },
+        "expected_pnl_pct": {
+          "type": "number"
+        },
+        "win_probability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "risk_reward_ratio": {
+          "type": "number"
+        },
+        "kelly_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Optimal position size per Kelly criterion"
+        },
+        "recommendation": {
+          "type": "string",
+          "enum": ["strong_approve", "approve", "neutral", "reject", "strong_reject"]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "monte_carlo": {
+      "type": "object",
+      "description": "Monte Carlo simulation results",
+      "properties": {
+        "iterations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "percentiles": {
+          "type": "object",
+          "properties": {
+            "p5": { "type": "number" },
+            "p25": { "type": "number" },
+            "p50": { "type": "number" },
+            "p75": { "type": "number" },
+            "p95": { "type": "number" }
+          }
+        },
+        "mean": { "type": "number" },
+        "std_dev": { "type": "number" }
+      }
+    },
+    "checksum": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 hash of simulation inputs for reproducibility"
+    }
+  },
+  "additionalProperties": false
+}

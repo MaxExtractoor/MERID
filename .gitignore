@@ -1,0 +1,345 @@
+# ── Large log/output files (GitHub >100MB limit) ─────────────────────
+data/audit/audit_log.jsonl
+web/react/jest_output.txt
+web/react/jest_results.txt
+*.jsonl
+data/*.jsonl
+logs/*.log
+*.log
+
+# ── Secrets & credentials (CRITICAL — never commit) ──────────────────
+.env
+.env.*
+.env.backup
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+kalshi_private_key.pem
+secrets/
+vault-token
+.vault-token
+
+# ── Python ───────────────────────────────────────────────────────────
+.hypothesis/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+eggs/
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+.Python
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+
+# ── Virtual environments ─────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+
+# ── IDE & editor ─────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ── OS files ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.lnk
+
+# ── Testing & coverage ──────────────────────────────────────────────
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Large binaries / build artifacts (never commit) ──────────────────
+Ollama/
+build/
+.dart_tool/
+node_modules/
+*.dill
+*.dill.track.dill
+*.cache.dill
+*.cache.dill.track.dill
+
+# ── Deployment & runtime ────────────────────────────────────────────
+backups/
+logs/
+tmp/
+*.log
+*.pid
+*.sock
+celerybeat-schedule
+celerybeat.pid
+
+# ── React / frontend build ──────────────────────────────────────────
+web/react/dist/
+web/react/node_modules/
+web/react/.cache/
+*.timestamp-*.mjs
+
+# ── Database ─────────────────────────────────────────────────────────
+*.sqlite3
+*.db
+neo4j/data/
+redis-data/
+
+# ── Generated reports & artifacts ─────────────────────────────────────
+coverage.json
+coverage.xml
+coverage_*.xml
+MERID_REPO_TREE.txt
+_merid-directories.txt
+full_collect*.txt
+collect_errors.txt
+env_var_refs.txt
+vite.log
+temp_snapshot.json
+observations_*.json
+master_roadmap_checklist.txt
+
+# ── Temp / debug files ────────────────────────────────────────────────
+err*.txt
+debug_html.txt
+test_output.txt
+test_run*.txt
+tmp_*.py
+tmp_*.txt
+weather_forecasts.csv
+pytest_lag_fix.log
+test_dictconfig.log
+test_merid.log
+dummy.log
+
+# ── Flutter (legacy) ──────────────────────────────────────────────────
+.flutter-plugins-dependencies
+.dart_tool/
+.metadata
+pubspec.lock
+
+# ── Misc IDE / platform ──────────────────────────────────────────────
+*.iml
+*.url
+.hintrc
+devtools_options.yaml
+.coverage_dir_backup/
+desktop.ini
+
+# ── Claude / AI worktrees ───────────────────────────────────────────
+.claude/
+
+# ── Legacy directories (removed from git 2026-02-21) ────────────────
+# Flutter platforms
+android/
+ios/
+linux/
+macos/
+windows/
+flutter/
+assets/fonts/
+
+# Legacy backends / APIs
+backend/
+merid-api/
+/src/
+docker/
+librex/
+
+# Legacy domain modules (no active imports)
+cognitive_core/
+sovereignty/
+collaborative/
+knowledge/
+learning/
+legal/
+onboarding/
+trust/
+marketing_swarm/
+
+# Legacy infra / tooling (no active imports)
+artifacts/
+baselines/
+examples/
+experiments/
+flink/
+/hooks/
+infra/
+mocks/
+operations/
+packages/
+policy/
+runbooks/
+voting/
+test/
+
+# Binary tools (download locally, don't track)
+.tools/
+
+# Stale root scripts
+create_shortcut.ps1
+
+# T-072: Orphan test/fix artifacts
+test_results_*.txt
+_fix_*.py
+
+# Root-level session/AI-generated COMPLETE_* and *_REMOVED.md docs
+COMPLETE_*.md
+*_REMOVED.md
+ENHANCED_*.md
+MINIMAL_*.md
+LIGHTWEIGHT_*.md
+CONCISE_*.md
+CODEBASE_BASELINE.*
+HIGH_LEVERAGE_TASKS.md
+HISTORICAL_AUDIT_GAP_REPORT.md
+DUPLICATES_COLLISIONS_REPORT.md
+UI_CLEANUP_FINAL_REPORT.md
+PHASE_2_OPTIMIZATION.md
+RECONCILIATION_OPTIMIZATION_PLAN.md
+DASHBOARD_README.md
+AUDIT_REPORT.md
+BTC_15M_GO_LIVE_CHECKLIST.md
+KALSHI_*.md
+MERID_KALSHI_*.md
+MULTI_VENUE_*.md
+CRYPTO_*.md
+EXECUTION_*.md
+ARBITRAGE_EXECUTION_*.md
+CEX_EXECUTION_*.md
+BLOCKCHAIN_MODULE_*.md
+EXECUTION_GUARD_*.md
+EXECUTION_MOAT_*.md
+Dockerfile.enhanced
+
+# Root-level JSON diagnostics
+crypto_classification_debug.json
+crypto_markets_investigation.json
+kalshi_access_diagnosis.json
+swarm_agent_hits.txt
+
+# Root-level one-off .py scripts (session artifacts)
+aws_ecs_deployment.py
+change_mode.py
+comprehensive_fix.py
+create_kalshi_venue_api.py
+get_telegram_chat_id.py
+merid_integration_gap_summary.py
+
+# Root-level scratch scripts (one-off integration/debug/patch files)
+patch_*.py
+fix_*.py
+debug_*.py
+check_*.py
+diagnose_*.py
+audit_*.py
+complete_*.py
+concrete_*.py
+final_*.py
+find_*.py
+integrate_*.py
+investigate_*.py
+production_*.py
+real_merid_*.py
+refresh_*.py
+update_*.py
+wire_*.py
+verify_*.py
+init_production_mesh.py
+health_check_temp.py
+ui_cleanup_plan.py
+ui_ux_crypto_gap_analysis.py
+minimal_backend.py
+minimal_server.py
+dashboard_api_endpoints.py
+
+# Root-level JSON audit/report artifacts
+*_report.json
+*_analysis.json
+*_results.json
+*_status.json
+*_integration.json
+*_implementation.json
+*_solution_report.json
+*_checklist.json
+diagnostic_report.json
+duplicates_analysis.json
+file_collisions.json
+authoritative_crypto_status.json
+ci_test_report.json
+comprehensive_merid_audit_report.json
+swarm_agent_hits.txt
+
+# Root-level temp files
+temp_line.txt
+temp_mode.json
+engine_bugs_analysis.md
+merid_integration_final_summary.md
+real_merid_integration_instructions.md
+concrete_integration_summary.md
+
+# Root-level one-off test scripts (not in tests/)
+test_agent_robustness.py
+test_behavioral_enhancements.py
+test_chat_ids.py
+test_commitments_endpoint.py
+test_integrations.py
+test_market_fix.py
+test_notifications.py
+test_refactoring.py
+test_risk_debate_integration.py
+test_risk_endpoints.py
+/test_telegram_*.py
+test_ui_integrations.py
+test_unified_signal_integration.py
+
+# Root-level shell test scripts
+test_*.sh
+
+# Root-level status/completion MD files (session artifacts)
+*_COMPLETE.md
+*_COMPLETE_REPORT.md
+*_PROGRESS.md
+*_SUMMARY.md
+*_CONFIRMED.md
+*_FIXED.md
+SESSION_COMPLETE_PROGRESS.md
+PROJECT_COMPLETE.md
+MEMORY.md
+
+# SQLite WAL sidecars under data/ (runtime locks; not portable — keep main .db only)
+data/*.db-shm
+data/*.db-wal
+
+# web/react scratch output files
+web/react/test-output.txt
+web/react/tsc-errors.txt
+web/react/tsc_out.txt
+web/react/used_icons.txt

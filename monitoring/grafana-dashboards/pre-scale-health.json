@@ -1,0 +1,323 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "MERID Pre-Scale Health",
+    "tags": ["risk", "pre-scale", "compliance"],
+    "timezone": "UTC",
+    "schemaVersion": 38,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Pre-Scale Status",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_pre_scale_status",
+            "legendFormat": "Status",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"options": {"0"}, "text": "OK", "type": "value", "color": "green"},
+              {"options": {"1"}, "text": "WARN", "type": "value", "color": "yellow"},
+              {"options": {"2"}, "text": "FAIL", "type": "value", "color": "red"}
+            ],
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 2}
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "center"
+        }
+      },
+      {
+        "id": 2,
+        "title": "Days to Scale-Ready",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_monitoring_days_remaining",
+            "legendFormat": "Days",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 7,
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 3},
+                {"color": "green", "value": 7}
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area"
+        }
+      },
+      {
+        "id": 3,
+        "title": "Audit Chain Records",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_audit_chain_records",
+            "legendFormat": "Records",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0}
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "none"
+        }
+      },
+      {
+        "id": 4,
+        "title": "Audit Chain Valid",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_audit_chain_valid",
+            "legendFormat": "Valid",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"options": {"0"}, "text": "INVALID", "type": "value", "color": "red"},
+              {"options": {"1"}, "text": "VALID", "type": "value", "color": "green"}
+            ]
+          }
+        },
+        "options": {
+          "colorMode": "background"
+        }
+      },
+      {
+        "id": 5,
+        "title": "Risk Events (24h)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_risk_event_total{type=\"position_sync_failed\"}",
+            "legendFormat": "Position Sync Failed",
+            "refId": "A"
+          },
+          {
+            "expr": "merid_risk_event_total{type=\"bankroll_unavailable\"}",
+            "legendFormat": "Bankroll Unavailable",
+            "refId": "B"
+          },
+          {
+            "expr": "merid_risk_event_total{type=\"equity_feed_lost\"}",
+            "legendFormat": "Equity Feed Lost",
+            "refId": "C"
+          },
+          {
+            "expr": "merid_risk_event_total{type=\"threshold_changed\"}",
+            "legendFormat": "Threshold Changed",
+            "refId": "D"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {"drawStyle": "line", "lineInterpolation": "linear"}
+          }
+        },
+        "options": {
+          "legend": {"displayMode": "table", "placement": "right"}
+        }
+      },
+      {
+        "id": 6,
+        "title": "Risk Event Counts (Current)",
+        "type": "bargauge",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_risk_event_count",
+            "legendFormat": "{{type}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 3},
+                {"color": "red", "value": 5}
+              ]
+            },
+            "max": 10
+          }
+        },
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "gradient"
+        }
+      },
+      {
+        "id": 7,
+        "title": "Tainted Path Markers",
+        "type": "timeseries",
+        "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "merid_tainted_path_count",
+            "legendFormat": "Tainted Paths",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "red", "value": 1}
+              ]
+            }
+          }
+        },
+        "alert": {
+          "name": "Tainted Path Detected",
+          "condition": {
+            "evaluator": {"params": [0], "type": "gt"},
+            "operator": {"type": "and"},
+            "query": {"params": ["A", "5m", "now"]},
+            "reducer": {"type": "last"},
+            "type": "query"
+          },
+          "executionErrorState": "alerting",
+          "frequency": "1m",
+          "handler": 1,
+          "message": "CRITICAL: Tainted path markers detected in logs",
+          "noDataState": "no_data",
+          "notifications": [{"uid": "telegram-alerts"}]
+        }
+      },
+      {
+        "id": 8,
+        "title": "Wiring Validation",
+        "type": "table",
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 18},
+        "targets": [
+          {
+            "expr": "merid_wiring_validation_status",
+            "format": "table",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "overrides": [
+            {
+              "matcher": {"id": "byName", "options": "Value"},
+              "properties": [
+                {
+                  "id": "mappings",
+                  "value": [
+                    {"options": {"0"}, "text": "FAIL", "type": "value"},
+                    {"options": {"1"}, "text": "OK", "type": "value"}
+                  ]
+                },
+                {
+                  "id": "thresholds",
+                  "value": {"steps": [{"color": "red", "value": 0}, {"color": "green", "value": 1}]}
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": 9,
+        "title": "Stress Test Results",
+        "type": "table",
+        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 18},
+        "targets": [
+          {
+            "expr": "merid_stress_test_result",
+            "format": "table",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "overrides": [
+            {
+              "matcher": {"id": "byName", "options": "success"},
+              "properties": [
+                {
+                  "id": "mappings",
+                  "value": [
+                    {"options": {"0"}, "text": "FAIL", "type": "value", "color": "red"},
+                    {"options": {"1"}, "text": "PASS", "type": "value", "color": "green"}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": 10,
+        "title": "Pre-Scale Protocol Checklist",
+        "type": "text",
+        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 24},
+        "options": {
+          "content": "# Pre-Scale Protocol Status\n\n- [ ] 7-day warm-up dry-run (no mode confusion)\n- [ ] Daily audit chain verification (passing)\n- [ ] Risk event counts < 5 per category\n- [ ] Zero tainted path markers\n- [ ] Wiring validation passing (CI gates active)\n- [ ] 50% partial-fill stress test passed\n- [ ] Restart + volatility stress test passed\n\n**Scale-up Criteria:** All boxes checked for 7 consecutive days"
+        }
+      }
+    ],
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Risk Events",
+          "datasource": "prometheus",
+          "expr": "merid_risk_event_total",
+          "tagKeys": "type",
+          "textFormat": "{{type}}",
+          "iconColor": "red"
+        },
+        {
+          "name": "Stress Tests",
+          "datasource": "prometheus",
+          "expr": "merid_stress_test_result{success=\"0\"}",
+          "tagKeys": "scenario",
+          "textFormat": "FAIL: {{scenario}}",
+          "iconColor": "yellow"
+        }
+      ]
+    }
+  }
+}

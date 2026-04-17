@@ -1,0 +1,137 @@
+venue:
+  name: kalshi
+  base_url: https://api.elections.kalshi.com/trade-api/v2
+  use_demo: false
+  max_notional_per_expiry_usd: 1000
+  max_open_markets_per_asset: 20
+
+session:
+  maintenance_day: 3
+  maintenance_start_et: 03:00
+  maintenance_end_et: 05:00
+
+agents:
+- name: SPORTS_15M
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 1
+
+- name: SPORTS_HOURLY
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - 1h
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+
+- name: SPORTS_DAILY
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - daily
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 60
+    cutoff_minutes_before_expiry: 5
+
+- name: SPORTS_WEEKLY
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - weekly
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 10
+
+- name: WEATHER_HOURLY
+  assets:
+  - WEATHER
+  timeframes:
+  - 1h
+  archetype: directional
+  market_filter:
+    category: weather
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+
+- name: WEATHER_DAILY
+  assets:
+  - WEATHER
+  timeframes:
+  - daily
+  archetype: directional
+  market_filter:
+    category: weather
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 60
+    cutoff_minutes_before_expiry: 5
+
+- name: SPORTS_CATCH_ALL
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - monthly
+  archetype: directional
+  market_filter:
+    category: sports
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 10

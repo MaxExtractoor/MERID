@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "issues": [],
+  "warning": null,
+  "health_summary": {
+    "total_components": 5,
+    "online_components": 5,
+    "synced_components": 5,
+    "healthy_components": 5,
+    "all_online": true,
+    "all_synced": true,
+    "all_healthy": true
+  },
+  "data_summary": {
+    "total_sources": 2,
+    "verified_sources": 2,
+    "all_verified": true
+  },
+  "mode_tags": [
+    "live",
+    "paper"
+  ]
+}

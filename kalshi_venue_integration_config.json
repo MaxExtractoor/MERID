@@ -1,0 +1,74 @@
+{
+  "timestamp": "2026-03-02T18:21:16.644677",
+  "venue_registry": {
+    "venues": [
+      "kalshi"
+    ],
+    "capabilities": {
+      "binary": [
+        "kalshi"
+      ],
+      "event": [
+        "kalshi"
+      ],
+      "crypto_event": [
+        "kalshi"
+      ]
+    }
+  },
+  "scheduler_jobs": [
+    {
+      "job_id": "kalshi_crypto_cycle",
+      "venue_id": "kalshi",
+      "schedule": "*/5 * * * *",
+      "enabled": true,
+      "risk_config": {
+        "max_position": 1000,
+        "risk_per_trade": 0.02
+      }
+    }
+  ],
+  "routing_info": {
+    "venues": {
+      "kalshi": {
+        "type": "prediction",
+        "capabilities": [
+          "binary",
+          "event",
+          "crypto_event"
+        ],
+        "instrument_types": [
+          "binary_event"
+        ],
+        "underlyings": [
+          "BTC",
+          "ETH"
+        ]
+      }
+    },
+    "routing_rules": [
+      {
+        "condition": {
+          "instrument_type": "binary_event",
+          "underlying": {
+            "$in": [
+              "BTC",
+              "ETH"
+            ]
+          },
+          "venue_capabilities": {
+            "$contains": "crypto_event"
+          }
+        },
+        "target_venues": [
+          "kalshi"
+        ]
+      }
+    ]
+  },
+  "kalshi_status": {
+    "status": "ok",
+    "crypto_available": true,
+    "total_markets": 2000
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "monitoring_running": true,
+  "startup_time": 1769486849.0802605,
+  "services": {
+    "prometheus": {
+      "url": "http://localhost:9090",
+      "status": "healthy"
+    },
+    "alertmanager": {
+      "url": "http://localhost:9093",
+      "status": "healthy"
+    },
+    "grafana": {
+      "url": "http://localhost:3000",
+      "status": "healthy"
+    }
+  },
+  "alerts": [
+    {
+      "name": "MERID_API_Down",
+      "state": "firing",
+      "severity": "critical",
+      "timestamp": 1769486849.0802605
+    }
+  ]
+}

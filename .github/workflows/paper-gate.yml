@@ -1,0 +1,112 @@
+name: Paper Gate Validation
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      gate_duration:
+        description: 'Gate duration in seconds (default: 1800 = 30 min)'
+        required: false
+        default: '1800'
+      gate_id:
+        description: 'Gate identifier (default: ci_<run_id>)'
+        required: false
+        default: ''
+
+jobs:
+  # Quick dry-run on every push/PR (2 minutes)
+  dry-run-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install aiohttp
+
+      - name: Run dry-run paper gate
+        run: |
+          python scripts/run_paper_gate.py --dry-run --output-dir ./results
+
+      - name: Upload dry-run results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-results
+          path: ./results/
+          retention-days: 7
+
+  # Full 30-minute gate (manual trigger only)
+  full-gate:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45  # 30 min gate + 15 min buffer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install aiohttp
+
+      - name: Set gate ID
+        id: gate
+        run: |
+          if [ -n "${{ github.event.inputs.gate_id }}" ]; then
+            echo "GATE_ID=${{ github.event.inputs.gate_id }}" >> $GITHUB_OUTPUT
+          else
+            echo "GATE_ID=ci_${{ github.run_id }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run full paper gate
+        run: |
+          python scripts/run_paper_gate.py \
+            --duration ${{ github.event.inputs.gate_duration || 1800 }} \
+            --gate-id ${{ steps.gate.outputs.GATE_ID }} \
+            --output-dir ./results
+
+      - name: Upload gate results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-gate-results-${{ steps.gate.outputs.GATE_ID }}
+          path: ./results/
+          retention-days: 30
+
+      - name: Comment on PR (if triggered from PR)
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = './results';
+            const files = fs.readdirSync(path).filter(f => f.endsWith('.json'));
+            
+            if (files.length > 0) {
+              const report = JSON.parse(fs.readFileSync(`${path}/${files[0]}`, 'utf8'));
+              const verdict = report.verdict || 'UNKNOWN';
+              const emoji = verdict.startsWith('PASS') ? '✅' : '❌';
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `${emoji} **Paper Gate**: ${verdict}\n- Gate ID: ${report.gate_id}\n- Duration: ${report.duration_seconds // 60} minutes\n- P95 max: ${report.p95_max?.toFixed(0) || 'N/A'}ms\n- [View artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`
+              });
+            }

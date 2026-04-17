@@ -1,0 +1,450 @@
+<!-- Bots/Agents Screen Component -->
+<div class="p-6">
+    <!-- Agent Overview Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+        <div class="metric-card p-4 border-l-4 border-green-500">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                    <span class="text-sm font-medium">Trend Agent</span>
+                </div>
+                <span class="status-badge status-live">RUNNING</span>
+            </div>
+            <div class="text-xs text-gray-400 mb-2">trend-analyst-01</div>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                    <span class="text-gray-400">Confidence:</span>
+                    <span class="text-green-400 font-medium ml-1">87%</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">P&L:</span>
+                    <span class="text-green-400 font-medium ml-1">+$2,340</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Last Decision:</span>
+                    <span class="ml-1">2m ago</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Win Rate:</span>
+                    <span class="text-green-400 font-medium ml-1">72%</span>
+                </div>
+            </div>
+            <button class="mt-3 text-xs text-blue-400 hover:text-blue-300" onclick="showAgentDetail('trend')">View Details →</button>
+        </div>
+        
+        <div class="metric-card p-4 border-l-4 border-green-500">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                    <span class="text-sm font-medium">Arbitrage Agent</span>
+                </div>
+                <span class="status-badge status-live">RUNNING</span>
+            </div>
+            <div class="text-xs text-gray-400 mb-2">arb-analyst-01</div>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                    <span class="text-gray-400">Confidence:</span>
+                    <span class="text-green-400 font-medium ml-1">92%</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">P&L:</span>
+                    <span class="text-green-400 font-medium ml-1">+$5,670</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Last Decision:</span>
+                    <span class="ml-1">1m ago</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Win Rate:</span>
+                    <span class="text-green-400 font-medium ml-1">84%</span>
+                </div>
+            </div>
+            <button class="mt-3 text-xs text-blue-400 hover:text-blue-300" onclick="showAgentDetail('arb')">View Details →</button>
+        </div>
+        
+        <div class="metric-card p-4 border-l-4 border-yellow-500">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 bg-yellow-500 rounded-full"></div>
+                    <span class="text-sm font-medium">Risk Agent</span>
+                </div>
+                <span class="status-badge status-paper">PAUSED</span>
+            </div>
+            <div class="text-xs text-gray-400 mb-2">risk-analyst-01</div>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                    <span class="text-gray-400">Confidence:</span>
+                    <span class="text-yellow-400 font-medium ml-1">45%</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">P&L:</span>
+                    <span class="text-red-400 font-medium ml-1">-$890</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Last Decision:</span>
+                    <span class="ml-1">15m ago</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Win Rate:</span>
+                    <span class="text-yellow-400 font-medium ml-1">58%</span>
+                </div>
+            </div>
+            <button class="mt-3 text-xs text-blue-400 hover:text-blue-300" onclick="showAgentDetail('risk')">View Details →</button>
+        </div>
+        
+        <div class="metric-card p-4 border-l-4 border-green-500">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                    <span class="text-sm font-medium">Skeptic Agent</span>
+                </div>
+                <span class="status-badge status-live">RUNNING</span>
+            </div>
+            <div class="text-xs text-gray-400 mb-2">skeptic-01</div>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                    <span class="text-gray-400">Confidence:</span>
+                    <span class="text-green-400 font-medium ml-1">78%</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">P&L:</span>
+                    <span class="text-green-400 font-medium ml-1">+$1,230</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Last Decision:</span>
+                    <span class="ml-1">5m ago</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Win Rate:</span>
+                    <span class="text-green-400 font-medium ml-1">69%</span>
+                </div>
+            </div>
+            <button class="mt-3 text-xs text-blue-400 hover:text-blue-300" onclick="showAgentDetail('skeptic')">View Details →</button>
+        </div>
+        
+        <div class="metric-card p-4 border-l-4 border-green-500">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                    <span class="text-sm font-medium">Synthesizer Agent</span>
+                </div>
+                <span class="status-badge status-live">RUNNING</span>
+            </div>
+            <div class="text-xs text-gray-400 mb-2">synthesizer-01</div>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                    <span class="text-gray-400">Confidence:</span>
+                    <span class="text-green-400 font-medium ml-1">91%</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">P&L:</span>
+                    <span class="text-green-400 font-medium ml-1">+$3,450</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Last Decision:</span>
+                    <span class="ml-1">30s ago</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Win Rate:</span>
+                    <span class="text-green-400 font-medium ml-1">88%</span>
+                </div>
+            </div>
+            <button class="mt-3 text-xs text-blue-400 hover:text-blue-300" onclick="showAgentDetail('synthesizer')">View Details →</button>
+        </div>
+        
+        <div class="metric-card p-4 border-l-4 border-red-500">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 bg-red-500 rounded-full"></div>
+                    <span class="text-sm font-medium">Archivist Agent</span>
+                </div>
+                <span class="status-badge status-dev">ERROR</span>
+            </div>
+            <div class="text-xs text-gray-400 mb-2">archivist-01</div>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                    <span class="text-gray-400">Confidence:</span>
+                    <span class="text-red-400 font-medium ml-1">--</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">P&L:</span>
+                    <span class="text-red-400 font-medium ml-1">-$120</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Last Decision:</span>
+                    <span class="ml-1">2h ago</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Win Rate:</span>
+                    <span class="text-red-400 font-medium ml-1">--</span>
+                </div>
+            </div>
+            <button class="mt-3 text-xs text-blue-400 hover:text-blue-300" onclick="showAgentDetail('archivist')">View Details →</button>
+        </div>
+    </div>
+    
+    <!-- Agent Performance Summary -->
+    <div class="metric-card p-6 mb-6">
+        <h2 class="text-lg font-semibold mb-4">Agent Performance Summary</h2>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="text-center">
+                <div class="text-2xl font-bold text-green-400">12</div>
+                <div class="text-sm text-gray-400">Total Agents</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-green-400">9</div>
+                <div class="text-sm text-gray-400">Running</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-yellow-400">2</div>
+                <div class="text-sm text-gray-400">Paused</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-red-400">1</div>
+                <div class="text-sm text-gray-400">Error</div>
+            </div>
+        </div>
+        
+        <!-- Performance Chart -->
+        <div class="mt-6 h-64">
+            <canvas id="agentPerformanceChart"></canvas>
+        </div>
+    </div>
+    
+    <!-- Agent Detail Drawer (Hidden by default) -->
+    <div id="agentDetailDrawer" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden">
+        <div class="absolute right-0 top-0 h-full w-96 bg-black border-l border-gray-800 overflow-y-auto">
+            <div class="p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h3 id="agentDetailTitle" class="text-lg font-semibold">Agent Details</h3>
+                    <button onclick="closeAgentDetail()" class="text-gray-400 hover:text-white">
+                        <i data-lucide="x" class="w-5 h-5"></i>
+                    </button>
+                </div>
+                
+                <div id="agentDetailContent">
+                    <!-- Agent detail content will be populated here -->
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Agent detail data
+const agentDetails = {
+    trend: {
+        name: 'Trend Agent',
+        id: 'trend-analyst-01',
+        status: 'RUNNING',
+        thesis: 'BTC showing strong upward momentum with increasing volume and RSI indicating bullish continuation. Expected target: $45,000 within 48 hours.',
+        confidence: 87,
+        recentTrades: [
+            { symbol: 'BTC/USD', side: 'BUY', size: '0.15', price: '$42,800', pnl: '+$340', time: '2m ago' },
+            { symbol: 'ETH/USD', side: 'BUY', size: '2.0', price: '$2,245', pnl: '+$120', time: '15m ago' },
+            { symbol: 'SOL/USD', side: 'SELL', size: '25', price: '$98.45', pnl: '+$89', time: '1h ago' }
+        ]
+    },
+    arb: {
+        name: 'Arbitrage Agent',
+        id: 'arb-analyst-01',
+        status: 'RUNNING',
+        thesis: 'Price discrepancy detected between Binance and Coinbase for BTC/USD. Opportunity: 0.15% spread with $50,000 capacity.',
+        confidence: 92,
+        recentTrades: [
+            { symbol: 'BTC/USD', side: 'BUY', size: '0.5', price: '$43,200', pnl: '+$650', time: '1m ago' },
+            { symbol: 'BTC/USD', side: 'SELL', size: '0.5', price: '$43,265', pnl: '+$325', time: '1m ago' },
+            { symbol: 'ETH/USD', side: 'BUY', size: '5.0', price: '$2,240', pnl: '+$280', time: '8m ago' }
+        ]
+    },
+    risk: {
+        name: 'Risk Agent',
+        id: 'risk-analyst-01',
+        status: 'PAUSED',
+        thesis: 'Portfolio risk exceeding thresholds. Current exposure at 85% of available margin. Recommend reducing position sizes.',
+        confidence: 45,
+        recentTrades: [
+            { symbol: 'NVDA', side: 'SELL', size: '25', price: '$485.00', pnl: '-$125', time: '15m ago' },
+            { symbol: 'AAPL', side: 'SELL', size: '50', price: '$178.80', pnl: '-$89', time: '1h ago' }
+        ]
+    }
+};
+
+// Show agent detail drawer
+function showAgentDetail(agentType) {
+    const drawer = document.getElementById('agentDetailDrawer');
+    const title = document.getElementById('agentDetailTitle');
+    const content = document.getElementById('agentDetailContent');
+    
+    const agent = agentDetails[agentType];
+    if (!agent) return;
+    
+    title.textContent = agent.name;
+    
+    const statusClass = agent.status === 'RUNNING' ? 'status-live' : 
+                       agent.status === 'PAUSED' ? 'status-paper' : 'status-dev';
+    
+    content.innerHTML = `
+        <div class="space-y-6">
+            <!-- Status Info -->
+            <div class="bg-gray-900 rounded p-4">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm text-gray-400">Status</span>
+                    <span class="status-badge ${statusClass}">${agent.status}</span>
+                </div>
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm text-gray-400">Agent ID</span>
+                    <span class="text-sm">${agent.id}</span>
+                </div>
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-gray-400">Confidence</span>
+                    <span class="text-sm font-medium ${agent.confidence >= 80 ? 'text-green-400' : agent.confidence >= 60 ? 'text-yellow-400' : 'text-red-400'}">${agent.confidence}%</span>
+                </div>
+            </div>
+            
+            <!-- Current Thesis -->
+            <div>
+                <h4 class="text-sm font-medium mb-2">Current Thesis</h4>
+                <div class="bg-gray-900 rounded p-3 text-sm text-gray-300">
+                    ${agent.thesis}
+                </div>
+            </div>
+            
+            <!-- Recent Trades -->
+            <div>
+                <h4 class="text-sm font-medium mb-2">Recent Trades</h4>
+                <div class="space-y-2">
+                    ${agent.recentTrades.map(trade => `
+                        <div class="bg-gray-900 rounded p-3">
+                            <div class="flex justify-between items-start">
+                                <div>
+                                    <div class="font-medium text-sm">${trade.symbol}</div>
+                                    <div class="text-xs text-gray-400">${trade.side} ${trade.size} @ ${trade.price}</div>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-sm font-medium ${trade.pnl.startsWith('+') ? 'text-green-400' : 'text-red-400'}">${trade.pnl}</div>
+                                    <div class="text-xs text-gray-400">${trade.time}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+            
+            <!-- Confidence vs Outcome Chart -->
+            <div>
+                <h4 class="text-sm font-medium mb-2">Confidence vs Outcome</h4>
+                <div class="h-32">
+                    <canvas id="confidenceChart"></canvas>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    drawer.classList.remove('hidden');
+    
+    // Initialize confidence chart
+    setTimeout(() => {
+        const ctx = document.getElementById('confidenceChart');
+        if (ctx) {
+            new Chart(ctx.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: ['1h', '2h', '3h', '4h', '5h', '6h'],
+                    datasets: [{
+                        label: 'Confidence',
+                        data: [75, 82, 88, 85, 91, 87],
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.4
+                    }, {
+                        label: 'Outcome',
+                        data: [70, 85, 92, 78, 88, 90],
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: { color: '#a0a0a0', font: { size: 10 } }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: '#2a2a2a' },
+                            ticks: { color: '#a0a0a0', font: { size: 10 } }
+                        },
+                        y: {
+                            grid: { color: '#2a2a2a' },
+                            ticks: { color: '#a0a0a0', font: { size: 10 } }
+                        }
+                    }
+                }
+            });
+        }
+    }, 100);
+}
+
+// Close agent detail drawer
+function closeAgentDetail() {
+    document.getElementById('agentDetailDrawer').classList.add('hidden');
+}
+
+// Initialize agent performance chart
+function initAgentPerformanceChart() {
+    const ctx = document.getElementById('agentPerformanceChart');
+    if (!ctx) return;
+    
+    new Chart(ctx.getContext('2d'), {
+        type: 'bar',
+        data: {
+            labels: ['Trend', 'Arbitrage', 'Risk', 'Skeptic', 'Synthesizer', 'Archivist'],
+            datasets: [{
+                label: 'P&L Contribution',
+                data: [2340, 5670, -890, 1230, 3450, -120],
+                backgroundColor: [
+                    'rgba(16, 185, 129, 0.7)',
+                    'rgba(16, 185, 129, 0.7)',
+                    'rgba(239, 68, 68, 0.7)',
+                    'rgba(16, 185, 129, 0.7)',
+                    'rgba(16, 185, 129, 0.7)',
+                    'rgba(239, 68, 68, 0.7)'
+                ],
+                borderWidth: 0
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: true,
+                    labels: { color: '#a0a0a0' }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: '#2a2a2a' },
+                    ticks: { color: '#a0a0a0' }
+                },
+                y: {
+                    grid: { color: '#2a2a2a' },
+                    ticks: { color: '#a0a0a0' }
+                }
+            }
+        }
+    });
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    initAgentPerformanceChart();
+});
+</script>

@@ -1,0 +1,70 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Trade-Hold Config — LIVE Profile
+# ═══════════════════════════════════════════════════════════════════════
+# Microscopic risk: designed for first-week live with real money.
+# Operator can switch to this by copying over trade_hold_config.yaml
+# or by setting env: MERID_TH_PROFILE=live (future feature).
+#
+# Philosophy: every threshold tightened vs defaults so the system
+# proves profitability at tiny scale before any limit increase.
+# ═══════════════════════════════════════════════════════════════════════
+
+enabled: true
+
+warmup:
+  min_seconds: 30.0          # Longer warmup in live — wait for data
+  max_seconds: 120.0
+  max_stagger_seconds: 15.0
+  min_cycles_for_data_ready: 2
+
+entry_window:
+  expiry_proximity_guard_seconds: 120  # 2 min guard in live (vs 90s default)
+  expiry_caution_zone_seconds: 180
+
+strategy:
+  min_edge_early: 0.10       # 10% — tighter than default 8%
+  min_edge_mid: 0.09
+  min_edge_late: 0.08
+  min_edge_terminal: 0.07
+  min_arb_edge: 0.01         # 1% for arb (vs 0.5% default)
+  min_confidence: 0.65       # Higher confidence floor
+  min_volume: 0
+  min_open_interest: 0
+  snapshot_stale_seconds: 90  # Shorter staleness window
+
+consensus:
+  solo_wait_seconds: 0.0     # Keep 0 for single-agent deploys
+  solo_trades_cap: 2         # Tighter cap
+  solo_wall_seconds: 900.0   # 15 min wall (vs 30 min)
+  consensus_wait_timeout_ms: 500
+
+risk:
+  max_contracts_per_order: 10    # Micro: max 10 contracts per order
+  max_contracts_per_market: 50   # Max 50 per market
+  min_order_size: 1
+  max_order_size: 10
+  max_notional_per_market_usd: 100.0   # $100 max per market
+  max_notional_per_event_usd: 200.0    # $200 max per event
+  max_total_notional_usd: 500.0        # $500 total exposure
+  max_daily_loss_usd: 50.0             # $50 daily loss cap
+  max_open_markets: 10
+  max_orders_per_minute: 10
+  max_orders_per_hour: 60
+  min_post_fee_edge: 0.02    # 2% post-fee edge minimum
+  tick_size_cents: 1
+  max_spread_cents: 8        # Tighter spread tolerance
+  max_slippage_cents: 2
+  min_depth_contracts: 1
+
+order_limits:
+  max_orders_per_window: 5   # 5 orders per window (vs 10 default)
+
+error_handling:
+  max_consecutive_errors: 3  # Halt faster on errors
+
+logging:
+  log_every_decision: true
+  log_hold_detail: true
+  log_config_snapshot: true   # Verbose in live for debugging
+  cycle_trace_no_action: true
+  cycle_trace_consensus: true

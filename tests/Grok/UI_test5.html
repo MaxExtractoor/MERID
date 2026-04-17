@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MERID Vigilance Dashboard</title>
+<style>
+  body { background: #0b0e17; color: #ffaa00; font-family: 'Arial', sans-serif; margin: 0; padding: 0; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  header { text-align: center; padding: 20px 0; position: relative; }
+  
+  /* Confidence Meter */
+  #confidence-meter {
+    height: 50px; background: linear-gradient(90deg, #3c2a00, #ffaa00, #3c2a00); border: 2px solid #ffaa00;
+    border-radius: 6px; box-shadow: 0 0 20px #ffaa00; position: relative; overflow: hidden; animation: pulse 5s infinite ease-in-out; margin-bottom: 20px;
+  }
+  #confidence-meter span { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 20px; font-weight: bold; z-index: 2; }
+  #confidence-meter::after { content: ''; position: absolute; inset: 0; background: radial-gradient(circle, transparent 40%, #ffaa0055 80%); animation: ripple 7s infinite; }
+  
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 15px #ffaa00; } 50% { box-shadow: 0 0 35px #ffaa00; } }
+  @keyframes ripple { 0% { opacity: 0.4; transform: scale(0.9); } 100% { opacity: 0; transform: scale(1.4); } }
+  
+  .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+  .panel { background: #11141f; border: 2px solid #ffaa00; padding: 15px; border-radius: 8px; position: relative; }
+  .panel h3 { margin: 0 0 10px; font-size: 18px; }
+  .tooltip { position: absolute; top: 5px; right: 5px; cursor: help; font-size: 14px; color: #ffaa0080; }
+  .tooltip:hover + .tooltip-text { display: block; }
+  .tooltip-text { display: none; position: absolute; background: #222; padding: 10px; border: 1px solid #ffaa00; border-radius: 4px; z-index: 10; width: 200px; font-size: 12px; color: #fff; }
+  
+  .agents { display: flex; flex-wrap: wrap; gap: 10px; }
+  .agent { background: #1a1a2e; padding: 10px; border: 1px solid #ffaa00; text-align: center; flex: 1; min-width: 120px; }
+  .agent.active { box-shadow: 0 0 15px #ffaa00; animation: agentPulse 2s infinite; }
+  
+  .sliders { display: flex; flex-direction: column; gap: 15px; }
+  .slider-label { display: block; margin-bottom: 5px; }
+  .slider { width: 100%; accent-color: #ffaa00; }
+  
+  #master-control { text-align: center; }
+  #master-fader { width: 100%; accent-color: #ffaa00; }
+  .lockdown { padding: 10px 20px; background: #300; border: 2px solid #f00; color: #f00; cursor: pointer; margin-top: 10px; }
+  .lockdown.locked { background: #f00; color: #000; }
+  
+  @keyframes agentPulse { 0%,100% { opacity: 0.9; } 50% { opacity: 1; } }
+  
+  .output { margin: 30px 0; border: 2px dashed #ffaa00; padding: 15px; border-radius: 8px; }
+  #raw { background: #000; color: #0f0; padding: 10px; font-family: monospace; display: none; margin-bottom: 10px; }
+  #distilled { background: #111; padding: 15px; border: 1px solid #ffaa00; }
+  
+  .status-bar { display: flex; justify-content: space-around; background: #11141f; padding: 10px; border-top: 2px solid #ffaa00; position: fixed; bottom: 0; width: 100%; font-size: 14px; }
+  .status-item { text-align: center; }
+  
+  #user-input { width: 100%; padding: 12px; background: #000; color: #ffaa00; border: 2px solid #ffaa00; font-size: 16px; box-sizing: border-box; margin-top: 20px; }
+  
+  #spinner { display: none; text-align: center; margin: 15px 0; font-size: 24px; color: #ffaa00; }
+  #help-modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #111; padding: 20px; border: 2px solid #ffaa00; z-index: 100; width: 80%; max-width: 600px; }
+  #help-modal button { float: right; background: none; border: none; color: #ffaa00; cursor: pointer; }
+  #help-toggle { position: absolute; top: 10px; right: 10px; cursor: pointer; font-size: 18px; color: #ffaa00; }
+  
+  /* Subtle Scanlines for Depth */
+  body::before { content: ''; position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.03) 3px, rgba(0,0,0,0.03) 6px); opacity: 0.6; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div id="confidence-meter"><span>Confidence: 98%</span></div>
+    <div id="help-toggle">?</div>
+  </header>
+  
+  <div class="dashboard">
+    <div class="panel">
+      <h3>Agents (Input Monitors)</h3>
+      <span class="tooltip">?</span>
+      <div class="tooltip-text">These monitor data ingestion and reasoning. Active agents glow during processing for vigilance.</div>
+      <div class="agents" id="agents">
+        <div class="agent">Eyes (Ingestion)</div>
+        <div class="agent">Brain (Reasoning)</div>
+        <div class="agent">Immune (Anomalies)</div>
+        <div class="agent">Perception</div>
+      </div>
+    </div>
+    
+    <div class="panel">
+      <h3>Process Buses</h3>
+      <span class="tooltip">?</span>
+      <div class="tooltip-text">Aggregate signals for empathy, logic, and ethics. Levels rise during active flow.</div>
+      <div class="sliders">
+        <label class="slider-label">Perception Bus</label><input type="range" class="slider" value="60" disabled>
+        <label class="slider-label">Reasoning Bus</label><input type="range" class="slider" value="80" disabled>
+        <label class="slider-label">Governance Bus</label><input type="range" class="slider" value="95" disabled>
+      </div>
+    </div>
+    
+    <div class="panel">
+      <h3>Master Controls</h3>
+      <span class="tooltip">?</span>
+      <div class="tooltip-text">Central integrity hub. Lockdown halts for risk management.</div>
+      <div id="master-control">
+        <label>Integrity Level</label><br>
+        <input type="range" class="slider" id="master-fader" value="90" disabled>
+        <button class="lockdown" id="lockdown">Lockdown</button>
+      </div>
+    </div>
+  </div>
+  
+  <div class="output">
+    <pre id="raw"></pre>
+    <div id="distilled">Awaiting input... (Outputs are governed for fairness and simplicity.)</div>
+  </div>
+  
+  <div id="spinner"></div>
+  
+  <input type="text" id="user-input" placeholder="Enter query (e.g., Status Report) then press Enter">
+</div>
+
+<div class="status-bar">
+  <div class="status-item">Local LLM: <span class="active">Active</span></div>
+  <div class="status-item">WebSocket: <span class="active">Active</span></div>
+  <div class="status-item">Telegram Feed: <span class="standby">Standby</span></div>
+  <div class="status-item">Memory Layer: <span class="active">Active</span></div>
+  <div class="status-item">External Ports: <span class="quarantined">Quarantined</span></div>
+</div>
+
+<div id="help-modal">
+  <button id="close-help">X</button>
+  <h3>MERID Dashboard Guide</h3>
+  <p>Confidence Meter: Shows AI vigilance level (amber shift if <80% for risk flags).</p>
+  <p>Agents: Monitor inputs—glow on activity.</p>
+  <p>Buses: Aggregate processes—levels indicate flow.</p>
+  <p>Master Controls: Integrity hub—lockdown for overrides.</p>
+  <p>Output: Raw logs + Distilled results, with habit nudges.</p>
+  <p>All elements tie to Live Signal Flow for accountable vigilance.</p>
+</div>
+
+<script>
+  const agents = document.querySelectorAll('.agent');
+  const raw = document.getElementById('raw');
+  const distilled = document.getElementById('distilled');
+  const lockdown = document.getElementById('lockdown');
+  const input = document.getElementById('user-input');
+  const master = document.getElementById('master-fader');
+  const spinner = document.getElementById('spinner');
+  const confidenceSpan = document.querySelector('#confidence-meter span');
+  const helpToggle = document.getElementById('help-toggle');
+  const helpModal = document.getElementById('help-modal');
+  const closeHelp = document.getElementById('close-help');
+  
+  // Session storage for compounding memory
+  let sessionConfidence = JSON.parse(sessionStorage.getItem('meridConfidence')) || { current: 98, history: [] };
+  
+  function updateConfidence(value) {
+    sessionConfidence.current = value;
+    sessionConfidence.history.push(value);
+    if (sessionConfidence.history.length > 5) sessionConfidence.history.shift(); // Keep recent for trends
+    sessionStorage.setItem('meridConfidence', JSON.stringify(sessionConfidence));
+    confidenceSpan.textContent = `Confidence: ${value}%`;
+    if (value < 80) document.body.style.filter = 'sepia(1) hue-rotate(30deg) saturate(2)';
+    else document.body.style.filter = 'none';
+  }
+  
+  updateConfidence(sessionConfidence.current); // Load from memory
+  
+  function simulateProcessing(query) {
+    spinner.style.display = 'block';
+    const braille = ['⠏', '⠇', '⠙', '

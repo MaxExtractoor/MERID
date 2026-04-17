@@ -1,0 +1,196 @@
+# Crypto PM/MM threshold matrix — Production Config: modern_tradeable_kalshi_v1
+# Active profile: MERID_CRYPTO_EDGE_PRODUCTION_PROFILE=modern_tradeable_kalshi_v1
+# Override file path: MERID_CRYPTO_THRESHOLD_MATRIX_PATH
+#
+# Row match: (asset, timeframe, archetype) with "*" = wildcard. Higher-specificity rows win.
+# Optional fields (null): fall back to merid.settings / Strategy defaults.
+
+schema_version: 2  # Bumped for confidence bands integration
+
+profiles:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # PROFILE: modern_tradeable_kalshi_v1 (PRODUCTION DEFAULT)
+  # Tradeable but fee-aware. BTC 15m min_edge=1.1%, DOGE annual=3.4%.
+  # ═══════════════════════════════════════════════════════════════════════════════
+  modern_tradeable_kalshi_v1:
+    confidence_bands:
+      - name: "no_trade"
+        min_conf: 0.00
+        max_conf: 0.60
+        allow_trades: false
+        edge_prob_bump: 0.00
+        edge_cents_bump: 0.0
+        kelly_multiplier: 0.0
+
+      - name: "cautious"
+        min_conf: 0.60
+        max_conf: 0.75
+        allow_trades: true
+        edge_prob_bump: 0.005    # +0.5ppt edge requirement
+        edge_cents_bump: 0.5     # +0.5¢ net EV after fees
+        kelly_multiplier: 0.5    # half-Kelly
+
+      - name: "confident"
+        min_conf: 0.75
+        max_conf: 1.00
+        allow_trades: true
+        edge_prob_bump: 0.00
+        edge_cents_bump: 0.0
+        kelly_multiplier: 1.0    # full allowed Kelly (capped by base_fraction)
+
+    edge_grid:
+      BTC:
+        15m: 0.011
+        1h: 0.0125
+        daily: 0.016
+        weekly: 0.022
+        monthly: 0.025
+        annual: 0.025
+      ETH:
+        15m: 0.012
+        1h: 0.014
+        daily: 0.018
+        weekly: 0.024
+        monthly: 0.027
+        annual: 0.027
+      SOL:
+        15m: 0.014
+        1h: 0.016
+        daily: 0.020
+        weekly: 0.027
+        monthly: 0.030
+        annual: 0.030
+      XRP:
+        15m: 0.015
+        1h: 0.017
+        daily: 0.022
+        weekly: 0.029
+        monthly: 0.032
+        annual: 0.032
+      DOGE:
+        15m: 0.016
+        1h: 0.018
+        daily: 0.024
+        weekly: 0.031
+        monthly: 0.034
+        annual: 0.034
+
+    fee_aware_settings:
+      min_edge_cents: 0.35
+      avoid_mid_fee_band: true
+      mid_fee_band_multiplier: 1.5
+      max_price_cents_grid:
+        BTC:  {15m: 45, 1h: 55, daily: 65, weekly: 70, monthly: 75, annual: 85}
+        ETH:  {15m: 42, 1h: 52, daily: 62, weekly: 68, monthly: 73, annual: 83}
+        SOL:  {15m: 40, 1h: 50, daily: 60, weekly: 66, monthly: 72, annual: 78}
+        XRP:  {15m: 38, 1h: 48, daily: 58, weekly: 64, monthly: 70, annual: 76}
+        DOGE: {15m: 35, 1h: 45, daily: 55, weekly: 60, monthly: 66, annual: 72}
+
+    kelly_settings:
+      base_fraction: 0.25
+      confidence_tier_multiplier:
+        no_trade: 0.0
+        cautious: 0.5
+        confident: 1.0
+
+    min_notional:
+      contracts: 1
+      usd: 0.35
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # PROFILE: modern (DEPRECATED — use modern_tradeable_kalshi_v1)
+  # Kept for backward compatibility; will be removed in future release.
+  # ═══════════════════════════════════════════════════════════════════════════════
+  modern:
+    rows:
+      - asset: "*"
+        timeframe: "*"
+        archetype: "*"
+        directional_min_edge: "0.011"
+        sentiment_vol_regime_min_edge: "0.011"
+        contrarian_sentiment_min: 58
+        contrarian_model_gap_min: 0.10
+        mm_max_spread_cents: "40"
+        pm_risk_max_spread_cents: "40"
+        tier_min_edge_floor: "0.005"
+        kelly_fraction: "0.25"
+        min_order_notional_usd: 0.35
+        spot_strike_veto_flag: false
+
+      - asset: "*"
+        timeframe: "1h"
+        archetype: "*"
+        directional_min_edge: "0.0125"
+        sentiment_vol_regime_min_edge: "0.0125"
+
+      - asset: "*"
+        timeframe: "daily"
+        archetype: "*"
+        directional_min_edge: "0.016"
+        sentiment_vol_regime_min_edge: "0.016"
+
+      - asset: "*"
+        timeframe: "weekly"
+        archetype: "*"
+        directional_min_edge: "0.022"
+        sentiment_vol_regime_min_edge: "0.022"
+
+      - asset: "*"
+        timeframe: "monthly"
+        archetype: "*"
+        directional_min_edge: "0.025"
+        sentiment_vol_regime_min_edge: "0.025"
+
+      - asset: "*"
+        timeframe: "annual"
+        archetype: "*"
+        directional_min_edge: "0.025"
+        sentiment_vol_regime_min_edge: "0.025"
+
+      - asset: "*"
+        timeframe: "*"
+        archetype: "contrarian"
+        contrarian_sentiment_min: 59
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # PROFILE: legacy (fallback for emergency use only)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  legacy:
+    rows:
+      - asset: "*"
+        timeframe: "*"
+        archetype: "*"
+        directional_min_edge: "0.04"
+        sentiment_vol_regime_min_edge: "0.04"
+        contrarian_sentiment_min: 75
+        contrarian_model_gap_min: 0.10
+        mm_max_spread_cents: "10"
+        pm_risk_max_spread_cents: "10"
+        tier_min_edge_floor: "0.08"
+        kelly_fraction: "0.25"
+        min_order_notional_usd: 1.0
+        spot_strike_veto_flag: false
+
+      - asset: "*"
+        timeframe: "daily"
+        archetype: "*"
+        directional_min_edge: "0.035"
+        sentiment_vol_regime_min_edge: "0.035"
+
+      - asset: "*"
+        timeframe: "weekly"
+        archetype: "*"
+        directional_min_edge: "0.03"
+        sentiment_vol_regime_min_edge: "0.03"
+
+      - asset: "*"
+        timeframe: "monthly"
+        archetype: "*"
+        directional_min_edge: "0.03"
+        sentiment_vol_regime_min_edge: "0.03"
+
+      - asset: "*"
+        timeframe: "annual"
+        archetype: "*"
+        directional_min_edge: "0.03"
+        sentiment_vol_regime_min_edge: "0.03"

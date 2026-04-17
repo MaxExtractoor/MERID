@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\conftest.py
+# hypothesis_version: 6.151.4
+
+['log_file', 'logs', 'merid.log', 'midnight', 'queue', 'session', 'spawn', 'utf-8']

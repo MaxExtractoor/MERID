@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\interface.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.9, 1.0, 30.0, 'Agent started: %s', 'Agent stopped: %s', 'abstain', 'approve', 'initializing', 'processing', 'ready', 'reflecting', 'reject', 'suspended', 'terminated', 'voting']

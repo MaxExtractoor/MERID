@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\explainability.py
+# hypothesis_version: 6.151.4
+
+[0.0, 100, 1000, 10000, '1.0', 'Contrary Factors:', 'Decision must be set', 'ReasoningBuilder', 'Risk Assessment:', 'action', 'agent_id', 'agents_active', 'analysis', 'avg_confidence', 'confidence', 'contrary_factors', 'data_sources', 'decision', 'decision_id', 'decision_type', 'decision_types', 'market_context', 'model_version', 'primary_reason', 'processing_time_ms', 'recent_decisions', 'recommendation', 'risk_assessment', 'signal', 'supporting_factors', 'timestamp', 'total_decisions', 'vote']

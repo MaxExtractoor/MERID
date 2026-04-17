@@ -1,0 +1,38 @@
+# CODEOWNERS — required reviewers for sensitive paths
+# Syntax: <path pattern> <@github-username or @org/team>
+# At least one listed owner must approve before merge to main.
+
+# Execution and order routing — any change requires review
+execution/                          @merid-risk-team
+trading/                            @merid-risk-team
+merid/execution/                    @merid-risk-team
+merid/risk/                         @merid-risk-team
+
+# Mode integrity — trade_mode and live-trading guards
+trading/trade_mode.py               @merid-risk-team
+trading/guards/                     @merid-risk-team
+trading/mode_controller.py          @merid-risk-team
+
+# Kill switch wiring
+core/kill_switches.py               @merid-risk-team
+core/execution_gate.py              @merid-risk-team
+merid/execution_guard.py            @merid-risk-team
+
+# Risk controls
+core/guardrails.py                  @merid-risk-team
+merid/guardrails/                   @merid-risk-team
+governance/                         @merid-risk-team
+
+# Secrets and configuration
+merid/settings.py                   @merid-ops-team
+config/                             @merid-ops-team
+core/secrets_guard.py               @merid-ops-team
+.env.example                        @merid-ops-team
+
+# CI/CD pipeline
+.github/                            @merid-ops-team
+
+# Deployment manifests
+Dockerfile                          @merid-ops-team
+docker-compose*.yml                 @merid-ops-team
+deploy/                             @merid-ops-team

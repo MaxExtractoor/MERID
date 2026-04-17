@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "asset": "BTC",
+    "timeframe": "15m",
+    "cycle_id": "golden-v1"
+  },
+  "catalog": null,
+  "spots": {
+    "BTC": 90000.0
+  },
+  "ct_config": {},
+  "loop_lag_stats": null,
+  "markets": [
+    {
+      "ticker": "KXBTC15M-26MAR291200-T89500",
+      "underlying": "BTC",
+      "timeframe": "15m",
+      "expiry_ts": 10000000000.0,
+      "volume": 1000,
+      "open_interest": 500,
+      "best_bid_cents": 45,
+      "best_ask_cents": 55,
+      "spread_cents": 10,
+      "mid_price_cents": 50,
+      "category": "crypto"
+    },
+    {
+      "ticker": "KXBTC15M-26MAR291200-T90000",
+      "underlying": "BTC",
+      "timeframe": "15m",
+      "expiry_ts": 10000000000.0,
+      "volume": 2000,
+      "open_interest": 800,
+      "best_bid_cents": 40,
+      "best_ask_cents": 48,
+      "spread_cents": 8,
+      "mid_price_cents": 44,
+      "category": "crypto"
+    }
+  ]
+}

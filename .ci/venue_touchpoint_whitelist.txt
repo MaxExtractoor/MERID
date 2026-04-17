@@ -1,0 +1,28 @@
+# CI Whitelist for Direct Venue Touchpoints
+#
+# Files listed here are permitted to contain direct Kalshi client calls
+# (place_order, cancel_order, execute_trade, etc.) outside the canonical
+# order_router pipeline.
+#
+# WARNING: Any file in this list must set manual_or_external=true on
+# any orders/positions it creates, and should be flagged in UI with
+# DataSourceBadge showing EXTERNAL/SIMULATED status.
+#
+# Format: One file path per line, relative to repo root
+# Lines starting with # are comments
+
+# Legacy migration tools (one-time use, manual only)
+scripts/migrate_positions_legacy.py
+scripts/manual_order_correction.py
+
+# Admin/emergency tools (require explicit --manual flag)
+scripts/emergency_kill_and_flatten.py
+scripts/admin_position_adjustment.py
+
+# Continuous Trader — DOCUMENTED BYPASS
+# Status: Uses direct HTTP (self._post) rather than route_order_async()
+# Reason: Threading/executor context compatibility with sync cycle loop
+# Risk: Bypasses order_router sanity checks, fills integrity, stale snapshot guard
+# Debt Tracking: AGENT_WIRING_AUDIT.md Section 5.1 "CT Migration Path"
+# Migration Plan: CT → router adapter in shadow mode → prod flip (TBD)
+merid/trading/kalshi_continuous_trader.py

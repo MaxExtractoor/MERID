@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\monitoring\system_monitor.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.1, 10.0, 50.0, 100, 1000, 1024, '/', 'architecture', 'bytes_recv', 'bytes_sent', 'components', 'components_count', 'count', 'cpu', 'cpu_percent', 'cpu_usage', 'current_stats', 'disk', 'disk_usage', 'error_message', 'healthy', 'history_count', 'hostname', 'interval_seconds', 'last_check', 'latency_ms', 'memory', 'memory_mb', 'memory_usage', 'metadata', 'monitoring.system', 'name', 'network', 'percent', 'platform', 'platform_release', 'platform_version', 'process', 'process_memory_mb', 'process_threads', 'processor', 'python_version', 'running', 'status', 'system_info', 'threads', 'timestamp', 'total_gb', 'total_mb', 'unhealthy_count', 'used_gb', 'used_mb']

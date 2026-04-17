@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\observability\clock_sync_monitor.py
+# hypothesis_version: 6.151.4
+
+[0.0, 5.0, 60.0, 100.0, -5000, 500, 1000, 10000, 'avg_drift_ms', 'critical', 'drift_threshold_ms', 'high', 'max_drift_ms', 'medium', 'recent_alerts', 'sources_tracked', 'total_measurements']

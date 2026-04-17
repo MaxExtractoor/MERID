@@ -1,0 +1,49 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: merid
+    replica: '{{.ExternalURL}}'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+# Load alert rules
+rule_files:
+  - alert_rules.yml
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    
+  # MERID Kalshi metrics
+  # Low cardinality: only venue, environment labels
+  # No per-market labels on counters/histograms
+  - job_name: 'merid-kalshi'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: '/api/v1/kalshi/metrics'
+    static_configs:
+      - targets: ['localhost:8000']
+        labels:
+          venue: 'kalshi'
+          environment: 'dev'
+          
+  # Optional: node_exporter for host metrics
+  # - job_name: 'node'
+  #   static_configs:
+  #     - targets: ['localhost:9100']
+
+# Storage configuration
+storage:
+  tsdb:
+    retention.time: 15d
+    retention.size: 10GB
+    wal-compression: true

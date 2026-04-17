@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\hardening\watchdog.py
+# hypothesis_version: 6.151.4
+
+['confirmed', 'energy', 'energy_id', 'failed', 'hardening.watchdog', 'notice', 'pending', 'sent', 'status', 'verdict', 'vote_result', 'watchdog']

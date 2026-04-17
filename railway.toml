@@ -1,0 +1,85 @@
+# MERID Deployment Configuration
+# Platform: Railway/Docker/Local
+# Version: 3.0.0 (Kalshi-First)
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m web.main"
+healthcheckPath = "/api/v1/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+[deploy.env]
+# Core Environment
+MERID_ENV = "production"
+MERID_LOG_LEVEL = "INFO"
+MERID_PROFILE = "kalshi-only"
+
+# Server Configuration
+HOST = "0.0.0.0"
+PORT = "8011"
+RELOAD = "false"
+
+# Trading Mode (paper for safety)
+MERID_TRADING_MODE = "paper"
+MERID_PM_TRADING_MODE = "paper"
+MERID_PM_LIVE_ENABLED = "false"
+MERID_LIVE_TRADING_UNLOCKED = "false"
+
+# Kalshi Configuration
+KALSHI_ONLY = "true"
+KALSHI_USE_DEMO = "true"
+KALSHI_API_HOST = "https://api.elections.kalshi.com/trade-api/v2"
+
+# Safety Limits
+MERID_MAX_ORDER_SIZE_USD = "100"
+MERID_MAX_DAILY_LOSS_USD = "500"
+MERID_MAX_POSITION_SIZE_USD = "1000"
+MERID_PM_MAX_NOTIONAL_PER_MARKET = "500"
+MERID_PM_MAX_DAILY_LOSS = "250"
+MERID_PM_MAX_TOTAL_NOTIONAL = "5000"
+MERID_REQUIRE_CONFIRMATION = "true"
+
+# Capital Allocation
+MERID_TOTAL_CAPITAL_USD = "50000"
+MERID_MAX_PORTFOLIO_NOTIONAL_USD = "50000"
+
+# Feature Flags (disabled for safety)
+MERID_ENABLE_CHAINLINK = "false"
+MERID_ENABLE_AUGUR = "false"
+MERID_ENABLE_NEWS_AGENT = "false"
+MERID_ENABLE_WHALE_INTEL = "false"
+MERID_ENABLE_POLYMARKET = "false"
+PHASE0_ENABLED = "false"
+
+# Mock/Simulation (disabled for live)
+MERID_USE_MOCK_ARB_DATA = "false"
+MERID_USE_DEMO_TRADES = "false"
+MERID_USE_SAMPLE_DATA = "false"
+MERID_USE_MOCK_STREAMS = "false"
+
+# Real-time Features (enabled)
+MERID_ENABLE_LIVE_PRICE_FEEDS = "true"
+MERID_ENABLE_REAL_PREDICTION_MARKETS = "true"
+MERID_ENABLE_REAL_SOLANA_WS = "true"
+MERID_ENABLE_REAL_NEWS = "true"
+
+# Security
+MERID_REQUIRE_VPN_HEADER = "false"
+MERID_ENABLE_CAPTCHA = "false"
+MERID_ENABLE_SPAM_GUARD = "true"
+MERID_SPAM_WINDOW_SECONDS = "30"
+MERID_SPAM_MAX_EVENTS = "10"
+MERID_GAMIFICATION_BASE_XP = "50"
+MERID_ENABLE_GAMIFICATION = "false"
+
+# WebSocket Dev Mode (disabled in prod)
+MERID_DEV_ALLOW_WS = "false"
+MERID_DEV_AUTH_BYPASS = "0"
+
+# CORS
+MERID_ALLOWED_ORIGINS = "https://your-frontend-url.railway.app"

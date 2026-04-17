@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://merid.io/schemas/v1.0/ArbitrageOpportunity.json",
+  "title": "ArbitrageOpportunity",
+  "description": "Canonical schema for MERID arbitrage opportunities - detected inefficiencies across markets",
+  "version": "1.0.0",
+  "type": "object",
+  "required": ["opportunity_id", "opportunity_type", "timestamp", "legs", "profit_estimate", "risk_assessment", "status"],
+  "properties": {
+    "opportunity_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this opportunity"
+    },
+    "opportunity_type": {
+      "type": "string",
+      "enum": ["cross_cex", "dex_cex", "perp_spot", "funding_rate", "prediction_cross", "triangular", "statistical"],
+      "description": "Type of arbitrage opportunity"
+    },
+    "timestamp": {
+      "type": "number",
+      "description": "Unix timestamp when opportunity was detected"
+    },
+    "expires_at": {
+      "type": "number",
+      "description": "Unix timestamp when opportunity is expected to expire"
+    },
+    "ttl_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Time-to-live in milliseconds"
+    },
+    "symbol": {
+      "type": "string",
+      "description": "Primary trading pair"
+    },
+    "legs": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["leg_id", "venue", "side", "price"],
+        "properties": {
+          "leg_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "venue": {
+            "type": "string",
+            "description": "Exchange or protocol name"
+          },
+          "venue_type": {
+            "type": "string",
+            "enum": ["cex", "dex", "perp", "prediction"]
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string",
+            "enum": ["buy", "sell", "long", "short"]
+          },
+          "price": {
+            "type": "number",
+            "minimum": 0
+          },
+          "quantity_available": {
+            "type": "number",
+            "minimum": 0
+          },
+          "fee_rate_bps": {
+            "type": "number",
+            "minimum": 0
+          },
+          "estimated_slippage_bps": {
+            "type": "number",
+            "minimum": 0
+          },
+          "latency_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Expected execution latency"
+          }
+        }
+      }
+    },
+    "spread": {
+      "type": "object",
+      "required": ["gross_bps", "net_bps"],
+      "properties": {
+        "gross_bps": {
+          "type": "number",
+          "description": "Gross spread in basis points before costs"
+        },
+        "net_bps": {
+          "type": "number",
+          "description": "Net spread after all costs"
+        },
+        "buy_price": {
+          "type": "number"
+        },
+        "sell_price": {
+          "type": "number"
+        }
+      }
+    },
+    "profit_estimate": {
+      "type": "object",
+      "required": ["gross_profit_usd", "net_profit_usd", "profit_after_costs"],
+      "properties": {
+        "gross_profit_usd": {
+          "type": "number",
+          "description": "Profit before fees and costs"
+        },
+        "net_profit_usd": {
+          "type": "number",
+          "description": "Profit after all costs"
+        },
+        "profit_after_costs": {
+          "type": "boolean",
+          "description": "Whether opportunity is profitable after costs"
+        },
+        "optimal_size_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optimal position size for maximum profit"
+        },
+        "max_size_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Maximum executable size based on liquidity"
+        },
+        "roi_pct": {
+          "type": "number",
+          "description": "Return on investment percentage"
+        },
+        "annualized_roi_pct": {
+          "type": "number",
+          "description": "Annualized ROI"
+        }
+      }
+    },
+    "costs": {
+      "type": "object",
+      "properties": {
+        "total_fees_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "total_slippage_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "gas_cost_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "funding_cost_usd": {
+          "type": "number",
+          "description": "Funding rate cost for perp positions"
+        },
+        "opportunity_cost_usd": {
+          "type": "number",
+          "description": "Capital opportunity cost"
+        },
+        "total_costs_usd": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "risk_assessment": {
+      "type": "object",
+      "required": ["execution_risk", "liquidity_score", "mev_risk"],
+      "properties": {
+        "execution_risk": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Probability of execution failure"
+        },
+        "liquidity_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Liquidity adequacy (1 = excellent)"
+        },
+        "mev_risk": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Risk of MEV extraction"
+        },
+        "counterparty_risk": {
+          "type": "string",
+          "enum": ["none", "low", "medium", "high"]
+        },
+        "timing_risk": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Risk of opportunity closing before execution"
+        },
+        "price_impact_pct": {
+          "type": "number",
+          "description": "Expected price impact from execution"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Overall confidence in opportunity validity"
+        }
+      }
+    },
+    "market_context": {
+      "type": "object",
+      "properties": {
+        "volatility_regime": {
+          "type": "string",
+          "enum": ["low", "normal", "high", "extreme"]
+        },
+        "trend": {
+          "type": "string",
+          "enum": ["bullish", "neutral", "bearish"]
+        },
+        "funding_rate": {
+          "type": "number",
+          "description": "Current funding rate (for perp arb)"
+        },
+        "open_interest_usd": {
+          "type": "number"
+        },
+        "recent_volume_usd": {
+          "type": "number"
+        }
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["detected", "validated", "queued", "executing", "executed", "expired", "rejected", "failed"],
+      "description": "Current status of the opportunity"
+    },
+    "execution_allowed": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether execution is permitted (default: read-only)"
+    },
+    "requires_consensus": {
+      "type": "boolean",
+      "default": true
+    },
+    "detection_source": {
+      "type": "string",
+      "description": "Scanner that detected this opportunity"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Additional context or warnings"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,108 @@
+/* Tooltip.css - Enhanced tooltip styles */
+
+.tooltip-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.tooltip {
+  position: absolute;
+  z-index: 50;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #e2e8f0;
+  white-space: normal;
+  word-wrap: break-word;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+  animation: tooltip-fade-in 0.15s ease-out;
+  pointer-events: none;
+}
+
+.tooltip--top {
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+}
+
+.tooltip--bottom {
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(8px);
+}
+
+.tooltip--left {
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%) translateX(-8px);
+}
+
+.tooltip--right {
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%) translateX(8px);
+}
+
+.tooltip::before {
+  content: '';
+  position: absolute;
+  width: 0;
+  height: 0;
+  border-style: solid;
+}
+
+.tooltip--top::before {
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 6px 6px 0 6px;
+  border-color: rgba(15, 23, 42, 0.95) transparent transparent transparent;
+}
+
+.tooltip--bottom::before {
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 0 6px 6px 6px;
+  border-color: transparent transparent rgba(15, 23, 42, 0.95) transparent;
+}
+
+.tooltip--left::before {
+  right: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-width: 6px 0 6px 6px;
+  border-color: transparent transparent transparent rgba(15, 23, 42, 0.95);
+}
+
+.tooltip--right::before {
+  left: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-width: 6px 6px 6px 0;
+  border-color: transparent rgba(15, 23, 42, 0.95) transparent transparent;
+}
+
+@keyframes tooltip-fade-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(-8px);
+  }
+}
+
+/* Info tooltip icon */
+.tooltip-info-icon {
+  cursor: help;
+  transition: color 0.2s ease;
+}
+
+.tooltip-info-icon:hover {
+  color: #94a3b8;
+}

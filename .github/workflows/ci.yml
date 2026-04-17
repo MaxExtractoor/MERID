@@ -1,0 +1,618 @@
+name: MERID CI
+# Primary CI workflow — only workflow that auto-triggers on push/PR
+# 15 legacy workflows removed 2026-02-21; aspirational workflows:
+#   workflow_dispatch only: cross-browser, prompt-eval, reality-enforcement,
+#                           autonomous-dev-swarm, fast-safety
+#   nightly cron (04:00 UTC) + dispatch: nightly-soak
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  MERID_ENV: "test"
+
+jobs:
+  # ── Swarm integrity + data authenticity gate ──────────────────────
+  swarm-integrity-gate:
+    name: Swarm Integrity Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify kill switch persistence default (repo policy)
+        run: python scripts/check_kill_switch_default.py
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run swarm integrity policy gate
+        run: |
+          mkdir -p reports
+          python scripts/enforce_swarm_integrity.py \
+            --config .merid_safeguard.yml \
+            --snapshot tests/fixtures/swarm/healthy_snapshot.json \
+            --output-json reports/swarm-integrity.json \
+            --strict
+
+      - name: Upload swarm integrity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarm-integrity-report
+          path: reports/swarm-integrity.json
+
+  # ── Wiring validation gate (fail-closed semantics) ────────────────
+  wiring-validation-gate:
+    name: Wiring Validation Gate
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 3
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for PR diff checks
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate wiring fixes
+        run: |
+          python scripts/validate_wiring_ci.py --json > reports/wiring_validation.json
+          cat reports/wiring_validation.json
+          
+          # Exit with error if checks failed
+          if [ "$(jq -r '.overall_passed' reports/wiring_validation.json)" != "true" ]; then
+            echo "ERROR: Wiring validation failed"
+            exit 1
+          fi
+
+      - name: Check PR diff for forbidden patterns (if PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Checking PR diff for wiring regressions..."
+          python scripts/validate_wiring_ci.py --check-diffs --base-ref ${{ github.base_ref }} --json > reports/pr_diff_check.json
+          cat reports/pr_diff_check.json
+          
+          if [ "$(jq -r '.overall_passed' reports/pr_diff_check.json)" != "true" ]; then
+            echo "ERROR: PR diff contains forbidden patterns"
+            exit 1
+          fi
+          
+          echo "✓ PR diff passes wiring regression checks"
+
+  # ── Backend golden path tests ─────────────────────────────────────
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate, wiring-validation-gate]
+    timeout-minutes: 15
+    env:
+      MERID_SWARM_INTEGRITY_ENFORCE: "1"
+      MERID_SWARM_HEALTH_SNAPSHOT: tests/fixtures/swarm/healthy_snapshot.json
+      MERID_SWARM_SAFEGUARD_CONFIG: .merid_safeguard.yml
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run golden path tests
+        run: |
+          mkdir -p reports
+          python -m pytest tests/test_e2e_golden_path.py \
+                           tests/test_signal_layer.py \
+                           tests/test_live_feeds.py \
+                           tests/test_prediction_markets.py \
+                           tests/test_unified_pipeline.py \
+                           tests/test_canonical_agents.py \
+                           tests/test_hardening.py \
+                           -v --tb=short --junitxml=reports/backend.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-report
+          path: reports/backend.xml
+
+  # ── Phase 2/3 hardening tests ────────────────────────────────────
+  hardening-tests:
+    name: Phase 2/3 Hardening Tests
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Phase 2/3 tests
+        run: |
+          python -m pytest tests/event_venues/kalshi/test_ws_resilience.py \
+                           tests/event_venues/kalshi/test_rate_limits.py \
+                           tests/prediction/test_trading_agent_explainability.py \
+                           tests/integration/test_swarm_health_gating.py \
+                           tests/integration/test_kalshi_e2e_stress.py \
+                           -v --tb=short --timeout=30 \
+                           --junitxml=reports/hardening.xml
+
+  # ── Kalshi property-based invariant tests ────────────────────────
+  kalshi-property-tests:
+    name: Kalshi Property Tests
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run property-based invariant tests
+        run: |
+          mkdir -p reports
+          # Fast mode for PR: 50 examples per property (full suite: 200+)
+          python -m pytest tests/test_kalshi_properties.py -v \
+            --tb=short \
+            -m "not slow" \
+            --hypothesis-seed=0 \
+            --junitxml=reports/kalshi-properties.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-property-tests-report
+          path: reports/kalshi-properties.xml
+
+  # ── Kalshi offline audit (lightweight per-PR check) ─────────────
+  kalshi-audit-offline:
+    name: Kalshi Offline Audit
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run offline audit on sample data
+        run: |
+          mkdir -p reports
+          # Verify audit harness parses and computes correctly using sample data
+          python -c "
+          import sys
+          sys.path.insert(0, 'scripts')
+          from audit_kalshi_values import BankrollState, FeeParams, KellySizing
+          
+          # Bankroll invariant check
+          state = BankrollState(cash_cents=10000, exposure_cents=3000, realized_pnl_cents=500, bankroll_cents=13500)
+          passed, delta = state.check_invariant()
+          assert passed, f'Bankroll invariant failed: delta={delta}'
+          print('✓ Bankroll invariant: PASSED')
+          
+          # Fee check (mid-curve at 50¢)
+          fee = FeeParams(price_cents=50, size_contracts=10)
+          assert fee.compute_fee() > 0, 'Fee should be positive'
+          assert fee.compute_fee() <= 70, 'Fee should respect 7¢/contract cap'
+          print('✓ Fee computation: PASSED')
+          
+          # Kelly sizing check
+          kelly = KellySizing(
+              edge=0.10, win_prob=0.60, payout_ratio=2.0,
+              kelly_fraction=0.25, bankroll_cents=10000, max_contracts_cap=50
+          )
+          k_raw, contracts = kelly.compute_kelly()
+          assert contracts >= 0, 'Contracts should be non-negative'
+          assert contracts <= 50, 'Contracts should respect cap'
+          print('✓ Kelly sizing: PASSED')
+          
+          print('\nAll offline audit checks passed!')
+          " 2>&1 | tee reports/kalshi-offline-audit.txt
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-offline-audit-report
+          path: reports/kalshi-offline-audit.txt
+
+  # ── Kalshi live-readiness (pytest -m kalshi_live_ready) ───────────
+  kalshi-live-ready:
+    name: Kalshi live-readiness
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Narrow paths: full `pytest tests -m kalshi_live_ready` collects the whole tree and fails on unrelated broken modules.
+      # Goal: collapse to `pytest tests -m kalshi_live_ready` once collection is clean repo-wide.
+      - name: Run kalshi_live_ready slice
+        run: |
+          python -m pytest \
+            tests/event_venues/kalshi/test_code_quality_invariants.py \
+            tests/event_venues/kalshi/test_invariants_crypto_universe.py \
+            tests/event_venues/kalshi/test_snapshot_replay.py \
+            tests/event_venues/kalshi/test_cycle_snapshot_schema.py \
+            tests/event_venues/kalshi/test_kalshi_runtime_config_snapshot.py \
+            tests/core/test_execution_gate_loop_lag_wiring.py \
+            tests/core/test_execution_gate.py \
+            tests/core/test_kalshi_gate_truth_table.py \
+            tests/event_venues/kalshi/test_risk_posture_snapshot.py \
+            tests/prediction/test_session_guard_exchange_availability.py \
+            tests/event_venues/kalshi/test_exchange_availability.py \
+            tests/test_asset_caps.py::TestIntegration::test_multi_timeframe_aggregation \
+            tests/test_orchestrator_bug_fix_regressions.py::TestBugH7HealthEndpointLive \
+            tests/test_execution_gate_fail_closed_order_paths.py \
+            -q --tb=short
+
+  # ── Kalshi P0 live blockers (enable-live on venue/account) ─────────
+  kalshi-live-p0:
+    name: Kalshi P0 live blockers
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run p0_live_blocker slice
+        run: |
+          python -m pytest \
+            tests/core/test_execution_gate_loop_lag_wiring.py \
+            tests/core/test_kalshi_gate_truth_table.py \
+            tests/core/test_execution_gate.py::TestCheckExecutionGate::test_gate_open_when_all_clear \
+            tests/core/test_execution_gate.py::TestCheckExecutionGate::test_gate_blocked_on_stale_feeds \
+            tests/core/test_execution_gate.py::TestCheckExecutionGate::test_gate_blocked_on_kill_switch \
+            tests/prediction/test_session_guard_exchange_availability.py \
+            tests/event_venues/kalshi/test_exchange_availability.py \
+            tests/test_orchestrator_bug_fix_regressions.py::TestBugH7HealthEndpointLive \
+            tests/test_asset_caps.py::TestIntegration::test_multi_timeframe_aggregation \
+            tests/test_execution_gate_fail_closed_order_paths.py \
+            -q --tb=short
+
+  # ── Track A: standard Kalshi contract pipeline (required gate) ──────
+  # Scope matches tests/TRACK_A_KALSHI_BACKLOG.txt.
+  # continue-on-error removed — Track A must be green before any live deploy.
+  kalshi-contract-pipeline:
+    name: Kalshi contract pipeline (Track A)
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Standard Kalshi contract slice
+        run: |
+          mkdir -p reports
+          python -m pytest \
+            tests/event_venues/kalshi \
+            tests/test_kalshi_crypto_multi_asset.py \
+            tests/test_execution_audit_regressions.py \
+            tests/core/test_celery_tasks.py \
+            tests/web/test_canonical_lifespan_and_tickers.py \
+            -v --tb=short \
+            --junitxml=reports/kalshi-contract-pipeline.xml
+
+      - name: Upload Kalshi contract report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-contract-pipeline-report
+          path: reports/kalshi-contract-pipeline.xml
+
+  # ── Track B: informational — quarantined kalshi_enhanced (detect accidental greens)
+  kalshi-enhanced-quarantine-signal:
+    name: Kalshi enhanced quarantine (informational)
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 15
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run quarantined kalshi_enhanced slice (always exits 0)
+        run: |
+          mkdir -p reports
+          python -m pytest --run-quarantine -m kalshi_enhanced \
+            -q --tb=no -ra \
+            --junitxml=reports/kalshi-enhanced-quarantine.xml || true
+          echo "Note: review reports/kalshi-enhanced-quarantine.xml for pass/fail/skip counts."
+
+      - name: Upload quarantine run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-enhanced-quarantine-report
+          path: reports/kalshi-enhanced-quarantine.xml
+
+  # ── Pytest collection gate (fail-fast on import/collection errors) ─
+  pytest-collection-gate:
+    name: Pytest collection (maxfail=1)
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Collect all tests (no run)
+        run: |
+          python -m pytest tests/ \
+            --ignore=tests/ChatGPT --ignore=tests/Grok --ignore=tests/Perplexity --ignore=tests/Final_Draft \
+            --collect-only --maxfail=1 -q
+
+  # ── Frontend tests ────────────────────────────────────────────────
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/react/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web/react
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: web/react
+        run: |
+          mkdir -p ../../reports
+          npx jest --ci --passWithNoTests 2>&1 | tee ../../reports/frontend.txt
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-test-report
+          path: reports/frontend.txt
+
+  # ── Security scan ─────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for secrets in tracked files
+        run: |
+          echo "Checking for tracked secrets..."
+          if git ls-files | grep -E '\.(pem|key|p12|pfx)$'; then
+            echo "::error::Secret files found in git index!"
+            exit 1
+          fi
+          if git ls-files | grep -E '\.env\.backup$'; then
+            echo "::error::.env.backup tracked in git!"
+            exit 1
+          fi
+          echo "No secrets found in tracked files."
+
+      - name: Verify .gitignore coverage
+        run: |
+          LINES=$(wc -l < .gitignore)
+          echo ".gitignore has $LINES entries"
+          if [ "$LINES" -lt 50 ]; then
+            echo "::warning::.gitignore has fewer than 50 entries — review for gaps"
+          fi
+
+  # ── T-056: Full test discovery (non-blocking) ────────────────────
+  full-test-discovery:
+    name: Full Test Discovery
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Discover and run all tests
+        run: |
+          mkdir -p reports
+          python -m pytest tests/ \
+            --ignore=tests/ChatGPT --ignore=tests/Grok --ignore=tests/Perplexity --ignore=tests/Final_Draft \
+            -v --tb=line --timeout=30 \
+            --junitxml=reports/full-discovery.xml \
+            -x --maxfail=50 \
+            2>&1 | tail -100 > reports/full-discovery-summary.txt || true
+          echo "--- Test Collection Summary ---"
+          python -m pytest tests/ \
+            --ignore=tests/ChatGPT --ignore=tests/Grok --ignore=tests/Perplexity --ignore=tests/Final_Draft \
+            --co -q 2>&1 | tail -5
+
+      - name: Upload full test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-test-discovery-report
+          path: reports/
+
+  # ── Lint ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check (blocking — syntax errors and fatal issues)
+        run: ruff check . --select E9,F63,F7,F82
+
+      - name: Install bandit + pip-audit
+        run: pip install bandit pip-audit
+
+      - name: SAST — bandit (HIGH severity blocks)
+        run: |
+          mkdir -p reports
+          bandit -r core/ trading/ merid/ web/ \
+            -ll \
+            -x archive/,tests/,flutter/ \
+            -f json -o reports/bandit.json || true
+          bandit -r core/ trading/ merid/ web/ \
+            -lll \
+            -x archive/,tests/,flutter/
+        # -ll = report medium+ (to file), -lll = exit non-zero on HIGH only
+
+      - name: Dependency vulnerability scan — pip-audit
+        run: |
+          pip-audit --format json -o reports/pip-audit.json || true
+          pip-audit --desc on -s pypi
+        # exits non-zero on any CRITICAL/HIGH CVE
+
+      - name: Upload SAST reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-reports
+          path: reports/

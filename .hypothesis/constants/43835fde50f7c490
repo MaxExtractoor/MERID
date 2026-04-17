@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\hardening\lockdown.py
+# hypothesis_version: 6.151.4
+
+['dev', 'full', 'incident', 'manual', 'none', 'security_event', 'strict', 'watch']

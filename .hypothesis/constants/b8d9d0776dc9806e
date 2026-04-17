@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\reflection\context.py
+# hypothesis_version: 6.151.4
+
+[0.25, 0.3, 0.7, 0.75, 1000, '## Failure Warnings', '## Recent Decisions', '## Success Patterns', '?', 'max_context_items', 'performance', 'reflection.context', 'requests_per_second', 'stable', 'total_requests', 'uptime_seconds', '⏳', '✓', '✗']

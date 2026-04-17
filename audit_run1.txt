@@ -1,0 +1,313 @@
+﻿
+=================================== ERRORS ====================================
+_________ ERROR collecting tests/analytics/test_merid_integration.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\analytics\test_merid_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\analytics\test_merid_integration.py:18: in <module>
+    from merid_metrics import load_and_evaluate_csv
+E   ImportError: cannot import name 'load_and_evaluate_csv' from 'merid_metrics' (unknown location)
+___________ ERROR collecting tests/analytics/test_merid_metrics.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\analytics\test_merid_metrics.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\analytics\test_merid_metrics.py:10: in <module>
+    from merid_metrics import (
+E   ImportError: cannot import name 'plot_reliability' from 'merid_metrics' (unknown location)
+__________ ERROR collecting tests/analytics/test_roi_integration.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\analytics\test_roi_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\analytics\test_roi_integration.py:14: in <module>
+    from integrate_task_runner_roi import log_task_completion
+E   ModuleNotFoundError: No module named 'integrate_task_runner_roi'
+_________ ERROR collecting tests/integration/test_web3_integration.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\integration\test_web3_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\integration\test_web3_integration.py:12: in <module>
+    from web3.blockchain_connector import BlockchainConnector
+E   ModuleNotFoundError: No module named 'web3.blockchain_connector'
+________ ERROR collecting tests/logging/test_merid_adapted_patterns.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_adapted_patterns.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_adapted_patterns.py:19: in <module>
+    import merid_logging_queue
+E   ModuleNotFoundError: No module named 'merid_logging_queue'
+_______ ERROR collecting tests/logging/test_merid_canonical_patterns.py _______
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_canonical_patterns.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_canonical_patterns.py:19: in <module>
+    import merid_logging
+E   ModuleNotFoundError: No module named 'merid_logging'
+_______ ERROR collecting tests/logging/test_merid_cohesive_patterns.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_cohesive_patterns.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_cohesive_patterns.py:19: in <module>
+    import merid_logging
+E   ModuleNotFoundError: No module named 'merid_logging'
+________ ERROR collecting tests/logging/test_merid_dropin_patterns.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_dropin_patterns.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_dropin_patterns.py:19: in <module>
+    import merid_logging_config
+E   ModuleNotFoundError: No module named 'merid_logging_config'
+______ ERROR collecting tests/logging/test_merid_end_to_end_patterns.py _______
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_end_to_end_patterns.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_end_to_end_patterns.py:18: in <module>
+    import merid_logging
+E   ModuleNotFoundError: No module named 'merid_logging'
+________ ERROR collecting tests/logging/test_merid_focused_patterns.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_focused_patterns.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_focused_patterns.py:19: in <module>
+    import merid_logging
+E   ModuleNotFoundError: No module named 'merid_logging'
+____________ ERROR collecting tests/logging/test_merid_logging.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_logging.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_logging.py:19: in <module>
+    import merid_logging
+E   ModuleNotFoundError: No module named 'merid_logging'
+______ ERROR collecting tests/logging/test_merid_production_patterns.py _______
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_merid_production_patterns.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_merid_production_patterns.py:18: in <module>
+    import merid_logging
+E   ModuleNotFoundError: No module named 'merid_logging'
+_________ ERROR collecting tests/monitoring/test_monitoring_system.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\monitoring\test_monitoring_system.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\monitoring\test_monitoring_system.py:13: in <module>
+    from monitoring.dashboard import MonitoringDashboard
+monitoring\dashboard.py:18: in <module>
+    from monitoring.liquidation_monitor import CoinGlassLiquidationMonitor, WhaleIntelMonitor, LiquidationEvent, WhaleSignal
+E   ImportError: cannot import name 'WhaleSignal' from 'monitoring.liquidation_monitor' (C:\Dev\MERID\monitoring\liquidation_monitor.py)
+_______________ ERROR collecting tests/test_consensus_loop2.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_consensus_loop2.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_consensus_loop2.py:16: in <module>
+    from consensus.consensus_coordinator import (
+E   ImportError: cannot import name 'AgentIncentiveLedger' from 'consensus.consensus_coordinator' (C:\Dev\MERID\consensus\consensus_coordinator.py)
+_______________ ERROR collecting tests/test_consensus_loop3.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_consensus_loop3.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_consensus_loop3.py:15: in <module>
+    from consensus.consensus_coordinator import (
+E   ImportError: cannot import name 'AgentIncentiveLedger' from 'consensus.consensus_coordinator' (C:\Dev\MERID\consensus\consensus_coordinator.py)
+_______________ ERROR collecting tests/test_consensus_loop4.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_consensus_loop4.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_consensus_loop4.py:16: in <module>
+    from consensus.consensus_coordinator import (
+E   ImportError: cannot import name 'AgentIncentiveLedger' from 'consensus.consensus_coordinator' (C:\Dev\MERID\consensus\consensus_coordinator.py)
+__________________ ERROR collecting tests/test_dev_swarm.py ___________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_dev_swarm.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_dev_swarm.py:25: in <module>
+    from core.dev_swarm import (
+E   ImportError: cannot import name 'DevTask' from 'core.dev_swarm' (unknown location)
+_________________ ERROR collecting tests/test_forecasters.py __________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_forecasters.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_forecasters.py:13: in <module>
+    from merid.prediction.forecasters.momentum import MomentumForecaster, _momentum_history
+E   ImportError: cannot import name '_momentum_history' from 'merid.prediction.forecasters.momentum' (C:\Dev\MERID\merid\prediction\forecasters\momentum.py)
+___________________ ERROR collecting tests/test_metrics.py ____________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_metrics.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_metrics.py:14: in <module>
+    from merid.metrics.calibration import (
+E   ImportError: cannot import name 'BrierStats' from 'merid.metrics.calibration' (unknown location)
+============================== warnings summary ===============================
+..\..\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\neo4j\_sync\driver.py:547
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\neo4j\_sync\driver.py:547: DeprecationWarning: Relying on Driver's destructor to close the session is deprecated. Please make sure to close the session. Use it as a context (`with` statement) or make sure to call `.close()` explicitly. Future versions of the driver will not close drivers automatically.
+    _deprecation_warn(
+
+tests\chaos\test_chaos_engineering.py:391
+  C:\Dev\MERID\tests\chaos\test_chaos_engineering.py:391: PytestUnknownMarkWarning: Unknown pytest.mark.chaos - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.chaos
+
+config\__init__.py:3
+  C:\Dev\MERID\config\__init__.py:3: DeprecationWarning: config.settings is deprecated ù use merid.settings instead (T-060)
+    from config.settings import (
+
+tests\consensus\test_consensus_coordinator.py:16
+  C:\Dev\MERID\tests\consensus\test_consensus_coordinator.py:16: PytestUnknownMarkWarning: Unknown pytest.mark.windows_flaky_async - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.windows_flaky_async
+
+tests\e2e\test_circuit_breaker_chaos.py:29
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:29: PytestUnknownMarkWarning: Unknown pytest.mark.e2e - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.e2e
+
+tests\e2e\test_circuit_breaker_chaos.py:30
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:30: PytestUnknownMarkWarning: Unknown pytest.mark.safety_critical - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.safety_critical
+
+tests\e2e\test_circuit_breaker_chaos.py:292
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:292: PytestUnknownMarkWarning: Unknown pytest.mark.e2e - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.e2e
+
+tests\e2e\test_circuit_breaker_chaos.py:293
+  C:\Dev\MERID\tests\e2e\test_circuit_breaker_chaos.py:293: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_contracts.py:12
+  C:\Dev\MERID\tests\integration\test_contracts.py:12: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_contracts.py:36
+  C:\Dev\MERID\tests\integration\test_contracts.py:36: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_contracts.py:54
+  C:\Dev\MERID\tests\integration\test_contracts.py:54: PytestUnknownMarkWarning: Unknown pytest.mark.contract - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.contract
+
+tests\integration\test_kalshi_e2e_stress.py:65
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:65: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:90
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:90: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:105
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:105: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+tests\integration\test_kalshi_e2e_stress.py:120
+  C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py:120: PytestUnknownMarkWarning: Unknown pytest.mark.stress_core - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.stress_core
+
+testing\final_validation.py:29
+  C:\Dev\MERID\testing\final_validation.py:29: PytestCollectionWarning: cannot collect test class 'TestType' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+    class TestType(Enum):
+
+testing\final_validation.py:39
+  C:\Dev\MERID\testing\final_validation.py:39: PytestCollectionWarning: cannot collect test class 'TestStatus' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+    class TestStatus(Enum):
+
+tests\smoke\test_paper_trading_smoke.py:14
+  C:\Dev\MERID\tests\smoke\test_paper_trading_smoke.py:14: PytestUnknownMarkWarning: Unknown pytest.mark.smoke - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.smoke
+
+tests\smoke\test_paper_trading_smoke.py:149
+  C:\Dev\MERID\tests\smoke\test_paper_trading_smoke.py:149: PytestUnknownMarkWarning: Unknown pytest.mark.smoke - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.smoke
+
+tests\streaming\test_stream_bus.py:8
+  C:\Dev\MERID\tests\streaming\test_stream_bus.py:8: PytestUnknownMarkWarning: Unknown pytest.mark.windows_flaky_async - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.windows_flaky_async
+
+tests\test_capital_ladder.py:88
+  C:\Dev\MERID\tests\test_capital_ladder.py:88: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:96
+  C:\Dev\MERID\tests\test_capital_ladder.py:96: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:117
+  C:\Dev\MERID\tests\test_capital_ladder.py:117: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:125
+  C:\Dev\MERID\tests\test_capital_ladder.py:125: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:133
+  C:\Dev\MERID\tests\test_capital_ladder.py:133: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:149
+  C:\Dev\MERID\tests\test_capital_ladder.py:149: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:159
+  C:\Dev\MERID\tests\test_capital_ladder.py:159: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:167
+  C:\Dev\MERID\tests\test_capital_ladder.py:167: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:184
+  C:\Dev\MERID\tests\test_capital_ladder.py:184: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:192
+  C:\Dev\MERID\tests\test_capital_ladder.py:192: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:208
+  C:\Dev\MERID\tests\test_capital_ladder.py:208: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:224
+  C:\Dev\MERID\tests\test_capital_ladder.py:224: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:233
+  C:\Dev\MERID\tests\test_capital_ladder.py:233: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:243
+  C:\Dev\MERID\tests\test_capital_ladder.py:243: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_capital_ladder.py:256
+  C:\Dev\MERID\tests\test_capital_ladder.py:256: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests\test_dev_swarm.py:16
+  C:\Dev\MERID\tests\test_dev_swarm.py:16: PytestUnknownMarkWarning: Unknown pytest.mark.dev_swarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.dev_swarm
+
+tests\test_dev_swarm_xdist_invariants.py:21
+  C:\Dev\MERID\tests\test_dev_swarm_xdist_invariants.py:21: PytestUnknownMarkWarning: Unknown pytest.mark.devswarm - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = [pytest.mark.devswarm, pytest.mark.auditor]
+
+tests\test_dev_swarm_xdist_invariants.py:21
+  C:\Dev\MERID\tests\test_dev_swarm_xdist_invariants.py:21: PytestUnknownMarkWarning: Unknown pytest.mark.auditor - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = [pytest.mark.devswarm, pytest.mark.auditor]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+ERROR tests/analytics/test_merid_integration.py
+ERROR tests/analytics/test_merid_metrics.py
+ERROR tests/analytics/test_roi_integration.py
+ERROR tests/integration/test_web3_integration.py
+ERROR tests/logging/test_merid_adapted_patterns.py
+ERROR tests/logging/test_merid_canonical_patterns.py
+ERROR tests/logging/test_merid_cohesive_patterns.py
+ERROR tests/logging/test_merid_dropin_patterns.py
+ERROR tests/logging/test_merid_end_to_end_patterns.py
+ERROR tests/logging/test_merid_focused_patterns.py
+ERROR tests/logging/test_merid_logging.py
+ERROR tests/logging/test_merid_production_patterns.py
+ERROR tests/monitoring/test_monitoring_system.py
+ERROR tests/test_consensus_loop2.py
+ERROR tests/test_consensus_loop3.py
+ERROR tests/test_consensus_loop4.py
+ERROR tests/test_dev_swarm.py
+ERROR tests/test_forecasters.py
+ERROR tests/test_metrics.py
+!!!!!!!!!!!!!!!!!! Interrupted: 19 errors during collection !!!!!!!!!!!!!!!!!!!
+38 warnings, 19 errors in 98.62s (0:01:38)

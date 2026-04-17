@@ -1,0 +1,30 @@
+{
+  "name": "merid-api",
+  "script": "uvicorn",
+  "args": "web.main:create_app --factory --host 0.0.0.0 --port 8012 --log-level info",
+  "cwd": "C:\\Dev\\MERID",
+  "env": {
+    "MERID_VALIDATION_MODE": "1",
+    "MERID_TRADING_MODE": "paper",
+    "MERID_PM_TRADING_MODE": "paper",
+    "MERID_LIVE_TRADING_UNLOCKED": "false",
+    "MERID_ALLOW_LIVE_TRADES": "false",
+    "KALSHI_ENV": "demo",
+    "MERID_HTTP_PORT": "8012",
+    "MERID_API_BASE_URL": "http://127.0.0.1:8012",
+    "MERID_LOG_LEVEL": "INFO"
+  },
+  "log_file": "C:\\Dev\\MERID\\logs\\merid-supervisor.log",
+  "error_file": "C:\\Dev\\MERID\\logs\\merid-supervisor-error.log",
+  "merge_logs": true,
+  "log_date_format": "YYYY-MM-DD HH:mm:ss Z",
+  "autorestart": true,
+  "max_restarts": 5,
+  "min_uptime": "10s",
+  "max_memory_restart": "2G",
+  "kill_timeout": 5000,
+  "wait_ready": true,
+  "listen_timeout": 30000,
+  "node_args": [],
+  "exec_mode": "fork"
+}

@@ -1,0 +1,611 @@
+venue:
+  name: kalshi
+  base_url: https://api.elections.kalshi.com/trade-api/v2
+  use_demo: false
+  max_notional_per_expiry_usd: 1000
+  max_open_markets_per_asset: 20
+session:
+  maintenance_day: 3
+  maintenance_start_et: 03:00
+  maintenance_end_et: 05:00
+agents:
+- name: SPORTS_15M
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 1
+- name: SPORTS_HOURLY
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - 1h
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+- name: SPORTS_DAILY
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - daily
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 60
+    cutoff_minutes_before_expiry: 5
+- name: SPORTS_WEEKLY
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - weekly
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 10
+- name: BTC_WEEKLY
+  assets:
+  - BTC
+  timeframes:
+  - weekly
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: ETH_15M
+  assets:
+  - ETH
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 1
+- name: ETH_HOURLY
+  assets:
+  - ETH
+  timeframes:
+  - 1h
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+- name: ETH_DAILY
+  assets:
+  - ETH
+  timeframes:
+  - daily
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+- name: ETH_WEEKLY
+  assets:
+  - ETH
+  timeframes:
+  - weekly
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: SOL_15M
+  assets:
+  - SOL
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 1
+- name: SOL_HOURLY
+  assets:
+  - SOL
+  timeframes:
+  - 1h
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+- name: SOL_DAILY
+  assets:
+  - SOL
+  timeframes:
+  - daily
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+- name: SOL_WEEKLY
+  assets:
+  - SOL
+  timeframes:
+  - weekly
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: XRP_15M
+  assets:
+  - XRP
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 1
+- name: XRP_HOURLY
+  assets:
+  - XRP
+  timeframes:
+  - 1h
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+- name: XRP_DAILY
+  assets:
+  - XRP
+  timeframes:
+  - daily
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+- name: XRP_WEEKLY
+  assets:
+  - XRP
+  timeframes:
+  - weekly
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: DOGE_15M
+  assets:
+  - DOGE
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10
+    cutoff_minutes_before_expiry: 1
+- name: DOGE_HOURLY
+  assets:
+  - DOGE
+  timeframes:
+  - 1h
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: hourly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 30
+    cutoff_minutes_before_expiry: 2
+- name: DOGE_DAILY
+  assets:
+  - DOGE
+  timeframes:
+  - daily
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: daily
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 120
+    cutoff_minutes_before_expiry: 15
+- name: DOGE_WEEKLY
+  assets:
+  - DOGE
+  timeframes:
+  - weekly
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: weekly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: CRYPTO_15M_MM
+  assets: []
+  timeframes:
+  - 15m
+  archetype: market_maker
+  pm_spot_hard_gate: true
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 14
+    cutoff_minutes_before_expiry: 0
+- name: KALSHI_ARB_SCANNER
+  assets: []
+  timeframes: []
+  archetype: arbitrage
+  market_filter:
+    category: all
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 0
+- name: MACRO_DIRECTIONAL
+  assets: []
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: economics
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: FINANCIALS_DIRECTIONAL
+  assets:
+  - SPX
+  - NDX
+  - DJI
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: financials
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: POLITICS_DIRECTIONAL
+  assets:
+  - ELECTION
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: politics
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 1440
+- name: CLIMATE_DIRECTIONAL
+  assets:
+  - WEATHER
+  - CLIMATE
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: climate
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: SPORTS_DIRECTIONAL
+  assets: []
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: sports
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 30
+- name: TECH_DIRECTIONAL
+  assets: []
+  timeframes: []
+  archetype: directional
+  market_filter:
+    category: tech
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 1440
+- name: SENTIMENT_CONTRARIAN_CRYPTO
+  category: crypto
+  assets:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
+  - DOGE
+  timeframes: []
+  archetype: contrarian
+  market_filter:
+    category: crypto
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 8
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 30
+- name: SENTIMENT_CONTRARIAN_MACRO
+  category: economics
+  assets: []
+  timeframes: []
+  archetype: contrarian
+  market_filter:
+    category: economics
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 10080
+    cutoff_minutes_before_expiry: 1440
+- name: SENTIMENT_REGIME_SWITCH_CRYPTO
+  category: crypto
+  assets:
+  - BTC
+  - ETH
+  - SOL
+  timeframes: []
+  archetype: regime_switch
+  market_filter:
+    category: crypto
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 8
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 30
+- name: SENTIMENT_REGIME_SWITCH_FINANCIALS
+  category: financials
+  assets: []
+  timeframes: []
+  archetype: regime_switch
+  market_filter:
+    category: financials
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+- name: SENTIMENT_VOL_BREAKOUT_CRYPTO
+  category: crypto
+  assets:
+  - BTC
+  - ETH
+  timeframes:
+  - 1h
+  - 15m
+  archetype: vol_breakout
+  market_filter:
+    category: crypto
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 240
+    cutoff_minutes_before_expiry: 5
+- name: SENTIMENT_VOL_BREAKOUT_GLOBAL
+  category: all
+  assets: []
+  timeframes: []
+  archetype: vol_breakout
+  market_filter:
+    category: all
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 8
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 480
+    cutoff_minutes_before_expiry: 10
+- name: KALSHI_CATCH_ALL
+  category: all
+  archetype: directional
+  market_filter:
+    category: all
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 5
+    max_notional_usd: 200
+  entry_window:
+    minutes_before_expiry: 60
+    cutoff_minutes_before_expiry: 5
+portfolio_risk:
+  max_total_notional_usd: 50000
+  max_notional_per_asset_usd: 15000
+  max_open_markets: 200
+  max_daily_loss_usd: 5000
+  max_margin_utilization_pct: 80
+  rebalance_check_interval_seconds: 30

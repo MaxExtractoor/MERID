@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\time_authority.py
+# hypothesis_version: 6.151.4
+
+['unix', 'utc_iso']

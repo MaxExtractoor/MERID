@@ -1,0 +1,208 @@
+import { useState, useEffect, useCallback } from 'react';
+import { CircuitBreakerState, type OperatorRiskState } from '../types/risk';
+import { API_BASE_URL, API_ENDPOINTS, AUTH_TOKEN_KEY } from '../config/constants';
+import { logUiError } from '../utils/logger';
+
+export interface CircuitBreakerStatus {
+  state: CircuitBreakerState;
+  state_color: 'green' | 'red' | 'yellow';
+  error_count: number;
+  window_seconds: number;
+  threshold: number;
+  last_error_at: string | null;
+  opened_at: string | null;
+  cooldown_seconds: number;
+  half_open_successes: number;
+}
+
+export interface LockdownStatus {
+  trading_suite_enabled: boolean;
+  global_mode: string;
+  spectator_mode: boolean;
+  lockdown_reason: string | null;
+}
+
+export interface RiskLimitsStatus {
+  max_daily_loss_usd: number;
+  current_daily_pnl: number;
+  daily_loss_utilization_pct: number;
+  max_per_symbol_exposure_usd: number;
+  max_open_orders: number;
+  current_open_orders: number;
+}
+
+export interface RiskEvent {
+  timestamp: string;
+  type: string;
+  details: Record<string, unknown>;
+}
+
+/** Mirrors ``GET /api/v1/operator/risk-state`` — includes PM spot diagnostics when present. */
+export interface RiskProtectionsData {
+  timestamp: string;
+  circuit_breaker: CircuitBreakerStatus;
+  lockdown: LockdownStatus;
+  risk_limits: RiskLimitsStatus;
+  recent_events: RiskEvent[];
+  all_pm_assets_have_spot?: OperatorRiskState['all_pm_assets_have_spot'];
+  crypto_pm_feed?: OperatorRiskState['crypto_pm_feed'];
+  kill_switch?: OperatorRiskState['kill_switch'];
+  pnl?: OperatorRiskState['pnl'];
+  position?: OperatorRiskState['position'];
+  errors?: OperatorRiskState['errors'];
+}
+
+export interface UseRiskProtectionsReturn {
+  data: RiskProtectionsData | null;
+  loading: boolean;
+  error: string | null;
+  refetch: () => Promise<void>;
+  resetCircuit: () => Promise<boolean>;
+  toggleKillSwitch: (action: 'enable' | 'disable') => Promise<boolean>;
+}
+
+const POLL_INTERVAL = 30000; // 30 seconds - matches backend PortfolioRiskAgent check interval
+
+export function useRiskProtections(pollingInterval = POLL_INTERVAL): UseRiskProtectionsReturn {
+  const [data, setData] = useState<RiskProtectionsData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
+      ...(headers ?? {}),
+    };
+  }, []);
+
+  const fetchProtections = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_PROTECTIONS}`, {
+        headers: authHeaders(),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      const json = await response.json();
+      setData(json);
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to fetch risk protections';
+      setError(message);
+      logUiError('useRiskProtections', 'Risk protections fetch error', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [authHeaders]);
+
+  const refetch = useCallback(async () => {
+    setLoading(true);
+    await fetchProtections();
+  }, [fetchProtections]);
+
+  const resetCircuit = useCallback(async (): Promise<boolean> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_CIRCUIT_BREAKER_RESET}`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ confirm: true }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      await fetchProtections(); // Refresh data
+      return true;
+    } catch (err) {
+      logUiError('useRiskProtections', 'Circuit reset failed', err);
+      return false;
+    }
+  }, [authHeaders, fetchProtections]);
+
+  const toggleKillSwitch = useCallback(async (action: 'enable' | 'disable'): Promise<boolean> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_KILL_SWITCH(action)}`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ reason: `Operator ${action} via risk protections panel` }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      await fetchProtections(); // Refresh data
+      return true;
+    } catch (err) {
+      logUiError('useRiskProtections', 'Kill switch toggle failed', err);
+      return false;
+    }
+  }, [authHeaders, fetchProtections]);
+
+  useEffect(() => {
+    fetchProtections();
+    const interval = setInterval(fetchProtections, pollingInterval);
+    return () => clearInterval(interval);
+  }, [fetchProtections, pollingInterval]);
+
+  return {
+    data,
+    loading,
+    error,
+    refetch,
+    resetCircuit,
+    toggleKillSwitch,
+  };
+}
+
+// Helper to get human-readable status text
+export function getCircuitStatusText(state: CircuitBreakerState): string {
+  switch (state) {
+    case 'CLOSED':
+      return 'System Operational';
+    case 'OPEN':
+      return 'Circuit Open - Orders Blocked';
+    case 'HALF_OPEN':
+      return 'Circuit Half-Open - Testing';
+    default:
+      return 'Unknown';
+  }
+}
+
+// Helper to check if trading is blocked
+export function isTradingBlocked(data: RiskProtectionsData | null): boolean {
+  if (!data || !data.circuit_breaker || !data.lockdown) return false;
+  
+  return (
+    data.circuit_breaker.state === 'OPEN' ||
+    !data.lockdown.trading_suite_enabled
+  );
+}
+
+// Helper to get overall status for UI
+export function getOverallRiskStatus(data: RiskProtectionsData | null): {
+  status: 'good' | 'warning' | 'critical';
+  message: string;
+} {
+  if (!data || !data.lockdown || !data.circuit_breaker) {
+    return { status: 'warning', message: 'Risk data unavailable' };
+  }
+
+  if (!data.lockdown.trading_suite_enabled) {
+    return { status: 'critical', message: 'Lockdown Active' };
+  }
+
+  if (data.circuit_breaker.state === 'OPEN') {
+    return { status: 'critical', message: 'Circuit Breaker Open' };
+  }
+
+  if (data.circuit_breaker.state === 'HALF_OPEN') {
+    return { status: 'warning', message: 'Circuit Half-Open' };
+  }
+
+  // Check risk limits
+  if ((data.risk_limits?.daily_loss_utilization_pct ?? 0) > 90) {
+    return { status: 'warning', message: 'Daily Loss Near Limit' };
+  }
+
+  return { status: 'good', message: 'All Protections Active' };
+}

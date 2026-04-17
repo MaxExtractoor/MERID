@@ -1,0 +1,36 @@
+name: Kalshi Gate
+
+# Fast Kalshi test slice that blocks PRs touching the Kalshi surface.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'merid/event_venues/kalshi/**'
+      - 'merid/execution/executors/kalshi.py'
+      - 'web/api/kalshi_api.py'
+      - 'tests/kalshi/**'
+      - 'tests/event_venues/kalshi/**'
+      - 'tests/monitoring/test_kalshi_metrics.py'
+
+jobs:
+  kalshi-test-slice:
+    name: Kalshi fast test slice
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Kalshi fast slice
+        run: make kalshi-test-slice

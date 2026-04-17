@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://merid.io/schemas/v1.0/ExecutionResult.json",
+  "title": "ExecutionResult",
+  "description": "Canonical schema for MERID execution results - immutable record of trade execution",
+  "version": "1.0.0",
+  "type": "object",
+  "required": ["execution_id", "intent_id", "consensus_block_id", "timestamp", "status", "execution_details"],
+  "properties": {
+    "execution_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this execution"
+    },
+    "intent_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to the original IntentEnvelope"
+    },
+    "consensus_block_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to the approving ConsensusBlock"
+    },
+    "timestamp": {
+      "type": "number",
+      "description": "Unix timestamp when execution completed"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "partial", "failed", "cancelled", "expired"],
+      "description": "Overall execution status"
+    },
+    "execution_details": {
+      "type": "object",
+      "required": ["exchange", "symbol", "side", "order_type"],
+      "properties": {
+        "exchange": {
+          "type": "string",
+          "description": "Exchange where order was executed"
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Trading pair"
+        },
+        "side": {
+          "type": "string",
+          "enum": ["buy", "sell"]
+        },
+        "order_type": {
+          "type": "string",
+          "enum": ["market", "limit", "stop", "stop_limit", "trailing_stop"]
+        },
+        "requested_quantity": {
+          "type": "number",
+          "minimum": 0
+        },
+        "filled_quantity": {
+          "type": "number",
+          "minimum": 0
+        },
+        "fill_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "requested_price": {
+          "type": ["number", "null"]
+        },
+        "average_fill_price": {
+          "type": "number",
+          "minimum": 0
+        },
+        "best_fill_price": {
+          "type": "number"
+        },
+        "worst_fill_price": {
+          "type": "number"
+        }
+      }
+    },
+    "fills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["fill_id", "price", "quantity", "timestamp"],
+        "properties": {
+          "fill_id": {
+            "type": "string"
+          },
+          "price": {
+            "type": "number",
+            "minimum": 0
+          },
+          "quantity": {
+            "type": "number",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "number"
+          },
+          "maker": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "costs": {
+      "type": "object",
+      "properties": {
+        "commission_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "commission_asset": {
+          "type": "string"
+        },
+        "commission_amount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "gas_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Gas cost for on-chain execution"
+        },
+        "gas_units": {
+          "type": "number",
+          "minimum": 0
+        },
+        "slippage_usd": {
+          "type": "number",
+          "description": "Cost due to slippage (can be negative if favorable)"
+        },
+        "slippage_bps": {
+          "type": "number"
+        },
+        "total_cost_usd": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "properties": {
+        "submitted_at": {
+          "type": "number"
+        },
+        "first_fill_at": {
+          "type": ["number", "null"]
+        },
+        "last_fill_at": {
+          "type": ["number", "null"]
+        },
+        "completed_at": {
+          "type": "number"
+        },
+        "latency_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Time from submission to first fill"
+        },
+        "total_duration_ms": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "pnl": {
+      "type": "object",
+      "description": "Realized PnL if closing a position",
+      "properties": {
+        "realized_pnl_usd": {
+          "type": "number"
+        },
+        "realized_pnl_pct": {
+          "type": "number"
+        },
+        "unrealized_pnl_usd": {
+          "type": "number"
+        }
+      }
+    },
+    "position_after": {
+      "type": "object",
+      "description": "Position state after execution",
+      "properties": {
+        "quantity": {
+          "type": "number"
+        },
+        "average_entry": {
+          "type": "number"
+        },
+        "market_value_usd": {
+          "type": "number"
+        }
+      }
+    },
+    "exchange_order_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Order IDs from the exchange"
+    },
+    "transaction_hashes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^0x[a-fA-F0-9]{64}$"
+      },
+      "description": "On-chain transaction hashes"
+    },
+    "error": {
+      "type": ["object", "null"],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "recoverable": {
+          "type": "boolean"
+        },
+        "retry_after": {
+          "type": ["number", "null"]
+        }
+      }
+    },
+    "audit_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 hash for audit trail integrity"
+    }
+  },
+  "additionalProperties": false
+}

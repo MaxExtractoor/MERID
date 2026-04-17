@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\trading\agents\slippage_agent.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.1, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.95, 1.0, 10.0, 30.0, 60.0, -100, 10000, 'actual_slippage', 'avg_slippage_bps', 'buy', 'expected_slippage', 'iceberg', 'inf', 'limit', 'market', 'max_slippage_bps', 'min_slippage_bps', 'normal', 'order_size', 'patient', 'slippage_error', 'timestamp', 'total_executions', 'twap', 'urgent']

@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\persistence_manager.py
+# hypothesis_version: 6.151.4
+
+[1.0, 5.0, 10.0, '.tmp', 'backup_count', 'batch_interval', 'batch_size', 'compression_enabled', 'pending_writes', 'r', 'read_errors', 'rt', 'temp_path', 'total_bytes_read', 'total_bytes_written', 'total_reads', 'total_writes', 'utf-8', 'w', 'wb', 'write_errors', 'wt']

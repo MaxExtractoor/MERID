@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\latency_optimizer\tracer.py
+# hypothesis_version: 6.151.4
+
+[1000000, 'stack']

@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\observability\lag_metrics.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.5, 0.95, 0.99, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, -5000, -500, 100, 1000, 10000, 1000000, 'avg_ms', 'count', 'critical', 'end_to_end', 'execution_fill', 'execution_submission', 'high', 'max_ms', 'medium', 'p50_ms', 'p95_ms', 'p99_ms', 'recent_alerts_1h', 'signal_generation', 'stage_stats', 'stage_thresholds', 'total_alerts', 'total_measurements']

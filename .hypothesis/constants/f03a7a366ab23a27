@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\governance\authority_boundary.py
+# hypothesis_version: 6.151.4
+
+[100, 'MERID-ARCHIVE', 'MERID-FIN', 'MERID-GOV', 'MERID-OPS', 'MERID-TREASURY', 'Request not found', 'action_type', 'alert', 'analyze', 'approval_id', 'approve', 'approved', 'approved_at', 'approved_by', 'audit', 'blocked', 'context', 'deploy_yield', 'description', 'details', 'execute_trade', 'freeze', 'manage_position', 'observe', 'pending', 'pending_approvals', 'permission_count', 'permissions', 'quarantine', 'query', 'rebalance', 'record', 'reject', 'report', 'request_id', 'requested_at', 'requesting_system', 'signal', 'simulate', 'source_system', 'status', 'systems', 'target_system', 'timestamp', 'total_violations', 'transfer_profit', 'violation_id', 'withdraw_defi']

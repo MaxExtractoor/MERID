@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\monitoring\performance_tracker.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.02, 0.5, 100000.0, 100, 365, 1000, 10000, 86400, 'all', 'avg_latency_ms', 'avg_loss', 'avg_pnl', 'avg_slippage_bps', 'avg_win', 'buy', 'current_equity', 'daily', 'end_time', 'entry_price', 'equity', 'execution_latency_ms', 'exit_price', 'gross_loss', 'gross_profit', 'hold_time_seconds', 'inf', 'losing_trades', 'max_drawdown_pct', 'monthly', 'peak_equity', 'period', 'pnl', 'pnl_percent', 'pnl_usd', 'profit_factor', 'quantity', 'sharpe_ratio', 'side', 'slippage_bps', 'start_time', 'summary', 'symbol', 'timestamp', 'total_pnl', 'total_pnl_usd', 'total_trades', 'trade_id', 'trade_latency', 'trade_volume_usd', 'trades_total', 'weekly', 'win_rate', 'winning_trades']

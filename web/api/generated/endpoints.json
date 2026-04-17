@@ -1,0 +1,1242 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/dev-swarm/pause",
+    "key": "DEV_SWARM_PAUSE"
+  },
+  {
+    "method": "POST",
+    "path": "/api/dev-swarm/resume",
+    "key": "DEV_SWARM_RESUME"
+  },
+  {
+    "method": "POST",
+    "path": "/api/dev-swarm/shutdown",
+    "key": "DEV_SWARM_SHUTDOWN"
+  },
+  {
+    "method": "GET",
+    "path": "/api/metrics/latency",
+    "key": "KALSHI_LATENCY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/alerts/crypto/metrics",
+    "key": "CRYPTO_ALERTS_METRICS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/alerts/crypto/status",
+    "key": "CRYPTO_ALERTS_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/audit-trail/entries",
+    "key": "AUDIT_TRAIL_ENTRIES"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/audit-trail/summary",
+    "key": "AUDIT_TRAIL_SUMMARY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/crypto/spot-vs-kalshi",
+    "key": "CRYPTO_SPOT_VS_KALSHI"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/data/freshness",
+    "key": "DATA_FRESHNESS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/explainability/decisions",
+    "key": "EXPLAINABILITY_DECISIONS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/agents",
+    "key": "KALSHI_GRID_AGENTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/agents/{name}",
+    "key": "KALSHI_GRID_AGENT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/agents/{name}/orders",
+    "key": "KALSHI_GRID_AGENT_ORDERS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/agents/{name}/pause",
+    "key": "KALSHI_GRID_AGENT_PAUSE"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/agents/{name}/resume",
+    "key": "KALSHI_GRID_AGENT_RESUME"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/agents/{name}/signals",
+    "key": "KALSHI_GRID_AGENT_SIGNALS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/canary-trade",
+    "key": "KALSHI_GRID_CANARY_TRADE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/crypto/rti",
+    "key": "KALSHI_CRYPTO_RTI"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/fills",
+    "key": "KALSHI_GRID_FILLS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/health",
+    "key": "KALSHI_GRID_HEALTH"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/kill-switch/reset",
+    "key": "KALSHI_GRID_KILL_SWITCH_RESET"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/matrix",
+    "key": "KALSHI_GRID_MATRIX"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/mode",
+    "key": "KALSHI_GRID_MODE"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/mode",
+    "key": "KALSHI_GRID_MODE"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/pause",
+    "key": "KALSHI_GRID_PAUSE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/performance/agents",
+    "key": "KALSHI_GRID_PERFORMANCE_AGENTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/performance/agents/{agentId}",
+    "key": "KALSHI_GRID_PERFORMANCE_AGENT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/performance/calibration",
+    "key": "KALSHI_GRID_PERFORMANCE_CALIBRATION"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/performance/execution",
+    "key": "KALSHI_EXECUTION_TELEMETRY"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/performance/export",
+    "key": "KALSHI_GRID_PERFORMANCE_EXPORT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/performance/summary",
+    "key": "KALSHI_GRID_PERFORMANCE_SUMMARY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/performance/top",
+    "key": "KALSHI_GRID_PERFORMANCE_TOP"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/pnl",
+    "key": "KALSHI_GRID_PNL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/portfolio",
+    "key": "KALSHI_GRID_PORTFOLIO"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/resume",
+    "key": "KALSHI_GRID_RESUME"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/sentiment",
+    "key": "KALSHI_GRID_SENTIMENT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/session",
+    "key": "KALSHI_GRID_SESSION"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/start",
+    "key": "KALSHI_GRID_START"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi-grid/status",
+    "key": "KALSHI_GRID_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi-grid/stop",
+    "key": "KALSHI_GRID_STOP"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/balance",
+    "key": "KALSHI_BALANCE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/calibration/cell-metrics",
+    "key": "CALIBRATION_CELL_METRICS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/calibration/forecasters",
+    "key": "CALIBRATION_FORECASTERS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/calibration/resolve",
+    "key": "CALIBRATION_RESOLVE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/calibration/stats",
+    "key": "CALIBRATION_STATS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/calibration/unresolved",
+    "key": "CALIBRATION_UNRESOLVED"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/calibration/weights",
+    "key": "CALIBRATION_WEIGHTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/catalog",
+    "key": "KALSHI_CATALOG"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/catalog/refresh",
+    "key": "KALSHI_CATALOG_REFRESH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/categories",
+    "key": "KALSHI_CATEGORIES"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/kalshi/categories",
+    "key": "KALSHI_CATEGORIES"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/consensus-signals",
+    "key": "KALSHI_CONSENSUS_SIGNALS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/consensus/all",
+    "key": "KALSHI_CONSENSUS_ALL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/consensus/{asset}/{timeframe}",
+    "key": "KALSHI_CONSENSUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/continuous-trader/status",
+    "key": "KALSHI_CONTINUOUS_TRADER_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/continuous-trader/stop",
+    "key": "KALSHI_CONTINUOUS_TRADER_STOP"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/correlation/clusters",
+    "key": "CORRELATION_CLUSTERS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/correlation/factor",
+    "key": "CORRELATION_FACTOR"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/correlation/matrix",
+    "key": "CORRELATION_MATRIX"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/deployment/auto-promoter/promotions",
+    "key": "AUTO_PROMOTER_PROMOTIONS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/deployment/auto-promoter/status",
+    "key": "AUTO_PROMOTER_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/deployment/halt",
+    "key": "KALSHI_DEPLOYMENT_HALT"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/deployment/promote-live",
+    "key": "KALSHI_DEPLOYMENT_PROMOTE_LIVE"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/deployment/promote-shadow",
+    "key": "KALSHI_DEPLOYMENT_PROMOTE_SHADOW"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/deployment/rollback",
+    "key": "KALSHI_DEPLOYMENT_ROLLBACK"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/deployment/status",
+    "key": "KALSHI_DEPLOYMENT_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/deployment/transitions",
+    "key": "KALSHI_DEPLOYMENT_TRANSITIONS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/discover-health",
+    "key": "KALSHI_DISCOVER_HEALTH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/edge",
+    "key": "KALSHI_EDGE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/events/{event}",
+    "key": "KALSHI_EVENT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/export",
+    "key": "KALSHI_EXPORT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/favorites",
+    "key": "KALSHI_FAVORITES"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/favorites/toggle",
+    "key": "KALSHI_FAVORITES_TOGGLE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/fills",
+    "key": "KALSHI_FILLS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/guardrails/p0-status",
+    "key": "KALSHI_P0_GUARDRAILS_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/health",
+    "key": "KALSHI_HEALTH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/insights",
+    "key": "KALSHI_INSIGHTS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/kill-switch",
+    "key": "KALSHI_KILL_SWITCH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/lane/status",
+    "key": "LANE_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/liquidity-alerts",
+    "key": "KALSHI_LIQUIDITY_ALERTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/liquidity-health/{marketId}",
+    "key": "KALSHI_LIQUIDITY_HEALTH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/markets",
+    "key": "KALSHI_MARKETS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/markets/{ticker}",
+    "key": "KALSHI_MARKET_DETAIL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/markets/{ticker}/orderbook",
+    "key": "KALSHI_ORDERBOOK"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/markets/{ticker}/orderbook/stream",
+    "key": "KALSHI_ORDERBOOK_STREAM"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/metrics/cycle-drawdown",
+    "key": "KALSHI_METRICS_CYCLE_DRAWDOWN"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/metrics/cycle-drawdown/reset",
+    "key": "KALSHI_CYCLE_DRAWDOWN_RESET"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/metrics/forecaster/{id}",
+    "key": "METRICS_FORECASTER"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/metrics/forecasters",
+    "key": "METRICS_FORECASTERS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/metrics/hedge",
+    "key": "KALSHI_METRICS_HEDGE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/metrics/markets/{marketId}",
+    "key": "METRICS_MARKET"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/metrics/order-invariants",
+    "key": "KALSHI_METRICS_ORDER_INVARIANTS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/metrics/resolve-all",
+    "key": "KALSHI_METRICS_RESOLVE_ALL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/metrics/resolver",
+    "key": "METRICS_RESOLVER"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/mood/all",
+    "key": "KALSHI_MOOD_ALL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/mood/fear-greed/{asset}",
+    "key": "KALSHI_MOOD_FEAR_GREED"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/mood/{asset}/{timeframe}",
+    "key": "KALSHI_MOOD"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/news-signals",
+    "key": "KALSHI_NEWS_SIGNALS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/order-errors",
+    "key": "KALSHI_ORDER_ERRORS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/order-groups",
+    "key": "KALSHI_ORDER_GROUPS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/order-groups",
+    "key": "KALSHI_ORDER_GROUP_CREATE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/order-groups/dashboard",
+    "key": "KALSHI_ORDER_GROUP_DASHBOARD"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/order-groups/stream",
+    "key": "KALSHI_ORDER_GROUP_STREAM"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/kalshi/order-groups/{groupId}",
+    "key": "KALSHI_ORDER_GROUP_DELETE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/order-groups/{groupId}",
+    "key": "KALSHI_ORDER_GROUP_DETAIL"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/kalshi/order-groups/{groupId}/limit",
+    "key": "KALSHI_ORDER_GROUP_LIMIT"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/kalshi/order-groups/{groupId}/reset",
+    "key": "KALSHI_ORDER_GROUP_RESET"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/kalshi/order-groups/{groupId}/trigger",
+    "key": "KALSHI_ORDER_GROUP_TRIGGER"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/kalshi/orders",
+    "key": "KALSHI_ORDERS_BATCH_CANCEL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/orders",
+    "key": "KALSHI_ORDERS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/orders/batch",
+    "key": "KALSHI_BATCH_ORDERS"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/kalshi/orders/{orderId}",
+    "key": "KALSHI_ORDER_CANCEL"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/kalshi/orders/{orderId}",
+    "key": "KALSHI_ORDER_AMEND"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/pnl",
+    "key": "KALSHI_PNL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/pnl-history",
+    "key": "KALSHI_PNL_HISTORY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/positions",
+    "key": "KALSHI_POSITIONS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/publish-pipeline",
+    "key": "KALSHI_PUBLISH_PIPELINE"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/publish-pipeline/trigger",
+    "key": "KALSHI_PUBLISH_PIPELINE_TRIGGER"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/risk",
+    "key": "KALSHI_RISK"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/risk/btc15m/status",
+    "key": "KALSHI_RISK_BTC15M_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/kalshi/risk/downsize",
+    "key": "KALSHI_RISK_DOWNSIZE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/risk/events",
+    "key": "KALSHI_RISK_EVENTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/risk/insights",
+    "key": "KALSHI_RISK_INSIGHTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/sentiment/bundle/{asset}",
+    "key": "KALSHI_SENTIMENT_BUNDLE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/sentiment/lane-snapshot",
+    "key": "KALSHI_SENTIMENT_LANE_SNAPSHOT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/sentiment/pnl",
+    "key": "KALSHI_SENTIMENT_PNL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/sentiment/pnl-attribution",
+    "key": "KALSHI_SENTIMENT_PNL_ATTRIBUTION"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/sizing-metrics",
+    "key": "KALSHI_SIZING_METRICS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/swarm/critic/history",
+    "key": "SWARM_CRITIC_HISTORY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/swarm/execution/stats",
+    "key": "SWARM_EXECUTION_STATS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/swarm/grid",
+    "key": "KALSHI_SWARM_GRID"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/swarm/health",
+    "key": "KALSHI_SWARM_HEALTH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/swarm/recalibration",
+    "key": "SWARM_RECALIBRATION"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/swarm/verdicts",
+    "key": "SWARM_VERDICTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/volume-alerts",
+    "key": "KALSHI_VOLUME_ALERTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/volume-anomalies",
+    "key": "KALSHI_VOLUME_ANOMALIES"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/volume-changes",
+    "key": "KALSHI_VOLUME_CHANGES"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/volume-history/{ticker}",
+    "key": "KALSHI_VOLUME_HISTORY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/kalshi/volume-history/{ticker}/smoothed",
+    "key": "KALSHI_VOLUME_SMOOTHED"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/logs",
+    "key": "LOGS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/logs/clear",
+    "key": "LOGS_CLEAR"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/logs/stats",
+    "key": "LOGS_STATS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/loop/execution/status",
+    "key": "LOOP_EXECUTION_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/loop/execution/toggle",
+    "key": "LOOP_EXECUTION_TOGGLE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/loop/live-readiness",
+    "key": "LOOP_LIVE_READINESS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/loop/status",
+    "key": "LOOP_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/loop/tick-log",
+    "key": "LOOP_TICK_LOG"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/monitoring/audit-chain/verify",
+    "key": "MONITORING_AUDIT_CHAIN_VERIFY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/monitoring/pre-scale-health",
+    "key": "MONITORING_PRE_SCALE_HEALTH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/monitoring/risk-events",
+    "key": "MONITORING_RISK_EVENTS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/monitoring/system/stop",
+    "key": "SYSTEM_STOP"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/monitoring/tainted-paths",
+    "key": "MONITORING_TAINTED_PATHS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/notifications",
+    "key": "NOTIFICATIONS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notifications/read-all",
+    "key": "NOTIFICATIONS_READ_ALL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/notifications/recent-alerts",
+    "key": "NOTIFICATION_RECENT_ALERTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/notifications/status",
+    "key": "NOTIFICATION_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/notifications/telegram/log",
+    "key": "NOTIFICATIONS_TELEGRAM_LOG"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notifications/telegram/send",
+    "key": "TELEGRAM_SEND_ALERT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/notifications/telegram/status",
+    "key": "TELEGRAM_BOT_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/notifications/{id}/read",
+    "key": "NOTIFICATION_READ"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operator/agent-activity",
+    "key": "OPERATOR_AGENT_ACTIVITY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operator/audit-trail",
+    "key": "OPERATOR_AUDIT_TRAIL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operator/decisions/recent",
+    "key": "SYSTEM_DECISIONS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/operator/emergency-stop",
+    "key": "OPERATOR_EMERGENCY_STOP"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operator/equity-series",
+    "key": "KALSHI_EQUITY_SERIES"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/operator/guard/kill",
+    "key": "GUARD_KILL"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/operator/guard/unkill",
+    "key": "GUARD_UNKILL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operator/kill-switch-status",
+    "key": "OPERATOR_KILL_SWITCH_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/operator/reset-kill-switch",
+    "key": "OPERATOR_RESET_KILL_SWITCH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operator/risk-state",
+    "key": "OPERATOR_RISK_STATE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/operator/summary",
+    "key": "OPERATOR_SUMMARY"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/operator/trading-mode",
+    "key": "TRADING_MODE_SET"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/paper-ladder/seed-all",
+    "key": "PAPER_LADDER_SEED_ALL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/paper-ladder/status",
+    "key": "PAPER_LADDER_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/paper-trading/{portfolioId}",
+    "key": "PAPER_TRADING_PORTFOLIO"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/pipeline/venue/mode",
+    "key": "PIPELINE_VENUE_MODE"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/pipeline/venue/{action}",
+    "key": "PIPELINE_VENUE_TOGGLE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/pipeline/venues",
+    "key": "PIPELINE_VENUES"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/pipeline/venues/{venue}/pnl",
+    "key": "PIPELINE_PNL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction-markets/alerts",
+    "key": "PM_ALERTS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/prediction-markets/alerts/{alertId}/acknowledge",
+    "key": "PM_ALERT_ACKNOWLEDGE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/badges/{agentId}",
+    "key": "PREDICTION_BADGES"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/debate-metrics",
+    "key": "PREDICTION_DEBATE_METRICS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/debates",
+    "key": "PREDICTION_DEBATES"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/debates/{id}",
+    "key": "PREDICTION_DEBATE_DETAIL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/leaderboard",
+    "key": "PREDICTION_LEADERBOARD"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/opinions",
+    "key": "PREDICTION_CONSENSUS_OPINIONS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/plans",
+    "key": "PREDICTION_CONSENSUS_PLANS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/rewards/{agentId}",
+    "key": "PREDICTION_REWARDS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/summary",
+    "key": "PREDICTION_CONSENSUS_SUMMARY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/consensus/teams",
+    "key": "PREDICTION_TEAMS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/prediction/metrics",
+    "key": "PREDICTION_METRICS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/reconciliation/run",
+    "key": "RECONCILIATION_RUN"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/reconciliation/status",
+    "key": "RECONCILIATION_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/resilience/breakers",
+    "key": "KALSHI_CIRCUIT_BREAKER"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/agents",
+    "key": "RISK_AGENTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/agents/{agentId}/drawdown-history",
+    "key": "RISK_AGENT_DRAWDOWN_HISTORY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/agents/{agentId}/equity-history",
+    "key": "RISK_AGENT_EQUITY_HISTORY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/agents/{agentId}/metrics",
+    "key": "RISK_AGENT_METRICS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/alerts",
+    "key": "RISK_ALERTS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/risk/alerts/acknowledge-all",
+    "key": "RISK_ALERTS_ACKNOWLEDGE_ALL"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/risk/alerts/{alertId}/acknowledge",
+    "key": "RISK_ALERT_ACKNOWLEDGE"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/risk/halt",
+    "key": "RISK_HALT"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/halt-status",
+    "key": "RISK_HALT_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/position-limits",
+    "key": "RISK_POSITION_LIMITS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/risk/resume",
+    "key": "RISK_RESUME"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/sentiment-vol/alerts",
+    "key": "SENTIMENT_VOL_ALERTS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/sentiment-vol/asset/{asset}",
+    "key": "SENTIMENT_VOL_ASSET"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/sentiment-vol/assets",
+    "key": "SENTIMENT_VOL_ASSETS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/sentiment-vol/config",
+    "key": "SENTIMENT_VOL_CONFIG"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/sentiment-vol/health",
+    "key": "SENTIMENT_VOL_HEALTH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/sentiment-vol/summary",
+    "key": "SENTIMENT_VOL_SUMMARY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/staleness",
+    "key": "RISK_STALENESS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/risk/summary",
+    "key": "RISK_SUMMARY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/sentiment/asset/{asset}",
+    "key": "SENTIMENT_ASSET"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/sentiment/assets",
+    "key": "SENTIMENT_ASSETS_ALL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/sentiment/hashtags/signals",
+    "key": "SENTIMENT_HASHTAG_SIGNALS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/sentiment/monitor/status",
+    "key": "SENTIMENT_MONITOR_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/signals/alerts/history",
+    "key": "SIGNALS_ALERTS_HISTORY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/swarm/prime-screen/state",
+    "key": "PRIME_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/system/config-reload",
+    "key": "CONFIG_RELOAD"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/system/execution-gate",
+    "key": "SYSTEM_EXECUTION_GATE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/system/fresh-start",
+    "key": "SYSTEM_FRESH_START"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/system/health",
+    "key": "SYSTEM_HEALTH"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/system/mode-safety",
+    "key": "SYSTEM_MODE_SAFETY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/system/pnl-consistency",
+    "key": "SYSTEM_PNL_CONSISTENCY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/system/price-feed-staleness",
+    "key": "SYSTEM_PRICE_FEED_STALENESS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/system/session-log",
+    "key": "SYSTEM_SESSION_LOG"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/system/symbol-status",
+    "key": "SYSTEM_SYMBOL_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/telemetry",
+    "key": "TELEMETRY"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/trade-mode",
+    "key": "TRADE_MODE"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/ui/mode-indicator",
+    "key": "UI_MODE_INDICATOR"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/ui/sidebar",
+    "key": "UI_SIDEBAR"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/ui/workflow",
+    "key": "UI_WORKFLOW"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/user/profile",
+    "key": "USER_PROFILE"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/user/settings",
+    "key": "USER_SETTINGS"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/xtf/signal/{asset}",
+    "key": "XTF_SIGNAL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/xtf/signals",
+    "key": "XTF_SIGNALS_ALL"
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/xtf/status",
+    "key": "XTF_STATUS"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/xtf/sync",
+    "key": "XTF_SYNC"
+  },
+  {
+    "method": "POST",
+    "path": "/api/x/post",
+    "key": "X_BOT_POST"
+  },
+  {
+    "method": "GET",
+    "path": "/api/x/status",
+    "key": "X_BOT_STATUS"
+  },
+  {
+    "method": "GET",
+    "path": "/debates/alerts",
+    "key": "DEBATE_ALERTS"
+  },
+  {
+    "method": "GET",
+    "path": "/debates/correlation",
+    "key": "DEBATE_CORRELATION"
+  },
+  {
+    "method": "GET",
+    "path": "/debates/health/overview",
+    "key": "KALSHI_DEBATE_STATS"
+  },
+  {
+    "method": "GET",
+    "path": "/debates/historical-contribution",
+    "key": "DEBATE_HISTORICAL_CONTRIBUTION"
+  },
+  {
+    "method": "GET",
+    "path": "/debates/rollups",
+    "key": "DEBATE_ROLLUPS"
+  }
+]

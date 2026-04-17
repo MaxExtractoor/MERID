@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\reflection\core.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.001, 0.1, 1.0, 1000, 50000, '2.0', 'Reflection', '_started_at', 'abstain', 'accept', 'active_agents', 'conflicted', 'decisions_per_minute', 'expired', 'invalidated', 'operations', 'outcome', 'outcome_distribution', 'pattern_tags', 'pending', 'performance', 'queries', 'records', 'reflection.core', 'reject', 'total_reflections', 'unique_energies', 'updates', 'updates_per_minute', 'uptime_seconds', 'validated']

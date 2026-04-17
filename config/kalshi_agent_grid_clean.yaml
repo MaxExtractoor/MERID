@@ -1,0 +1,83 @@
+venue:
+  name: kalshi
+  base_url: https://api.elections.kalshi.com/trade-api/v2
+  use_demo: false
+  max_notional_per_expiry_usd: 1000
+  max_open_markets_per_asset: 20
+
+session:
+  maintenance_day: 3
+  maintenance_start_et: 03:00
+  maintenance_end_et: 05:00
+
+agents:
+- name: SPORTS_MONTHLY_1
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - monthly
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: monthly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+
+- name: SPORTS_MONTHLY_2
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - monthly
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: monthly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+
+- name: SPORTS_MONTHLY_3
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - monthly
+  archetype: directional
+  market_filter:
+    category: sports
+    frequency: monthly
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60
+
+- name: SPORTS_CATCH_ALL
+  assets:
+  - SPORTS_COMBO
+  timeframes:
+  - monthly
+  archetype: directional
+  market_filter:
+    category: sports
+  risk_limits:
+    max_yes_position: 500
+    max_no_position: 500
+    max_orders_per_window: 10
+    max_notional_usd: 250
+  entry_window:
+    minutes_before_expiry: 1440
+    cutoff_minutes_before_expiry: 60

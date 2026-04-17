@@ -1,0 +1,49 @@
+# Prometheus alert rules for Kelly metrics
+# Mount this file into Prometheus (e.g., /etc/prometheus/rules/kelly_rules.yml)
+# and ensure it is referenced in prometheus.yml under rule_files.
+
+groups:
+  - name: kelly-alerts
+    interval: 30s
+    rules:
+      - alert: KellyFractionTooHigh
+        expr: kelly_fraction > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: kalshi
+          service: kelly-engine
+        annotations:
+          summary: "Kelly fraction too high for {{ $labels.strategy }}"
+          description: |
+            Kelly fraction {{ $value | printf "%.3f" }} exceeds 0.50 for strategy {{ $labels.strategy }}.
+            Consider scaling down position sizing or switching to fractional Kelly.
+          runbook: "https://docs.merid.systems/kelly-runbook#kelly-fraction-too-high"
+
+      - alert: KellyRiskOfRuinHigh
+        expr: kelly_risk_of_ruin > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          team: kalshi
+          service: kelly-engine
+        annotations:
+          summary: "High risk of ruin for {{ $labels.strategy }}"
+          description: |
+            Monte Carlo risk of ruin {{ $value | printf "%.2%" }} exceeds 5% for strategy {{ $labels.strategy }}.
+            Re-run calibration with tighter volatility scaling.
+          runbook: "https://docs.merid.systems/kelly-runbook#risk-of-ruin-high"
+
+      - alert: KellyDrawdownBreached
+        expr: kelly_max_drawdown < -0.2
+        for: 15m
+        labels:
+          severity: warning
+          team: kalshi
+          service: kelly-engine
+        annotations:
+          summary: "Max drawdown breached for {{ $labels.strategy }}"
+          description: |
+            Current max drawdown {{ $value | printf "%.2%" }} is worse than -20% threshold.
+            Verify hedges and consider pausing new trades.
+          runbook: "https://docs.merid.systems/kelly-runbook#drawdown-breach"

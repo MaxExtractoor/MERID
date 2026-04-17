@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\fast_prediction_arbitrage_analyst.py
+# hypothesis_version: 6.151.4
+
+[0.004, 0.05, 0.5, 50000.0, 1000, 'Analysis completed', 'agent_id', 'agent_version', 'analysis', 'brier_score', 'bucket_analysis', 'categories', 'confidence_level', 'energy_id', 'error', 'experiment_id', 'latency_ms', 'manual', 'market_conditions', 'max_opportunities', 'min_liquidity', 'min_spread', 'neutral', 'reasoning', 'run_type', 'status', 'success', 'summary', 'top_opportunities', '{', '}']

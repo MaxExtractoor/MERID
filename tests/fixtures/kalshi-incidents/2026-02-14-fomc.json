@@ -1,0 +1,61 @@
+{
+  "id": "2026-02-14-fomc",
+  "description": "Synthetic FOMC stress: latency spike + risk CB + WS flap",
+  "time_range": {
+    "start": "2026-02-14T18:00:00Z",
+    "end": "2026-02-14T19:00:00Z"
+  },
+  "orders": [
+    {
+      "timestamp": "2026-02-14T18:05:00Z",
+      "request": {
+        "market_id": "KXBTC24",
+        "side": "buy",
+        "size": 10,
+        "price": 0.45
+      },
+      "response": {
+        "status": "rejected",
+        "error_code": "DAILY_LOSS_LIMIT"
+      }
+    },
+    {
+      "timestamp": "2026-02-14T18:10:00Z",
+      "request": {
+        "market_id": "KXETH24",
+        "side": "sell",
+        "size": 5,
+        "price": 0.40
+      },
+      "response": {
+        "status": "accepted",
+        "order_id": "ORD-123"
+      }
+    }
+  ],
+  "fills": [
+    {
+      "timestamp": "2026-02-14T18:10:02Z",
+      "order_id": "ORD-123",
+      "price": 0.39,
+      "size": 5
+    }
+  ],
+  "metrics": {
+    "latency_ms": [120, 340, 950, 1100],
+    "ws_events": [
+      {"timestamp": "2026-02-14T18:15:00Z", "state": "disconnected"},
+      {"timestamp": "2026-02-14T18:15:10Z", "state": "connected"}
+    ],
+    "catalog_refresh_timestamps": [
+      "2026-02-14T18:00:00Z",
+      "2026-02-14T18:20:00Z"
+    ]
+  },
+  "cb_events": [
+    {
+      "timestamp": "2026-02-14T18:05:01Z",
+      "error_code": "DAILY_LOSS_LIMIT"
+    }
+  ]
+}

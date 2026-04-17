@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\monitoring\health_checker.py
+# hypothesis_version: 6.151.4
+
+[0.0, 5.0, 30.0, 100, 1000, 'Check not found', 'Check returned false', 'Check timed out', 'agent_swarm', 'checks', 'consecutive_failures', 'database', 'degraded', 'degraded_count', 'error', 'event_bus', 'failure_rate', 'healthy', 'healthy_count', 'last_check', 'last_error', 'last_failure', 'last_success', 'last_update', 'latency_ms', 'monitoring.health', 'name', 'overall', 'price_feed', 'running', 'status', 'total_checks', 'total_failures', 'unhealthy', 'unhealthy_count', 'unknown', 'unknown_count']

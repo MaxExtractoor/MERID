@@ -1,0 +1,27 @@
+{
+  "gate_id": "iter3-catalog-fix-retry3",
+  "timestamp": "2026-04-02T18:29:27.986037+00:00",
+  "duration_seconds": 600,
+  "dry_run": false,
+  "samples_total": 20,
+  "samples_valid": 20,
+  "p95_min": 15.0,
+  "p95_max": 2000.0,
+  "p95_avg": 618.55,
+  "degraded_count": 2,
+  "high_lag_profiles": 10,
+  "verdict": "FAIL",
+  "passed": false,
+  "failures": [
+    "2026-04-02T18:22:54.320806+00:00: degraded=true",
+    "2026-04-02T18:23:24.847086+00:00: P95=2000ms >= 500ms",
+    "2026-04-02T18:23:57.879796+00:00: P95=1953ms >= 500ms",
+    "2026-04-02T18:24:27.903800+00:00: P95=1953ms >= 500ms",
+    "2026-04-02T18:24:57.929397+00:00: P95=907ms >= 500ms",
+    "2026-04-02T18:28:57.949859+00:00: P95=1578ms >= 500ms",
+    "2026-04-02T18:29:27.966015+00:00: P95=1266ms >= 500ms",
+    "2026-04-02T18:29:27.966015+00:00: degraded=true",
+    "10 high-lag profiles captured"
+  ],
+  "sample_data": null
+}

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MERID Cognitive Bus Mixer — GLITCHED</title>
+<style>
+  body { background: #0b0e17; color: #ffaa00; font-family: 'Courier New', monospace; margin: 0; padding: 0; overflow: hidden; position: relative; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px; position: relative; z-index: 2; }
+  header { text-align: center; padding: 20px 0; }
+  
+  /* Maker Confidence Meter */
+  #confidence-meter {
+    height: 60px; background: linear-gradient(90deg, #3c2a00, #ffaa00, #3c2a00); border: 3px solid #ffaa00;
+    border-radius: 8px; box-shadow: 0 0 30px #ffaa00; position: relative; overflow: hidden; animation: pulse 4s infinite; margin-bottom: 30px;
+  }
+  #confidence-meter::before { content: "MAKER CONFIDENCE METER — 98%"; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 24px; font-weight: bold; text-shadow: 0 0 10px #000; z-index: 2; }
+  #confidence-meter::after { content: ''; position: absolute; inset: 0; background: radial-gradient(circle, transparent 30%, #ffaa0055 70%);
+    animation: ripple 6s infinite; }
+  
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 20px #ffaa00; } 50% { box-shadow: 0 0 60px #ffaa00; } }
+  @keyframes ripple { 0% { opacity: 0.3; transform: scale(0.8); } 100% { opacity: 0; transform: scale(1.5); } }
+  
+  .mixer { display: flex; justify-content: space-between; gap: 30px; }
+  .column { flex: 1; background: #11141f; border: 2px solid #ffaa00; padding: 20px; border-radius: 10px; }
+  
+  .agents { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
+  .agent { background: #1a1a2e; padding: 15px; border: 1px solid #ffaa00; text-align: center; transition: all 0.3s; }
+  .agent.active { box-shadow: 0 0 30px #ffaa00; animation: agentPulse 1.5s infinite; }
+  
+  .buses { display: flex; flex-direction: column; gap: 30px; }
+  .slider-container { text-align: center; }
+  .slider { writing-mode: bt-lr; direction: rtl; height: 300px; width: 60px; -webkit-appearance: slider-vertical; background: #222; }
+  
+  #master-fader { height: 400px; }
+  
+  .lockdown { margin: 30px auto; padding: 15px 40px; font-size: 20px; background: #300; border: 3px solid #f00; color: #f00; cursor: pointer; }
+  .lockdown.locked { background: #f00; color: #000; animation: flash 0.3s infinite; }
+  
+  @keyframes flash { 0%,100% { background: #f00; } 50% { background: #900; } }
+  @keyframes agentPulse { 0%,100% { opacity: 0.8; } 50% { opacity: 1; } }
+  
+  .distillation { margin: 40px 0; border: 2px dashed #ffaa00; padding: 20px; }
+  #raw { background: #000; color: #0f0; padding: 15px; font-family: monospace; min-height: 100px; display: none; }
+  #distilled { background: #111; padding: 20px; min-height: 150px; border: 1px solid #ffaa00; }
+  
+  .ports { display: flex; justify-content: space-around; background: #11141f; padding: 15px; border-top: 2px solid #ffaa00; position: fixed; bottom: 0; width: 100%; z-index: 3; }
+  .port { text-align: center; }
+  .active { color: #0f0; } .standby { color: #ffaa00; } .quarantined { color: #f00; }
+  
+  input#user-input { width: 100%; padding: 15px; background: #000; color: #ffaa00; border: 2px solid #ffaa00; font-size: 18px; }
+
+  /* Enhanced Glitch Effects */
+  .glitch-heavy { position: relative; display: inline-block; }
+  .glitch-heavy::before, .glitch-heavy::after {
+    content: attr(data-text); position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  }
+  .glitch-heavy::before { left: 3px; text-shadow: -3px 0 #f00, 3px 0 #0ff; clip: rect(0, 450px, 100px, 0); animation: glitch-anim1 1.5s infinite linear alternate-reverse; }
+  .glitch-heavy::after { left: -3px; text-shadow: 3px 0 #00ff00; clip: rect(50px, 450px, 150px, 0); animation: glitch-anim2 2s infinite linear alternate-reverse; }
+  
+  @keyframes glitch-anim1 { 0% { clip: rect(32px, 9999px, 76px, 0); } 100% { clip: rect(12px, 9999px, 96px, 0); } }
+  @keyframes glitch-anim2 { 0% { clip: rect(82px, 9999px, 46px, 0); } 100% { clip: rect(62px, 9999px, 26px, 0); } }
+  
+  /* Scanlines + Noise */
+  body::before {
+    content: ''; position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0.1), rgba(0,0,0,0.1) 1px, transparent 1px, transparent 2px);
+    animation: scanline 8s linear infinite;
+  }
+  @keyframes scanline { 0% { transform: translateY(0); } 100% { transform: translateY(100vh); } }
+  
+  /* Global Glitch Burst Overlay */
+  #glitch-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; opacity: 0; z-index: 10;
+    background: repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,0,255,0.05) 10px, rgba(255,0,255,0.05) 20px); }
+  
+  /* Braille Spinner */
+  #spinner { display: none; font-size: 32px; text-align: center; margin: 20px 0; animation: glitch-flicker 0.2s infinite; }
+  @keyframes glitch-flicker { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+</style>
+</head>
+<body>
+<div id="glitch-overlay"></div>
+<div class="container">
+  <header>
+    <div id="confidence-meter" class="glitch-heavy" data-text="MAKER CONFIDENCE METER — 98%"></div>
+  </header>
+  
+  <div class="mixer">
+    <div class="column">
+      <h2 class="glitch-heavy" data-text="AGENTS (Input Sources)">AGENTS (Input Sources)</h2>
+      <div class="agents" id="agents">
+        <div class="agent">Eyes (Data Ingestion)<br><small>LED ●</small></div>
+        <div class="agent">Brain (Reasoning)<br><small>LED ●</small></div>
+        <div class="agent">Immune (Anomaly)<br><small>LED ●</small></div>
+        <div class="agent">Perception<br><small>LED ○</small></div>
+      </div>
+    </div>
+    
+    <div class="column buses">
+      <h2 class="glitch-heavy" data-text="LAYER BUSES">LAYER BUSES</h2>
+      <div class="slider-container"><label>Perception Bus</label><input type="range" orient="vertical" class="slider" value="60"></div>
+      <div class="slider-container"><label>Reasoning Bus</label><input type="range" orient="vertical" class="slider" value="80"></div>
+      <div class="slider-container"><label>Governance Bus</label><input type="range" orient="vertical" class="slider" value="95"></div>
+    </div>
+    
+    <div class="column">
+      <h2 class="glitch-heavy" data-text="MASTER INTEGRITY BUS">MASTER INTEGRITY BUS</h2>
+      <div style="text-align:center;">
+        <label>MASTER CHOKE POINT</label><br>
+        <input type="range" orient="vertical" class="slider" id="master-fader" value="90">
+        <br><br>
+        <button class="lockdown" id="lockdown">[ MUTE / KILL ]</button>
+      </div>
+    </div>
+  </div>
+  
+  <div class="distillation">
+    <h2 class="glitch-heavy" data-text="────────────── DISTILLATION GATE ──────────────">────────────── DISTILLATION GATE ──────────────</h2>
+    <pre id="raw">RAW COGNITION (collapsed)</pre>
+    <div id="distilled">DISTILLED OUTPUT<br><br>Awaiting input...</div>
+  </div>
+  
+  <div id="spinner"></div>
+  
+  <input type="text" id="user-input" placeholder="Enter query (e.g., Status Report) then press Enter">
+</div>
+
+<div class="ports">
+  <div class="port glitch-heavy" data-text="Local LLM<br>ACTIVE ●">Local LLM<br><span class="active">ACTIVE ●</span></div>
+  <div class="port glitch-heavy" data-text="WebSocket Bus<br>ACTIVE ●">WebSocket Bus<br><span class="active">ACTIVE ●</span></div>
+  <div class="port glitch-heavy" data-text="Telegram Feed<br>STANDBY ○">Telegram Feed<br><span class="standby">STANDBY ○</span></div>
+  <div class="port glitch-heavy" data-text="Memory Layer<br>ACTIVE ●">Memory Layer<br><span class="active">ACTIVE ●</span></div>
+  <div class="port glitch-heavy" data-text="External Ports<br>QUARANTINED ■">External Ports<br><span class="quarantined">QUARANTINED ■</span></div>
+</div>
+
+<script>
+  const agents = document.querySelectorAll('.agent');
+  const raw = document.getElementById('raw');
+  const distilled = document.getElementById('distilled');
+  const lockdown = document.getElementById('lockdown');
+  const input = document.getElementById('user-input');
+  const master = document.getElementById('master-fader');
+  const spinner = document.getElementById('spinner');
+  const overlay = document.getElementById('glitch-overlay');
+  const meter = document.getElementById('confidence-meter');
+
+  function triggerGlitchBurst() {
+    overlay.style.opacity = '0.3';
+    setTimeout(() => overlay.style.opacity = '0', 300);
+  }
+
+  function simulateProcessing(query) {
+    spinner.style.display = 'block';
+    const braille = ['⠏', '⠧', '⠇', '⠙', '⠹', '⠴', '⠦', '⠼', '⠸', '⠛'];
+    let i = 0;
+    const spinInt = setInterval(() => {
+      spinner.textContent = braille[i % braille.length];
+      i++;
+      if (Math.random() > 0.7) triggerGlitchBurst();
+    }, 80);
+
+    meter.classList.add('glitch-heavy');
+
+    agents.forEach(a => a.classList.add('active'));
+    
+    document.querySelectorAll('.slider').forEach(s => {
+      let val = parseInt(s.value);
+      const interval = setInterval(() => {
+        val += Math.floor(Math.random() * 10) + 5;
+        s.value = val > 100 ? 100 : val;
+        if (val >= 100) clearInterval(interval);
+      }, 60);
+    });
+    
+    let mval = parseInt(master.value);
+    const mint = setInterval(() => {
+      mval += 15;
+      master.value = mval > 100 ? 100 : mval;
+      triggerGlitchBurst();
+    }, 150);
+    
+    raw.style.display = 'block';
+    raw.textContent = `Analyzing inputs… checking invariants… processing "${query}"… risk assessment… governance check… ---- signal noise increasing ----`;
+    
+    setTimeout(() => {
+      distilled.innerHTML = `<strong>DISTILLED OUTPUT:</strong><br><br>Query received: "${query}"<br><br>System status nominal. Live Signal Flow active.<br>Confidence: High — vigilance intensifying —`;
+      
+      setTimeout(() => {
+        agents.forEach(a => a.classList.remove('active'));
+        raw.style.display = 'none';
+        spinner.style.display = 'none';
+        meter.classList.remove('glitch-heavy');
+        clearInterval(spinInt);
+      }, 3000);
+    }, 2200);
+  }
+
+  input.addEventListener('keypress', e => {
+    if (e.key === 'Enter' && input.value.trim()) {
+      simulateProcessing(input.value.trim());
+      input.value = '';
+    }
+  });
+
+  lockdown.addEventListener('click', () => {
+    lockdown.classList.add('locked');
+    lockdown.textContent = 'EXECUTION HALTED — GOVERNANCE OVERRIDE';
+    document.body.style.background = '#300';
+    document.querySelectorAll('*').forEach(el => el.style.color = '#f00');
+    document.querySelectorAll('.slider').forEach(s => s.value = 0);
+    distilled.innerHTML = '<strong style="font-size:40px;">SYSTEM LOCKDOWN ENGAGED</strong>';
+    triggerGlitchBurst();
+  });
+
+  // Random ambient glitches
+  setInterval(() => {
+    if (Math.random() > 0.85) triggerGlitchBurst();
+  }, 3000);
+</script>
+</body>
+</html>

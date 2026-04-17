@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://merid.io/schemas/v1.0/IntentEnvelope.json",
+  "title": "IntentEnvelope",
+  "description": "Canonical schema for MERID intent envelopes - the atomic unit of agent decision-making",
+  "version": "1.0.0",
+  "type": "object",
+  "required": ["intent_id", "intent_type", "source_agent", "timestamp", "payload", "signature"],
+  "properties": {
+    "intent_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this intent"
+    },
+    "intent_type": {
+      "type": "string",
+      "enum": ["trade", "rebalance", "hedge", "arbitrage", "prediction", "governance", "treasury", "alert"],
+      "description": "Classification of the intent"
+    },
+    "source_agent": {
+      "type": "string",
+      "description": "Agent ID that originated this intent"
+    },
+    "timestamp": {
+      "type": "number",
+      "description": "Unix timestamp when intent was created"
+    },
+    "expires_at": {
+      "type": ["number", "null"],
+      "description": "Unix timestamp when intent expires (null = no expiry)"
+    },
+    "priority": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 5,
+      "description": "Priority level (1=lowest, 10=highest)"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Intent-specific payload data",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["buy", "sell", "open_long", "open_short", "close", "transfer", "stake", "unstake", "vote", "propose"]
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Trading pair or asset symbol"
+        },
+        "quantity": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Amount to trade/transfer"
+        },
+        "price_limit": {
+          "type": ["number", "null"],
+          "description": "Maximum/minimum price for execution"
+        },
+        "slippage_tolerance_bps": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 50,
+          "description": "Maximum slippage in basis points"
+        },
+        "time_in_force": {
+          "type": "string",
+          "enum": ["GTC", "IOC", "FOK", "GTD"],
+          "default": "GTC"
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Additional context-specific data"
+        }
+      }
+    },
+    "risk_assessment": {
+      "type": "object",
+      "description": "Pre-computed risk metrics",
+      "properties": {
+        "max_loss_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "var_95": {
+          "type": "number"
+        },
+        "exposure_delta": {
+          "type": "number"
+        },
+        "correlation_impact": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        }
+      }
+    },
+    "requires_consensus": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether this intent requires consensus approval"
+    },
+    "consensus_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.67,
+      "description": "Required vote threshold for approval"
+    },
+    "signature": {
+      "type": "string",
+      "description": "Cryptographic signature of the intent"
+    },
+    "parent_intent_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Reference to parent intent if this is a sub-intent"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Searchable tags for categorization"
+    }
+  },
+  "additionalProperties": false
+}

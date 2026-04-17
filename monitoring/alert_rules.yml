@@ -1,0 +1,297 @@
+# MERID Alert Rules
+# Week 2: Production Operations Gate - Evidence Artifact
+# Date: 2026-01-26
+
+groups:
+  - name: merid_critical
+    rules:
+      # API Health Critical Alerts
+      - alert: MERID_API_Down
+        expr: up{job="merid-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: merid-api
+          team: operations
+        annotations:
+          summary: "MERID API is down"
+          description: "MERID API has been down for more than 1 minute"
+          runbook_url: "https://docs.merid.com/runbooks/api-down"
+          dashboard_url: "http://grafana.merid.com/d/system-health"
+
+      - alert: MERID_API_High_Error_Rate
+        expr: rate(http_requests_total{job="merid-api",status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          service: merid-api
+          team: operations
+        annotations:
+          summary: "MERID API error rate is high"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+          runbook_url: "https://docs.merid.com/runbooks/api-errors"
+          dashboard_url: "http://grafana.merid.com/d/api-performance"
+
+      - alert: MERID_API_High_Latency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="merid-api"}[5m])) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          service: merid-api
+          team: operations
+        annotations:
+          summary: "MERID API latency is high"
+          description: "95th percentile latency is {{ $value }}s over the last 5 minutes"
+          runbook_url: "https://docs.merid.com/runbooks/api-latency"
+          dashboard_url: "http://grafana.merid.com/d/api-performance"
+
+  - name: merid_governance
+    rules:
+      # Governance Gate Alerts
+      - alert: Technical_Readiness_Gate_Failed
+        expr: merid_technical_readiness_gate_status != 1
+        for: 1m
+        labels:
+          severity: critical
+          service: governance
+          team: operations
+        annotations:
+          summary: "Technical Readiness Gate failed"
+          description: "Technical readiness gate status is {{ query \"merid_technical_readiness_gate_status\" | first | value }}"
+          runbook_url: "https://docs.merid.com/runbooks/technical-readiness-gate"
+          dashboard_url: "http://grafana.merid.com/d/governance-gates"
+
+      - alert: Cohort_Governance_Gate_Failed
+        expr: merid_cohort_gate_status != 1
+        for: 1m
+        labels:
+          severity: critical
+          service: governance
+          team: operations
+        annotations:
+          summary: "Cohort Governance Gate failed"
+          description: "Cohort gate status is {{ query \"merid_cohort_gate_status\" | first | value }}"
+          runbook_url: "https://docs.merid.com/runbooks/cohort-gate"
+          dashboard_url: "http://grafana.merid.com/d/governance-gates"
+
+      - alert: Stress_Test_Gate_Failed
+        expr: merid_stress_test_gate_status != 1
+        for: 1m
+        labels:
+          severity: critical
+          service: governance
+          team: operations
+        annotations:
+          summary: "Stress Test Gate failed"
+          description: "Stress test gate status is {{ query \"merid_stress_test_gate_status\" | first | value }}"
+          runbook_url: "https://docs.merid.com/runbooks/stress-test-gate"
+          dashboard_url: "http://grafana.merid.com/d/governance-gates"
+
+  - name: merid_reality_system
+    rules:
+      # Reality System Alerts
+      - alert: Reality_Registry_Degraded
+        expr: merid_reality_assertions_valid_percentage < 50
+        for: 2m
+        labels:
+          severity: warning
+          service: reality-registry
+          team: operations
+        annotations:
+          summary: "Reality Registry assertion health degraded"
+          description: "Only {{ $value }}% of assertions are valid"
+          runbook_url: "https://docs.merid.com/runbooks/reality-registry"
+          dashboard_url: "http://grafana.merid.com/d/reality-system"
+
+      - alert: Reality_Mode_Blind
+        expr: merid_reality_system_mode == "BLIND"
+        for: 1m
+        labels:
+          severity: critical
+          service: reality-registry
+          team: operations
+        annotations:
+          summary: "Reality system is in BLIND mode"
+          description: "System cannot operate without valid assertions"
+          runbook_url: "https://docs.merid.com/runbooks/reality-blind-mode"
+          dashboard_url: "http://grafana.merid.com/d/reality-system"
+
+      - alert: Reality_Conflicts_Detected
+        expr: merid_reality_conflicts_count > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: reality-registry
+          team: operations
+        annotations:
+          summary: "Reality conflicts detected"
+          description: "{{ $value }} conflicts detected in reality registry"
+          runbook_url: "https://docs.merid.com/runbooks/reality-conflicts"
+          dashboard_url: "http://grafana.merid.com/d/reality-system"
+
+  - name: merid_swarm
+    rules:
+      # Swarm Health Alerts
+      - alert: Swarm_Agent_Unhealthy
+        expr: merid_swarm_agent_health < 0.8
+        for: 2m
+        labels:
+          severity: warning
+          service: swarm
+          team: operations
+        annotations:
+          summary: "Swarm agent health degraded"
+          description: "Swarm health is {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs.merid.com/runbooks/swarm-health"
+          dashboard_url: "http://grafana.merid.com/d/swarm-health"
+
+      - alert: Swarm_Decision_Latency_High
+        expr: histogram_quantile(0.95, rate(merid_swarm_decision_duration_seconds_bucket[5m])) > 5.0
+        for: 5m
+        labels:
+          severity: warning
+          service: swarm
+          team: operations
+        annotations:
+          summary: "Swarm decision latency high"
+          description: "95th percentile decision latency is {{ $value }}s"
+          runbook_url: "https://docs.merid.com/runbooks/swarm-latency"
+          dashboard_url: "http://grafana.merid.com/d/swarm-performance"
+
+  - name: merid_infrastructure
+    rules:
+      # Infrastructure Alerts
+      - alert: High_Memory_Usage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+          team: operations
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs.merid.com/runbooks/high-memory"
+          dashboard_url: "http://grafana.merid.com/d/infrastructure"
+
+      - alert: High_CPU_Usage
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+          team: operations
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}%"
+          runbook_url: "https://docs.merid.com/runbooks/high-cpu"
+          dashboard_url: "http://grafana.merid.com/d/infrastructure"
+
+      - alert: Disk_Space_Low
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+          service: infrastructure
+          team: operations
+        annotations:
+          summary: "Low disk space"
+          description: "Only {{ $value | humanizePercentage }} disk space remaining"
+          runbook_url: "https://docs.merid.com/runbooks/low-disk-space"
+          dashboard_url: "http://grafana.merid.com/d/infrastructure"
+
+  - name: merid_database
+    rules:
+      # Database Alerts
+      - alert: Neo4j_Connection_Failed
+        expr: up{job="neo4j"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: neo4j
+          team: operations
+        annotations:
+          summary: "Neo4j database is down"
+          description: "Neo4j database has been down for more than 1 minute"
+          runbook_url: "https://docs.merid.com/runbooks/neo4j-down"
+          dashboard_url: "http://grafana.merid.com/d/database-health"
+
+      - alert: Redis_Connection_Failed
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+          team: operations
+        annotations:
+          summary: "Redis cache is down"
+          description: "Redis cache has been down for more than 1 minute"
+          runbook_url: "https://docs.merid.com/runbooks/redis-down"
+          dashboard_url: "http://grafana.merid.com/d/database-health"
+
+      - alert: Database_Connection_Pool_Exhausted
+        expr: neo4j_database_pool_active > neo4j_database_pool_max * 0.9
+        for: 2m
+        labels:
+          severity: warning
+          service: neo4j
+          team: operations
+        annotations:
+          summary: "Neo4j connection pool nearly exhausted"
+          description: "{{ $value }}/{{ query \"neo4j_database_pool_max\" | first }} connections active"
+          runbook_url: "https://docs.merid.com/runbooks/connection-pool"
+          dashboard_url: "http://grafana.merid.com/d/database-health"
+
+  - name: merid_drift
+    rules:
+      - alert: MERID_Drift_Degraded
+        expr: merid_drift_status >= 2
+        for: 5m
+        labels:
+          severity: warning
+          service: merid-drift
+          team: ml-ops
+        annotations:
+          summary: "Model/strategy drift degraded"
+          description: "Drift monitor {{ $labels.monitor_id }} ({{ $labels.drift_type }}) has been degraded for 5+ minutes"
+          runbook_url: "https://docs.merid.com/runbooks/model-drift-response"
+
+      - alert: MERID_Drift_Critical
+        expr: merid_drift_status >= 3
+        for: 2m
+        labels:
+          severity: critical
+          service: merid-drift
+          team: ml-ops
+        annotations:
+          summary: "Model/strategy drift critical"
+          description: "Drift monitor {{ $labels.monitor_id }} ({{ $labels.drift_type }}) is CRITICAL — automatic demotion triggered"
+          runbook_url: "https://docs.merid.com/runbooks/model-drift-response"
+
+      - alert: MERID_Feed_Stale
+        expr: merid_feeds_stale_total > 0
+        for: 3m
+        labels:
+          severity: warning
+          service: merid-data
+          team: data-ops
+        annotations:
+          summary: "Stale data feeds detected"
+          description: "{{ $value }} data feed(s) are stale — instruments may be auto-paused"
+          runbook_url: "https://docs.merid.com/runbooks/feed-staleness"
+
+# Inhibition Rules
+inhibit_rules:
+  # Don't alert on latency if the service is down
+  - source_match:
+      - alertname: MERID_API_Down
+    target_match:
+      - alertname: MERID_API_High_Latency
+    equal: ['service', 'team']
+
+  # Don't alert on error rate if the service is down
+  - source_match:
+      - alertname: MERID_API_Down
+    target_match:
+      - alertname: MERID_API_High_Error_Rate
+    equal: ['service', 'team']

@@ -1,0 +1,7 @@
+{
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.defaultInterpreterPath": "python",
+  "terminal.integrated.env.windows": {
+    "MERID_ENV": "development"
+  }
+}

@@ -1,0 +1,8 @@
+
+=== Creating ctrl with daily_loss_limit=100.0 ===
+ctrl id = 1878930670864
+ctrl.__dict__ = {'daily_loss_limit': 500.0, 'max_position_value': 10000.0, 'error_threshold': 10, '_global_kill': False, '_kill_reason': None, '_kill_details': None, '_kill_timestamp': None, '_daily_pnl': 0.0, '_daily_pnl_reset_date': '2026-03-26', '_total_position_value': 0.0, '_error_count': 0, '_error_window_start': 1774536652.009142, '_events': [], '_callbacks': [], '_lock': <unlocked _thread.lock object at 0x000001B57907B200>, '_consecutive_rejections': 0, '_auto_halt_until': 0.0, '_auto_halt_cooldown': 300.0}
+type(ctrl.daily_loss_limit) = <class 'float'>
+ctrl.daily_loss_limit = 500.0
+actual_value = 500.0
+expected 100.0, actual 500.0, match: False

@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\telemetry_manager.py
+# hypothesis_version: 6.151.4
+
+[0.01, 0.1, 1.0, 100, 180, 365, 730, 1000, '***MASKED***', 'access_token', 'agent_id', 'analytics', 'api_key', 'archive', 'classification', 'cold', 'correlation_id', 'execution', 'gamification', 'gamification_swarm', 'governance', 'hot', 'internal', 'jwt_token', 'log_count', 'logs', 'market_data', 'meta_audit', 'meta_audit_runtime', 'metric_count', 'metrics', 'mnemonic', 'owner', 'password', 'private_key', 'public', 'refresh_token', 'retention_days', 'retention_tier', 'risk', 'sampling_rate', 'secret', 'secret_key', 'seed_phrase', 'sensitive', 'social', 'strategy', 'streams', 'test_swarm', 'timestamp', 'total_logs', 'total_metrics', 'total_traces', 'trace_id', 'traces', 'user_id', 'warm']

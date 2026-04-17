@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\events.py
+# hypothesis_version: 6.151.4
+
+[',', '1.0', ':', 'action', 'actor', 'agent_id', 'agent_output', 'audit', 'audit_system', 'causation_id', 'consensus', 'consensus_engine', 'content', 'core.events', 'correlation_id', 'default', 'details', 'environment', 'error', 'event_id', 'event_type', 'execution', 'heartbeat', 'info', 'market_data', 'max_retries', 'metadata', 'news', 'onchain', 'output_type', 'partition_key', 'payload', 'price', 'priority', 'producer_id', 'producer_type', 'production', 'region', 'result', 'retry_count', 'round_id', 'schema_version', 'sequence_number', 'severity', 'signature', 'simulation', 'social', 'source', 'state', 'symbol', 'system', 'tags', 'timestamp', 'ttl_seconds', 'utf-8', 'volume', 'votes']

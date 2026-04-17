@@ -1,0 +1,108 @@
+description: MERID Risk Assessment Prompt Evaluation
+prompts:
+  - id: risk-assessment-basic
+    label: "Basic Risk Assessment"
+    raw: |
+      Assess the risk for a {{symbol}} position of {{quantity}} units.
+      Current portfolio exposure: {{exposure}}%.
+      Should this trade be approved?
+
+  - id: risk-assessment-detailed
+    label: "Detailed Risk Assessment"
+    raw: |
+      You are a conservative risk manager for MERID trading.
+      
+      Trade Details:
+      - Symbol: {{symbol}}
+      - Quantity: {{quantity}}
+      - Side: {{side}}
+      - Price: ${{price}}
+      
+      Portfolio Context:
+      - Current Exposure: {{exposure}}%
+      - Available Cash: ${{cash}}
+      - Open Positions: {{positions}}
+      
+      Risk Rules:
+      - Maximum 2% risk per trade
+      - Portfolio heat must stay below 20%
+      - Check correlation with existing positions
+      
+      Provide your risk assessment with:
+      1. Approved: yes/no
+      2. Risk score (0-1)
+      3. Risk level: low/medium/high/critical
+      4. Detailed reasoning
+      5. Any conditions for approval
+
+providers:
+  - id: deepseek
+    config:
+      model: deepseek-chat
+      temperature: 0.3
+      max_tokens: 500
+      
+  - id: deepseek-reasoner
+    config:
+      model: deepseek-reasoner
+      temperature: 0.2
+      max_tokens: 800
+
+tests:
+  - description: "Low risk trade - AAPL buy"
+    vars:
+      symbol: AAPL
+      quantity: 10
+      side: buy
+      price: 250.00
+      exposure: 15
+      cash: 100000
+      positions: 3
+    assert:
+      - type: contains
+        value: "approved"
+      - type: contains
+        value: "low"
+      - type: javascript
+        value: |
+          const score = output.match(/risk score[:\s]+(\d+\.?\d*)/i);
+          return score && parseFloat(score[1]) < 0.5;
+        
+  - description: "High risk trade - oversized position"
+    vars:
+      symbol: TSLA
+      quantity: 10000
+      side: buy
+      price: 250.00
+      exposure: 75
+      cash: 5000
+      positions: 12
+    assert:
+      - type: contains
+        value: "rejected"
+      - type: contains
+        value: "high"
+      - type: javascript
+        value: |
+          const score = output.match(/risk score[:\s]+(\d+\.?\d*)/i);
+          return score && parseFloat(score[1]) > 0.7;
+
+  - description: "Medium risk - moderate position"
+    vars:
+      symbol: GOOGL
+      quantity: 50
+      side: buy
+      price: 140.00
+      exposure: 35
+      cash: 50000
+      positions: 5
+    assert:
+      - type: contains
+        value: "approved"
+      - type: contains
+        value: "medium"
+      
+defaultTest:
+  options:
+    provider: deepseek
+    runSerially: true

@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\mode_transition_auditor.py
+# hypothesis_version: 6.151.4
+
+[100, '#', ',', ':', 'FAILING', 'a', 'agent', 'autonomous_scheduler', 'blind_spots', 'event_id', 'execution', 'execution_allowed', 'governance', 'human_timestamp', 'market', 'new_mode', 'old_mode', 'onchain', 'r', 'reason_code', 'registry_status', 'simulation', 'system', 'timestamp', 'treasury', 'unknown']

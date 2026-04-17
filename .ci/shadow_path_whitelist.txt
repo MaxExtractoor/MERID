@@ -1,0 +1,21 @@
+# Shadow Path Whitelist
+# ====================
+#
+# Files listed here are allowed to use direct venue client calls.
+# This is a DANGEROUS list - only add files with explicit risk team approval.
+#
+# Format: One file path per line, relative to repo root
+#
+# Whitelist Policy:
+# - Each entry must have a linked JIRA ticket or incident ID
+# - Entries expire after 90 days and must be re-approved
+# - Max 10 files in whitelist at any time
+
+# Canonical order router itself (by design)
+merid/event_venues/kalshi/order_router.py
+
+# Paper trading session (expected to bypass for simulation)
+merid/prediction/paper_session.py
+
+# Legacy modules (being phased out, see T-061)
+merid/event_venues/_legacy/polymarket/order_manager.py

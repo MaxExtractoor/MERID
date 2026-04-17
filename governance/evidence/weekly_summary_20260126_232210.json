@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-01-26T23:22:10.675441",
+  "week_start": "2026-01-19T23:22:10.675441",
+  "week_end": "2026-01-26T23:22:10.675441",
+  "technical_gate": {
+    "status": "PASS",
+    "last_run": "2026-01-26T23:21:58.112500",
+    "evidence_url": "governance\\evidence\\technical_gate_20260126_232158.json",
+    "issues": [
+      "Mock gate - real TechnicalReadinessGate not available"
+    ]
+  },
+  "operational_gate": {
+    "status": "PASS",
+    "last_run": "2026-01-26T23:21:58.127439",
+    "evidence_url": "governance\\evidence\\operational_gate_20260126_232158.json",
+    "issues": [
+      "Mock gate - real OperationalReadinessGate not available"
+    ]
+  },
+  "threeam_drill": {
+    "status": "PASS",
+    "last_run": "2026-01-26T23:22:10.660975",
+    "evidence_url": "ops\\drills\\3am_drill_report.md",
+    "issues": []
+  },
+  "overall_status": "PASS",
+  "blocking_issues": [
+    "Mock gate - real TechnicalReadinessGate not available",
+    "Mock gate - real OperationalReadinessGate not available"
+  ]
+}

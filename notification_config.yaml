@@ -1,0 +1,30 @@
+# Debate Alert Notification Configuration
+# This file controls how debate alerts are routed to Telegram and X/Twitter
+
+channels:
+  telegram:
+    enabled: true
+    critical_alerts: true
+    warning_alerts: true
+    daily_summary: true
+    rate_limit_messages_per_hour: 50
+    rate_limit_tweets_per_day: 20
+
+  x_twitter:
+    enabled: false
+    critical_alerts: false
+    warning_alerts: false
+    daily_summary: false
+    rate_limit_messages_per_hour: 50
+    rate_limit_tweets_per_day: 20
+
+routing:
+  critical_to_telegram: true
+  critical_to_x: false
+  warnings_to_telegram: true
+  warnings_to_x: false
+  high_utilization_only: false
+  aggregate_similar: true
+
+poll_interval_minutes: 5
+daily_summary_time_utc: 9

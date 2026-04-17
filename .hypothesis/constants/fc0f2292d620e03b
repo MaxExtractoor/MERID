@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\reflection\persistence.py
+# hypothesis_version: 6.151.4
+
+[5.0, 30.0, -10000, -5000, 100, 1000, 1024, 10000, '.tmp', '2.0', 'Flush loop started', 'Flush loop stopped', 'archived_at', 'batch_size', 'buffer_size', 'count', 'file_size_mb', 'flush_interval', 'flushes', 'last_updated', 'metadata', 'operations', 'performance', 'r', 'reads', 'reflections', 'storage_path', 'total_reflections', 'uptime_seconds', 'utf-8', 'version', 'w', 'writes', 'writes_per_second']

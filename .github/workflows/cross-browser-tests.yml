@@ -1,0 +1,101 @@
+name: Cross-Browser Dashboard Tests
+
+on:
+  workflow_dispatch:
+# Disabled auto-trigger — Playwright not configured in CI yet
+# Re-enable push/PR triggers once browser tests are wired up
+
+env:
+  PLAYWRIGHT_BASE_URL: http://localhost:5173
+
+jobs:
+  playwright-tests:
+    name: Playwright (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [chromium, firefox, webkit]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/react/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web/react
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: web/react
+        run: npx playwright install --with-deps ${{ matrix.project }}
+
+      - name: Run Playwright tests
+        working-directory: web/react
+        run: npx playwright test --project=${{ matrix.project }}
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ matrix.project }}
+          path: web/react/playwright-report/
+          retention-days: 14
+
+      - name: Upload test videos
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-videos-${{ matrix.project }}
+          path: web/react/test-results/
+          retention-days: 7
+
+  browserstack-tests:
+    name: BrowserStack Live
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: playwright-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/react/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web/react
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: web/react
+        run: npx playwright install --with-deps
+
+      - name: Run BrowserStack tests
+        working-directory: web/react
+        env:
+          BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+          BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+        run: |
+          if [ -n "$BROWSERSTACK_USERNAME" ]; then
+            echo "BrowserStack credentials found — running remote tests"
+            npx playwright test --project=chromium --project=firefox --project=webkit
+          else
+            echo "No BrowserStack credentials — skipping remote tests"
+          fi
+
+      - name: Upload BrowserStack results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browserstack-report
+          path: web/react/playwright-report/
+          retention-days: 14

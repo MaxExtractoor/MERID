@@ -1,0 +1,207 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "MERID API Performance",
+    "tags": [
+      "merid",
+      "api",
+      "performance"
+    ],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Request Rate",
+        "type": "graph",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"merid-api\"}[5m])",
+            "legendFormat": "Total Requests"
+          },
+          {
+            "expr": "rate(http_requests_total{job=\"merid-api\",status=~\"2..\"}[5m])",
+            "legendFormat": "Success Requests"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Requests/sec",
+            "min": 0
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Response Time Percentiles",
+        "type": "graph",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"merid-api\"}[5m]))",
+            "legendFormat": "P50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"merid-api\"}[5m]))",
+            "legendFormat": "P95"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"merid-api\"}[5m]))",
+            "legendFormat": "P99"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Seconds",
+            "min": 0
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Error Rate by Status",
+        "type": "graph",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"merid-api\",status=\"500\"}[5m])",
+            "legendFormat": "500 Server Error"
+          },
+          {
+            "expr": "rate(http_requests_total{job=\"merid-api\",status=\"503\"}[5m])",
+            "legendFormat": "503 Service Unavailable"
+          },
+          {
+            "expr": "rate(http_requests_total{job=\"merid-api\",status=\"504\"}[5m])",
+            "legendFormat": "504 Gateway Timeout"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Errors/sec",
+            "min": 0
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Response Time Distribution",
+        "type": "heatmap",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 8
+        },
+        "targets": [
+          {
+            "expr": "rate(http_request_duration_seconds_bucket{job=\"merid-api\"}[5m])",
+            "legendFormat": "{{le}}"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "API Health Score",
+        "type": "stat",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 16
+        },
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{job=\"merid-api\",status=~\"2..\"}[5m]) / rate(http_requests_total{job=\"merid-api\"}[5m]) * 100",
+            "legendFormat": "Success Rate"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 95
+                },
+                {
+                  "color": "yellow",
+                  "value": 98
+                },
+                {
+                  "color": "green",
+                  "value": 99
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Average Response Time",
+        "type": "stat",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 6,
+          "y": 16
+        },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"merid-api\"}[5m]))",
+            "legendFormat": "P50 Response Time"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0.5
+                },
+                {
+                  "color": "yellow",
+                  "value": 1.0
+                },
+                {
+                  "color": "red",
+                  "value": 2.0
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "refresh": "15s"
+  }
+}

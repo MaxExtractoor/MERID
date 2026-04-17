@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>MERID Dashboard</title>
+    <style>
+        body { font-family: monospace; background: #0a0a0a; color: #00ff41; padding: 20px; }
+        #output { border: 1px solid #00ff41; padding: 15px; height: 500px; overflow-y: auto; background: #000; margin-top: 20px; }
+        .agent-line { margin: 5px 0; border-bottom: 1px solid #111; padding-bottom: 5px; }
+        .final-box { background: #002200; border: 2px solid #00ff41; padding: 15px; margin-top: 15px; color: white; }
+    </style>
+</head>
+<body>
+    <h1>MERID SWARM OVERSIGHT</h1>
+    <button onclick="startStream()">INITIATE ANALYSIS</button>
+    <div id="output">SYSTEM READY...</div>
+
+    <script>
+        function startStream() {
+            const out = document.getElementById("output");
+            out.innerHTML = "Opening stream...<br>";
+            const es = new EventSource("http://127.0.0.1:8011/submit");
+            es.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                if (data.agent) {
+                    out.innerHTML += `<div class="agent-line"><strong>${data.agent}:</strong> ${data.content}</div>`;
+                }
+                if (data.status === "COMPLETE") {
+                    out.innerHTML += `<div class="final-box">
+                        <h3>CONSCIOUSNESS FORMED</h3>
+                        <p>SCORE: ${data.score}</p>
+                        <p>RESULT: ${data.approved}</p>
+                    </div>`;
+                    es.close();
+                }
+            };
+        }
+    </script>
+</body>
+</html>

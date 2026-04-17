@@ -1,0 +1,391 @@
+{
+  "captures": [
+    {
+      "timestamp": "2026-04-01T11:36:44.877118",
+      "elapsed": 0,
+      "summary": {
+        "profiles_count": 10,
+        "top_coroutines": [
+          {
+            "coroutine": "StreamingAgent._run_loop",
+            "count": 66
+          },
+          {
+            "coroutine": "KalshiTradingAgent._run_loop",
+            "count": 43
+          },
+          {
+            "coroutine": "Event.wait",
+            "count": 16
+          },
+          {
+            "coroutine": "MeridLoop.run",
+            "count": 10
+          },
+          {
+            "coroutine": "KalshiContinuousTrader.run",
+            "count": 10
+          },
+          {
+            "coroutine": "NotificationManager._process_loop",
+            "count": 10
+          },
+          {
+            "coroutine": "Queue.get",
+            "count": 8
+          },
+          {
+            "coroutine": "_app_lifespan.<locals>._deferred_orchestrator_start",
+            "count": 6
+          },
+          {
+            "coroutine": "AlertManager._monitor_loop",
+            "count": 6
+          },
+          {
+            "coroutine": "LifespanOn.main",
+            "count": 4
+          }
+        ],
+        "lag_range_ms": {
+          "min": 1344.0,
+          "max": 14859.0,
+          "avg": 7179.6
+        },
+        "timestamp": 1775057804.4912055
+      }
+    },
+    {
+      "timestamp": "2026-04-01T11:37:15.945555",
+      "elapsed": 30,
+      "summary": {
+        "profiles_count": 10,
+        "top_coroutines": [
+          {
+            "coroutine": "StreamingAgent._run_loop",
+            "count": 60
+          },
+          {
+            "coroutine": "KalshiTradingAgent._run_loop",
+            "count": 57
+          },
+          {
+            "coroutine": "Event.wait",
+            "count": 21
+          },
+          {
+            "coroutine": "MeridLoop.run",
+            "count": 10
+          },
+          {
+            "coroutine": "KalshiContinuousTrader.run",
+            "count": 10
+          },
+          {
+            "coroutine": "NotificationManager._process_loop",
+            "count": 10
+          },
+          {
+            "coroutine": "Queue.get",
+            "count": 5
+          },
+          {
+            "coroutine": "_app_lifespan.<locals>._deferred_orchestrator_start",
+            "count": 4
+          },
+          {
+            "coroutine": "AlertManager._monitor_loop",
+            "count": 4
+          },
+          {
+            "coroutine": "MeridLoop._run_step",
+            "count": 4
+          }
+        ],
+        "lag_range_ms": {
+          "min": 1453.0,
+          "max": 14859.0,
+          "avg": 6995.1
+        },
+        "timestamp": 1775057835.9341502
+      }
+    },
+    {
+      "timestamp": "2026-04-01T11:37:46.689328",
+      "elapsed": 60,
+      "summary": {
+        "profiles_count": 10,
+        "top_coroutines": [
+          {
+            "coroutine": "KalshiTradingAgent._run_loop",
+            "count": 64
+          },
+          {
+            "coroutine": "StreamingAgent._run_loop",
+            "count": 58
+          },
+          {
+            "coroutine": "Event.wait",
+            "count": 23
+          },
+          {
+            "coroutine": "MeridLoop.run",
+            "count": 10
+          },
+          {
+            "coroutine": "KalshiContinuousTrader.run",
+            "count": 10
+          },
+          {
+            "coroutine": "NotificationManager._process_loop",
+            "count": 10
+          },
+          {
+            "coroutine": "AlertManager._monitor_loop",
+            "count": 4
+          },
+          {
+            "coroutine": "Queue.get",
+            "count": 4
+          },
+          {
+            "coroutine": "_app_lifespan.<locals>._deferred_orchestrator_start",
+            "count": 3
+          },
+          {
+            "coroutine": "MeridLoop._run_step",
+            "count": 3
+          }
+        ],
+        "lag_range_ms": {
+          "min": 1203.0,
+          "max": 14859.0,
+          "avg": 6877.9
+        },
+        "timestamp": 1775057866.6840787
+      }
+    },
+    {
+      "timestamp": "2026-04-01T11:38:19.777120",
+      "elapsed": 90,
+      "summary": {
+        "profiles_count": 10,
+        "top_coroutines": [
+          {
+            "coroutine": "KalshiTradingAgent._run_loop",
+            "count": 71
+          },
+          {
+            "coroutine": "StreamingAgent._run_loop",
+            "count": 57
+          },
+          {
+            "coroutine": "Event.wait",
+            "count": 26
+          },
+          {
+            "coroutine": "MeridLoop.run",
+            "count": 10
+          },
+          {
+            "coroutine": "KalshiContinuousTrader.run",
+            "count": 10
+          },
+          {
+            "coroutine": "NotificationManager._process_loop",
+            "count": 10
+          },
+          {
+            "coroutine": "AlertManager._monitor_loop",
+            "count": 5
+          },
+          {
+            "coroutine": "Queue.get",
+            "count": 3
+          },
+          {
+            "coroutine": "MeridLoop._run_step",
+            "count": 2
+          },
+          {
+            "coroutine": "publish_forecast",
+            "count": 2
+          }
+        ],
+        "lag_range_ms": {
+          "min": 500.0,
+          "max": 14859.0,
+          "avg": 6459.2
+        },
+        "timestamp": 1775057899.7498693
+      }
+    },
+    {
+      "timestamp": "2026-04-01T11:38:50.098041",
+      "elapsed": 120,
+      "summary": {
+        "profiles_count": 10,
+        "top_coroutines": [
+          {
+            "coroutine": "KalshiTradingAgent._run_loop",
+            "count": 71
+          },
+          {
+            "coroutine": "StreamingAgent._run_loop",
+            "count": 57
+          },
+          {
+            "coroutine": "Event.wait",
+            "count": 27
+          },
+          {
+            "coroutine": "MeridLoop.run",
+            "count": 10
+          },
+          {
+            "coroutine": "KalshiContinuousTrader.run",
+            "count": 10
+          },
+          {
+            "coroutine": "NotificationManager._process_loop",
+            "count": 10
+          },
+          {
+            "coroutine": "AlertManager._monitor_loop",
+            "count": 5
+          },
+          {
+            "coroutine": "Queue.get",
+            "count": 4
+          },
+          {
+            "coroutine": "publish_forecast",
+            "count": 2
+          },
+          {
+            "coroutine": "MeridLoop._run_step",
+            "count": 1
+          }
+        ],
+        "lag_range_ms": {
+          "min": 500.0,
+          "max": 14125.0,
+          "avg": 5078.0
+        },
+        "timestamp": 1775057930.09263
+      }
+    },
+    {
+      "timestamp": "2026-04-01T11:39:23.017652",
+      "elapsed": 150,
+      "summary": {
+        "profiles_count": 10,
+        "top_coroutines": [
+          {
+            "coroutine": "KalshiTradingAgent._run_loop",
+            "count": 71
+          },
+          {
+            "coroutine": "StreamingAgent._run_loop",
+            "count": 57
+          },
+          {
+            "coroutine": "Event.wait",
+            "count": 27
+          },
+          {
+            "coroutine": "MeridLoop.run",
+            "count": 10
+          },
+          {
+            "coroutine": "KalshiContinuousTrader.run",
+            "count": 10
+          },
+          {
+            "coroutine": "NotificationManager._process_loop",
+            "count": 10
+          },
+          {
+            "coroutine": "AlertManager._monitor_loop",
+            "count": 5
+          },
+          {
+            "coroutine": "Queue.get",
+            "count": 4
+          },
+          {
+            "coroutine": "publish_forecast",
+            "count": 2
+          },
+          {
+            "coroutine": "MeridLoop._run_step",
+            "count": 1
+          }
+        ],
+        "lag_range_ms": {
+          "min": 500.0,
+          "max": 14125.0,
+          "avg": 5078.0
+        },
+        "timestamp": 1775057962.5521078
+      }
+    },
+    {
+      "timestamp": "2026-04-01T11:39:53.233990",
+      "elapsed": 180,
+      "summary": {
+        "profiles_count": 10,
+        "top_coroutines": [
+          {
+            "coroutine": "KalshiTradingAgent._run_loop",
+            "count": 70
+          },
+          {
+            "coroutine": "StreamingAgent._run_loop",
+            "count": 58
+          },
+          {
+            "coroutine": "Event.wait",
+            "count": 26
+          },
+          {
+            "coroutine": "MeridLoop.run",
+            "count": 10
+          },
+          {
+            "coroutine": "KalshiContinuousTrader.run",
+            "count": 10
+          },
+          {
+            "coroutine": "NotificationManager._process_loop",
+            "count": 10
+          },
+          {
+            "coroutine": "AlertManager._monitor_loop",
+            "count": 5
+          },
+          {
+            "coroutine": "Queue.get",
+            "count": 4
+          },
+          {
+            "coroutine": "IocpProactor.accept.<locals>.accept_coro",
+            "count": 2
+          },
+          {
+            "coroutine": "MeridLoop._run_step",
+            "count": 1
+          }
+        ],
+        "lag_range_ms": {
+          "min": 500.0,
+          "max": 9219.0,
+          "avg": 2815.5
+        },
+        "timestamp": 1775057993.227101
+      }
+    }
+  ],
+  "start_time": "2026-04-01T11:36:42.632594",
+  "end_time": "2026-04-01T11:41:59.393738"
+}

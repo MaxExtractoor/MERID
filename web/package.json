@@ -1,0 +1,44 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build-css": "npx tailwindcss -i ./static/css/input.css -o ./static/css/output.css --watch",
+    "build-css-prod": "npx tailwindcss -i ./static/css/input.css -o ./static/css/output.css --minify",
+    "dev": "npm run build-css",
+    "build": "npm run build-css-prod",
+    "clean": "rm -f ./static/css/output.css",
+    "rebuild": "npm run clean && npm run build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/chart.js": "^2.9.41",
+    "@types/jest": "^30.0.0",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3",
+    "@types/socket.io-client": "^1.4.36",
+    "autoprefixer": "^10.4.23",
+    "jest": "^30.2.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.3",
+    "ts-jest": "^29.4.6"
+  },
+  "dependencies": {
+    "axios": "^1.13.4",
+    "chart.js": "^4.5.1",
+    "lucide-react": "^0.563.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router-dom": "^7.13.0",
+    "recharts": "^3.7.0",
+    "socket.io-client": "^4.8.3"
+  }
+}

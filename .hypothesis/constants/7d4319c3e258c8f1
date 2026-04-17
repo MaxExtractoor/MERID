@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\info_theory_metrics.py
+# hypothesis_version: 6.151.4
+
+[1e-10, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0, 100, 'actual_n_assets', 'baselines', 'checks_performed', 'concentration', 'effective_n_assets', 'high', 'last_check', 'low', 'max_entropy', 'medium', 'portfolio_entropy', 'recent_avg_kl', 'recent_breaches', 'recent_max_kl', 'sample_count', 'total_baselines']

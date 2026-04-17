@@ -1,0 +1,24 @@
+{
+  "gate_id": "iter5-agent-filter",
+  "timestamp": "2026-04-02T18:00:29.963169+00:00",
+  "duration_seconds": 300,
+  "dry_run": false,
+  "samples_total": 10,
+  "samples_valid": 10,
+  "p95_min": 31.0,
+  "p95_max": 1562.0,
+  "p95_avg": 612.2,
+  "degraded_count": 2,
+  "high_lag_profiles": 10,
+  "verdict": "FAIL",
+  "passed": false,
+  "failures": [
+    "2026-04-02T17:59:28.845968+00:00: P95=1547ms >= 500ms",
+    "2026-04-02T17:59:28.845968+00:00: degraded=true",
+    "2026-04-02T17:59:59.921165+00:00: P95=1547ms >= 500ms",
+    "2026-04-02T17:59:59.921165+00:00: degraded=true",
+    "2026-04-02T18:00:29.937764+00:00: P95=1562ms >= 500ms",
+    "10 high-lag profiles captured"
+  ],
+  "sample_data": null
+}

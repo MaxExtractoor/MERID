@@ -1,0 +1,403 @@
+<!-- Risk & Health Screen Component -->
+<div class="p-6">
+    <!-- Risk Overview Dashboard -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div class="metric-card p-4 border-l-4 border-green-500">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm text-gray-400">Overall Risk</span>
+                <span class="risk-indicator risk-low"></span>
+            </div>
+            <div class="text-2xl font-bold text-green-400">LOW</div>
+            <div class="text-xs text-gray-400">All systems normal</div>
+        </div>
+        
+        <div class="metric-card p-4 border-l-4 border-yellow-500">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm text-gray-400">Margin Usage</span>
+                <span class="risk-indicator risk-medium"></span>
+            </div>
+            <div class="text-2xl font-bold text-yellow-400">78%</div>
+            <div class="text-xs text-gray-400">Approaching limit</div>
+        </div>
+        
+        <div class="metric-card p-4 border-l-4 border-green-500">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm text-gray-400">Position Risk</span>
+                <span class="risk-indicator risk-low"></span>
+            </div>
+            <div class="text-2xl font-bold text-green-400">$45K</div>
+            <div class="text-xs text-gray-400">8.0% of equity</div>
+        </div>
+        
+        <div class="metric-card p-4 border-l-4 border-green-500">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm text-gray-400">Leverage</span>
+                <span class="risk-indicator risk-low"></span>
+            </div>
+            <div class="text-2xl font-bold text-green-400">2.3x</div>
+            <div class="text-xs text-gray-400">Within limits</div>
+        </div>
+    </div>
+    
+    <!-- System Health Panel -->
+    <div class="metric-card p-6 mb-6">
+        <h2 class="text-lg font-semibold mb-4">System Health</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <!-- Broker Connectivity -->
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-medium">Broker Connectivity</span>
+                    <span class="risk-indicator risk-low"></span>
+                </div>
+                <div class="space-y-2">
+                    <div class="flex justify-between text-xs">
+                        <span>Alpaca</span>
+                        <span class="text-green-400">Connected (12ms)</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Interactive Brokers</span>
+                        <span class="text-green-400">Connected (45ms)</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>TD Ameritrade</span>
+                        <span class="text-yellow-400">Degraded (234ms)</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Exchange Connectivity -->
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-medium">Exchange Connectivity</span>
+                    <span class="risk-indicator risk-low"></span>
+                </div>
+                <div class="space-y-2">
+                    <div class="flex justify-between text-xs">
+                        <span>Binance</span>
+                        <span class="text-green-400">Connected (8ms)</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Coinbase</span>
+                        <span class="text-green-400">Connected (15ms)</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Kraken</span>
+                        <span class="text-green-400">Connected (22ms)</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Bybit</span>
+                        <span class="text-green-400">Connected (18ms)</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Data Feeds -->
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-medium">Data Feeds</span>
+                    <span class="risk-indicator risk-low"></span>
+                </div>
+                <div class="space-y-2">
+                    <div class="flex justify-between text-xs">
+                        <span>Price Feed</span>
+                        <span class="text-green-400">Live (1s)</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>News Feed</span>
+                        <span class="text-green-400">Live (5s)</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>On-chain Data</span>
+                        <span class="text-green-400">Live (10s)</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Latency & Error Rate -->
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-medium">Latency</span>
+                    <span class="risk-indicator risk-low"></span>
+                </div>
+                <div class="space-y-2">
+                    <div class="flex justify-between text-xs">
+                        <span>Avg Response Time</span>
+                        <span class="text-green-400">45ms</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>95th Percentile</span>
+                        <span class="text-yellow-400">120ms</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Max Latency</span>
+                        <span class="text-red-400">450ms</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Error Rate -->
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-medium">Error Rate</span>
+                    <span class="risk-indicator risk-low"></span>
+                </div>
+                <div class="space-y-2">
+                    <div class="flex justify-between text-xs">
+                        <span>API Errors</span>
+                        <span class="text-green-400">0.2%</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Timeout Rate</span>
+                        <span class="text-green-400">0.1%</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Failed Orders</span>
+                        <span class="text-green-400">0.0%</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Margin & Risk Limits -->
+            <div class="bg-gray-900 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-medium">Margin & Risk Limits</span>
+                    <span class="risk-indicator risk-medium"></span>
+                </div>
+                <div class="space-y-2">
+                    <div class="flex justify-between text-xs">
+                        <span>Margin Used</span>
+                        <span class="text-yellow-400">78%</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Position Limits</span>
+                        <span class="text-green-400">45%</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span>Daily Loss Limit</span>
+                        <span class="text-green-400">12%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Risk Alerts Table -->
+    <div class="metric-card p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-semibold">Risk Alerts</h2>
+            <div class="flex gap-2">
+                <button class="text-sm text-blue-400 hover:text-blue-300">Acknowledge All</button>
+                <button class="text-sm text-gray-400 hover:text-white">Export</button>
+            </div>
+        </div>
+        
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-left text-gray-400 border-b border-gray-800">
+                        <th class="pb-2">Timestamp</th>
+                        <th class="pb-2">Severity</th>
+                        <th class="pb-2">Alert Type</th>
+                        <th class="pb-2">Description</th>
+                        <th class="pb-2">Source</th>
+                        <th class="pb-2">Status</th>
+                        <th class="pb-2">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="riskAlertsTable">
+                    <!-- Alert rows will be populated here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <!-- Risk Chart -->
+    <div class="metric-card p-6 mt-6">
+        <h2 class="text-lg font-semibold mb-4">Risk Metrics Over Time</h2>
+        <div class="h-64">
+            <canvas id="riskMetricsChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<script>
+// Mock risk alerts data
+const riskAlerts = [
+    {
+        timestamp: '2 minutes ago',
+        severity: 'medium',
+        type: 'MARGIN_WARNING',
+        description: 'Margin usage approaching 80% threshold',
+        source: 'Risk Monitor',
+        status: 'active'
+    },
+    {
+        timestamp: '15 minutes ago',
+        severity: 'low',
+        type: 'LATENCY_SPIKE',
+        description: 'TD Ameritrade API latency increased to 234ms',
+        source: 'Connectivity Monitor',
+        status: 'acknowledged'
+    },
+    {
+        timestamp: '1 hour ago',
+        severity: 'high',
+        type: 'POSITION_LIMIT',
+        description: 'BTC position size approaching maximum limit',
+        source: 'Position Monitor',
+        status: 'resolved'
+    },
+    {
+        timestamp: '2 hours ago',
+        severity: 'low',
+        type: 'VOLATILITY_ALERT',
+        description: 'BTC volatility increased 45% in last hour',
+        source: 'Volatility Monitor',
+        status: 'acknowledged'
+    },
+    {
+        timestamp: '3 hours ago',
+        severity: 'medium',
+        type: 'P&L_SWING',
+        description: 'Daily P&L swing exceeded 5% threshold',
+        source: 'P&L Monitor',
+        status: 'resolved'
+    }
+];
+
+// Populate risk alerts table
+function populateRiskAlertsTable() {
+    const tbody = document.getElementById('riskAlertsTable');
+    tbody.innerHTML = '';
+    
+    riskAlerts.forEach(alert => {
+        const severityClass = alert.severity === 'high' ? 'text-red-400 bg-red-900/20 border-red-700' :
+                            alert.severity === 'medium' ? 'text-yellow-400 bg-yellow-900/20 border-yellow-700' :
+                            'text-blue-400 bg-blue-900/20 border-blue-700';
+        
+        const statusClass = alert.status === 'active' ? 'text-red-400' :
+                          alert.status === 'acknowledged' ? 'text-yellow-400' :
+                          'text-green-400';
+        
+        const row = `
+            <tr class="table-row-hover border-b border-gray-800">
+                <td class="py-3 text-xs text-gray-400">${alert.timestamp}</td>
+                <td class="py-3">
+                    <span class="text-xs ${severityClass} px-2 py-1 rounded border">${alert.severity.toUpperCase()}</span>
+                </td>
+                <td class="py-3 text-xs font-mono">${alert.type}</td>
+                <td class="py-3 text-sm max-w-xs">${alert.description}</td>
+                <td class="py-3 text-xs text-gray-400">${alert.source}</td>
+                <td class="py-3">
+                    <span class="text-xs ${statusClass}">${alert.status.toUpperCase()}</span>
+                </td>
+                <td class="py-3">
+                    <div class="flex gap-1">
+                        ${alert.status === 'active' ? '<button class="text-blue-400 hover:text-blue-300 text-xs">Acknowledge</button>' : ''}
+                        <button class="text-gray-400 hover:text-white text-xs">Details</button>
+                    </div>
+                </td>
+            </tr>
+        `;
+        tbody.innerHTML += row;
+    });
+}
+
+// Initialize risk metrics chart
+function initRiskMetricsChart() {
+    const ctx = document.getElementById('riskMetricsChart');
+    if (!ctx) return;
+    
+    new Chart(ctx.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00', '24:00'],
+            datasets: [
+                {
+                    label: 'Margin Usage %',
+                    data: [65, 68, 72, 75, 78, 76, 78],
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    yAxisID: 'y'
+                },
+                {
+                    label: 'Position Risk $K',
+                    data: [35, 38, 42, 45, 43, 44, 45],
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    yAxisID: 'y1'
+                },
+                {
+                    label: 'Error Rate %',
+                    data: [0.1, 0.2, 0.15, 0.3, 0.25, 0.2, 0.2],
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    yAxisID: 'y2'
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                mode: 'index',
+                intersect: false,
+            },
+            plugins: {
+                legend: {
+                    display: true,
+                    labels: { color: '#a0a0a0' }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: '#2a2a2a' },
+                    ticks: { color: '#a0a0a0' }
+                },
+                y: {
+                    type: 'linear',
+                    display: true,
+                    position: 'left',
+                    grid: { color: '#2a2a2a' },
+                    ticks: { color: '#a0a0a0' },
+                    title: {
+                        display: true,
+                        text: 'Margin %',
+                        color: '#a0a0a0'
+                    }
+                },
+                y1: {
+                    type: 'linear',
+                    display: true,
+                    position: 'right',
+                    grid: { drawOnChartArea: false },
+                    ticks: { color: '#a0a0a0' },
+                    title: {
+                        display: true,
+                        text: 'Risk $K',
+                        color: '#a0a0a0'
+                    }
+                },
+                y2: {
+                    type: 'linear',
+                    display: false,
+                    grid: { drawOnChartArea: false },
+                    ticks: { color: '#a0a0a0' }
+                }
+            }
+        }
+    });
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    populateRiskAlertsTable();
+    initRiskMetricsChart();
+});
+</script>

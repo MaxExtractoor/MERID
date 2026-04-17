@@ -1,0 +1,325 @@
+{
+  "dashboard": {
+    "title": "MERID Kalshi Pipeline - Audit Spec Observability",
+    "tags": ["merid", "kalshi", "audit", "rag"],
+    "timezone": "utc",
+    "schemaVersion": 36,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Version Drift - FORMULAS_VERSION",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_formulas_version{job=~\"merid-.*\"}",
+            "legendFormat": "{{instance}} - {{version}}",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "orientation": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 2}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Version Drift - AUDIT_SPEC_VERSION",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_audit_spec_version{job=~\"merid-.*\"}",
+            "legendFormat": "{{instance}} - {{version}}",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "orientation": "auto"
+        }
+      },
+      {
+        "id": 3,
+        "title": "Version Drift Alert",
+        "type": "alertlist",
+        "gridPos": {"h": 4, "w": 12, "x": 12, "y": 0},
+        "options": {
+          "showOptions": "current",
+          "maxItems": 10,
+          "sortOrder": 1
+        }
+      },
+      {
+        "id": 4,
+        "title": "Pipeline R/A/G Status - BTC 15m",
+        "type": "gauge",
+        "gridPos": {"h": 8, "w": 4, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_pipeline_status{asset=\"BTC\",timeframe=\"15m\"}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "green", "value": 2}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Pipeline R/A/G Status - ETH 15m",
+        "type": "gauge",
+        "gridPos": {"h": 8, "w": 4, "x": 4, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_pipeline_status{asset=\"ETH\",timeframe=\"15m\"}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "green", "value": 2}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Pipeline R/A/G Status - SOL 15m",
+        "type": "gauge",
+        "gridPos": {"h": 8, "w": 4, "x": 8, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_pipeline_status{asset=\"SOL\",timeframe=\"15m\"}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "green", "value": 2}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Pipeline R/A/G Status - XRP 15m",
+        "type": "gauge",
+        "gridPos": {"h": 8, "w": 4, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_pipeline_status{asset=\"XRP\",timeframe=\"15m\"}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "green", "value": 2}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Pipeline R/A/G Status - DOGE 15m",
+        "type": "gauge",
+        "gridPos": {"h": 8, "w": 4, "x": 16, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_pipeline_status{asset=\"DOGE\",timeframe=\"15m\"}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "green", "value": 2}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 9,
+        "title": "R/A/G Status Over Time (All Assets)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "merid_pipeline_status{timeframe=\"15m\"}",
+            "legendFormat": "{{asset}} - {{timeframe}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "green", "value": 2}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 10,
+        "title": "Trace Chain: Active Correlation IDs",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+        "targets": [
+          {
+            "expr": "topk(10, merid_trace_correlation_id_age_seconds)",
+            "format": "table",
+            "refId": "A"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "indexByName": {
+                "correlation_id": 0,
+                "asset": 1,
+                "timeframe": 2,
+                "stage": 3,
+                "Value": 4
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "title": "Invariant Violations",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 20},
+        "targets": [
+          {
+            "expr": "sum(rate(merid_invariant_violations_total[5m]))",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "red", "value": 1}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 12,
+        "title": "Exit Criteria Blocks",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 20},
+        "targets": [
+          {
+            "expr": "sum(rate(merid_exit_criteria_blocks_total[5m]))",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "colorMode": "background"
+        }
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "asset",
+          "type": "custom",
+          "query": "BTC,ETH,SOL,XRP,DOGE",
+          "multi": true,
+          "includeAll": true
+        },
+        {
+          "name": "timeframe",
+          "type": "custom",
+          "query": "15m,1h,daily,weekly",
+          "multi": true
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Version Changes",
+          "datasource": "Prometheus",
+          "expr": "changes(merid_formulas_version[1m]) > 0",
+          "textFormat": "Version changed to {{version}}"
+        }
+      ]
+    },
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    }
+  }
+}

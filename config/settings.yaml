@@ -1,0 +1,12 @@
+system_name: MERID
+timezone: UTC
+blind_consensus: true
+
+swarm:
+  enabled: true
+  max_agents: 12
+  ttl_seconds: 300
+
+consensus:
+  minimum_percentage: 0.75
+  allow_silence: true

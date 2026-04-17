@@ -1,0 +1,192 @@
+name: Reconciliation Safety Gate
+# BUG-0324-0001: CI gate for reconciliation domain isolation
+# This workflow ensures cross-domain position pollution cannot be introduced
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'merid/reconciliation/**'
+      - 'trading/paper_trading.py'
+      - 'tests/reconciliation/**'
+
+env:
+  PYTHON_VERSION: "3.11"
+  MERID_ENV: "test"
+
+jobs:
+  # ── Domain isolation tests ──────────────────────────────────────
+  domain-isolation:
+    name: Reconciliation Domain Isolation Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run domain isolation tests
+        run: |
+          python -m pytest tests/reconciliation/test_domain_isolation.py -v --tb=short
+
+      - name: Kalshi ledger action, execution health, and API router path
+        run: |
+          python -m pytest \
+            tests/event_venues/kalshi/test_fills_ledger_action_upsert.py \
+            tests/event_venues/kalshi/test_live_open_order_registry.py \
+            tests/event_venues/kalshi/test_ws_trade_action_infer.py \
+            tests/event_venues/kalshi/test_execution_audit.py \
+            tests/reconciliation/test_execution_health.py \
+            tests/web/test_kalshi_place_order_router_only.py \
+            -v --tb=short
+
+      - name: Verify _is_kalshi_ticker logic
+        run: |
+          # Script to verify the hardening is in place
+          python -c "
+          from merid.reconciliation.venue_reconciler import _is_kalshi_ticker
+          
+          # Test cases that must pass
+          test_cases = [
+              ('KXBTC-25DEC-100000', True),   # Kalshi with KX prefix
+              ('BTC-USD-PERP', False),        # Crypto perp (BUG-0324-0001)
+              ('ETH-USD-PERP', False),       # Crypto perp (BUG-0324-0001)
+              ('SOL-USDC-PERP', False),      # Crypto perp
+              ('SPY', False),                 # ETF
+              ('FED-25DEC-T5.00', True),      # Kalshi prediction market
+          ]
+          
+          all_pass = True
+          for symbol, expected in test_cases:
+              result = _is_kalshi_ticker(symbol)
+              if result != expected:
+                  print(f'FAIL: {symbol} -> expected {expected}, got {result}')
+                  all_pass = False
+              else:
+                  print(f'PASS: {symbol} -> {result}')
+          
+          if not all_pass:
+              raise SystemExit('Domain isolation filter has regressions!')
+          print('\n✅ All domain isolation checks passed')
+          "
+
+  # ── Smoke test interlock verification ────────────────────────────
+  smoke-test-interlock:
+    name: Smoke Test Safety Interlock Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify smoke test interlock exists (BUG-0324-0002)
+        run: |
+          # Check that the safety interlock code is present
+          grep -q "StartupValidationError" merid/startup_validations.py || \
+            (echo "Missing StartupValidationError class" && exit 1)
+          grep -q "KALSHI_TRADER_SMOKE_TEST" merid/startup_validations.py || \
+            (echo "Missing smoke test validation in startup_validations.py" && exit 1)
+          echo "✅ Smoke test interlock code verified"
+
+      - name: Test smoke test detection logic
+        run: |
+          python -c "
+          import os
+          
+          # Set dangerous configuration
+          os.environ['KALSHI_TRADER_SMOKE_TEST'] = 'true'
+          os.environ['MERID_PM_TRADING_MODE'] = 'live'
+          os.environ['MERID_PM_LIVE_ENABLED'] = 'true'
+          
+          try:
+              from merid.startup_validations import validate_env_for_live_mode, StartupValidationError
+              validate_env_for_live_mode()
+              print('FAIL: Should have raised StartupValidationError')
+              exit(1)
+          except StartupValidationError as e:
+              if 'KALSHI_TRADER_SMOKE_TEST' in str(e):
+                  print('✅ Smoke test interlock correctly blocks live startup')
+              else:
+                  print(f'FAIL: Wrong error message: {e}')
+                  exit(1)
+          except Exception as e:
+              print(f'FAIL: Wrong exception type: {type(e).__name__}: {e}')
+              exit(1)
+          "
+
+  # ── Promotion grace window verification ───────────────────────────
+  promotion-grace-check:
+    name: Promotion Grace Window Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Verify reduced grace window (BUG-0324-0005)
+        run: |
+          # Check that default grace window is reduced to 30s
+          grep -q "MERID_PROMOTION_GRACE_S.*30" merid/execution_guard.py || \
+            grep -q "MERID_PROMOTION_GRACE_S.*\"30\"" merid/execution_guard.py || \
+            (echo "Grace window default not reduced to 30s" && exit 1)
+          echo "✅ Grace window default reduced to 30s verified"
+
+      - name: Verify grace window startup validation
+        run: |
+          grep -q "MERID_PROMOTION_GRACE_S" merid/startup_validations.py || \
+            (echo "Missing grace window validation" && exit 1)
+          echo "✅ Grace window validation in startup_validations.py verified"
+
+  # ── KALSHI_ONLY race condition fix verification ──────────────────
+  kalshi-only-fix:
+    name: KALSHI_ONLY Race Condition Fix Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Verify KALSHI_ONLY fix (BUG-0324-0007)
+        run: |
+          # Check that get_paper_trading_engine is used instead of get_paper_engine
+          grep -q "get_paper_trading_engine" merid/reconciliation/venue_reconciler.py || \
+            (echo "BUG-0324-0007: Should use get_paper_trading_engine" && exit 1)
+          grep -q "BUG-0324-0007" merid/reconciliation/venue_reconciler.py || \
+            (echo "BUG-0324-0007: Missing bug reference comment" && exit 1)
+          echo "✅ KALSHI_ONLY race condition fix verified"

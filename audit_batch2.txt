@@ -1,0 +1,22 @@
+﻿py : C:\Dev\MERID\tests\trading\test_spectator.py:9: PytestCollectionWarning: cannot collect test class 'TestEvent' because it has a __init__ constructor (from: tests/trading/test_spectator.py)
+At line:1 char:1
++ py -m pytest tests/agents/core/ tests/consensus/ tests/event_venues/k ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Dev\MERID\te...t_spectator.py):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  @dataclass
+....FFFF......FF........................................EEEEEEEEEEEEEFFE [  1%]
+EEEEEEEE................................................................ [  3%]
+.....................................................................F.. [  5%]
+.FFF..FFFFF...FFFF...FF...............................................F. [  7%]
+........................................................................ [  9%]
+..................................................................F..... [ 11%]
+........................................................................ [ 13%]
+...................................................................F.... [ 15%]
+.............................FF......................................... [ 17%]
+......................................................................FF [ 19%]
+FFFFFFFFFFF.FEEEEEEEEE.FFFFFFFF.FFFF.FEEEEEEEEE......................... [ 21%]
+................FFFFFFFF.FFFFFFFFF.F.....FFFFFFFF...........FF.F......F. [ 23%]
+FF.....F......F......FFFF......................F.........FF...F......... [ 25%]
+...........FFF.........FF....

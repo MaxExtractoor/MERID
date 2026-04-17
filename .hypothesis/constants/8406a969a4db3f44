@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\trading\agents\execution_agent.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.0002, 0.0005, 100.0, 500.0, -100, 100, 1000, 10000, 86400, 100000, '; ', 'No valid price data', 'OPERATIONAL', 'Order %s already %s', 'Order cancelled: %s', 'agent', 'asset', 'avg_slippage_bps', 'buy', 'cancelled', 'close', 'consecutive_failures', 'daily_pnl', 'daily_trade_count', 'execution-agent', 'failed_executions', 'fees', 'fill_price', 'filled', 'hyperliquid', 'limit', 'live_allowed', 'live_reason', 'market', 'order_id', 'order_type', 'partially_filled', 'passed', 'pending', 'reason', 'reduce_only', 'rejected', 'risk_status', 'sell', 'side', 'size_usd', 'status', 'stop_loss', 'submitted', 'success_rate', 'take_profit', 'timestamp', 'total_executions', 'trailing_stop', 'unknown']

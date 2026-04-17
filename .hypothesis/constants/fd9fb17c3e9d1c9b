@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\meta_agent.py
+# hypothesis_version: 6.151.4
+
+[0.0, 0.6, 0.9, 'abstain', 'agent_id', 'audit', 'audit:report', 'confidence', 'count', 'issues', 'keywords', 'leaderboard_snapshot', 'meta-audit-01', 'pattern_summary', 'pending', 'raw', 'reasoning', 'report', 'research', 'score', 'simulation', 'status', 'trust', 'validation_sample', 'verdict', 'vote']

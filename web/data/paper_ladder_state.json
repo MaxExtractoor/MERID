@@ -1,0 +1,602 @@
+{
+  "swarm-consensus": {
+    "portfolio_id": "swarm-consensus",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.018413
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-btc_15m": {
+    "portfolio_id": "kalshi-btc_15m",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.021466
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-btc_hourly": {
+    "portfolio_id": "kalshi-btc_hourly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0242145
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-btc_daily": {
+    "portfolio_id": "kalshi-btc_daily",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0267487
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-btc_weekly": {
+    "portfolio_id": "kalshi-btc_weekly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0297487
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-eth_15m": {
+    "portfolio_id": "kalshi-eth_15m",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0327473
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-eth_hourly": {
+    "portfolio_id": "kalshi-eth_hourly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0347478
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-eth_daily": {
+    "portfolio_id": "kalshi-eth_daily",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0367475
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-eth_weekly": {
+    "portfolio_id": "kalshi-eth_weekly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0413609
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-sol_15m": {
+    "portfolio_id": "kalshi-sol_15m",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0453598
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-sol_hourly": {
+    "portfolio_id": "kalshi-sol_hourly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0483584
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-sol_daily": {
+    "portfolio_id": "kalshi-sol_daily",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.051359
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-sol_weekly": {
+    "portfolio_id": "kalshi-sol_weekly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.053359
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-xrp_15m": {
+    "portfolio_id": "kalshi-xrp_15m",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0563595
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-xrp_hourly": {
+    "portfolio_id": "kalshi-xrp_hourly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0603602
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-xrp_daily": {
+    "portfolio_id": "kalshi-xrp_daily",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0627658
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-xrp_weekly": {
+    "portfolio_id": "kalshi-xrp_weekly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0627658
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-doge_15m": {
+    "portfolio_id": "kalshi-doge_15m",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0627658
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-doge_hourly": {
+    "portfolio_id": "kalshi-doge_hourly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0627658
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-doge_daily": {
+    "portfolio_id": "kalshi-doge_daily",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0780275
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-doge_weekly": {
+    "portfolio_id": "kalshi-doge_weekly",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0820258
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-crypto_15m_mm": {
+    "portfolio_id": "kalshi-crypto_15m_mm",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0856862
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-kalshi_arb_scanner": {
+    "portfolio_id": "kalshi-kalshi_arb_scanner",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.091409
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-macro_directional": {
+    "portfolio_id": "kalshi-macro_directional",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0954049
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  },
+  "kalshi-kalshi_catch_all": {
+    "portfolio_id": "kalshi-kalshi_catch_all",
+    "current_tier": 0,
+    "seed_balance": 1000,
+    "high_water_mark": 1000,
+    "current_equity": 1000,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "promoted_at": 0.0,
+    "demoted_at": 0.0,
+    "tier_history": [
+      {
+        "event": "seeded",
+        "tier": 0,
+        "tier_name": "Sandbox",
+        "seed_usd": 1000,
+        "timestamp": 1772773163.0984046
+      }
+    ],
+    "win_rate_pct": 0.0,
+    "roi_pct": 0.0,
+    "drawdown_pct": 0.0
+  }
+}

@@ -1,0 +1,273 @@
+# Enhanced Docker Compose with Monitoring Services
+
+version: "3.9"
+
+services:
+  # FastAPI Backend Service
+  api:
+    build: 
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: kalshi-api
+    ports:
+      - "8000:8000"
+    environment:
+      - KALSHI_API_KEY=${KALSHI_API_KEY}
+      - KALSHI_API_SECRET=${KALSHI_API_SECRET}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://kalshi:password@postgres:5432/kalshi}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - PROMETHEUS_ENABLED=true
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - kalshi-network
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8000"
+      - "prometheus.path=/metrics"
+
+  # Streamlit Dashboard Service
+  streamlit:
+    build: 
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: kalshi-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - KALSHI_API_BASE=http://api:8000
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_SERVER_ENABLECORS=false
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - PROMETHEUS_ENABLED=true
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - kalshi-network
+    labels:
+      - "prometheus.scrape=true"
+      - "prometheus.port=8501"
+      - "prometheus.path=/metrics"
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: kalshi-postgres
+    environment:
+      - POSTGRES_DB=kalshi
+      - POSTGRES_USER=kalshi
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-kalshi_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kalshi -d kalshi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kalshi-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: kalshi-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - kalshi-network
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: kalshi-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+      - ./prometheus_rules:/etc/prometheus/rules:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    restart: unless-stopped
+    networks:
+      - kalshi-network
+    depends_on:
+      - api
+      - streamlit
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: kalshi-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-worldmap-panel
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SMTP_ENABLED=false
+      - GF_SERVER_DOMAIN=localhost
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - kalshi-network
+
+  # Grafana Agent for Metrics Collection
+  grafana-agent:
+    image: grafana/agent:latest
+    container_name: kalshi-grafana-agent
+    volumes:
+      - ./grafana-agent.yaml:/etc/agent/agent.yaml:ro
+      - /var/log:/var/log:ro
+      - /sys:/sys:ro
+      - /proc:/proc:ro
+      - /etc:/etc:ro
+    environment:
+      - GRAFANA_CLOUD_USERNAME=${GRAFANA_CLOUD_USERNAME}
+      - GRAFANA_CLOUD_API_KEY=${GRAFANA_CLOUD_API_KEY}
+    depends_on:
+      - api
+      - streamlit
+      - postgres
+    restart: unless-stopped
+    networks:
+      - kalshi-network
+    command:
+      - -config.file=/etc/agent/agent.yaml
+      - -metrics.wal-directory=/tmp/agent/wal
+
+  # Node Exporter for System Metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: kalshi-node-exporter
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+    networks:
+      - kalshi-network
+
+  # cAdvisor for Container Metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: kalshi-cadvisor
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    privileged: true
+    devices:
+      - /dev/kmsg
+    restart: unless-stopped
+    networks:
+      - kalshi-network
+
+  # AlertManager for Alerting
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: kalshi-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    restart: unless-stopped
+    networks:
+      - kalshi-network
+    depends_on:
+      - prometheus
+
+  # Nginx Reverse Proxy (Optional)
+  nginx:
+    image: nginx:alpine
+    container_name: kalshi-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/ssl:ro
+    depends_on:
+      - api
+      - streamlit
+      - grafana
+    restart: unless-stopped
+    networks:
+      - kalshi-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+
+networks:
+  kalshi-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

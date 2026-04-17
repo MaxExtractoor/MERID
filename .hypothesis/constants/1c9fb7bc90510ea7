@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\core\social_strategy_router.py
+# hypothesis_version: 6.151.4
+
+[0.0, 'active', 'allowed', 'asset', 'confirmation', 'confirmation_score', 'constraints', 'portfolio_value', 'reason', 'reasons', 'sentiment_score', 'size_usd', 'sizing', 'strategy_id', 'version']

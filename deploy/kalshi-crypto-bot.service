@@ -1,0 +1,37 @@
+[Unit]
+Description=Kalshi Crypto Telegram Bot — posts open crypto markets every 15 min
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=merid
+WorkingDirectory=/opt/merid
+ExecStart=/opt/merid/.venv/bin/python scripts/kalshi_crypto_bot.py
+Restart=always
+RestartSec=30
+
+# ── Environment ──────────────────────────────────────────────────────────
+# Option A: inline (replace ... with real values)
+#Environment="TELEGRAM_BOT_TOKEN=..."
+#Environment="TELEGRAM_CHAT_ID=..."
+#Environment="KALSHI_API_KEY_ID=..."
+#Environment="KALSHI_PRIVATE_KEY_PATH=/opt/merid/kalshi.key"
+
+# Option B: env file (recommended — keeps secrets out of unit file)
+EnvironmentFile=-/opt/merid/.env
+
+# ── Tuning ───────────────────────────────────────────────────────────────
+# Poll interval (seconds); default 900 = 15 min
+Environment="CRYPTO_BOT_INTERVAL=900"
+# Full snapshot every N polls; default 4 = hourly at 15-min interval
+Environment="CRYPTO_BOT_FULL_EVERY=4"
+
+# ── Hardening ────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/merid
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

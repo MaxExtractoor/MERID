@@ -1,0 +1,285 @@
+﻿...............................................FFFFFFFFFFF.............. [ 18%]
+..............................FFFFF............FF.FF.F....FFFF.....F.... [ 36%]
+.......F................................................................ [ 54%]
+........................................................................ [ 73%]
+.......................................................................F [ 91%]
+FFF.........F....................                                        [100%]
+================================== FAILURES ===================================
+________________________ TestAPIRoutes.test_get_stats _________________________
+tests\test_dev_swarm.py:822: in test_get_stats
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:14 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:14 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:14 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:14 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+_______________________ TestAPIRoutes.test_list_agents ________________________
+tests\test_dev_swarm.py:832: in test_list_agents
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+_____________________ TestAPIRoutes.test_list_tasks_empty _____________________
+tests\test_dev_swarm.py:842: in test_list_tasks_empty
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+_______________________ TestAPIRoutes.test_create_task ________________________
+tests\test_dev_swarm.py:858: in test_create_task
+    assert resp.status_code == 201
+E   assert 401 == 201
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+_______________ TestAPIRoutes.test_create_task_validation_error _______________
+tests\test_dev_swarm.py:871: in test_create_task_validation_error
+    assert resp.status_code == 422
+E   assert 401 == 422
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+____________________ TestAPIRoutes.test_get_task_not_found ____________________
+tests\test_dev_swarm.py:876: in test_get_task_not_found
+    assert resp.status_code == 404
+E   assert 401 == 404
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:15 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+__________________ TestAPIRoutes.test_cancel_task_not_found ___________________
+tests\test_dev_swarm.py:881: in test_cancel_task_not_found
+    assert resp.status_code == 404
+E   assert 401 == 404
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+_______________________ TestAPIRoutes.test_health_check _______________________
+tests\test_dev_swarm.py:886: in test_health_check
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+______________________ TestAPIRoutes.test_update_config _______________________
+tests\test_dev_swarm.py:895: in test_update_config
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+_________________ TestAPIRoutes.test_update_config_no_changes _________________
+tests\test_dev_swarm.py:902: in test_update_config_no_changes
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+___________________ TestAPIRoutes.test_create_and_get_task ____________________
+tests\test_dev_swarm.py:912: in test_create_and_get_task
+    assert create_resp.status_code == 201
+E   assert 401 == 201
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:16 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+__________ TestAPIRoutesEdgeCases.test_list_tasks_with_status_filter __________
+tests\test_dev_swarm.py:1543: in test_list_tasks_with_status_filter
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+______________ TestAPIRoutesEdgeCases.test_get_task_from_history ______________
+tests\test_dev_swarm.py:1556: in test_get_task_from_history
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+____________ TestAPIRoutesEdgeCases.test_get_running_task_duration ____________
+tests\test_dev_swarm.py:1568: in test_get_running_task_duration
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+_______________ TestAPIRoutesEdgeCases.test_cancel_active_task ________________
+tests\test_dev_swarm.py:1582: in test_cancel_active_task
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+_______________ TestAPIRoutesEdgeCases.test_update_config_cost ________________
+tests\test_dev_swarm.py:1589: in test_update_config_cost
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout setup ----------------------------
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:19 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+__________ TestAPIShutdownAndSingleton.test_get_swarm_singleton_init __________
+tests\test_dev_swarm.py:1856: in test_get_swarm_singleton_init
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+_____________ TestAPIShutdownAndSingleton.test_shutdown_endpoint ______________
+tests\test_dev_swarm.py:1867: in test_shutdown_endpoint
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+---------------------------- Captured stdout call -----------------------------
+2026-03-16 03:15:20 [info     ] agent_registered               component=DevSwarm name=CoveragePlanner role=planner
+2026-03-16 03:15:20 [info     ] agent_registered               component=DevSwarm name=PyTestCoder role=coder
+2026-03-16 03:15:20 [info     ] agent_registered               component=DevSwarm name=TestValidator role=tester
+2026-03-16 03:15:20 [info     ] agent_registered               component=DevSwarm name=CodeReviewer role=reviewer
+__________ TestReadinessAuditor.test_all_checks_pass_in_current_repo __________
+tests\test_dev_swarm.py:1888: in test_all_checks_pass_in_current_repo
+    assert failures == [], f"Failing checks: {[(r.item, r.status.value) for r in failures]}"
+E   AssertionError: Failing checks: [('CI gate >=90', 'MISSING'), ('Coverage snapshot >=90%', 'MISSING'), ('LEGACY_RISK_MATRIX.md', 'MISSING')]
+E   assert [CheckResult(...K_MATRIX.md')] == []
+E     
+E     Left contains 3 more items, first extra item: CheckResult(area='Testing', item='CI gate >=90', status=<CheckStatus.MISSING: 'MISSING'>, evidence='LEGACY_RISK_MATRIX.md missing', fix_plan='Create LEGACY_RISK_MATRIX.md')
+E     Use -v to get more diff
+______________ TestReadinessAuditor.test_report_passed_property _______________
+tests\test_dev_swarm.py:1894: in test_report_passed_property
+    assert report.passed is True
+E   AssertionError: assert False is True
+E    +  where False = AuditReport(results=[CheckResult(area='Testing', item='dev_swarm marker registered', status=<CheckStatus.OK: 'OK'>, ev...tes (/tasks, /stats, /shutdown)', status=<CheckStatus.OK: 'OK'>, evidence='web/api/dev_swarm_routes.py', fix_plan='')]).passed
+_______ TestReadinessAuditor.test_create_drift_tasks_empty_when_passing _______
+tests\test_dev_swarm.py:1910: in test_create_drift_tasks_empty_when_passing
+    assert tasks == []
+E   AssertionError: assert [{'descriptio...mes OK', ...}] == []
+E     
+E     Left contains 3 more items, first extra item: {'description': '[Readiness Auditor] Testing: CI gate >=90 is MISSING. Create LEGACY_RISK_MATRIX.md', 'estimated_effort': 'small', 'priority': 1, 'success_criteria': 'CI gate >=90 status becomes OK', ...}
+E     Use -v to get more diff
+_____________ TestReadinessAuditor.test_cli_entrypoint_exit_zero ______________
+tests\test_dev_swarm.py:1963: in test_cli_entrypoint_exit_zero
+    assert result.returncode == 0
+E   assert 1 == 0
+E    +  where 1 = CompletedProcess(args=['C:\\Users\\Chris\\AppData\\Local\\Programs\\Python\\Python311\\python.exe', '-m', 'core.dev_sw...026-03-16 03:15:34 | INFO | agents.framework | Registered agent prediction-arbitrage-analyst-fast (research_signal)\n").returncode
+_________ TestReadinessEndpoint.test_readiness_endpoint_returns_json __________
+tests\test_dev_swarm.py:2009: in test_readiness_endpoint_returns_json
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+____________ TestReadinessEndpoint.test_readiness_endpoint_all_ok _____________
+tests\test_dev_swarm.py:2021: in test_readiness_endpoint_all_ok
+    assert data["passed"] is True
+E   KeyError: 'passed'
+____________________ TestSLOTracking.test_record_and_load _____________________
+tests\test_dev_swarm.py:2046: in test_record_and_load
+    assert rec["passed"] is True
+E   assert False is True
+_______________ TestSLOEndpoint.test_slo_endpoint_returns_json ________________
+tests\test_dev_swarm.py:2146: in test_slo_endpoint_returns_json
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+___________ TestCodebaseDriftEndpoint.test_codebase_drift_endpoint ____________
+tests\test_dev_swarm.py:2310: in test_codebase_drift_endpoint
+    assert resp.status_code == 200
+E   assert 401 == 200
+E    +  where 401 = <Response [401 Unauthorized]>.status_code
+______________ TestMarketHeatmapHelper.test_sector_map_coverage _______________
+tests\test_dev_swarm.py:4880: in test_sector_map_coverage
+    assert "True" in result.stdout
+E   assert 'True' in 'False\n'
+E    +  where 'False\n' = CompletedProcess(args=['C:\\Users\\Chris\\AppData\\Local\\Programs\\Python\\Python311\\python.exe', '-c', 'from core.m...026-03-16 03:32:25 | INFO | agents.framework | Registered agent prediction-arbitrage-analyst-fast (research_signal)\n").stdout
+_____________ TestRouterRegistration.test_operator_router_in_main _____________
+tests\test_dev_swarm.py:4889: in test_operator_router_in_main
+    assert "from web.api.operator import router as operator_router" in content
+E   AssertionError: assert 'from web.api.operator import router as operator_router' in 'from __future__ import annotations\n\nimport asyncio\nimport json\nimport os\nimport re\nimport time\nfrom contextlib...\n        # Clean up event loop\n        try:\n            loop.close()\n        except Exception:\n            pass\n'
+_____________ TestRouterRegistration.test_metrics_router_in_main ______________
+tests\test_dev_swarm.py:4895: in test_metrics_router_in_main
+    assert "from web.api.metrics import router as metrics_router" in content
+E   AssertionError: assert 'from web.api.metrics import router as metrics_router' in 'from __future__ import annotations\n\nimport asyncio\nimport json\nimport os\nimport re\nimport time\nfrom contextlib...\n        # Clean up event loop\n        try:\n            loop.close()\n        except Exception:\n            pass\n'
+___________ TestRouterRegistration.test_market_data_router_in_main ____________
+tests\test_dev_swarm.py:4901: in test_market_data_router_in_main
+    assert "from web.api.market_data import router as market_data_router" in content
+E   AssertionError: assert 'from web.api.market_data import router as market_data_router' in 'from __future__ import annotations\n\nimport asyncio\nimport json\nimport os\nimport re\nimport time\nfrom contextlib...\n        # Clean up event loop\n        try:\n            loop.close()\n        except Exception:\n            pass\n'
+__________ TestWebSocketMarketData.test_ws_router_registered_in_main __________
+tests\test_dev_swarm.py:5045: in test_ws_router_registered_in_main
+    assert "from web.api.market_data import ws_router as market_ws_router" in content
+E   AssertionError: assert 'from web.api.market_data import ws_router as market_ws_router' in 'from __future__ import annotations\n\nimport asyncio\nimport json\nimport os\nimport re\nimport time\nfrom contextlib...\n        # Clean up event loop\n        try:\n            loop.close()\n        except Exception:\n            pass\n'
+=========================== short test summary info ===========================
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_get_stats - assert 401 ==...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_list_agents - assert 401 ...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_list_tasks_empty - assert...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_create_task - assert 401 ...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_create_task_validation_error
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_get_task_not_found - asse...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_cancel_task_not_found - a...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_health_check - assert 401...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_update_config - assert 40...
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_update_config_no_changes
+FAILED tests/test_dev_swarm.py::TestAPIRoutes::test_create_and_get_task - ass...
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_list_tasks_with_status_filter
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_get_task_from_history
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_get_running_task_duration
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_cancel_active_task
+FAILED tests/test_dev_swarm.py::TestAPIRoutesEdgeCases::test_update_config_cost
+FAILED tests/test_dev_swarm.py::TestAPIShutdownAndSingleton::test_get_swarm_singleton_init
+FAILED tests/test_dev_swarm.py::TestAPIShutdownAndSingleton::test_shutdown_endpoint
+FAILED tests/test_dev_swarm.py::TestReadinessAuditor::test_all_checks_pass_in_current_repo
+FAILED tests/test_dev_swarm.py::TestReadinessAuditor::test_report_passed_property
+FAILED tests/test_dev_swarm.py::TestReadinessAuditor::test_create_drift_tasks_empty_when_passing
+FAILED tests/test_dev_swarm.py::TestReadinessAuditor::test_cli_entrypoint_exit_zero
+FAILED tests/test_dev_swarm.py::TestReadinessEndpoint::test_readiness_endpoint_returns_json
+FAILED tests/test_dev_swarm.py::TestReadinessEndpoint::test_readiness_endpoint_all_ok
+FAILED tests/test_dev_swarm.py::TestSLOTracking::test_record_and_load - asser...
+FAILED tests/test_dev_swarm.py::TestSLOEndpoint::test_slo_endpoint_returns_json
+FAILED tests/test_dev_swarm.py::TestCodebaseDriftEndpoint::test_codebase_drift_endpoint
+FAILED tests/test_dev_swarm.py::TestMarketHeatmapHelper::test_sector_map_coverage
+FAILED tests/test_dev_swarm.py::TestRouterRegistration::test_operator_router_in_main
+FAILED tests/test_dev_swarm.py::TestRouterRegistration::test_metrics_router_in_main
+FAILED tests/test_dev_swarm.py::TestRouterRegistration::test_market_data_router_in_main
+FAILED tests/test_dev_swarm.py::TestWebSocketMarketData::test_ws_router_registered_in_main
+32 failed, 361 passed in 1462.20s (0:24:22)

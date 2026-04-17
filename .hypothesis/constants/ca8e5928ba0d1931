@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\utils\deps.py
+# hypothesis_version: 6.151.4
+
+['ccxt', 'ccxt.async_support', 'email_validator', 'gymnasium', 'networkx', 'torch', 'utils.deps']

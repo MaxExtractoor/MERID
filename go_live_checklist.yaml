@@ -1,0 +1,159 @@
+# MERID Kalshi Crypto Trading - Go-Live Checklist
+# Version: 2.0.0 (Computed Caps Edition)
+# 
+# This file controls pre-flight checks and trading mode.
+# Edit this file to enable live trading - the system validates on startup.
+
+version: "2.0.0"
+last_updated: "2026-03-30T13:15:00+00:00"
+
+# Trading Mode
+# Options: disabled, observation, live_small, live_full
+# - disabled: No trading, no pipeline
+# - observation: Full pipeline runs, orders may be built and logged for analysis, 
+#                but NEVER reach any execution venue (safest for testing)
+# - live_small: Live trading with reduced size caps (30% of computed caps)
+# - live_full: Full live trading (100% of computed caps)
+mode: live_full
+observation_reason: null
+
+# Upstream Guards (data inputs, configs, regimes)
+upstream:
+  market_sanity:
+    enabled: true
+    required_assets:
+      - BTC
+      - ETH
+      - SOL
+      - XRP
+      - DOGE
+    max_data_age_seconds: 30
+    fail_on_missing: true
+  
+  registry_integrity:
+    enabled: true
+    check_weights_sum: true
+    weight_tolerance: 0.01
+    fail_on_invalid: true
+  
+  regime_health:
+    enabled: true
+    required_regimes:
+      - calm_neutral
+      - extreme_fear
+      - extreme_greed
+    observation_if_stale: true
+
+# Mid-Pipeline Guards (indicator health, hierarchy, conviction)
+mid_pipeline:
+  indicator_health:
+    enabled: true
+    # FVG pressure raw bounds before normalization
+    fvg_pressure_bounds: [-3.0, 3.0]
+    atr_min_positive: true
+    # Log condensed snapshot every 5 minutes
+    log_interval_seconds: 300
+  
+  hierarchy_enforcement:
+    enabled: true
+    assert_layer1_vetoes: true
+    # Structural conviction factor bounds
+    conviction_bounds: [0.4, 1.2]
+  
+  conviction_consistency:
+    enabled: true
+    epsilon: 0.001
+    verify_reproducibility: true
+
+# Downstream Guards (orders, execution, post-trade)
+downstream:
+  pre_trade_risk:
+    enabled: true
+    check_ev_positive: true
+    max_slippage_bps: 50
+    enforce_exposure_caps: true
+  
+  execution_monitoring:
+    enabled: true
+    store_decision_record: true
+    link_fvg_context: true
+  
+  post_trade_tca:
+    enabled: true
+    stratify_by_conviction: true
+    # Manual weight adjustment for now
+    feedback_to_weights: false
+
+# Live Size Caps (% of normal Kelly, per-asset)
+# 0.0 = observation mode (orders not sent)
+# 0.25 = 25% of Kelly (LIVE_SMALL — conservative live)
+# 1.0 = 100% of Kelly (LIVE_FULL)
+# NOTE: These are STATIC caps, used when use_computed_caps=false (default).
+live_size_caps:
+  BTC: 0.25
+  ETH: 0.25
+  SOL: 0.25
+  XRP: 0.25
+  DOGE: 0.25
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Computed Live Size Caps (BTC-anchored, bankroll-aware) - v2.0
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Enable computed caps (True) or use static live_size_caps (False).
+# NOTE: The computed formula assumes $1/contract risk and produces 0 contracts
+# for bankrolls under ~$500.  Keep False for live accounts under $500.
+use_computed_caps: false
+
+# Base allocation per asset (% of bankroll)
+# These are the foundational risk allocations per asset
+base_per_asset_frac:
+  BTC: 0.02    # 2% of bankroll
+  ETH: 0.015   # 1.5% of bankroll
+  SOL: 0.01    # 1% of bankroll
+  XRP: 0.01    # 1% of bankroll
+  DOGE: 0.005  # 0.5% of bankroll
+
+# Volatility anchor configuration
+vol_anchor_asset: BTC
+target_vol_annual: 0.65  # 65% annualized vol target
+vol_scale_min: 0.3       # Minimum 30% allocation in high vol
+vol_scale_max: 1.0       # Maximum 100% allocation in low vol
+
+# Mode multipliers for computed caps
+mode_caps_multiplier:
+  OBSERVATION: 0.0
+  DISABLED: 0.0
+  LIVE_SMALL: 0.3
+  LIVE_FULL: 1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tiny Bankroll Dev Mode (DEV ONLY - NOT FOR PRODUCTION)
+# ─────────────────────────────────────────────────────────────────────────────
+# This is an explicit opt-in mechanism for tiny bankroll development/testing.
+# When enabled, it can force minimum contract caps even when computed caps are 0.
+#
+# SAFETY WARNINGS:
+# - This must NEVER be enabled in production configs.
+# - The observation invariant (mode==OBSERVATION -> can_trade=False) is ALWAYS enforced.
+# - This override only applies when bankroll >= bankroll_cents_floor.
+#
+# How it works:
+# - If enabled=false (default): Normal computed caps apply (production behavior).
+# - If enabled=true and bankroll < floor: Caps remain 0 (too small even for dev).
+# - If enabled=true and bankroll >= floor but computed < min_contracts: Force min_contracts.
+#
+# Example: With bankroll=$50 (5000¢), base_frac=0.02, mode_mult=0.3:
+#   Raw computed = $50 * 0.02 * 0.3 = $0.30 = 0 contracts
+#   With override enabled and floor=5000, min=1: Effective = 1 contract
+tiny_bankroll_mode:
+  enabled: false              # PRODUCTION: no dev override
+  bankroll_cents_floor: 5000  # $50 default (inactive when enabled=false)
+  min_contracts_if_above_floor: 1
+  log_override: true
+
+# Phase 2 Feature Flags (gate new features)
+phase2_features:
+  ohlc_fvg_oracle: false
+  ifvg_tracking: false
+  higher_tf_filters: false

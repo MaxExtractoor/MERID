@@ -1,0 +1,4 @@
+# file: C:\Dev\MERID\agents\reflection\analytics.py
+# hypothesis_version: 6.151.4
+
+[-0.1, 0.0, 0.1, 0.5, 0.7, 1.0, 60.0, 100, 1000, 86400, 'abstain', 'abstain_rate', 'accept', 'accept_rate', 'accuracy', 'accuracy_metrics', 'agent_id', 'avg', 'avg_confidence', 'avg_response_time_ms', 'cache_ttl_seconds', 'cached_agents', 'calibration', 'confidence', 'confidence_metrics', 'current', 'decision_counts', 'declining', 'degradations', 'drop_pct', 'f1_score', 'high', 'historical', 'improving', 'invalidated', 'last_updated', 'max', 'medium', 'metric', 'min', 'overconfidence_rate', 'pending', 'performance', 'precision', 'reality_gap', 'reality_gap_metrics', 'recall', 'recent_accuracy_24h', 'recent_accuracy_7d', 'reflection.analytics', 'reject', 'reject_rate', 'severity', 'stable', 'temporal_metrics', 'timestamp', 'total', 'total_calculations', 'trends', 'underconfidence_rate', 'uptime_seconds', 'validated']
