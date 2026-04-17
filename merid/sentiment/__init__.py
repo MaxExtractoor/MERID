@@ -184,6 +184,31 @@ from merid.sentiment.btc_risk_dial import (
     scale_btc_size,
 )
 
+from merid.sentiment.crypto_risk_dial import (
+    CryptoRiskDialConfig,
+    MultiAssetSentimentRiskDial,
+    get_crypto_risk_dial,
+    quick_crypto_risk_check,
+    scale_crypto_size,
+    ASSET_BEHAVIORAL_CONFIG,
+)
+
+from merid.sentiment.behavioral_exploitation import (
+    BehavioralPattern,
+    MarketMicrostructure,
+    SentimentContext,
+    BehavioralSignal,
+    LongshotBiasDetector,
+    PanicVolatilityExploiter,
+    AffirmationBiasExploiter,
+    DelayedInformationProcessor,
+    LossAversionMonitor,
+    HypeCycleDetector,
+    BehavioralExploitationEngine,
+    get_behavioral_engine,
+    quick_behavioral_check,
+)
+
 from merid.sentiment.sentiment_gating import (
     GatingCriteria,
     GatingDecision,
@@ -291,8 +316,16 @@ __all__ = [
     "VaderThresholdOptimizer",
     "SentimentRegimeEngine",
     "BTCSentimentRiskDial",
+    "MultiAssetSentimentRiskDial",
     "SentimentGatingLayer",
     "SentimentStopRules",
+    "BehavioralExploitationEngine",
+    "LongshotBiasDetector",
+    "PanicVolatilityExploiter",
+    "AffirmationBiasExploiter",
+    "DelayedInformationProcessor",
+    "LossAversionMonitor",
+    "HypeCycleDetector",
     
     # New modules
     "KalshiArbitrageBot",
@@ -335,6 +368,11 @@ __all__ = [
     "SentimentRegime",
     "RegimeState",
     "BTCRiskDial",
+    "CryptoRiskDialConfig",
+    "BehavioralPattern",
+    "MarketMicrostructure",
+    "SentimentContext",
+    "BehavioralSignal",
     "GatingCriteria",
     "GatingDecision",
     "StopAdjustment",
@@ -347,6 +385,8 @@ __all__ = [
     "get_twitter_stream_handler",
     "get_sentiment_regime_engine",
     "get_btc_risk_dial",
+    "get_crypto_risk_dial",
+    "get_behavioral_engine",
     "get_sentiment_gating_layer",
     "get_sentiment_stop_rules",
     
@@ -367,6 +407,9 @@ __all__ = [
     "get_current_risk_caps",
     "quick_risk_check",
     "scale_btc_size",
+    "quick_crypto_risk_check",
+    "scale_crypto_size",
+    "quick_behavioral_check",
     "quick_gate_check",
     "apply_sentiment_confirmation",
     "check_sentiment_stops",
@@ -464,4 +507,5 @@ __all__ = [
     "STRONG_NEGATIVE_THRESHOLD",
     "FIB_WEIGHTS",
     "FIB_LEVELS",
+    "ASSET_BEHAVIORAL_CONFIG",
 ]

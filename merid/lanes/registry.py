@@ -210,6 +210,28 @@ def build_crypto_lanes(
             risk_stream_topic="risk.crypto.xrp15m.paper",
             paper=True,
         ),
+
+        # DOGE lanes - meme volatility with social-sentiment weighting
+        Crypto15MLaneConfig(
+            symbol="DOGE",
+            max_positions=1,
+            max_markets_live=1,
+            base_kelly_fraction=0.10,  # Lower base due to meme volatility
+            min_edge_bps=100,  # Higher edge requirement for DOGE
+            fear_greed_weight=0.6,  # Heavy social sentiment weighting
+            risk_stream_topic="risk.crypto.doge15m",
+            paper=False,
+        ),
+        Crypto15MLaneConfig(
+            symbol="DOGE",
+            max_positions=1,
+            max_markets_live=1,
+            base_kelly_fraction=0.10,
+            min_edge_bps=100,
+            fear_greed_weight=0.6,
+            risk_stream_topic="risk.crypto.doge15m.paper",
+            paper=True,
+        ),
     ]
 
     # Create and register lanes
