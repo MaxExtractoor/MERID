@@ -1012,3 +1012,13 @@ def get_market_catalog() -> KalshiMarketCatalog:
             if _catalog is None:
                 _catalog = KalshiMarketCatalog()
     return _catalog
+
+
+# Module-level convenience wrapper for tests and external callers
+def _detect_from_ticker(ticker: str) -> tuple:
+    """Detect category and asset from Kalshi event_ticker prefix.
+
+    Module-level wrapper around KalshiMarketCatalog._detect_from_ticker.
+    Returns (category, asset) — either may be None.
+    """
+    return KalshiMarketCatalog._detect_from_ticker(ticker)

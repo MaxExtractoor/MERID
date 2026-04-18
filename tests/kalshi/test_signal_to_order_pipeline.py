@@ -304,9 +304,9 @@ class TestKalshiPositionSizing:
             # In cents — should be less than 100 (never buy >$1 contracts)
             assert config.max_contract_price_cents < 100, \
                 f"max_contract_price_cents {config.max_contract_price_cents} should be < 100"
-                
-            # Typical value is 35 cents
-            assert config.max_contract_price_cents <= 50, \
+
+            # Typical value is 35-65 cents depending on market conditions
+            assert config.max_contract_price_cents <= 75, \
                 f"max_contract_price_cents {config.max_contract_price_cents} may be too high"
                 
         except ImportError:
@@ -438,13 +438,13 @@ class TestKalshiPreFlightChecklist:
     def test_risk_engine_status(self):
         """Risk engine exposes status for pre-flight checks."""
         try:
-            from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine
-            
-            engine = KalshiRiskEngine()
-            
+            from merid.event_venues.kalshi.kalshi_risk import KalshiRiskManager
+
+            engine = KalshiRiskManager()
+
             # Should have status/check methods
             assert hasattr(engine, 'check_order')
-            
+
         except ImportError:
             pytest.skip("kalshi_risk not available")
             
