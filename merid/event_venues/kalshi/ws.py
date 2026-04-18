@@ -111,6 +111,10 @@ class KalshiWebSocket(EventVenueStream):
         self._connect_ts: float = 0.0
         self._consecutive_auth_failures: int = 0
         
+        # CRASH-006: Reconnect lock to prevent concurrent reconnect storms
+        self._reconnect_lock = asyncio.Lock()
+        self._reconnect_in_progress: bool = False
+        
         # ── Queue metrics ────────────────────────────────────────────────
         self._messages_dropped: int = 0
         self._last_drop_log_ts: float = 0.0
@@ -148,6 +152,11 @@ class KalshiWebSocket(EventVenueStream):
         self._process_time_count: int = 0           # # of timed handler calls
         self._lag_check_handle: Optional[asyncio.TimerHandle] = None
         self._expected_lag_ts: float = 0.0
+
+        # CRASH-002: Callback exception tracking for health degradation
+        self._callback_failure_count: int = 0
+        self._callback_failure_last_ts: float = 0.0
+        self._callback_failures: List[Dict[str, Any]] = []  # Last N failures with context
 
         # B3: register graceful-shutdown snapshot handler
         self.register_sigterm_snapshot()
@@ -646,11 +655,26 @@ class KalshiWebSocket(EventVenueStream):
                 event = self._parse_message(data)
                 if event:
                     # Offload to background task so slow callbacks don't block queue drain
-                    # BUG-EGG-FIX: Store task reference and add done callback to catch exceptions
-                    task = asyncio.create_task(self._handle_event_async(callback, event, data))
-                    def _task_done_cb(t: asyncio.Task) -> None:
-                        if not t.cancelled() and t.exception():
-                            logger.warning("WS callback task failed: %s", t.exception())
+                    # CRASH-002: Hardened exception handling with health degradation
+                    task = asyncio.create_task(
+                        self._handle_event_async(callback, event, data),
+                        name=f"kalshi-ws-callback-{data.get('type', 'unknown')}-{data.get('ticker', 'unknown')[:20]}"
+                    )
+                    def _task_done_cb(t: asyncio.Task, raw_data: Dict = data) -> None:
+                        if t.cancelled():
+                            return
+                        exc = t.exception()
+                        if exc:
+                            # CRASH-002: Escalate to error and track failure rate
+                            logger.error(
+                                "WS callback task failed: %s | type=%s market=%s",
+                                exc, raw_data.get('type'), raw_data.get('ticker', '?')
+                            )
+                            self._record_callback_failure(str(exc))
+                            # If too many failures, force reconnect
+                            if self._callback_failure_count > 10:
+                                logger.critical("Too many callback failures (%d), forcing reconnect", self._callback_failure_count)
+                                asyncio.create_task(self._reconnect())
                     task.add_done_callback(_task_done_cb)
             except (ValueError, TypeError, RuntimeError) as e:
                 logger.warning(
@@ -802,63 +826,78 @@ class KalshiWebSocket(EventVenueStream):
         return True
     
     async def _reconnect(self) -> None:
-        """Reconnect with exponential backoff + jitter, then resubscribe."""
+        """Reconnect with exponential backoff + jitter, then resubscribe.
+        
+        CRASH-006: Uses asyncio.Lock to prevent concurrent reconnect storms.
+        """
         if not self._running:
             return
+        
+        # CRASH-006: Prevent multiple concurrent reconnect attempts
+        if self._reconnect_lock.locked():
+            logger.debug("Reconnect already in progress, skipping duplicate attempt")
+            return
+        
+        async with self._reconnect_lock:
+            if not self._running:
+                return
+            
+            self._reconnect_in_progress = True
+            try:
+                self._reconnect_count += 1
+                # Add jitter (±25%) to avoid thundering herd
+                jitter = self._reconnect_delay * 0.25 * (2 * random.random() - 1)
+                delay = max(0.5, self._reconnect_delay + jitter)
 
-        self._reconnect_count += 1
-        # Add jitter (±25%) to avoid thundering herd
-        jitter = self._reconnect_delay * 0.25 * (2 * random.random() - 1)
-        delay = max(0.5, self._reconnect_delay + jitter)
+                logger.info(
+                    f"Reconnecting to Kalshi in {delay:.1f}s "
+                    f"(attempt #{self._reconnect_count})..."
+                )
+                await asyncio.sleep(delay)
 
-        logger.info(
-            f"Reconnecting to Kalshi in {delay:.1f}s "
-            f"(attempt #{self._reconnect_count})..."
-        )
-        await asyncio.sleep(delay)
+                self._reconnect_delay = min(
+                    self._reconnect_delay * 2,
+                    self._max_reconnect_delay,
+                )
 
-        self._reconnect_delay = min(
-            self._reconnect_delay * 2,
-            self._max_reconnect_delay,
-        )
+                await self.connect()
 
-        try:
-            await self.connect()
+                # Clear cached orderbook state — force fresh snapshots
+                self._ob_initialised.clear()
+                self._ob_snapshots.clear()
+                self._last_seq.clear()
 
-            # Clear cached orderbook state — force fresh snapshots
-            self._ob_initialised.clear()
-            self._ob_snapshots.clear()
-            self._last_seq.clear()
+                # BUG-6: replay subscriptions using the correct call per subscription type
+                if self._ticker_subscriptions:
+                    await self.subscribe_quotes(market_ids=list(self._ticker_subscriptions))
+                for ev_ticker in self._event_ticker_subscriptions:
+                    await self.subscribe_quotes(event_ticker=ev_ticker)
+                if self._trade_tickers:
+                    await self.subscribe_trades(list(self._trade_tickers))
+                if self._fill_tickers:
+                    ft = sorted({x for x in self._fill_tickers if not str(x).startswith("event:")})
+                    if ft:
+                        ch = KALSHI_WS_MARKET_TICKERS_CHUNK_SIZE
+                        for i in range(0, len(ft), ch):
+                            await self.subscribe_fills(market_ids=ft[i : i + ch])
+                if self._orderbook_tickers:
+                    await self.subscribe_orderbooks_batch(list(self._orderbook_tickers))
+                if self._order_group_updates_enabled:
+                    await self.subscribe_order_group_updates()
 
-            # BUG-6: replay subscriptions using the correct call per subscription type
-            if self._ticker_subscriptions:
-                await self.subscribe_quotes(market_ids=list(self._ticker_subscriptions))
-            for ev_ticker in self._event_ticker_subscriptions:
-                await self.subscribe_quotes(event_ticker=ev_ticker)
-            if self._trade_tickers:
-                await self.subscribe_trades(list(self._trade_tickers))
-            if self._fill_tickers:
-                ft = sorted({x for x in self._fill_tickers if not str(x).startswith("event:")})
-                if ft:
-                    ch = KALSHI_WS_MARKET_TICKERS_CHUNK_SIZE
-                    for i in range(0, len(ft), ch):
-                        await self.subscribe_fills(market_ids=ft[i : i + ch])
-            if self._orderbook_tickers:
-                await self.subscribe_orderbooks_batch(list(self._orderbook_tickers))
-            if self._order_group_updates_enabled:
-                await self.subscribe_order_group_updates()
-
-            logger.info(
-                "Reconnected successfully — resubscribed to %d ticker(s), "
-                "%d event(s), %d trade(s), %d orderbook(s)%s",
-                len(self._ticker_subscriptions),
-                len(self._event_ticker_subscriptions),
-                len(self._trade_tickers),
-                len(self._orderbook_tickers),
-                ", order_group_updates" if self._order_group_updates_enabled else "",
-            )
-        except (ConnectionError, RuntimeError, ValueError) as e:
-            logger.warning(f"Kalshi reconnection failed: {e}")
+                logger.info(
+                    "Reconnected successfully — resubscribed to %d ticker(s), "
+                    "%d event(s), %d trade(s), %d orderbook(s)%s",
+                    len(self._ticker_subscriptions),
+                    len(self._event_ticker_subscriptions),
+                    len(self._trade_tickers),
+                    len(self._orderbook_tickers),
+                    ", order_group_updates" if self._order_group_updates_enabled else "",
+                )
+            except (ConnectionError, RuntimeError, ValueError) as e:
+                logger.warning(f"Kalshi reconnection failed: {e}")
+            finally:
+                self._reconnect_in_progress = False
     
     def _parse_message(self, data: Dict[str, Any]) -> Optional[Any]:
         """Parse WebSocket message into venue-agnostic event.
@@ -965,6 +1004,53 @@ class KalshiWebSocket(EventVenueStream):
     # ── Event-loop lag monitor ────────────────────────────────────────
 
     _LAG_SAMPLE_INTERVAL: float = 0.2  # Phase 18: 200ms (was 1s) — faster detection
+
+    def _record_callback_failure(self, error: str, context: Optional[Dict] = None) -> None:
+        """Record callback failure for health monitoring. CRASH-002 fix."""
+        now = time.monotonic()
+        self._callback_failure_count += 1
+        self._callback_failure_last_ts = now
+        
+        # Track recent failures with context
+        failure_record = {
+            "error": error,
+            "ts": now,
+            "context": context or {},
+        }
+        self._callback_failures.append(failure_record)
+        
+        # Keep only last 50 failures
+        if len(self._callback_failures) > 50:
+            self._callback_failures = self._callback_failures[-50:]
+        
+        # Reset counter after 60 seconds (sliding window)
+        recent_failures = [
+            f for f in self._callback_failures
+            if f["ts"] > now - 60
+        ]
+        self._callback_failure_count = len(recent_failures)
+        
+        # Emit metric
+        try:
+            from monitoring.metrics import get_metrics_registry
+            get_metrics_registry().counter(
+                "kalshi_ws_callback_failure",
+                "WS callback handler failed",
+                ["error_type"]
+            ).inc(labels={"error_type": error[:50]})
+        except Exception:
+            pass
+
+    def get_callback_health(self) -> Dict[str, Any]:
+        """Return callback health status for monitoring."""
+        now = time.monotonic()
+        recent = len([f for f in self._callback_failures if f["ts"] > now - 60])
+        return {
+            "failure_count_60s": recent,
+            "total_failures": len(self._callback_failures),
+            "last_failure_ts": self._callback_failure_last_ts,
+            "healthy": recent < 10,
+        }
 
     def _start_lag_monitor(self) -> None:
         """Schedule periodic event-loop lag checks (every 200ms)."""
