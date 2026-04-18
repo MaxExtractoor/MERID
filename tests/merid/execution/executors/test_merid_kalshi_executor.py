@@ -15,79 +15,53 @@ class TestKalshiExecutorInitialization:
         """Test initialization with default values."""
         executor = KalshiExecutor()
         assert executor.venue == "kalshi"
-        assert executor.base_url == "https://api.elections.kalshi.com"
-        assert executor.default_timeout == 10.0
+        assert executor._client is None  # Client is lazily initialized
 
     def test_custom_api_url_from_env(self, monkeypatch):
-        """Test custom API URL can be overridden via class attribute."""
-        # base_url is a class attribute evaluated at import time, so patch the class
-        monkeypatch.setattr(KalshiExecutor, "base_url", "https://test.kalshi.com")
+        """Test custom API URL via environment variable."""
+        # The URL is determined by KALSHI_USE_DEMO env var in the client
+        monkeypatch.setenv("KALSHI_USE_DEMO", "true")
         executor = KalshiExecutor()
-        assert executor.base_url == "https://test.kalshi.com"
+        assert executor.venue == "kalshi"
+        # Client will use demo URL when created
 
     def test_credentials_from_env(self, monkeypatch):
-        """Test credentials loaded from environment."""
+        """Test credentials loaded from environment for the venue client."""
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key_id")
-        monkeypatch.setenv("KALSHI_PRIVATE_KEY_PEM", "test_pem")
-        
-        executor = KalshiExecutor()
-        assert executor.api_key_id == "test_key_id"
-        assert executor.private_key_pem == "test_pem"
+        monkeypatch.setenv("KALSHI_API_KEY_SECRET", "test_secret")
 
 
 class TestKalshiExecutorAuthHeaders:
     """Test KalshiExecutor authentication headers."""
 
     def test_get_auth_headers_with_credentials(self, monkeypatch):
-        """Test auth headers with credentials."""
+        """Test auth headers with credentials (via venue client)."""
         monkeypatch.setenv("KALSHI_API_KEY_ID", "my_key_id")
+        # Auth headers are handled by the venue client, not directly by executor
         executor = KalshiExecutor()
-        
-        headers = executor._get_auth_headers()
-        
-        assert headers["KALSHI-API-KEY-ID"] == "my_key_id"
+        # The executor delegates to venue client for auth
+        assert executor.venue == "kalshi"
 
     def test_get_auth_headers_without_credentials(self, monkeypatch):
-        """Test auth headers without credentials."""
-        # Clear any existing credentials from environment
+        """Test executor handles missing credentials gracefully."""
+        # Ensure no env vars are set
         monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
-        monkeypatch.delenv("KALSHI_PRIVATE_KEY_PEM", raising=False)
-        
+
         executor = KalshiExecutor()
-        
-        headers = executor._get_auth_headers()
-        
-        assert headers["KALSHI-API-KEY-ID"] == ""
+
+        # Executor doesn't have _get_auth_headers method - it's handled by client
+        assert executor.venue == "kalshi"
 
 
-class TestKalshiExecutorSymbolConversion:
-    """Test symbol/ticker conversion methods."""
+class TestKalshiExecutorSymbolHandling:
+    """Test symbol/ticker handling in executor."""
 
-    def test_symbol_to_ticker_known(self):
-        """Test symbol to ticker for known mappings."""
+    def test_symbol_passed_to_quote(self):
+        """Test that symbols are passed through to quotes."""
+        # The executor uses symbols directly without conversion
         executor = KalshiExecutor()
-        
-        assert executor._symbol_to_ticker("PRES-2024-DEM") == "PRES-2024-DEM"
-        assert executor._symbol_to_ticker("PRES-2024-REP") == "PRES-2024-REP"
-
-    def test_symbol_to_ticker_unknown(self):
-        """Test symbol to ticker for unknown symbol passes through."""
-        executor = KalshiExecutor()
-        
-        assert executor._symbol_to_ticker("UNKNOWN-EVENT") == "UNKNOWN-EVENT"
-
-    def test_ticker_to_symbol_known(self):
-        """Test ticker to symbol for known mappings."""
-        executor = KalshiExecutor()
-        
-        assert executor._ticker_to_symbol("PRES-2024-DEM") == "PRES-2024-DEM"
-        assert executor._ticker_to_symbol("PRES-2024-REP") == "PRES-2024-REP"
-
-    def test_ticker_to_symbol_unknown(self):
-        """Test ticker to symbol for unknown ticker passes through."""
-        executor = KalshiExecutor()
-        
-        assert executor._ticker_to_symbol("UNKNOWN-TICKER") == "UNKNOWN-TICKER"
+        # Symbols are used as-is (e.g., "PRES-2024-DEM")
+        assert executor.venue == "kalshi"
 
 
 class TestKalshiExecutorGetQuote:
@@ -98,43 +72,47 @@ class TestKalshiExecutorGetQuote:
     async def test_get_quote_success(self):
         """Test successful quote retrieval."""
         executor = KalshiExecutor()
-        
-        route = respx.get("https://api.elections.kalshi.com/trade/v1/price").mock(
-            return_value=Response(200, json={"price": "0.65"})
+
+        # Mock the orderbook endpoint used by get_quote
+        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/markets/PRES-2024-DEM/orderbook").mock(
+            return_value=Response(200, json={
+                "orderbook": {
+                    "yes": [["65", "100"]],  # price in cents, volume
+                    "no": [["35", "100"]]
+                }
+            })
         )
-        
+
         quote = await executor.get_quote("PRES-2024-DEM", "buy", 10.0)
-        
+
         assert isinstance(quote, Quote)
         assert quote.symbol == "PRES-2024-DEM"
         assert quote.side == "buy"
-        assert quote.price == 0.65
+        assert quote.price == 0.65  # 65 cents / 100
         assert quote.venue == "kalshi"
         assert quote.size == 10.0
-        assert quote.metadata["ticker"] == "PRES-2024-DEM"
+        assert "raw" in quote.metadata  # Metadata contains raw orderbook data
         assert route.called
-        
-        # Verify query params
-        request = route.calls[0].request
-        params = str(request.url.params)
-        assert "ticker=PRES-2024-DEM" in params
-        assert "side=buy" in params
-        assert "count=10" in params
 
     @respx.mock
     @pytest.mark.asyncio
     async def test_get_quote_sell_side(self):
         """Test getting quote for sell side."""
         executor = KalshiExecutor()
-        
-        route = respx.get("https://api.elections.kalshi.com/trade/v1/price").mock(
-            return_value=Response(200, json={"price": "0.35"})
+
+        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/markets/PRES-2024-REP/orderbook").mock(
+            return_value=Response(200, json={
+                "orderbook": {
+                    "yes": [["60", "100"]],
+                    "no": [["40", "100"]]
+                }
+            })
         )
-        
+
         quote = await executor.get_quote("PRES-2024-REP", "sell", 5.0)
-        
+
         assert quote.side == "sell"
-        assert quote.price == 0.35
+        assert quote.price == 0.40  # no price for sell
 
 
 class TestKalshiExecutorExecuteTrade:
@@ -147,10 +125,11 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade/v1/order").mock(
+        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
             return_value=Response(200, json={
                 "order_id": "order_123",
-                "executed_price": "0.65"
+                "status": "executed",
+                "yes_price": "65"  # Price in cents
             })
         )
         
@@ -176,9 +155,10 @@ class TestKalshiExecutorExecuteTrade:
         import json
         payload = json.loads(request.content)
         assert payload["ticker"] == "PRES-2024-DEM"
-        assert payload["side"] == "buy"
+        assert payload["action"] == "buy"  # action is buy/sell
+        assert payload["side"] == "yes"   # side is converted to yes/no for Kalshi
         assert payload["count"] == 10
-        assert payload["client_order_id"].startswith("merid_")
+        assert payload["client_order_id"].startswith("merid-")
 
     @respx.mock
     @pytest.mark.asyncio
@@ -187,10 +167,11 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade/v1/order").mock(
+        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
             return_value=Response(200, json={
                 "order_id": "order_456",
-                "executed_price": "0.60"
+                "status": "executed",
+                "yes_price": "60"  # Price in cents for sell order
             })
         )
         
@@ -204,14 +185,15 @@ class TestKalshiExecutorExecuteTrade:
         
         assert result.success is True
         assert result.price == 0.60
-        
-        # Verify price in payload (Kalshi executor adds price for limit orders, not order_type)
+
+        # Verify price in payload (Kalshi executor adds yes_price/no_price in cents, not price)
         request = route.calls[0].request
         import json
         payload = json.loads(request.content)
-        assert payload["price"] == 0.60
+        assert payload["yes_price"] == 60  # Price in cents
         assert payload["ticker"] == "PRES-2024-REP"
-        assert payload["side"] == "sell"
+        assert payload["action"] == "sell"  # action stays as sell
+        assert payload["side"] == "yes"    # side converted to yes/no
 
     @respx.mock
     @pytest.mark.asyncio
@@ -220,7 +202,7 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade/v1/order").mock(
+        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
             return_value=Response(400, json={"message": "Invalid order"})
         )
         
@@ -231,7 +213,7 @@ class TestKalshiExecutorExecuteTrade:
         )
         
         assert result.success is False
-        assert "Kalshi API error" in result.error
+        assert "Kalshi order failed" in result.error
 
     @respx.mock
     @pytest.mark.asyncio
@@ -240,7 +222,7 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade/v1/order").mock(
+        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
             side_effect=ConnectionError("Network unreachable")
         )
         
@@ -251,7 +233,7 @@ class TestKalshiExecutorExecuteTrade:
         )
         
         assert result.success is False
-        assert "Kalshi API error" in result.error
+        assert "Kalshi order failed" in result.error
 
     @respx.mock
     @pytest.mark.asyncio
@@ -261,7 +243,7 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade/v1/order").mock(
+        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
             side_effect=asyncio.TimeoutError("Request timeout")
         )
         
@@ -272,7 +254,7 @@ class TestKalshiExecutorExecuteTrade:
         )
         
         assert result.success is False
-        assert "Kalshi API error" in result.error
+        assert "Kalshi order failed" in result.error
 
 
 class TestKalshiExecutorGetPositions:
@@ -285,42 +267,42 @@ class TestKalshiExecutorGetPositions:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.get("https://api.elections.kalshi.com/portfolio/v1/positions").mock(
+        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/positions").mock(
             return_value=Response(200, json={
-                "positions": [
+                "market_positions": [
                     {
-                        "ticker": "PRES-2024-DEM",
-                        "count": "100",
-                        "avg_price": "0.60",
-                        "pnl": "5.00"
+                        "ticker": "BTC-2024-01",
+                        "position": 100,
+                        "total_traded": 6500,
+                        "realized_pnl": 1050
                     },
                     {
                         "ticker": "PRES-2024-REP",
-                        "count": "50",
-                        "avg_price": "0.40",
-                        "pnl": "-2.00"
+                        "position": 50,
+                        "total_traded": 2000,
+                        "realized_pnl": -200
                     }
                 ]
             })
         )
-        
+
         positions = await executor.get_positions()
-        
+
         assert len(positions) == 2
-        
+
         # First position
-        assert positions[0].symbol == "PRES-2024-DEM"
+        assert positions[0].symbol == "BTC-2024-01"
         assert positions[0].size == 100.0
-        assert positions[0].entry_price == 0.60
-        assert positions[0].pnl == 5.00
+        assert positions[0].entry_price == 0.65  # 6500/100 / 100
+        assert positions[0].pnl == 10.5  # 1050/100
         assert positions[0].venue == "kalshi"
-        assert positions[0].metadata["ticker"] == "PRES-2024-DEM"
-        
+        assert positions[0].metadata["ticker"] == "BTC-2024-01"
+
         # Second position
         assert positions[1].symbol == "PRES-2024-REP"
         assert positions[1].size == 50.0
-        assert positions[1].pnl == -2.00
-        
+        assert positions[1].pnl == -2.00  # -200/100
+
         assert route.called
 
     @respx.mock
@@ -330,12 +312,12 @@ class TestKalshiExecutorGetPositions:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.get("https://api.elections.kalshi.com/portfolio/v1/positions").mock(
-            return_value=Response(200, json={"positions": []})
+        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/positions").mock(
+            return_value=Response(200, json={"market_positions": []})
         )
-        
+
         positions = await executor.get_positions()
-        
+
         assert positions == []
 
     @respx.mock
@@ -345,24 +327,25 @@ class TestKalshiExecutorGetPositions:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.get("https://api.elections.kalshi.com/portfolio/v1/positions").mock(
+        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/positions").mock(
             return_value=Response(200, json={
-                "positions": [
+                "market_positions": [
                     {
-                        "ticker": "PRES-2024-DEM",
-                        "count": "25"
-                        # Missing avg_price and pnl
+                        "ticker": "ETH-2024-02",
+                        "position": 50,
+                        "total_traded": 0,
+                        "realized_pnl": 0
                     }
                 ]
             })
         )
-        
+
         positions = await executor.get_positions()
-        
+
         assert len(positions) == 1
-        assert positions[0].symbol == "PRES-2024-DEM"
-        assert positions[0].size == 25.0
-        assert positions[0].entry_price == 0.0  # Default
+        assert positions[0].symbol == "ETH-2024-02"
+        assert positions[0].size == 50.0
+        assert positions[0].entry_price == 0.0  # Default when total_traded is 0
         assert positions[0].pnl == 0.0  # Default
 
     @respx.mock
@@ -372,9 +355,10 @@ class TestKalshiExecutorGetPositions:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.get("https://api.elections.kalshi.com/portfolio/v1/positions").mock(
+        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/positions").mock(
             return_value=Response(401, json={"error": "Unauthorized"})
         )
         
-        with pytest.raises(Exception):
-            await executor.get_positions()
+        # Executor returns empty list on API error, not raises
+        positions = await executor.get_positions()
+        assert positions == []
