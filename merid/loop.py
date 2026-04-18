@@ -386,6 +386,17 @@ class MeridLoop:
         self._slow_action_last_skip.pop(step_name, None)
         return False
 
+    def _get_event_loop_lag_ms(self) -> float:
+        """Get current event-loop lag from monitor.
+        
+        EVENT-LOOP-FIX: Returns 0 if monitor unavailable, allowing graceful degradation.
+        """
+        try:
+            from merid.diagnostics.loop_lag import get_current_lag_ms
+            return get_current_lag_ms()
+        except Exception:
+            return 0.0
+
     async def _run_step(self, name: str, coro, summary: Dict) -> None:
         """Execute a single loop step with isolation — errors are logged
         and recorded in the summary but never propagate to crash the tick."""
@@ -456,6 +467,14 @@ class MeridLoop:
 
     async def _tick_body(self, now: Optional[float] = None) -> Dict[str, Any]:
         """Internal tick implementation - separated for overlap protection."""
+        import asyncio
+        
+        # EVENT-LOOP-FIX: Check for cancellation at start of tick for cooperative shutdown
+        if hasattr(asyncio, 'current_task') and asyncio.current_task():
+            if asyncio.current_task().cancelled():
+                logger.debug("[TICK] Cancelled at start — skipping tick body")
+                return {"tick": "cancelled", "actions": []}
+        
         now = now or time.time()
         start = time.perf_counter()
         tick_number = self.metrics.total_ticks + 1
@@ -1185,10 +1204,21 @@ class MeridLoop:
 
         CPU-heavy orderbook processing is offloaded to thread pool to avoid
         blocking the event loop (BUG-EL12 fix).
+        
+        EVENT-LOOP-FIX: Added lag-aware scheduling and timeout guards.
         """
+        import asyncio
+        
         # AGGRESSIVE: Skip liquidity sweep for first 120 ticks (~10 min) to reduce startup load
         if self.metrics.total_ticks < 120:
             summary["actions"].append("liquidity_sweep:skipped_startup_cooldown")
+            return
+        
+        # Check lag before starting
+        current_lag = self._get_event_loop_lag_ms()
+        if current_lag > 750:  # Skip if already lagging
+            logger.warning(f"[LAG-GUARD] Skipping liquidity sweep — lag {current_lag:.0f}ms > 750ms")
+            summary["actions"].append("liquidity_sweep:skipped_due_to_lag")
             return
 
         sub_timings: Dict[str, float] = {}
@@ -1224,7 +1254,17 @@ class MeridLoop:
                 return tickers
 
             loop = asyncio.get_running_loop()
-            tickers = await loop.run_in_executor(_get_loop_executor(), _collect_tickers_sync)
+            
+            # EVENT-LOOP-FIX: Add timeout to thread pool operation
+            try:
+                tickers = await asyncio.wait_for(
+                    loop.run_in_executor(_get_loop_executor(), _collect_tickers_sync),
+                    timeout=2.0  # Max 2s for ticker collection
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[LAG-GUARD] liquidity ticker collection timed out after 2s")
+                summary["actions"].append("liquidity_sweep:timeout_collecting_tickers")
+                return
             _mark("collect_tickers")
 
             if not tickers:
@@ -1288,7 +1328,16 @@ class MeridLoop:
                         logger.debug("liquidity_sweep %s process skipped: %s", ticker, _te)
                 return alerts_total
 
-            alerts_total = await loop.run_in_executor(_get_loop_executor(), _process_results_sync)
+            # EVENT-LOOP-FIX: Add timeout to orderbook processing
+            try:
+                alerts_total = await asyncio.wait_for(
+                    loop.run_in_executor(_get_loop_executor(), _process_results_sync),
+                    timeout=3.0  # Max 3s for orderbook processing
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[LAG-GUARD] liquidity orderbook processing timed out after 3s")
+                summary["actions"].append("liquidity_sweep:timeout_processing")
+                alerts_total = 0
 
             # Update stop-loss prices separately (lightweight, async-safe)
             for ticker, ob in results:
@@ -1326,10 +1375,20 @@ class MeridLoop:
         """Step 4: Scan for cross-venue arbitrage/dislocations.
         
         CPU-heavy scanning is offloaded to thread pool to avoid blocking event loop.
+        EVENT-LOOP-FIX: Added timeout guard and cancellation support.
         """
+        import asyncio
+        
         # Skip arb scan for first 40 ticks (~3.3 min) to let startup stabilize
         if self.metrics.total_ticks < 40:
             summary["actions"].append("arb_scan:skipped_startup_cooldown")
+            return
+        
+        # Check current lag before starting
+        current_lag = self._get_event_loop_lag_ms()
+        if current_lag > 500:  # Skip if already lagging significantly
+            logger.warning(f"[LAG-GUARD] Skipping arb_scan — lag {current_lag:.0f}ms > 500ms")
+            summary["actions"].append("arb_scan:skipped_due_to_lag")
             return
             
         step_start = time.perf_counter()
@@ -1349,7 +1408,13 @@ class MeridLoop:
                 return signals
             
             loop = asyncio.get_running_loop()
-            signals = await loop.run_in_executor(_get_loop_executor(), _do_arb_scan_all)
+            
+            # EVENT-LOOP-FIX: Add timeout to prevent thread pool starvation
+            _ARB_TIMEOUT_S = float(os.getenv("MERID_ARB_SCAN_TIMEOUT_S", "2.0"))
+            signals = await asyncio.wait_for(
+                loop.run_in_executor(_get_loop_executor(), _do_arb_scan_all),
+                timeout=_ARB_TIMEOUT_S
+            )
             
             self.metrics.arb_scans_run += 1
             summary["actions"].append(f"arb_scan:{len(signals)}signals")
@@ -1358,8 +1423,17 @@ class MeridLoop:
             total_ms = (time.perf_counter() - step_start) * 1000
             if total_ms > 100:
                 logger.debug("arb_scan total=%.0fms signals=%d", total_ms, len(signals))
+        except asyncio.TimeoutError:
+            logger.warning(f"[LAG-GUARD] arb_scan timed out after {_ARB_TIMEOUT_S}s — skipping")
+            summary["actions"].append("arb_scan:timeout")
+            # Track for adaptive skipping
+            self._slow_action_last_skip["arb_scan"] = time.time()
+        except asyncio.CancelledError:
+            logger.debug("[LAG-GUARD] arb_scan cancelled during shutdown")
+            raise
         except Exception as e:
             logger.warning(f"Arb scan failed: {e}")
+            summary["actions"].append(f"arb_scan:error:{e}")
 
     async def _execute_plans(self, summary: Dict):
         """Step 5: Execute approved trade plans through the venue adapter.
@@ -1869,34 +1943,67 @@ class MeridLoop:
         
         Sync callbacks run in thread pool to avoid blocking event loop.
         Slow subscribers are logged for identification.
+        
+        EVENT-LOOP-FIX: Added per-subscriber timeout and overall budget enforcement.
         """
+        import asyncio
         step_start = time.perf_counter()
         notify_count = 0
         slow_subscribers = []
+        timed_out_count = 0
+        
+        # Check lag before starting
+        current_lag = self._get_event_loop_lag_ms()
+        if current_lag > 1000:  # Skip notify entirely if lag is critical
+            logger.warning(f"[LAG-GUARD] Skipping notify — lag {current_lag:.0f}ms > 1000ms")
+            return
+        
+        # Per-subscriber timeout: max 100ms each
+        _CB_TIMEOUT_S = 0.1
+        # Overall budget: max 500ms total for all subscribers
+        _TOTAL_BUDGET_MS = 500.0
         
         for cb in self._subscribers:
+            # Check if we're over budget
+            elapsed_ms = (time.perf_counter() - step_start) * 1000
+            if elapsed_ms > _TOTAL_BUDGET_MS:
+                logger.warning(f"[LAG-GUARD] notify exceeded budget ({_TOTAL_BUDGET_MS:.0f}ms), skipping {len(self._subscribers) - notify_count} remaining subscribers")
+                break
+            
             cb_start = time.perf_counter()
             try:
                 if asyncio.iscoroutinefunction(cb):
-                    await cb(event_type, data)
+                    # Add timeout for async callbacks
+                    await asyncio.wait_for(cb(event_type, data), timeout=_CB_TIMEOUT_S)
                 else:
-                    # Run sync callbacks in dedicated thread pool to avoid blocking event loop
+                    # Run sync callbacks in dedicated thread pool with timeout
                     loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(_get_loop_executor(), cb, event_type, data)
+                    await asyncio.wait_for(
+                        loop.run_in_executor(_get_loop_executor(), cb, event_type, data),
+                        timeout=_CB_TIMEOUT_S
+                    )
                 notify_count += 1
+            except asyncio.TimeoutError:
+                timed_out_count += 1
+                cb_ms = (time.perf_counter() - cb_start) * 1000
+                slow_subscribers.append(f"{cb.__name__ if hasattr(cb, '__name__') else str(cb)[:30]}:TIMEOUT:{cb_ms:.0f}ms")
+                logger.warning(f"[LAG-GUARD] Subscriber {cb.__name__ if hasattr(cb, '__name__') else str(cb)[:20]} timed out after {_CB_TIMEOUT_S*1000:.0f}ms")
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Subscriber notification failed: {e}")
             
             # Track slow subscribers (>50ms)
             cb_ms = (time.perf_counter() - cb_start) * 1000
-            if cb_ms > 50:
+            if cb_ms > 50 and "TIMEOUT" not in str(slow_subscribers[-1:]):
                 slow_subscribers.append(f"{cb.__name__ if hasattr(cb, '__name__') else str(cb)[:30]}:{cb_ms:.0f}ms")
         
         total_ms = (time.perf_counter() - step_start) * 1000
-        # Log if slow or if there were slow subscribers
-        if total_ms > 100 or slow_subscribers:
-            logger.debug("notify timings: total=%.0fms, count=%d, slow=[%s]", 
-                        total_ms, notify_count, "; ".join(slow_subscribers[:3]))
+        # Log if slow or if there were slow subscribers or timeouts
+        if total_ms > 100 or slow_subscribers or timed_out_count > 0:
+            logger.debug("notify timings: total=%.0fms, count=%d/%d, timeouts=%d, slow=[%s]", 
+                        total_ms, notify_count, len(self._subscribers), timed_out_count,
+                        "; ".join(slow_subscribers[:3]))
 
     # ── Run forever ───────────────────────────────────────────────────
 
