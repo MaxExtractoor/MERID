@@ -147,6 +147,7 @@ class ArbitrageOpportunitySummary:
     total_liquidity: float
     risk_note: str
     forecast_probability: float  # Agent's confidence this will be profitable
+    market_id: str = ""  # Optional market identifier for outcome tracking
 
 @dataclass
 class BucketAnalysis:
@@ -585,10 +586,10 @@ Please analyze these opportunities and provide your structured recommendations.
         
         # Calculate decomposition for diagnostics
         decomp = brier_decomposition(y_true, y_prob, n_bins=4)
-        
+
         # Quality assessment
         quality = "Excellent" if brier_score < 0.1 else "Good" if brier_score < 0.2 else "Fair" if brier_score < 0.3 else "Poor"
-        
+
         return {
             "brier_score": brier_score,
             "brier_skill_score_vs_baseline": bss_vs_baseline,
@@ -597,15 +598,11 @@ Please analyze these opportunities and provide your structured recommendations.
             "climatology_baseline": baseline_prob,
             "quality_category": quality,
             "n_samples": len(opportunities),
-            "quality_category": quality,
-            "n_samples": len(opportunities),
-            "quality_category": quality,
-            "n_samples": len(opportunities),
             "decomposition": {
-                "reliability": decomp["REL"],
-                "resolution": decomp["RES"],
-                "uncertainty": decomp["UNC"],
-                "base_rate": decomp["base_rate"]
+                "reliability": decomp.reliability,
+                "resolution": decomp.resolution,
+                "uncertainty": decomp.uncertainty,
+                "base_rate": baseline_prob
             },
             "status": "ok",
             "reason": "Metrics calculated successfully"
