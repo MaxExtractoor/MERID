@@ -176,23 +176,43 @@ def get_brier_db_connection():
 
 class BrierMetricsDB:
     """Database interface for Brier metrics system."""
-    
+
     def __init__(self, db_path: str = "brier_metrics.db"):
         self.db_path = db_path
-        self._init_database()
-    
+        self._memory_conn = None  # Persistent connection for :memory: databases
+        if db_path == ":memory:":
+            # For in-memory databases, we need a persistent connection
+            self._memory_conn = sqlite3.connect(db_path)
+            self._memory_conn.row_factory = sqlite3.Row
+            self._init_database(self._memory_conn)
+        else:
+            self._init_database()
+
+    @contextmanager
     def get_brier_db_connection(self):
         """Create a sqlite connection bound to this database instance."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-    
-    def _init_database(self) -> None:
+        if self._memory_conn is not None:
+            # Reuse the persistent in-memory connection
+            yield self._memory_conn
+        else:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                yield conn
+            finally:
+                conn.close()
+
+    def _init_database(self, conn=None) -> None:
         """Initialize database with schema."""
-        with self.get_brier_db_connection() as conn:
+        if conn is not None:
             conn.executescript(BRIER_SCHEMA)
             conn.commit()
-            logger.info("Brier metrics database initialized")
+            logger.info("Brier metrics database initialized (in-memory)")
+        else:
+            with self.get_brier_db_connection() as conn:
+                conn.executescript(BRIER_SCHEMA)
+                conn.commit()
+                logger.info("Brier metrics database initialized")
     
     def register_model(self, model_id: str, name: str, kind: str) -> None:
         """Register a new model."""
@@ -325,6 +345,76 @@ class BrierMetricsDB:
             return "sports"
         else:
             return "other"
+
+    def save_calibration(self, model_id: str, cal_result) -> int:
+        """Save calibration parameters for a model.
+
+        Returns:
+            calib_run_id
+        """
+        with self.get_brier_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO calibration_runs
+                (model_id, method, archetype, params, n_events,
+                 brier_raw, brier_cal, bss_vs_raw, version,
+                 data_start, data_end, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                model_id,
+                cal_result.method.value if hasattr(cal_result.method, 'value') else str(cal_result.method),
+                cal_result.archetype.value if hasattr(cal_result.archetype, 'value') else str(cal_result.archetype),
+                json.dumps(cal_result.params),
+                cal_result.n_events,
+                cal_result.brier_raw,
+                cal_result.brier_cal,
+                cal_result.bss_vs_raw,
+                cal_result.version,
+                cal_result.trained_on_start,
+                cal_result.trained_on_end,
+                datetime.now()
+            ))
+            calib_run_id = cursor.lastrowid
+            conn.commit()
+            logger.debug(f"Saved calibration {calib_run_id} for model {model_id}")
+            return calib_run_id
+
+    def get_current_calibration(self, model_id: str) -> Optional[Dict[str, Any]]:
+        """Get the most recent calibration for a model."""
+        with self.get_brier_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT method, archetype, params, version
+                FROM calibration_runs
+                WHERE model_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (model_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "method": row["method"],
+                    "archetype": row["archetype"],
+                    "params": json.loads(row["params"]),
+                    "version": row["version"]
+                }
+            return None
+
+    def get_streaming_metrics(self, model_id: str, days: int = 1) -> List[Dict[str, Any]]:
+        """Get streaming metrics for a model over the last N days."""
+        with self.get_brier_db_connection() as conn:
+            cursor = conn.cursor()
+            window_start = datetime.now() - timedelta(days=days)
+            cursor.execute("""
+                SELECT metrics_id, market_group, window_start, window_end,
+                       n_events, brier_raw, sum_brier_raw, weight_sum_raw,
+                       created_at, updated_at
+                FROM calibration_metrics_streaming
+                WHERE model_id = ? AND window_start >= ?
+                ORDER BY window_start DESC
+            """, (model_id, window_start))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
 
 # Global singleton for Brier metrics database
 _brier_db_singleton: BrierMetricsDB | None = None
