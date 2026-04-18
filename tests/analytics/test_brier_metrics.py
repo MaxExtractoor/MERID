@@ -256,7 +256,6 @@ class TestProbabilityCalibrator:
         assert len(y_pred_cal) == len(y_pred)
         assert all(0 <= p <= 1 for p in y_pred_cal)
 
-@pytest.mark.skip(reason="Database initialization issue - needs investigation")
 class TestBrierMetricsDB:
     """Test Brier metrics database integration."""
 
