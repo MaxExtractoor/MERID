@@ -15,12 +15,10 @@ from pathlib import Path
 from agents.base_agent import BaseAgent
 from monitoring.prediction_analytics import get_arbitrage_opportunities, ArbitrageOpportunity
 from monitoring.prediction_markets import get_prediction_aggregator
-from merid_metrics import compute_brier, compute_bss, brier_decomposition
-from core.merid_metrics import get_merid_metrics, BrierResult
-from core.brier_metrics_db import get_brier_db
-from core.event_bus import event_stream
-from merid_metrics import compute_brier, compute_bss, brier_decomposition
-from core.merid_metrics import get_merid_metrics, BrierResult
+from core.merid_metrics import (
+    compute_brier, compute_bss, brier_decomposition,
+    get_merid_metrics, BrierResult
+)
 from core.brier_metrics_db import get_brier_db
 from core.event_bus import event_stream
 from utils.logger import get_logger
@@ -569,23 +567,29 @@ Please analyze these opportunities and provide your structured recommendations.
                 y_true.append(float(real_outcome))
             else:
                 y_true.append(1.0 if opp.spread_probability > 0.5 else 0.0)
-        
+
+        # Convert to numpy arrays for metrics functions
+        import numpy as np
+        y_true_arr = np.array(y_true)
+        y_prob_arr = np.array(y_prob)
+
         # Calculate canonical metrics
-        brier_score = compute_brier(y_true, y_prob)
+        brier_score = compute_brier(y_true_arr, y_prob_arr)
         
         # Calculate BSS vs MERID baseline
         merid_baseline = 0.004316
         baseline_prob = y_true.count(1) / len(y_true)  # Use empirical base rate as baseline
         
         # Calculate BSS vs climatology (empirical base rate)
-        bss_vs_climatology = compute_bss(y_true, y_prob, baseline_prob)
-        
+        # Pass None for baseline to let compute_bss use climatology internally
+        bss_vs_climatology = compute_bss(y_true_arr, y_prob_arr, baseline=None)
+
         # For BSS vs MERID baseline, we need to compare Brier scores directly
         # BSS = 1 - BS_model / BS_baseline
         bss_vs_baseline = 1.0 - brier_score / merid_baseline
-        
+
         # Calculate decomposition for diagnostics
-        decomp = brier_decomposition(y_true, y_prob, n_bins=4)
+        decomp = brier_decomposition(y_true_arr, y_prob_arr, n_bins=4)
 
         # Quality assessment
         quality = "Excellent" if brier_score < 0.1 else "Good" if brier_score < 0.2 else "Fair" if brier_score < 0.3 else "Poor"
