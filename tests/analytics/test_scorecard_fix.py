@@ -34,15 +34,17 @@ def test_scorecard_generation():
         # Test the to_dict method
         scorecard_dict = scorecard.to_dict()
         print(f"✅ to_dict() works: {scorecard_dict['data_state']['metrics_state']}")
-        
-        return True
-        
+
+        # Assert the test passes instead of returning True
+        assert scorecard_dict is not None
+        assert scorecard_dict['data_state']['metrics_state'] is not None
+
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise
 
 if __name__ == "__main__":
-    success = test_scorecard_generation()
-    sys.exit(0 if success else 1)
+    test_scorecard_generation()
+    print("✅ All tests passed!")

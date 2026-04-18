@@ -45,8 +45,8 @@ agents:
     min_price_move_for_reentry: 5
     min_edge_after_fees_cents: 2.0
   strike_selection:
-    max_spot_to_strike_pct: 0.05   # 5% max distance for 15m BTC
-    target_spot_band_pct: 0.02     # prefer contracts within 2% of spot
+    max_spot_to_strike_pct: 0.15   # 15% max distance for 15m BTC (calibrated v2)
+    target_spot_band_pct: 0.06     # prefer contracts within 6% of spot
     deep_otm_allowed: false
 - name: BTC_HOURLY
   assets:
@@ -183,8 +183,8 @@ agents:
     min_price_move_for_reentry: 5
     min_edge_after_fees_cents: 2.0
   strike_selection:
-    max_spot_to_strike_pct: 0.07   # 7% max distance for 15m ETH
-    target_spot_band_pct: 0.03     # prefer contracts within 3% of spot
+    max_spot_to_strike_pct: 0.15   # 15% max distance for 15m ETH (calibrated v2)
+    target_spot_band_pct: 0.06     # prefer contracts within 6% of spot
     deep_otm_allowed: false
 - name: ETH_HOURLY
   assets:
@@ -292,8 +292,8 @@ agents:
   - 15m
   archetype: directional
   strike_selection:
-    max_spot_to_strike_pct: 0.10
-    target_spot_band_pct: 0.04
+    max_spot_to_strike_pct: 0.20   # 20% max distance for 15m SOL (calibrated v2)
+    target_spot_band_pct: 0.08     # prefer contracts within 8% of spot
     deep_otm_allowed: false
   strategy:
     # SOL 15m: higher vol asset — 2% above BTC 15m thresholds
@@ -426,8 +426,8 @@ agents:
   assets:
   - XRP
   strike_selection:
-    max_spot_to_strike_pct: 0.10
-    target_spot_band_pct: 0.04
+    max_spot_to_strike_pct: 0.20   # 20% max distance for 15m XRP (calibrated v2)
+    target_spot_band_pct: 0.08     # prefer contracts within 8% of spot
     deep_otm_allowed: false
   timeframes:
   - 15m
@@ -789,8 +789,8 @@ agents:
   assets:
   - DOGE
   strike_selection:
-    max_spot_to_strike_pct: 0.12
-    target_spot_band_pct: 0.05
+    max_spot_to_strike_pct: 0.30   # 30% max distance for 15m DOGE (highest vol, calibrated v2)
+    target_spot_band_pct: 0.12     # prefer contracts within 12% of spot
     deep_otm_allowed: false
   timeframes:
   - 15m
@@ -1128,8 +1128,9 @@ strike_selection_defaults:
   # Global defaults for spot-to-strike distance thresholds.
   # These are used when an agent doesn't have per-asset/timeframe overrides.
   # Per-agent YAML blocks override these; these override hardcoded Python defaults.
-  max_spot_to_strike_pct: 0.08     # max |spot-strike|/strike (fraction)
-  target_spot_band_pct: 0.03       # preferred ATM band (fraction)
+  # v2 (2026-04-17): Calibrated to match actual Kalshi market availability
+  max_spot_to_strike_pct: 0.20     # max |spot-strike|/strike (fraction) - 20% default
+  target_spot_band_pct: 0.08       # preferred ATM band (fraction) - 8% default
   deep_otm_allowed: false
   deep_otm_max_risk_pct: 0.005    # max risk per trade when deep OTM (0.5%)
   rejection_log_throttle_seconds: 30  # throttle STRIKE_REJECT logs

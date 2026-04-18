@@ -92,15 +92,15 @@ class TestStrikeSelectorAcceptance(unittest.TestCase):
 
     def test_in_target_band_flag(self):
         sel = _default_selector()
-        # BTC 15m target band is 2%; strike is 1% away
+        # BTC 15m target band is 6%; strike is 1% away (well inside)
         result = sel.evaluate("KXBTC15M-T101000", "BTC", "15m", spot=100000.0, strike=101000.0)
         self.assertTrue(result.accepted)
         self.assertTrue(result.in_target_band)
 
     def test_outside_target_band_but_accepted(self):
         sel = _default_selector()
-        # BTC 15m target band is 2%, max distance is 5%; strike is 3% away
-        result = sel.evaluate("KXBTC15M-T103000", "BTC", "15m", spot=100000.0, strike=103000.0)
+        # BTC 15m target band is 6%, max distance is 15%; strike is 8% away (outside target, inside max)
+        result = sel.evaluate("KXBTC15M-T108000", "BTC", "15m", spot=100000.0, strike=108000.0)
         self.assertTrue(result.accepted)
         self.assertFalse(result.in_target_band)
 
@@ -141,24 +141,25 @@ class TestStrikeSelectorRejection(unittest.TestCase):
 
     def test_btc_15m_too_far(self):
         sel = _default_selector()
-        # BTC 15m max distance is 5%, 10% away should be rejected
-        result = sel.evaluate("KXBTC15M-T110000", "BTC", "15m", spot=100000.0, strike=110000.0)
+        # BTC 15m max distance is 15%, 20% away (strike 120000) should be rejected
+        result = sel.evaluate("KXBTC15M-T120000", "BTC", "15m", spot=100000.0, strike=120000.0)
         self.assertFalse(result.accepted)
         self.assertEqual(result.rejection_reason, RejectionReason.EXCEEDS_MAX_DISTANCE)
 
     def test_eth_hourly_too_far(self):
         sel = _default_selector()
-        # ETH hourly max distance is 10%, 15% away should be rejected
-        result = sel.evaluate("KXETH-T4000", "ETH", "1h", spot=3000.0, strike=4000.0)
+        # ETH hourly max distance is 20%, 30% away (strike 3900) should be rejected
+        result = sel.evaluate("KXETH-T3900", "ETH", "1h", spot=3000.0, strike=3900.0)
         self.assertFalse(result.accepted)
         self.assertEqual(result.rejection_reason, RejectionReason.EXCEEDS_MAX_DISTANCE)
 
     def test_result_includes_distance_on_rejection(self):
         sel = _default_selector()
-        result = sel.evaluate("KXBTC15M-T110000", "BTC", "15m", spot=100000.0, strike=110000.0)
+        # 20% away should be rejected with new 15% max distance
+        result = sel.evaluate("KXBTC15M-T120000", "BTC", "15m", spot=100000.0, strike=120000.0)
         self.assertFalse(result.accepted)
         self.assertIsNotNone(result.distance_pct)
-        self.assertAlmostEqual(result.distance_pct, 0.0909, places=3)
+        self.assertAlmostEqual(result.distance_pct, 0.1667, places=3)  # 20/120 = 16.67%
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -198,10 +199,10 @@ class TestBatchEvaluation(unittest.TestCase):
     def test_batch_mixed(self):
         sel = _default_selector()
         contracts = [
-            # Within BTC 15m 5% max distance (0.5% away) - should be accepted
+            # Within BTC 15m 15% max distance (0.5% away) - should be accepted
             {"ticker": "KXBTC15M-T100500", "asset": "BTC", "timeframe": "15m", "spot": 100000, "strike": 100500},
-            # Outside BTC 15m 5% max distance (10% away) - should be rejected
-            {"ticker": "KXBTC15M-T110000", "asset": "BTC", "timeframe": "15m", "spot": 100000, "strike": 110000},
+            # Outside BTC 15m 15% max distance (20% away) - should be rejected
+            {"ticker": "KXBTC15M-T120000", "asset": "BTC", "timeframe": "15m", "spot": 100000, "strike": 120000},
             # Missing spot - should be rejected
             {"ticker": "KXETH-T3500", "asset": "ETH", "timeframe": "1h", "spot": None, "strike": 3500},
         ]

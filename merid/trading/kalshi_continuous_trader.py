@@ -322,7 +322,7 @@ class TraderConfig:
             min_edge=_resolve_trader_min_edge(smoke_test),
             directional_max_tilt=float(os.getenv("KALSHI_CT_DIRECTIONAL_MAX_TILT", "0.15")),
             max_markets_to_scan=int(os.getenv("KALSHI_TRADER_MAX_SCAN", "10")),
-            max_strike_distance_pct=float(os.getenv("KALSHI_TRADER_MAX_DISTANCE", "0.125")),
+            max_strike_distance_pct=float(os.getenv("KALSHI_TRADER_MAX_DISTANCE", "0.20")),  # 20% default per v2 calibration
             stale_order_seconds=int(os.getenv("KALSHI_TRADER_STALE_ORDER_SEC", "120")),
             max_orders_per_cycle=1 if smoke_test else int(os.getenv("KALSHI_TRADER_MAX_ORDERS_CYCLE", "1")),
             fee_edge_multiplier_midcurve=float(os.getenv("KALSHI_TRADER_FEE_MULT_MID", "1.75")),  # 1.75x - calibrated
@@ -537,22 +537,23 @@ def _load_strike_band_pct() -> Dict[Tuple[str, str], float]:
         from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
         return dict(DEFAULT_MAX_DISTANCE)
     except ImportError:
+        # Fallback values matching v2 calibration (2026-04-17)
         return {
-            ("BTC", "15m"):   0.05, ("BTC", "1h"):   0.08,
-            ("BTC", "daily"): 0.15, ("BTC", "weekly"): 0.25,
-            ("BTC", "monthly"): 0.35, ("BTC", "annual"): 0.50,
-            ("ETH", "15m"):   0.07, ("ETH", "1h"):   0.10,
-            ("ETH", "daily"): 0.18, ("ETH", "weekly"): 0.28,
-            ("ETH", "monthly"): 0.40, ("ETH", "annual"): 0.55,
-            ("SOL", "15m"):   0.10, ("SOL", "1h"):   0.14,
-            ("SOL", "daily"): 0.22, ("SOL", "weekly"): 0.35,
-            ("SOL", "monthly"): 0.45, ("SOL", "annual"): 0.60,
-            ("XRP", "15m"):   0.10, ("XRP", "1h"):   0.14,
-            ("XRP", "daily"): 0.22, ("XRP", "weekly"): 0.35,
-            ("XRP", "monthly"): 0.45, ("XRP", "annual"): 0.60,
-            ("DOGE", "15m"):  0.12, ("DOGE", "1h"):  0.16,
-            ("DOGE", "daily"):0.25, ("DOGE", "weekly"):0.40,
-            ("DOGE", "monthly"):0.50, ("DOGE", "annual"):0.65,
+            ("BTC", "15m"):   0.15, ("BTC", "1h"):   0.20,
+            ("BTC", "daily"): 0.25, ("BTC", "weekly"): 0.35,
+            ("BTC", "monthly"): 0.50, ("BTC", "annual"): 0.50,
+            ("ETH", "15m"):   0.15, ("ETH", "1h"):   0.20,
+            ("ETH", "daily"): 0.25, ("ETH", "weekly"): 0.35,
+            ("ETH", "monthly"): 0.50, ("ETH", "annual"): 0.50,
+            ("SOL", "15m"):   0.20, ("SOL", "1h"):   0.25,
+            ("SOL", "daily"): 0.30, ("SOL", "weekly"): 0.40,
+            ("SOL", "monthly"): 0.60, ("SOL", "annual"): 0.60,
+            ("XRP", "15m"):   0.20, ("XRP", "1h"):   0.25,
+            ("XRP", "daily"): 0.30, ("XRP", "weekly"): 0.40,
+            ("XRP", "monthly"): 0.60, ("XRP", "annual"): 0.60,
+            ("DOGE", "15m"):  0.30, ("DOGE", "1h"):  0.35,
+            ("DOGE", "daily"):0.40, ("DOGE", "weekly"):0.50,
+            ("DOGE", "monthly"):0.70, ("DOGE", "annual"):0.70,
         }
 
 

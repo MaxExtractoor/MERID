@@ -204,6 +204,10 @@ from merid.sentiment.behavioral_exploitation import (
     DelayedInformationProcessor,
     LossAversionMonitor,
     HypeCycleDetector,
+    RecencyBiasDetector,
+    SocialDesirabilityBiasDetector,
+    EmotionBiasDetector,
+    NarrativeMomentumDetector,
     BehavioralExploitationEngine,
     get_behavioral_engine,
     quick_behavioral_check,
@@ -326,6 +330,10 @@ __all__ = [
     "DelayedInformationProcessor",
     "LossAversionMonitor",
     "HypeCycleDetector",
+    "RecencyBiasDetector",
+    "SocialDesirabilityBiasDetector",
+    "EmotionBiasDetector",
+    "NarrativeMomentumDetector",
     
     # New modules
     "KalshiArbitrageBot",
