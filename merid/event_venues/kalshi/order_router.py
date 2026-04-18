@@ -702,14 +702,24 @@ def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
 
     Must be called on every early-exit path in _route_live that rejects
     AFTER _run_pre_trade_gate already inserted a PENDING record.
+    
+    CRASH-013: Uses intent_id as fallback when client_tag is missing to ensure
+    cleanup happens even if gate stamping failed.
     """
-    if not intent.client_tag:
+    # CRASH-013: Use intent_id as fallback for gate cleanup
+    tag = intent.client_tag or intent.intent_id
+    if not tag:
+        logger.warning(
+            "[CRASH-013] Cannot release gate record: both client_tag and intent_id are empty for %s",
+            intent.ticker
+        )
         return
     try:
         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
-        get_pre_trade_gate().mark_rejected(intent.client_tag, reason)
+        get_pre_trade_gate().mark_rejected(tag, reason or "unknown")
+        logger.debug("[order-router] Released gate record for %s: %s", tag[:32], reason[:50])
     except Exception as e:
-        logger.debug(f"Failed to release gate record: {e}")
+        logger.debug(f"[CRASH-013] Failed to release gate record for {tag[:32]}: {e}")
 
 
 async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
@@ -849,20 +859,39 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         risk = get_kalshi_risk()
         _rm_category = _infer_cat(_get_underlying(intent.ticker))
         # Look up existing position so per-contract limit check is accurate
+        # CRASH-004: Use sentinel value for cache failure, never poison calculation
+        _POSITION_UNKNOWN = -1
         _existing_pos = 0
+        _position_cache_ok = True
         try:
             from merid.event_venues.kalshi.position_cache import get_position_cache
             _cached = get_position_cache().get_position(intent.ticker)
             if _cached is not None:
                 _existing_pos = _cached.contracts
         except Exception as _pos_err:
-            # Fail-closed: assume max position on cache failure in live mode
+            _position_cache_ok = False
+            # CRASH-004: Log and emit metric, but don't poison the position value
             logger.error(
-                "[order-router] Position cache lookup failed for %s: %s — assuming max position (fail-closed)",
+                "[order-router] Position cache lookup failed for %s: %s — rejecting order (fail-closed)",
                 intent.ticker,
                 _pos_err,
             )
-            _existing_pos = 999999  # Force position limit breach check to fail
+            try:
+                from monitoring.metrics import get_metrics_registry
+                get_metrics_registry().counter(
+                    "kalshi_position_cache_failure",
+                    "Position cache lookup failed, order rejected",
+                    ["ticker"]
+                ).inc(labels={"ticker": intent.ticker})
+            except Exception:
+                pass
+            # CRASH-004: Explicit rejection instead of poisoned value
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"position_cache_unavailable:{_pos_err}",
+                latency_ms=round((time.monotonic() - t0) * 1000, 2),
+            )
         
         # Derive asset/timeframe for group-level risk aggregation using canonical helper
         # Prefer upstream group_id from OrderIntent (propagated from FilterPipeline), fallback to canonical helper
@@ -1039,15 +1068,27 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         from merid.sentiment.sentiment_bus import get_sentiment_bus
         _asset = _get_underlying(intent.ticker)
         if _asset != "OTHER":
-            _sent = get_sentiment_bus().get_sentiment(_asset)
-            if _sent is not None and _sent.should_reduce_size():
-                _scaled = max(1, int(intent.count * 0.5))
-                if _scaled != intent.count:
-                    logger.info(
-                        "[order-router] Sentiment scaling %s: %d→%d (regime=%s)",
-                        intent.ticker, intent.count, _scaled, _sent.trend_regime,
-                    )
-                    intent = _dc_replace(intent, count=_scaled)
+            _sent_bus = get_sentiment_bus()
+            if _sent_bus is None:
+                logger.debug("[order-router] Sentiment bus unavailable — skipping scaling")
+            else:
+                _sent = _sent_bus.get_sentiment(_asset)
+                # CRASH-008: Defensive attribute checking
+                if _sent is not None and hasattr(_sent, 'should_reduce_size') and callable(getattr(_sent, 'should_reduce_size')):
+                    try:
+                        if _sent.should_reduce_size():
+                            _scaled = max(1, int(intent.count * 0.5))
+                            if _scaled != intent.count:
+                                logger.info(
+                                    "[order-router] Sentiment scaling %s: %d→%d (regime=%s)",
+                                    intent.ticker, intent.count, _scaled, 
+                                    getattr(_sent, 'trend_regime', 'unknown'),
+                                )
+                                intent = _dc_replace(intent, count=_scaled)
+                    except Exception as _sent_exc:
+                        logger.debug("[order-router] Sentiment should_reduce_size() failed: %s", _sent_exc)
+                else:
+                    logger.debug("[order-router] Sentiment object missing should_reduce_size method")
     except Exception as _exc:
         logger.debug("[order-router] Sentiment scaling skipped: %s", _exc)
 
@@ -1172,14 +1213,22 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # client_tag was already set by _run_pre_trade_gate (called by
         # route_order_async before _route_live).  Fallback only if caller
         # invoked _route_live directly without the gate (e.g. tests).
+        # CRASH-003: client_tag MUST use original decision timestamp to prevent
+        # duplicate orders on bucket rollover during retries.
         if not intent.client_tag:
-            ts_bucket = int(intent.snapshot_ts) // 60
+            # Lock to original decision timestamp, never use current time
+            decision_ts = intent.snapshot_ts
+            ts_bucket = int(decision_ts) // 60
             idempotency_preimage = (
                 f"{intent.agent_id or 'none'}|{intent.ticker}|{intent.side}|{intent.action}|"
                 f"{intent.price_cents}|{intent.count}|{ts_bucket}|{intent.order_group_id or 'none'}"
             )
             id_hash = hashlib.sha256(idempotency_preimage.encode()).hexdigest()[:16]
             intent.client_tag = f"merid-{id_hash}-{ts_bucket}"
+            logger.debug(
+                "[CRASH-003] Generated client_tag=%s using locked snapshot_ts=%s (bucket=%s)",
+                intent.client_tag, decision_ts, ts_bucket
+            )
 
         tif, gtt_exp = _resolve_tif(intent)
 
@@ -1218,6 +1267,18 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         )
 
         # DRY-RUN-TRACE: Fee computation using canonical kalshi_fee_cents
+        # CRASH-007: Validate inputs before fee calculation
+        if intent.price_cents <= 0 or intent.count <= 0:
+            logger.error(
+                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting",
+                intent.ticker, intent.price_cents, intent.count
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"invalid_order_params:price={intent.price_cents}:count={intent.count}",
+                latency_ms=round((time.monotonic() - t0) * 1000, 2),
+            )
         _fee_pre = _kalshi_fee_cents(intent.price_cents, intent.count)
         _price_dollars = intent.price_cents / 100.0
         _notional_cents = intent.count * intent.price_cents
@@ -1988,15 +2049,42 @@ async def route_batch_orders_async(
     route_tasks = [route_with_limit(intent) for intent in valid_orders]
     route_results = await asyncio.gather(*route_tasks, return_exceptions=True)
 
-    # Combine pre-validation failures with routing results
-    all_results = pre_validated_results + [
-        r if isinstance(r, OrderResult) else OrderResult(
+    # CRASH-005: Harden result handling against None or unexpected types
+    def _normalize_route_result(r, intent_ref: OrderIntent) -> OrderResult:
+        if isinstance(r, OrderResult):
+            return r
+        if r is None:
+            logger.error(
+                "[CRASH-005] route_order_async returned None for %s — treating as rejection",
+                intent_ref.ticker
+            )
+            return OrderResult(
+                status="rejected",
+                mode=_resolve_mode(intent_ref.mode),
+                reason="routing_returned_none",
+                latency_ms=0.0,
+            )
+        if isinstance(r, Exception):
+            return OrderResult(
+                status="rejected",
+                mode=_resolve_mode(intent_ref.mode),
+                reason=f"routing_exception:{type(r).__name__}:{str(r)[:100]}",
+                latency_ms=0.0,
+            )
+        logger.error(
+            "[CRASH-005] Unexpected route result type %s for %s — treating as rejection",
+            type(r), intent_ref.ticker
+        )
+        return OrderResult(
             status="rejected",
-            mode=TradingMode.MOCK,
-            reason=f"routing_exception:{str(r)}",
+            mode=_resolve_mode(intent_ref.mode),
+            reason=f"unexpected_result_type:{type(r).__name__}",
             latency_ms=0.0,
         )
-        for r in route_results
+
+    # Combine pre-validation failures with routing results
+    all_results = pre_validated_results + [
+        _normalize_route_result(r, intent) for r, intent in zip(route_results, valid_orders)
     ]
 
     latency = (time.monotonic() - t0) * 1000

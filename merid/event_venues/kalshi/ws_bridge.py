@@ -132,6 +132,47 @@ class KalshiWebSocketBridge:
         self._coalesce_interval: float = _UI_COALESCE_INTERVAL
         self._ui_batches_sent: int = 0
         self._start_lock = asyncio.Lock()
+        
+        # CRASH-001: Task failure tracking for health degradation
+        self._task_failures: List[Dict[str, Any]] = []
+        self._emergency_reconnect_lock = asyncio.Lock()
+
+    def _record_task_failure(self, task_name: str, error: str) -> None:
+        """Record task failure for health monitoring."""
+        self._task_failures.append({
+            "task_name": task_name,
+            "error": error,
+            "ts": time.monotonic(),
+        })
+        # Keep last 100 failures
+        if len(self._task_failures) > 100:
+            self._task_failures = self._task_failures[-100:]
+
+    def get_health_status(self) -> Dict[str, Any]:
+        """Return health status for monitoring integration."""
+        recent_failures = [
+            f for f in self._task_failures
+            if f["ts"] > time.monotonic() - 300  # Last 5 minutes
+        ]
+        status = "GREEN"
+        if len(recent_failures) > 0:
+            status = "YELLOW" if len(recent_failures) < 3 else "RED"
+        return {
+            "status": status,
+            "running": self.is_running(),
+            "recent_task_failures": len(recent_failures),
+            "total_task_failures": len(self._task_failures),
+            "uptime_s": time.monotonic() - self._start_ts if self._start_ts else 0,
+        }
+
+    async def _emergency_reconnect(self) -> None:
+        """Emergency reconnect triggered by critical task failure."""
+        async with self._emergency_reconnect_lock:
+            if not self._shutdown.is_set():
+                logger.critical("[CRASH-001] Executing emergency reconnect")
+                await self.stop()
+                await asyncio.sleep(1.0)
+                await self.start(self._subscribed_tickers)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -243,12 +284,32 @@ class KalshiWebSocketBridge:
                     logger.warning(f"WS bridge subscription error: {exc}")
 
             def _task_done_cb(task: asyncio.Task) -> None:
-                """Log unhandled exceptions from background tasks instead of silently losing them."""
+                """Log unhandled exceptions from background tasks and trigger health degradation."""
                 if task.cancelled():
                     return
                 exc = task.exception()
                 if exc is not None:
-                    logger.error("WS bridge task %s crashed: %s", task.get_name(), exc, exc_info=exc)
+                    task_name = task.get_name()
+                    logger.critical(
+                        "WS bridge task %s crashed: %s",
+                        task_name, exc, exc_info=exc
+                    )
+                    # CRASH-001: Health degradation signal
+                    self._record_task_failure(task_name, str(exc))
+                    # Emit metric for monitoring
+                    try:
+                        from monitoring.metrics import get_metrics_registry
+                        get_metrics_registry().counter(
+                            "kalshi_ws_bridge_task_crash",
+                            "WS bridge background task crashed",
+                            ["task_name"]
+                        ).inc(labels={"task_name": task_name or "unknown"})
+                    except Exception as metric_err:
+                        logger.debug(f"Failed to emit crash metric: {metric_err}")
+                    # Trigger reconnect if main listener died
+                    if "kalshi-ws-bridge" in (task_name or ""):
+                        logger.critical("Main WS listener died - triggering emergency reconnect")
+                        asyncio.create_task(self._emergency_reconnect())
 
             # Start the WS listener task (enqueues events)
             self._task = asyncio.create_task(
