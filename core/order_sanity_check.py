@@ -29,7 +29,7 @@ class OrderSanityConfig:
     max_order_pct_of_portfolio: float = 0.10  # 10% of portfolio
     max_order_notional_usd: float = 10_000.0  # $10K absolute cap
     min_order_notional_usd: float = 1.0  # $1 minimum
-    max_daily_order_count: int = 500
+    max_daily_order_count: int = 5000
     max_order_notional_per_symbol_usd: float = 25_000.0  # per-symbol daily cap
 
 

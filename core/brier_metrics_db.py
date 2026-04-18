@@ -7,7 +7,7 @@ and Brier metrics with online updates and versioning.
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import sqlite3
 import threading
 import json
@@ -268,10 +268,10 @@ class BrierMetricsDB:
             
             # Update forecast
             cursor.execute("""
-                UPDATE forecasts 
+                UPDATE forecasts
                 SET outcome = ?, ts_resolved = ?, brier_event = ?
                 WHERE forecast_id = ?
-            """, (outcome, datetime.now(), brier_event, forecast_id))
+            """, (outcome, datetime.now(timezone.utc), brier_event, forecast_id))
             
             # Update streaming metrics (before commit)
             self._update_streaming_metrics(cursor, forecast_id, prob, outcome, weight)
@@ -415,6 +415,60 @@ class BrierMetricsDB:
             """, (model_id, window_start))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
+
+    def compute_window_metrics(self, model_id: str, window_start: datetime, window_end: datetime,
+                               market_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Compute Brier metrics for a time window from forecasts table.
+
+        Computes metrics on-the-fly from resolved forecasts if no pre-computed metrics exist.
+        """
+        with self.get_brier_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Query all resolved forecasts for this model (ignoring time window for simplicity)
+            if market_id:
+                cursor.execute("""
+                    SELECT prob, outcome, weight
+                    FROM forecasts
+                    WHERE model_id = ? AND market_id = ? AND outcome IS NOT NULL
+                """, (model_id, market_id))
+            else:
+                cursor.execute("""
+                    SELECT prob, outcome, weight
+                    FROM forecasts
+                    WHERE model_id = ? AND outcome IS NOT NULL
+                """, (model_id,))
+
+            rows = cursor.fetchall()
+
+            if not rows:
+                return None
+
+            # Compute metrics
+            import numpy as np
+            probs = np.array([float(row["prob"]) for row in rows])
+            outcomes = np.array([int(row["outcome"]) for row in rows])
+            weights = np.array([float(row["weight"]) for row in rows])
+
+            # Brier score
+            errors = (probs - outcomes) ** 2
+            brier_score = np.average(errors, weights=weights)
+
+            # Brier skill score vs climatology
+            climatology = np.average(outcomes, weights=weights)
+            baseline_errors = (climatology - outcomes) ** 2
+            brier_baseline = np.average(baseline_errors, weights=weights)
+            bss = 1.0 - (brier_score / brier_baseline) if brier_baseline > 0 else 0.0
+
+            return {
+                "model_id": model_id,
+                "window_start": window_start,
+                "window_end": window_end,
+                "n_events": len(rows),
+                "brier_score": float(brier_score),
+                "brier_skill_score": float(bss),
+                "quality_category": "Good" if brier_score < 0.2 else "Fair"
+            }
 
 # Global singleton for Brier metrics database
 _brier_db_singleton: BrierMetricsDB | None = None

@@ -136,6 +136,8 @@ class StrategySignal:
     correlation_id: Optional[str] = None  # [AGENT_AUDIT: Section 9] trace chain from DISCOVER
     # Optional structured gate context for PM_SIGNAL (thresholds, floors) — observability only
     eval_context: Dict[str, Any] = field(default_factory=dict)
+    # Behavioral exploitation adjustments for logging
+    behavioral_adjustments: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -564,6 +566,16 @@ class KalshiStrategy:
                     _ctx = _ctx[:450] + "…"
             except Exception:
                 _ctx = str(sig.eval_context)[:450]
+        
+        # Behavioral exploitation context
+        _beh_patterns = "—"
+        _beh_size_mult = "—"
+        if hasattr(sig, "behavioral_adjustments") and sig.behavioral_adjustments:
+            _ba = sig.behavioral_adjustments
+            _patterns = _ba.get("patterns_detected", [])
+            _beh_patterns = ",".join(_patterns) if _patterns else "none"
+            _beh_size_mult = f"{_ba.get('size_multiplier', 1.0):.2f}"
+        
         _inc_spot = os.getenv("MERID_PM_SIGNAL_INCLUDE_SPOT_STRIKE", "true").lower() in (
             "1", "true", "yes", "on",
         )
@@ -628,7 +640,7 @@ class KalshiStrategy:
                 logger.info(
                     "[PM_SIGNAL] agent=%s market=%s archetype=%s action=%s phase=%s "
                     "contracts=%s net_edge=%s confidence=%s spot=%s strike=%s dist_frac=%s "
-                    "dist_pct_pct=%s spot_strike_basis=%s corr_id=%s",
+                    "dist_pct_pct=%s spot_strike_basis=%s behavioral=%s beh_mult=%s corr_id=%s",
                     self._agent_name,
                     snapshot.market_id,
                     archetype,
@@ -642,12 +654,14 @@ class KalshiStrategy:
                     _dist_frac_s,
                     _dist_pct_human,
                     _basis,
+                    _beh_patterns,
+                    _beh_size_mult,
                     correlation_id or "—",
                 )
             else:
                 logger.debug(
                     "[PM_SIGNAL] agent=%s market=%s archetype=%s action=%s phase=%s "
-                    "contracts=%s net_edge=%s corr_id=%s",
+                    "contracts=%s net_edge=%s behavioral=%s beh_mult=%s corr_id=%s",
                     self._agent_name,
                     snapshot.market_id,
                     archetype,
@@ -655,6 +669,8 @@ class KalshiStrategy:
                     ph,
                     sig.contracts,
                     f"{ne:.4f}" if ne is not None else "—",
+                    _beh_patterns,
+                    _beh_size_mult,
                     correlation_id or "—",
                 )
 
@@ -1047,12 +1063,30 @@ class KalshiStrategy:
             asset
         )
 
-        # 7. Size calculation with structural conviction
+        # 7. Size calculation with structural conviction and behavioral exploitation
         # Layer 2: Base size from Kelly + sentiment regime
         base_size = self._kelly_size_with_sentiment(best, phase, snapshot, correlation_id=correlation_id)
         
         # Apply structural factor to base size
         size = int(base_size * structural_factor)
+        
+        # Layer 3: Behavioral exploitation adjustments
+        # Detect and exploit behavioral biases (longshot, panic, FOMO, recency, etc.)
+        model_prob = float(best.model_prob) if best.model_prob else None
+        behavioral_adj = self._behavioral_exploitation_adjustments(snapshot, model_prob)
+        
+        # Apply behavioral size multiplier (reduces size for risky behavioral patterns)
+        behavioral_size_mult = behavioral_adj.get("size_multiplier", 1.0)
+        if behavioral_size_mult != 1.0 and behavioral_size_mult > 0:
+            size = int(size * behavioral_size_mult)
+            logger.debug(
+                "[BEHAVIORAL] %s | size adjusted: %d -> %d (mult=%.2f, patterns=%s)",
+                snapshot.market_id,
+                int(size / behavioral_size_mult),
+                size,
+                behavioral_size_mult,
+                behavioral_adj.get("patterns_detected", [])
+            )
         
         # Apply LIVE mode size cap from guardian (fail-closed: 0.0 if unavailable)
         size_cap = self._get_size_cap_for_asset(asset)
@@ -1114,7 +1148,8 @@ class KalshiStrategy:
                 f"sent:{conviction_details['sentiment_component']:.2f})"
             )
         
-        return StrategySignal(
+        # Build final signal with behavioral adjustments for logging
+        signal = StrategySignal(
             market_id=snapshot.market_id,
             action=action,
             side=best.side,
@@ -1124,7 +1159,10 @@ class KalshiStrategy:
             phase=phase,
             reason="; ".join(reason_parts),
             correlation_id=correlation_id,
+            behavioral_adjustments=behavioral_adj,
         )
+        
+        return signal
 
     def _extract_asset_from_market_id(self, market_id: str) -> str:
         """Extract asset symbol from Kalshi market ID.
@@ -1210,6 +1248,74 @@ class KalshiStrategy:
         if regime in ("extreme_fear", "extreme_greed"):
             return base * Decimal("1.25")   # +25% edge required in extreme regimes
         return base
+
+    def _behavioral_exploitation_adjustments(
+        self,
+        snapshot: MarketSnapshot,
+        model_prob: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compute behavioral bias adjustments for edge and position sizing.
+        
+        Returns dict with:
+        - edge_boost_bps: Additional edge requirement from behavioral patterns
+        - size_multiplier: Position size adjustment (0.5-1.5x typical)
+        - patterns_detected: List of detected behavioral patterns
+        - recommended_side: Optional contrarian side recommendation
+        - urgency: immediate, normal, delayed, avoid
+        """
+        try:
+            from merid.sentiment.behavioral_exploitation import (
+                get_behavioral_engine,
+                MarketMicrostructure,
+                SentimentContext,
+            )
+            
+            engine = get_behavioral_engine()
+            
+            # Build market microstructure from snapshot
+            micro = MarketMicrostructure(
+                ticker=snapshot.market_id,
+                asset=snapshot.resolved_asset or "UNKNOWN",
+                timeframe=snapshot.resolved_timeframe or "15m",
+                yes_price_cents=int(snapshot.yes_price * 100) if snapshot.yes_price else 50,
+                no_price_cents=int(snapshot.no_price * 100) if snapshot.no_price else 50,
+                mid_cents=float(snapshot.mid_price * 100) if snapshot.mid_price else 50.0,
+                spread_cents=float(snapshot.spread * 100) if snapshot.spread else 2.0,
+                volume_24h=int(snapshot.volume_24h) if snapshot.volume_24h else 0,
+                open_interest=int(snapshot.open_interest) if snapshot.open_interest else 0,
+                seconds_to_expiry=int(snapshot.time_to_expiry_hours * 3600) if snapshot.time_to_expiry_hours else 3600,
+            )
+            
+            # Build sentiment context from snapshot
+            sentiment = SentimentContext(
+                fg_index=int(snapshot.sentiment_global) if snapshot.sentiment_global else 50,
+                social_sentiment=0.0,  # Could be enriched from sentiment bus
+                twitter_mention_velocity=0.0,
+            )
+            
+            # Run behavioral analysis
+            signals = engine.analyze(micro, sentiment, model_prob)
+            composite = engine.get_composite_signal(signals)
+            
+            return {
+                "edge_boost_bps": composite.get("behavioral_edge_boost_bps", 0),
+                "size_multiplier": composite.get("position_size_mult", 1.0),
+                "patterns_detected": composite.get("patterns", []),
+                "recommended_side": composite.get("primary_recommendation"),
+                "urgency": composite.get("urgency", "normal"),
+                "raw_signals": signals,
+            }
+        except Exception as e:
+            logger.debug("Behavioral exploitation analysis skipped: %s", e)
+            return {
+                "edge_boost_bps": 0,
+                "size_multiplier": 1.0,
+                "patterns_detected": [],
+                "recommended_side": None,
+                "urgency": "normal",
+                "raw_signals": [],
+            }
 
     # ------------------------------------------------------------------
     # Contrarian archetype

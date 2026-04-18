@@ -368,7 +368,7 @@ class TestBrierMetricsAPI:
             kind="agent"
         )
         
-        response = self.client.post("/api/v1/metrics/models/register", json=request.dict())
+        response = self.client.post("/api/v1/metrics/models/register", json=request.model_dump())
         assert response.status_code == 200
         
         data = response.json()
@@ -392,7 +392,7 @@ class TestBrierMetricsAPI:
             weight=1.0
         )
         
-        response = self.client.post("/api/v1/metrics/forecasts", json=request.dict())
+        response = self.client.post("/api/v1/metrics/forecasts", json=request.model_dump())
         assert response.status_code == 200
         
         data = response.json()
@@ -420,14 +420,13 @@ class TestBrierMetricsAPI:
         
         # Resolve forecast
         request = ForecastResolution(forecast_id=forecast_id, outcome=1)
-        response = self.client.put("/api/v1/metrics/forecasts/resolve", json=request.dict())
+        response = self.client.put("/api/v1/metrics/forecasts/resolve", json=request.model_dump())
         
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
         assert data["outcome"] == 1
     
-    @pytest.mark.skip(reason="API endpoint returning 404 - needs investigation")
     def test_evaluation_endpoint(self):
         """Test Brier evaluation API."""
         request = BrierEvaluationRequest(
@@ -437,7 +436,7 @@ class TestBrierMetricsAPI:
             n_bins=5
         )
 
-        response = self.client.post("/api/v1/metrics/evaluate", json=request.dict())
+        response = self.client.post("/api/v1/metrics/evaluate", json=request.model_dump())
         assert response.status_code == 200
         
         data = response.json()
@@ -449,7 +448,6 @@ class TestBrierMetricsAPI:
         assert evaluation["raw"]["brier_score"] is not None
         assert evaluation["raw"]["brier_skill_score"] is not None
     
-    @pytest.mark.skip(reason="Pydantic ValidationError - needs investigation")
     def test_reliability_diagram_endpoint(self):
         """Test reliability diagram generation API."""
         request = BrierEvaluationRequest(
@@ -458,7 +456,7 @@ class TestBrierMetricsAPI:
             n_bins=4
         )
         
-        response = self.client.post("/api/v1/metrics/reliability-diagram", json=request.dict())
+        response = self.client.post("/api/v1/metrics/reliability-diagram", json=request.model_dump())
         assert response.status_code == 200
         
         data = response.json()
@@ -471,7 +469,6 @@ class TestBrierMetricsAPI:
         assert "perfect_line" in diagram
         assert len(diagram["bin_centers"]) == 4
     
-    @pytest.mark.skip(reason="API endpoint issue - needs investigation")
     def test_promotion_evaluation_endpoint(self):
         """Test promotion eligibility evaluation API."""
         # Register model and add some forecasts

@@ -6,7 +6,7 @@ Integrates with MERID's core metrics system as the canonical probability accurac
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta, timezone
 import numpy as np
@@ -14,7 +14,7 @@ import pandas as pd
 
 from core.merid_metrics import (
     MERIDMetrics, CalibrationMethod, CalibrationArchetype,
-    BrierResult, CalibrationResult
+    BrierResult, CalibrationResult, get_merid_metrics
 )
 from core.brier_metrics_db import get_brier_db
 from web.api.auth import get_current_session
@@ -52,12 +52,14 @@ class CalibrationRequest(BaseModel):
     data_end: datetime
 
 class BrierEvaluationRequest(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
     y_true: List[float] = Field(description="True outcomes (0/1)")
     y_pred: List[float] = Field(description="Predicted probabilities")
     weights: Optional[List[float]] = None
     baseline: Optional[List[float]] = None
     calibration_method: Optional[CalibrationMethod] = None
-    n_bins: int = Field(default=10, ge=5, le=50)
+    n_bins: int = Field(default=10, ge=2, le=50)
 
 class WindowMetricsRequest(BaseModel):
     model_id: str
@@ -150,10 +152,18 @@ async def evaluate_predictions(request: BrierEvaluationRequest):
         if not np.all((y_pred >= 0) & (y_pred <= 1)):
             raise HTTPException(status_code=400, detail="y_pred must be between 0 and 1")
         
+        # Convert calibration_method string to enum if provided
+        calibration_method = None
+        if request.calibration_method:
+            try:
+                calibration_method = CalibrationMethod(request.calibration_method)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid calibration method: {request.calibration_method}")
+
         # Compute metrics
         metrics = get_merid_metrics()
         results = metrics.evaluate_model(
-            y_true, y_pred, baseline, request.calibration_method, request.n_bins
+            y_true, y_pred, baseline, calibration_method, request.n_bins
         )
         
         return {
@@ -161,7 +171,7 @@ async def evaluate_predictions(request: BrierEvaluationRequest):
             "evaluation": results,
             "metadata": {
                 "n_events": len(y_true),
-                "calibration_method": request.calibration_method.value if request.calibration_method else None,
+                "calibration_method": request.calibration_method if request.calibration_method else None,
                 "n_bins": request.n_bins,
                 "evaluated_at": datetime.now(timezone.utc).isoformat()
             }
@@ -368,15 +378,15 @@ async def evaluate_promotion_eligibility(model_id: str,
                                       days: int = Query(default=30, ge=1, le=90)):
     """
     Evaluate if a model meets promotion criteria.
-    
+
     Uses Brier Skill Score and event count as primary gates for promotion.
     """
     try:
         db = get_brier_db()
-        
+
         # Get recent performance
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
-        
+
         with db.get_brier_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -386,17 +396,28 @@ async def evaluate_promotion_eligibility(model_id: str,
                 ORDER BY window_start DESC
                 LIMIT 1
             """, (model_id, cutoff_date))
-            
+
             row = cursor.fetchone()
-        
+
+        # If no pre-computed metrics, compute from forecasts on-the-fly
         if not row:
-            raise HTTPException(status_code=404, detail="No recent metrics found for model")
-        
+            metrics = get_merid_metrics()
+            window_metrics = db.compute_window_metrics(model_id, cutoff_date, datetime.now(timezone.utc))
+
+            if not window_metrics or window_metrics.get("n_events", 0) == 0:
+                raise HTTPException(status_code=404, detail="No forecasts found for model")
+
+            brier_score = window_metrics.get("brier_score", 0.0)
+            n_events = window_metrics.get("n_events", 0)
+            bss = window_metrics.get("brier_skill_score", 0.0)
+            quality = metrics._categorize_quality(brier_score, bss)
+        else:
+            brier_score = row["brier_score"]
+            n_events = row["n_events"]
+            bss = row["brier_skill_score"] or 0.0
+            quality = row["quality_category"]
+
         # Evaluate criteria
-        bss = row["brier_skill_score"] or 0.0
-        n_events = row["n_events"]
-        quality = row["quality_category"]
-        
         meets_bss = bss >= min_bss
         meets_events = n_events >= min_events
         eligible = meets_bss and meets_events
@@ -404,6 +425,14 @@ async def evaluate_promotion_eligibility(model_id: str,
         # Additional quality checks
         quality_good = quality in ["Excellent", "Good", "Fair"]
         
+        # Use computed metrics or row values depending on which path was taken
+        current_metrics = {
+            "brier_score": brier_score,
+            "brier_skill_score": bss,
+            "n_events": n_events,
+            "quality_category": quality
+        }
+
         return {
             "success": True,
             "model_id": model_id,
@@ -412,12 +441,7 @@ async def evaluate_promotion_eligibility(model_id: str,
                 "meets_bss_criteria": meets_bss,
                 "meets_events_criteria": meets_events,
                 "quality_acceptable": quality_good,
-                "current_metrics": {
-                    "brier_score": row["brier_score"],
-                    "brier_skill_score": bss,
-                    "n_events": n_events,
-                    "quality_category": quality
-                },
+                "current_metrics": current_metrics,
                 "criteria": {
                     "min_bss": min_bss,
                     "min_events": min_events,

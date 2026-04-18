@@ -586,12 +586,12 @@ class MERIDMetrics:
         
         # Calibration analysis
         if calibration_method:
-            cal_result = self.calibrate_probabilities(y_true, y_pred, calibration_method)
+            cal_result = self.calibrate_probabilities(y_pred, y_true, calibration_method)
             results["calibration"] = cal_result.to_dict()
-            
+
             # Calibrated metrics
             calibrator = ProbabilityCalibrator(calibration_method)
-            calibrator.fit(y_true, y_pred)
+            calibrator.fit(y_pred, y_true)
             y_pred_cal = calibrator.predict(y_pred)
             results["calibrated"] = self.brier_decomposition(y_true, y_pred_cal, n_bins).to_dict()
         
