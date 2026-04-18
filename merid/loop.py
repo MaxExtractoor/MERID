@@ -1217,8 +1217,13 @@ class MeridLoop:
         # Check lag before starting
         current_lag = self._get_event_loop_lag_ms()
         if current_lag > 750:  # Skip if already lagging
-            logger.warning(f"[LAG-GUARD] Skipping liquidity sweep — lag {current_lag:.0f}ms > 750ms")
+            logger.warning(
+                "[LAG-SKIP] action=liquidity_sweep reason=elevated_lag "
+                f"lag_ms={current_lag:.0f} threshold_ms=750 timeout_count={getattr(self.metrics, 'liquidity_timeouts', 0)}"
+            )
             summary["actions"].append("liquidity_sweep:skipped_due_to_lag")
+            # Track skip metrics
+            self.metrics.lag_skips_total = getattr(self.metrics, 'lag_skips_total', 0) + 1
             return
 
         sub_timings: Dict[str, float] = {}
@@ -1387,8 +1392,13 @@ class MeridLoop:
         # Check current lag before starting
         current_lag = self._get_event_loop_lag_ms()
         if current_lag > 500:  # Skip if already lagging significantly
-            logger.warning(f"[LAG-GUARD] Skipping arb_scan — lag {current_lag:.0f}ms > 500ms")
+            logger.warning(
+                "[LAG-SKIP] action=arb_scan reason=elevated_lag "
+                f"lag_ms={current_lag:.0f} threshold_ms=500 timeout_count={getattr(self.metrics, 'arb_scan_timeouts', 0)}"
+            )
             summary["actions"].append("arb_scan:skipped_due_to_lag")
+            # Track skip metrics
+            self.metrics.lag_skips_total = getattr(self.metrics, 'lag_skips_total', 0) + 1
             return
             
         step_start = time.perf_counter()
@@ -1955,7 +1965,12 @@ class MeridLoop:
         # Check lag before starting
         current_lag = self._get_event_loop_lag_ms()
         if current_lag > 1000:  # Skip notify entirely if lag is critical
-            logger.warning(f"[LAG-GUARD] Skipping notify — lag {current_lag:.0f}ms > 1000ms")
+            logger.warning(
+                "[LAG-SKIP] action=notify reason=critical_lag "
+                f"lag_ms={current_lag:.0f} threshold_ms=1000 subscriber_count={len(self._subscribers)}"
+            )
+            # Track skip metrics
+            self.metrics.lag_skips_total = getattr(self.metrics, 'lag_skips_total', 0) + 1
             return
         
         # Per-subscriber timeout: max 100ms each
@@ -2146,6 +2161,43 @@ class MeridLoop:
     def stop(self):
         """Signal the loop to stop after the current tick."""
         self._running = False
+    
+    async def shutdown(self, timeout: float = 10.0) -> None:
+        """Graceful shutdown with background task cleanup.
+        
+        EVENT-LOOP-FIX: Cancels and awaits background tasks to prevent
+        dangling work during loop closure.
+        
+        Args:
+            timeout: Max seconds to wait for background tasks
+        """
+        import asyncio
+        logger.info(f"[SHUTDOWN] Initiating graceful shutdown (timeout={timeout}s)")
+        self._running = False
+        
+        # Collect background tasks to cancel
+        bg_tasks = []
+        if self._agent_bg_task and not self._agent_bg_task.done():
+            bg_tasks.append(("agent_cycles", self._agent_bg_task))
+        if self._promo_bg_task and not self._promo_bg_task.done():
+            bg_tasks.append(("promotion_sync", self._promo_bg_task))
+        
+        if bg_tasks:
+            logger.info(f"[SHUTDOWN] Cancelling {len(bg_tasks)} background tasks: {[n for n,_ in bg_tasks]}")
+            for name, task in bg_tasks:
+                task.cancel()
+            
+            # Await with timeout
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*[t for _, t in bg_tasks], return_exceptions=True),
+                    timeout=timeout
+                )
+                logger.info("[SHUTDOWN] Background tasks cancelled successfully")
+            except asyncio.TimeoutError:
+                logger.warning(f"[SHUTDOWN] Timeout waiting for background tasks after {timeout}s")
+        
+        logger.info("[SHUTDOWN] Complete")
 
     # ── Status ────────────────────────────────────────────────────────
 
