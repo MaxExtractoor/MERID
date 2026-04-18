@@ -23,7 +23,7 @@ import threading
 import requests
 
 from utils.logger import get_logger
-from merid.prediction.execution_intelligence import get_execution_intel
+from merid.prediction.execution_intelligence import get_execution_intel, ExecutionDecision
 from merid.kalshi.execution_telemetry import get_execution_telemetry_tracker
 
 logger = get_logger("merid.kalshi.maker_bot")
@@ -1145,7 +1145,7 @@ class KalshiMultiMarketMaker:
     
     async def _quote_scheduler_loop(self):
         """Prioritize and schedule quotes across markets."""
-        while True:
+        while self.running:
             try:
                 # Calculate market priorities
                 market_priorities = []
@@ -1156,17 +1156,17 @@ class KalshiMultiMarketMaker:
                         edge = self._calculate_edge(orderbook)
                         priority = volume * abs(edge)
                         market_priorities.append((priority, ticker, orderbook))
-                
+
                 # Sort by priority (highest first)
                 market_priorities.sort(reverse=True)
-                
+
                 # Quote top markets
                 for priority, ticker, orderbook in market_priorities[:self.max_concurrent_quotes]:
                     if self._should_quote_market(orderbook):
                         await self._evaluate_trading_opportunity(orderbook)
-                
+
                 await asyncio.sleep(0.1)  # 100ms quote cycle
-                
+
             except Exception as e:
                 logger.error(f"Quote scheduler error: {e}")
                 await asyncio.sleep(1.0)
@@ -2009,21 +2009,28 @@ class KalshiQueueAwareStrategy:
 
 # ── Queue Position Polling Loop ─────────────────────────────────────────
 
-async def queue_poll_loop(auto_cancel: KalshiQueueAutoCancel, active_orders: Dict[str, Dict[str, Any]], 
-                         interval: float = 15.0):
-    """Async queue position polling loop."""
-    while True:
+async def queue_poll_loop(auto_cancel: KalshiQueueAutoCancel, active_orders: Dict[str, Dict[str, Any]],
+                         interval: float = 15.0, running: Optional[threading.Event] = None):
+    """Async queue position polling loop.
+
+    Args:
+        auto_cancel: Queue auto-cancel manager
+        active_orders: Dictionary of active orders to monitor
+        interval: Polling interval in seconds
+        running: Optional threading.Event to signal loop exit
+    """
+    while running is None or running.is_set():
         try:
             # Refresh queue positions and cancel poor orders
             updated_orders = auto_cancel.refresh_queue_and_maybe_cancel(active_orders)
-            
+
             # Update the shared active_orders dict
             active_orders.clear()
             active_orders.update(updated_orders)
-            
+
         except Exception as e:
             logger.error(f"Queue poll loop error: {e}")
-        
+
         await asyncio.sleep(interval)
 
 
@@ -2672,19 +2679,19 @@ class KalshiRealTimeQueueBot(KalshiAutoCancelMakerBot):
     
     async def _production_queue_poll_loop(self, interval: float = 15.0):
         """Production queue polling loop with time-based thresholds."""
-        while True:
+        while self.running:
             try:
                 # Refresh queue positions and cancel based on time-based thresholds
                 self.active_orders = self.production_queue_manager.refresh_queue_and_cancel(self.active_orders)
-                
+
                 # Log queue statistics
                 if self.active_orders:
                     avg_qp = sum(o.get("queue_position", 0) for o in self.active_orders.values()) / len(self.active_orders)
                     logger.debug(f"Queue poll: {len(self.active_orders)} active orders, avg QP: {avg_qp:.1f}")
-                
+
             except Exception as e:
                 logger.error(f"Production queue poll error: {e}")
-            
+
             await asyncio.sleep(interval)
     
     def _parse_orderbook(self, data: Dict[str, Any]) -> KalshiOrderbookSnapshot:
@@ -3615,7 +3622,7 @@ class KalshiWebSocketFillMonitor:
     
     async def _periodic_reconciliation(self):
         """Periodically reconcile with REST API to ensure consistency."""
-        while True:
+        while self.running:
             try:
                 await asyncio.sleep(self.reconciliation_interval)
                 await self._reconcile_orders()
@@ -7004,9 +7011,15 @@ def snapshot(bot) -> dict:
         "order_groups": dict(getattr(bot, 'order_group_state', {})),
     }
 
-async def monitoring_loop(bot, interval: float = 5.0):
-    """Periodic monitoring loop with bot state logging."""
-    while True:
+async def monitoring_loop(bot, interval: float = 5.0, running: Optional[threading.Event] = None):
+    """Periodic monitoring loop with bot state logging.
+
+    Args:
+        bot: Bot instance to monitor
+        interval: Monitoring interval in seconds
+        running: Optional threading.Event to signal loop exit
+    """
+    while running is None or running.is_set():
         snap = snapshot(bot)
         logger.info(f"PNL={snap['pnl']:.2f}, pos={snap['positions']}, "
                     f"active={snap['active_orders']}, og={snap['order_groups']}")
@@ -7989,46 +8002,73 @@ class RateLimiter:
         self.last = time.time()
         self.lock = threading.Lock()
 
-    def acquire(self):
-        """Acquire a token, blocking until available."""
+    def acquire(self, timeout: Optional[float] = None):
+        """Acquire a token, blocking until available.
+
+        Args:
+            timeout: Maximum time to wait in seconds. If None, blocks indefinitely.
+
+        Returns:
+            True if token acquired, False if timeout expired.
+        """
+        start_time = time.time()
         with self.lock:
             while True:
                 now = time.time()
                 elapsed = now - self.last
-                
+
                 # Refill tokens
                 self.tokens = min(self.max_per_sec, self.tokens + elapsed * self.max_per_sec)
                 self.last = now
-                
+
                 if self.tokens >= 1:
                     self.tokens -= 1
-                    return
-                
+                    return True
+
+                # Check timeout
+                if timeout is not None and (now - start_time) >= timeout:
+                    return False
+
                 time.sleep(0.01)
 
 class KalshiRequestQueue:
     """Rate-limited request queue for Kalshi API calls."""
-    
+
     def __init__(self, read_limit: int = 15, write_limit: int = 8):
         self.request_q = queue.Queue()
         self.read_limiter = RateLimiter(read_limit)
         self.write_limiter = RateLimiter(write_limit)
-        
+        self._running = True
+        self._shutdown_sentinel = (None, None, None, None)  # Signal to stop worker
+
         # Start worker thread
         self.worker_thread = threading.Thread(target=self._worker, daemon=True)
         self.worker_thread.start()
-    
+
+    def stop(self):
+        """Stop the worker thread gracefully."""
+        self._running = False
+        self.request_q.put(self._shutdown_sentinel)
+        self.worker_thread.join(timeout=5.0)
+
     def _worker(self):
         """Worker thread that processes requests from queue."""
-        while True:
-            method, url, kwargs, future = self.request_q.get()
-            
+        while self._running:
+            item = self.request_q.get()
+
+            # Check for shutdown sentinel
+            if item == self._shutdown_sentinel:
+                self.request_q.task_done()
+                break
+
+            method, url, kwargs, future = item
+
             # Choose appropriate limiter
             limiter = self.read_limiter if method.upper() in ['GET', 'HEAD'] else self.write_limiter
-            
+
             # Acquire rate limit token
             limiter.acquire()
-            
+
             try:
                 resp = kalshi_request(method, url, **kwargs)
                 future["resp"] = resp
