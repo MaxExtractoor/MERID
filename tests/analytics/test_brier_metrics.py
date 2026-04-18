@@ -510,7 +510,6 @@ class TestBrierMetricsAPI:
         assert "meets_events_criteria" in evaluation
         assert "recommendation" in evaluation
 
-@pytest.mark.skip(reason="ImportError - ArbitrageOpportunitySummary not found")
 class TestIntegrationWithMERID:
     """Test integration with existing MERID components."""
 
@@ -518,21 +517,19 @@ class TestIntegrationWithMERID:
         """Test integration with prediction agents."""
         # This would test the actual integration with prediction agents
         # For now, we'll test the structure
-        
-        from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent
-        
+
+        from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent, ArbitrageOpportunitySummary
+
         # Create agent
         agent = PredictionArbitrageAnalystAgent(
             agent_id="test_brier_agent",
             model_name="Test Brier Model"
         )
-        
+
         # Verify agent has Brier capability
         assert hasattr(agent, '_calculate_brier_score')
-        
+
         # Test Brier calculation with mock data
-        from monitoring.prediction_analytics import ArbitrageOpportunitySummary
-        
         mock_opportunities = [
             ArbitrageOpportunitySummary(
                 canonical_question="Test question 1",
@@ -544,7 +541,8 @@ class TestIntegrationWithMERID:
                 days_to_resolution=10,
                 total_liquidity=100000,
                 risk_note="Low risk",
-                forecast_probability=0.65
+                forecast_probability=0.65,
+                market_id="market_1"
             ),
             ArbitrageOpportunitySummary(
                 canonical_question="Test question 2",
@@ -556,7 +554,8 @@ class TestIntegrationWithMERID:
                 days_to_resolution=15,
                 total_liquidity=150000,
                 risk_note="Medium risk",
-                forecast_probability=0.7
+                forecast_probability=0.7,
+                market_id="market_2"
             )
         ]
         
@@ -590,8 +589,8 @@ class TestIntegrationWithMERID:
             )
             
             # Test Brier calculation during blindness
-            from monitoring.prediction_analytics import ArbitrageOpportunitySummary
-            
+            from agents.prediction_arbitrage_analyst import ArbitrageOpportunitySummary
+
             mock_opps = [ArbitrageOpportunitySummary(
                 canonical_question="Test",
                 spread_probability=0.1,
@@ -602,7 +601,8 @@ class TestIntegrationWithMERID:
                 days_to_resolution=10,
                 total_liquidity=100000,
                 risk_note="Low risk",
-                forecast_probability=0.65
+                forecast_probability=0.65,
+                market_id="market_test"
             )]
             
             brier_metrics = agent._calculate_brier_score(mock_opps)
