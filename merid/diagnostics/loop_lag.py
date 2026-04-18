@@ -298,3 +298,81 @@ async def measure_loop_lag() -> float:
     await asyncio.sleep(0)  # Yield control
     t1 = time.monotonic()
     return max(0.0, (t1 - t0) * 1000.0)
+
+
+# EVENT-LOOP-FIX: Utility functions for lag-aware operation guards
+def get_current_lag_ms() -> float:
+    """Get current event-loop lag without blocking.
+    
+    Returns:
+        Current lag in milliseconds, or 0.0 if monitor unavailable.
+    """
+    try:
+        monitor = get_loop_lag_monitor()
+        health = monitor.get_health()
+        return health.get("current_ms", 0.0)
+    except Exception:
+        return 0.0
+
+
+def is_lag_elevated(threshold_ms: float = 500.0) -> bool:
+    """Check if event-loop lag is elevated.
+    
+    Args:
+        threshold_ms: Lag threshold in milliseconds (default: 500ms)
+        
+    Returns:
+        True if lag exceeds threshold, False otherwise.
+    """
+    return get_current_lag_ms() > threshold_ms
+
+
+def is_lag_degraded(threshold_ms: float = 1000.0) -> bool:
+    """Check if event-loop lag is in degraded state.
+    
+    Args:
+        threshold_ms: Lag threshold in milliseconds (default: 1000ms)
+        
+    Returns:
+        True if lag exceeds threshold, False otherwise.
+    """
+    return get_current_lag_ms() > threshold_ms
+
+
+def is_lag_halt_band(threshold_ms: float = 2000.0) -> bool:
+    """Check if event-loop lag is in halt band (critical).
+    
+    Args:
+        threshold_ms: Lag threshold in milliseconds (default: 2000ms)
+        
+    Returns:
+        True if lag exceeds threshold, False otherwise.
+    """
+    return get_current_lag_ms() > threshold_ms
+
+
+async def with_timeout_guard(coro, timeout_ms: float, operation_name: str = "operation"):
+    """Execute coroutine with timeout to prevent event-loop starvation.
+    
+    EVENT-LOOP-FIX: Wraps slow operations to prevent them from blocking
+    the event loop beyond their budget.
+    
+    Args:
+        coro: Coroutine to execute
+        timeout_ms: Timeout in milliseconds
+        operation_name: Name for logging
+        
+    Returns:
+        Result of coroutine
+        
+    Raises:
+        asyncio.TimeoutError: If operation exceeds timeout
+    """
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout_ms / 1000.0)
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[EVENT-LOOP-FIX] Operation '{operation_name}' timed out after {timeout_ms}ms "
+            f"— prevented event-loop starvation"
+        )
+        raise

@@ -156,6 +156,11 @@ class KalshiWebSocket(EventVenueStream):
         # CRASH-002: Callback exception tracking for health degradation
         self._callback_failure_count: int = 0
         self._callback_failure_last_ts: float = 0.0
+        
+        # EVENT-LOOP-FIX: Lag-based circuit breaker state
+        self._lag_pause_active: bool = False  # True when lag > halt band
+        self._lag_pause_entered_at: Optional[float] = None
+        self._lag_pause_count: int = 0  # Total times entered lag pause
         self._callback_failures: List[Dict[str, Any]] = []  # Last N failures with context
 
         # B3: register graceful-shutdown snapshot handler
@@ -825,12 +830,66 @@ class KalshiWebSocket(EventVenueStream):
         self._last_seq[market_id] = seq
         return True
     
+    def _get_event_loop_lag_ms(self) -> float:
+        """Get current event-loop lag from the lag monitor.
+        
+        EVENT-LOOP-FIX: Returns 0 if monitor unavailable, lag in ms otherwise.
+        """
+        try:
+            from merid.diagnostics.loop_lag import get_loop_lag_monitor
+            monitor = get_loop_lag_monitor()
+            health = monitor.get_health()
+            return health.get("current_ms", 0.0)
+        except Exception:
+            return 0.0
+
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff + jitter, then resubscribe.
         
         CRASH-006: Uses asyncio.Lock to prevent concurrent reconnect storms.
+        EVENT-LOOP-FIX: Skips reconnect if lag > 1000ms to prevent storm during starvation.
         """
         if not self._running:
+            return
+        
+        # EVENT-LOOP-FIX: Check event-loop lag before attempting reconnect
+        # If lag is severe, skip reconnect to prevent adding load to starving loop
+        _LAG_THRESHOLD_MS = float(os.getenv("KALSHI_WS_RECONNECT_LAG_THRESHOLD_MS", "1000"))
+        _HALT_BAND_MS = 2000.0  # Critical threshold for lag pause mode
+        current_lag = self._get_event_loop_lag_ms()
+        
+        if current_lag > _HALT_BAND_MS:
+            # Enter lag pause mode - completely suspend reconnection attempts
+            if not self._lag_pause_active:
+                self._lag_pause_active = True
+                self._lag_pause_entered_at = time.monotonic()
+                self._lag_pause_count += 1
+                logger.critical(
+                    f"[EVENT-LOOP-FIX] ENTERING LAG PAUSE MODE — lag {current_lag:.0f}ms > {_HALT_BAND_MS}ms "
+                    f"(pause_count={self._lag_pause_count}). All WS reconnects suspended."
+                )
+            return
+        elif self._lag_pause_active and current_lag < _LAG_THRESHOLD_MS:
+            # Exit lag pause mode - lag has recovered
+            duration = time.monotonic() - (self._lag_pause_entered_at or time.monotonic())
+            self._lag_pause_active = False
+            self._lag_pause_entered_at = None
+            logger.warning(
+                f"[EVENT-LOOP-FIX] EXITING LAG PAUSE MODE — lag recovered to {current_lag:.0f}ms "
+                f"after {duration:.1f}s"
+            )
+        
+        # Skip individual reconnect if lag is elevated (but not in halt band)
+        if current_lag > _LAG_THRESHOLD_MS:
+            logger.warning(
+                f"[EVENT-LOOP-FIX] Skipping WS reconnect — event loop lag {current_lag:.0f}ms "
+                f"exceeds threshold {_LAG_THRESHOLD_MS:.0f}ms"
+            )
+            # Exponential backoff continues even when skipping - don't reset delay
+            self._reconnect_delay = min(
+                self._reconnect_delay * 2,
+                self._max_reconnect_delay,
+            )
             return
         
         # CRASH-006: Prevent multiple concurrent reconnect attempts
