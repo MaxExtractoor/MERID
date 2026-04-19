@@ -1369,7 +1369,7 @@ class KalshiRiskManager:
         - 1.0 <= ratio < 1.5: daily_loss_frac = 0.14 (BASELINE)
         - ratio >= 1.5: daily_loss_frac = 0.10 (LOCK_IN_GAINS)
 
-        Safety clamp: dynamic_daily_loss <= static_cap (config.max_daily_loss_pct)
+        Safety clamp: dynamic_daily_loss <= static_cap (derived from config.max_daily_loss_usd / bankroll)
 
         Returns:
             Tuple of (max_daily_loss_usd, regime, ratio)
@@ -1378,8 +1378,13 @@ class KalshiRiskManager:
         if bankroll_usd <= 0:
             return (0.0, "NO_BANKROLL", 0.0)
 
-        # Static safety cap from config (always computed as limit)
-        static_cap = bankroll_usd * self._config.max_daily_loss_pct
+        # Static safety cap from config (derive pct from max_daily_loss_usd / bankroll)
+        # Single source of truth: config holds dollar caps, we compute percentage on demand
+        max_daily_loss_usd = float(self._config.max_daily_loss_usd)
+        if max_daily_loss_usd <= 0:
+            max_daily_loss_usd = bankroll_usd * 0.10  # 10% default
+        max_daily_loss_pct = min(max_daily_loss_usd / bankroll_usd, 0.15)  # Cap at 15%
+        static_cap = bankroll_usd * max_daily_loss_pct
 
         # Compute equity/bankroll ratio for dynamic regime
         ratio = equity_usd / bankroll_usd if bankroll_usd > 0 else 1.0
@@ -1435,7 +1440,7 @@ class KalshiRiskManager:
         base_daily_loss = self._config.max_daily_loss_usd
         if base_daily_loss <= 0:
             base_daily_loss = bankroll_usd * 0.10  # 10% default
-        static_cap = base_daily_loss * static_cluster_frac
+        static_cap = float(base_daily_loss) * static_cluster_frac
 
         # Compute equity/bankroll ratio for dynamic regime
         ratio = equity_usd / bankroll_usd
