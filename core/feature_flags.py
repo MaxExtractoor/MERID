@@ -30,6 +30,7 @@ _FLAG_DEFAULTS: Dict[str, bool] = {
     "unusual_volume_reaction": True,
     "telegram_alerts": True,  # Re-enabled after dedup + latch + backoff fixes (2026-03-19)
     "betting_refresh": False,  # LEGACY: disabled by default for Kalshi-only deployments
+    # TODO: Remove this flag - it's permanently disabled and superseded by Kalshi-only mode
 }
 
 _lock = threading.Lock()
