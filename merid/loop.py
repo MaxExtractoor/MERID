@@ -238,6 +238,7 @@ class MeridLoop:
         self.config = config or LoopConfig()
         self.metrics = LoopMetrics()
         self._running = False
+        self._last_liquidity_refresh = None  # Liquidity tracking for observability
         self._subscribers: Set[Callable] = set()
         self._matching_engines: Dict[str, Any] = {}
         self._agent_errors: Dict[str, int] = {}  # per-agent consecutive error count
