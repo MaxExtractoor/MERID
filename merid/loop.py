@@ -234,6 +234,8 @@ class MeridLoop:
     ticks continuously on the configured cadence.
     """
 
+    _last_liquidity_refresh: Optional[float] = None  # Liquidity tracking for observability
+
     def __init__(self, config: Optional[LoopConfig] = None):
         self.config = config or LoopConfig()
         self.metrics = LoopMetrics()
