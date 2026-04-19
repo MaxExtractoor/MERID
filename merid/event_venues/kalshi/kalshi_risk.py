@@ -1012,6 +1012,115 @@ class KalshiRiskManager:
                 # Fail-open: log but don't block trading if cycle drawdown check fails
                 logger.debug("Cycle drawdown check failed (fail-open): %s", exc)
 
+            # 12. CRYPTO15M Timeframe Budget Check — cross-asset 15m crypto limit
+            # Only applies to 15m crypto tickers; reductions always allowed
+            try:
+                from merid.prediction.crypto15mallocator import (
+                    is_15m_crypto_ticker,
+                    check_timeframe_budget,
+                    is_increasing_exposure_check,
+                    get_crypto15m_allocator,
+                )
+                
+                if is_15m_crypto_ticker(ticker):
+                    # Determine if this is increasing exposure
+                    is_increasing = is_increasing_exposure_check(
+                        ticker=ticker,
+                        side="YES" if contracts > 0 else "NO",
+                        requested_contracts=abs(contracts),
+                        existing_position_contracts=abs(existing_position),
+                    )
+                    
+                    # Only check budget for increasing exposure
+                    if is_increasing:
+                        # Get current bankroll from state
+                        bankroll = max(self._state.current_equity_usd, 0.0)
+                        
+                        tf_allowed, tf_approved, tf_reason = check_timeframe_budget(
+                            ticker=ticker,
+                            requested_contracts=abs(contracts),
+                            bankroll_equity_usd=bankroll,
+                        )
+                        
+                        if not tf_allowed:
+                            reason = f"[TFBUDGET] timeframe_budget_exhausted ticker={ticker}"
+                            self._log_breach("timeframe_budget", reason)
+                            logger.info(
+                                "[RISK] decision=deny reason=timeframe_budget_exhausted ticker=%s "
+                                "requested=%d remaining=0",
+                                ticker, abs(contracts)
+                            )
+                            return False, reason, "timeframe_budget"
+                        
+                        if tf_approved < abs(contracts):
+                            # Sliced down to remaining capacity
+                            logger.info(
+                                "[RISK] decision=approve reason=timeframe_budget_capped ticker=%s "
+                                "requested=%d approved=%d",
+                                ticker, abs(contracts), tf_approved
+                            )
+                            # Note: actual slicing happens at caller level
+            except Exception as exc:
+                # Fail-open during rollout; log but don't block
+                allocator = get_crypto15m_allocator()
+                if allocator.config.rollout_phase == "hard_gate":
+                    logger.warning(f"[TFBUDGET] Check failed in hard_gate mode: {exc}")
+                else:
+                    logger.debug(f"[TFBUDGET] Check failed (fail-open in {allocator.config.rollout_phase}): {exc}")
+
+            # 13. CRYPTO15M Per-Expiry Open Exposure Cap — max open per expiry
+            # Only applies to 15m crypto tickers; reductions always allowed
+            try:
+                from merid.prediction.crypto15mallocator import (
+                    is_15m_crypto_ticker,
+                    check_expiry_open_cap,
+                    is_increasing_exposure_check,
+                    get_crypto15m_allocator,
+                )
+                
+                if is_15m_crypto_ticker(ticker):
+                    # Determine if this is increasing exposure
+                    is_increasing = is_increasing_exposure_check(
+                        ticker=ticker,
+                        side="YES" if contracts > 0 else "NO",
+                        requested_contracts=abs(contracts),
+                        existing_position_contracts=abs(existing_position),
+                    )
+                    
+                    # Only check cap for increasing exposure
+                    if is_increasing:
+                        expiry_allowed, expiry_approved, expiry_reason = check_expiry_open_cap(
+                            ticker=ticker,
+                            requested_contracts=abs(contracts),
+                            is_increasing_exposure=True,
+                        )
+                        
+                        if not expiry_allowed:
+                            reason = f"[EXPIRYLIMIT] expiry_limit_exhausted ticker={ticker}"
+                            self._log_breach("expiry_limit", reason)
+                            logger.info(
+                                "[RISK] decision=deny reason=expiry_limit_exhausted ticker=%s "
+                                "requested=%d remaining=0",
+                                ticker, abs(contracts)
+                            )
+                            return False, reason, "expiry_limit"
+                        
+                        if expiry_approved < abs(contracts):
+                            # Sliced down to remaining capacity
+                            logger.info(
+                                "[RISK] decision=approve reason=expiry_limit_capped ticker=%s "
+                                "requested=%d approved=%d",
+                                ticker, abs(contracts), expiry_approved
+                            )
+                            # Note: actual slicing happens at caller level
+            except Exception as exc:
+                # Fail-open during rollout; log but don't block
+                allocator = get_crypto15m_allocator()
+                if allocator.config.rollout_phase == "hard_gate":
+                    logger.warning(f"[EXPIRYLIMIT] Check failed in hard_gate mode: {exc}")
+                else:
+                    logger.debug(f"[EXPIRYLIMIT] Check failed (fail-open in {allocator.config.rollout_phase}): {exc}")
+
             return True, "OK", None
 
     def _check_fills_integrity(self) -> Tuple[bool, str]:

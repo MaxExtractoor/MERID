@@ -439,6 +439,100 @@ class PreTradeGate:
                     reason=f"already_satisfied:filled={already_filled}>=target={target_count}",
                 )
 
+        # 4b. CRYPTO15M Timeframe Budget + Expiry Cap Check (hard gate)
+        # This is a safety check that runs regardless of allocator state
+        try:
+            from merid.prediction.crypto15mallocator import (
+                is_15m_crypto_ticker,
+                check_timeframe_budget,
+                check_expiry_open_cap,
+                is_increasing_exposure_check,
+                get_crypto15m_allocator,
+            )
+            
+            if is_15m_crypto_ticker(contract_id):
+                # Determine if this increases exposure
+                is_increasing = is_increasing_exposure_check(
+                    ticker=contract_id,
+                    side=side,
+                    requested_contracts=target_count,
+                    existing_position_contracts=existing_filled or 0,
+                )
+                
+                # Only check caps for increasing exposure (reductions always allowed)
+                if is_increasing:
+                    allocator = get_crypto15m_allocator()
+                    phase = allocator.config.rollout_phase
+                    
+                    # Check timeframe budget
+                    tf_allowed, tf_approved, tf_reason = check_timeframe_budget(
+                        ticker=contract_id,
+                        requested_contracts=target_count,
+                        bankroll_equity_usd=0.0,  # Will use default budget
+                    )
+                    
+                    # Check expiry cap
+                    expiry_allowed, expiry_approved, expiry_reason = check_expiry_open_cap(
+                        ticker=contract_id,
+                        requested_contracts=target_count,
+                        is_increasing_exposure=True,
+                    )
+                    
+                    # In hard_gate phase, enforce strictly
+                    if phase == "hard_gate":
+                        if not tf_allowed:
+                            self._store._metrics.blocked_risk += 1
+                            logger.warning(
+                                "[GATE] [TFBUDGET] BLOCKED hard_gate coid=%s contract=%s "
+                                "reason=timeframe_budget_exhausted agent=%s",
+                                coid, contract_id, agent_id
+                            )
+                            return GateVerdict(
+                                allowed=False,
+                                client_order_id=coid,
+                                reason="timeframe_budget_exhausted",
+                            )
+                        
+                        if not expiry_allowed:
+                            self._store._metrics.blocked_risk += 1
+                            logger.warning(
+                                "[GATE] [EXPIRYLIMIT] BLOCKED hard_gate coid=%s contract=%s "
+                                "reason=expiry_limit_exhausted agent=%s",
+                                coid, contract_id, agent_id
+                            )
+                            return GateVerdict(
+                                allowed=False,
+                                client_order_id=coid,
+                                reason="expiry_limit_exhausted",
+                            )
+                        
+                        # Check if slicing is needed
+                        min_approved = min(tf_approved, expiry_approved)
+                        if min_approved < target_count:
+                            logger.info(
+                                "[GATE] [CRYPTO15M] CAPPED coid=%s contract=%s "
+                                "requested=%d approved=%d (tf=%d, expiry=%d) agent=%s",
+                                coid, contract_id, target_count, min_approved,
+                                tf_approved, expiry_approved, agent_id
+                            )
+                            # Note: We don't return here; the slicing happens at caller
+                    
+                    # In soft_gate/dry_run, log but allow
+                    elif phase in ("soft_gate", "dry_run"):
+                        if not tf_allowed:
+                            logger.debug(
+                                "[GATE] [TFBUDGET] would_block phase=%s coid=%s contract=%s agent=%s",
+                                phase, coid, contract_id, agent_id
+                            )
+                        if not expiry_allowed:
+                            logger.debug(
+                                "[GATE] [EXPIRYLIMIT] would_block phase=%s coid=%s contract=%s agent=%s",
+                                phase, coid, contract_id, agent_id
+                            )
+        except Exception as exc:
+            # Fail-open: log but don't block if check fails
+            logger.debug("[GATE] CRYPTO15M check failed (fail-open): %s", exc)
+
         # 5. Insert new record (PENDING)
         record = OrderRecord(
             client_order_id=coid,

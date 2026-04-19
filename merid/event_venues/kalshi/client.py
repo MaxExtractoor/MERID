@@ -1415,9 +1415,19 @@ class KalshiVenueClient(EventVenueClient):
             order_group_id: Optional order group ID for aggregate limits
             self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
         """
+        # Normalize ticker to Kalshi canonical format (e.g., KXBTC15M-... -> KXBTC-15M-...)
+        from merid.event_venues.kalshi.settlement_poller import normalize_kalshi_ticker
+        normalized_ticker = normalize_kalshi_ticker(order.market_id)
+        
+        if normalized_ticker != order.market_id:
+            logger.info(
+                "[KALSHI_TICKER_NORMALIZE] original=%s normalized=%s",
+                order.market_id, normalized_ticker
+            )
+
         outcome = order.outcome_id or "yes"
         kalshi_order: Dict[str, Any] = {
-            "ticker": order.market_id,
+            "ticker": normalized_ticker,
             "action": order.side,           # "buy" or "sell"
             "side": outcome,                # "yes" or "no"
             "count": int(order.size),

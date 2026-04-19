@@ -537,6 +537,46 @@ class Settings(BaseSettings):
     # Spot-strike guard (used by strike_selector.py)
     KALSHI_SPOT_STRIKE_GLOBAL_WARN_PCT: float = Field(default=0.85, description="Hard global guard - reject strikes beyond this distance from spot")
     
+    # =============================================================================
+    # CRYPTO15M CROSS-ASSET RISK ALLOCATOR SETTINGS
+    # Production implementation: timeframe-wide budget + per-expiry exposure caps
+    # =============================================================================
+    # Rollout phase: "dry_run" (log only), "soft_gate" (allocator blocks), "hard_gate" (risk enforces)
+    CRYPTO15M_ALLOCATOR_PHASE: str = Field(
+        default="hard_gate",
+        description="Rollout phase: dry_run | soft_gate | hard_gate"
+    )
+    
+    # Timeframe-wide budget: max contracts across all 5 assets (BTC/ETH/SOL/XRP/DOGE) per 15m bar
+    MAX_CONTRACTS_PER_TF_CRYPTO_15M: int = Field(
+        default=1,
+        description="Max contracts per 15m timeframe across all 5 crypto assets (default: 1)"
+    )
+    
+    # Markets limit: max distinct tickers per 15m bar
+    MAX_MARKETS_PER_TF_CRYPTO_15M: int = Field(
+        default=2,
+        description="Max distinct markets per 15m timeframe (default: 2)"
+    )
+    
+    # Per-expiry open exposure cap: max open contracts per expiry across all crypto assets
+    MAX_OPEN_CONTRACTS_PER_EXPIRY_CRYPTO_15M: int = Field(
+        default=1,
+        description="Max open contracts per expiry across all 15m crypto assets (default: 1)"
+    )
+    
+    # Budget scaling function: "constant" or "linear" (future: bankroll-driven scaling)
+    CONTRACT_BUDGET_SCALE_CRYPTO_15M: str = Field(
+        default="constant",
+        description="Budget scaling: constant | linear (future: bankroll-driven)"
+    )
+    
+    # Linear scaling factor (contracts per $100 of bankroll, only if linear scaling enabled)
+    CONTRACT_BUDGET_SCALE_FACTOR: float = Field(
+        default=0.01,
+        description="Linear scaling: add this many contracts per $100 bankroll"
+    )
+    
     # Computed properties for derived USD limits (bankroll * percentage)
     @property
     def kalshi_portfolio_max_notional_cents(self) -> int:
