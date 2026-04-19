@@ -264,8 +264,6 @@ class MeridLoop:
         self._last_reconciliation = 0.0
         self._last_promotion_sync = 0.0
         self._promotion_sync_interval = 300.0  # 5 minutes
-        self._last_betting_refresh = 0.0
-        self._betting_refresh_interval = 120.0  # 2 minutes
         self._last_reflection_cycle = 0.0
         self._reflection_cycle_interval = 300.0  # 5 minutes — run after enough fills accumulate
         self._last_liquidity_refresh = 0.0
@@ -327,14 +325,6 @@ class MeridLoop:
     def _risk_context(self):
         from merid.pipeline.risk_context import build_risk_context
         return build_risk_context()
-
-    def _betting_odds_client(self):
-        from merid.betting.odds_client import get_odds_client
-        return get_odds_client()
-
-    def _betting_store(self):
-        from merid.betting.store import get_betting_store
-        return get_betting_store()
 
     def _order_group_lifecycle(self):
         if not hasattr(self, '_og_lifecycle'):
@@ -546,15 +536,6 @@ class MeridLoop:
         if now - self._last_cqi_update >= self.config.cqi_interval:
             parallel_coros.append(self._run_step("cqi", self._update_cqi(now, summary), summary))
             self._last_cqi_update = now
-
-        if now - self._last_betting_refresh >= self._betting_refresh_interval:
-            # FEATURE FLAG: betting refresh is legacy/non-Kalshi; disabled by default
-            from core.feature_flags import is_enabled
-            if not is_enabled("betting_refresh"):
-                summary["actions"].append("betting_refreshed:disabled")
-            else:
-                parallel_coros.append(self._run_step("betting", self._refresh_betting_odds(now, summary), summary))
-            self._last_betting_refresh = now
 
         if "prediction" in self.config.active_domains and now - self._last_order_groups_sync >= self._order_groups_sync_interval:
             parallel_coros.append(self._run_step("order_groups", self._sync_order_groups(summary), summary))
@@ -1208,9 +1189,16 @@ class MeridLoop:
         EVENT-LOOP-FIX: Added lag-aware scheduling and timeout guards.
         """
         import asyncio
+        import os as _os
+        
+        # PROFILING: Track entry time and lag
+        _profiling = _os.getenv("MERID_PROFILING")
+        _prof_entry_ts = time.perf_counter() if _profiling else 0
         
         # AGGRESSIVE: Skip liquidity sweep for first 120 ticks (~10 min) to reduce startup load
         if self.metrics.total_ticks < 120:
+            if _profiling:
+                logger.debug("[PROF] liquidity:skipped_startup tick=%d", self.metrics.total_ticks)
             summary["actions"].append("liquidity_sweep:skipped_startup_cooldown")
             return
         
@@ -1276,8 +1264,18 @@ class MeridLoop:
                 summary["actions"].append("liquidity_sweep:no_active_tickers")
                 return
 
-            # Deduplicate and CAP: reduce to 3 markets during startup, 5 after
-            MAX_TICKERS = 3 if self.metrics.total_ticks < 120 else 5
+            # PHASE-3: Lag-aware scope reduction — fewer markets when lag is elevated
+            # This prevents the 9.7s blocking observed in production
+            base_max = 3 if self.metrics.total_ticks < 120 else 5
+            if current_lag > 500:
+                MAX_TICKERS = 1  # Critical lag: absolute minimum
+                logger.warning("[BUDGET] liquidity: reduced scope to 1 market due to lag %.0fms", current_lag)
+            elif current_lag > 250:
+                MAX_TICKERS = 2  # Elevated lag: reduced scope
+                logger.warning("[BUDGET] liquidity: reduced scope to 2 markets due to lag %.0fms", current_lag)
+            else:
+                MAX_TICKERS = base_max
+            
             tickers = list(dict.fromkeys(tickers))[:MAX_TICKERS]
 
             # D13: Subscribe WS bridge to any new tickers discovered this sweep
@@ -1290,11 +1288,30 @@ class MeridLoop:
             _mark("prep_done")
             alerts_total = 0
 
+            # PHASE-3: Hard budget enforcement for liquidity sweep
+            # Track cumulative time and abort if approaching 1000ms budget
+            LIQUIDITY_HARD_BUDGET_MS = 1000.0
+            _budget_start = time.perf_counter()
+            
+            def _check_budget_exceeded() -> bool:
+                elapsed_ms = (time.perf_counter() - _budget_start) * 1000
+                if elapsed_ms > LIQUIDITY_HARD_BUDGET_MS:
+                    logger.error(
+                        "[BUDGET] liquidity_budget_exceeded: aborting after %.1fms (budget %.0fms)",
+                        elapsed_ms, LIQUIDITY_HARD_BUDGET_MS
+                    )
+                    return True
+                return False
+            
             # Fetch orderbooks concurrently (max 2 at a time via semaphore - reduced from 3)
             _sem = asyncio.Semaphore(2)
 
             async def _fetch_ob(ticker: str):
                 async with _sem:
+                    # PHASE-3: Budget check before each fetch
+                    if _check_budget_exceeded():
+                        return (ticker, None)
+                    
                     # Abort if circuit tripped during this sweep
                     if getattr(client, "is_circuit_open", False):
                         return (ticker, None)
@@ -1373,6 +1390,15 @@ class MeridLoop:
             if total_ms > 100:
                 timing_str = ", ".join(f"{k}={v:.0f}ms" for k, v in sub_timings.items())
                 logger.debug("liquidity_sweep timings: %s (total=%.0fms)", timing_str, total_ms)
+            
+            # PROFILING: Log structured metrics (bounded: only when profiling enabled)
+            if _profiling and (total_ms > 50 or _prof_entry_ts):
+                _prof_exit_ts = time.perf_counter()
+                _current_lag = self._get_event_loop_lag_ms()
+                logger.debug(
+                    "[PROF] liquidity action=%s duration_ms=%.1f lag_ms=%.1f markets=%d alerts=%d",
+                    "liquidity_sweep", total_ms, _current_lag, len(tickers), alerts_total
+                )
         except Exception as exc:
             logger.debug("_refresh_liquidity skipped: %s", exc)
 
@@ -1383,19 +1409,28 @@ class MeridLoop:
         EVENT-LOOP-FIX: Added timeout guard and cancellation support.
         """
         import asyncio
+        import os as _os
+        
+        # PROFILING: Track entry
+        _profiling = _os.getenv("MERID_PROFILING")
+        _prof_entry_ts = time.perf_counter() if _profiling else 0
         
         # Skip arb scan for first 40 ticks (~3.3 min) to let startup stabilize
         if self.metrics.total_ticks < 40:
+            if _profiling:
+                logger.debug("[PROF] arb_scan:skipped_startup tick=%d", self.metrics.total_ticks)
             summary["actions"].append("arb_scan:skipped_startup_cooldown")
             return
         
         # Check current lag before starting
         current_lag = self._get_event_loop_lag_ms()
-        if current_lag > 500:  # Skip if already lagging significantly
+        if current_lag > 200:  # Hardened: lowered from 500ms to 200ms
             logger.warning(
                 "[LAG-SKIP] action=arb_scan reason=elevated_lag "
-                f"lag_ms={current_lag:.0f} threshold_ms=500 timeout_count={getattr(self.metrics, 'arb_scan_timeouts', 0)}"
+                f"lag_ms={current_lag:.0f} threshold_ms=200 timeout_count={getattr(self.metrics, 'arb_scan_timeouts', 0)}"
             )
+            if _profiling:
+                logger.debug("[PROF] arb_scan:skipped_due_to_lag lag_ms=%.1f", current_lag)
             summary["actions"].append("arb_scan:skipped_due_to_lag")
             # Track skip metrics
             self.metrics.lag_skips_total = getattr(self.metrics, 'lag_skips_total', 0) + 1
@@ -1409,11 +1444,25 @@ class MeridLoop:
             # Combine scan + store + validate into a single executor call to
             # reduce thread-pool contention (all are lightweight in-memory ops).
             def _do_arb_scan_all():
+                # PHASE-3: Yield points for GAP-2 fix — periodically release GIL to let asyncio breathe
+                # This prevents multi-second blocking in CPU-heavy scanning loops
+                # NOTE: time.sleep() here (not asyncio.sleep) because this runs in a thread pool
+                # executor. It releases the GIL, allowing the main event loop thread to process.
                 signals = scanner.scan(now)
+                
+                # Yield after initial scan to allow event loop processing
+                time.sleep(0.001)  # 1ms GIL yield in thread pool context
+                
                 if not signals:
                     signals = scanner.synthetic_scan(now)
+                    # Second yield point after synthetic scan
+                    time.sleep(0.001)
+                    
                 if signals:
                     store.store_arb_signals_batch([sig.to_dict() for sig in signals])
+                    # Third yield point after batch store
+                    time.sleep(0.001)
+                    
                 scanner.validate_plans(now)
                 return signals
             
@@ -1758,32 +1807,6 @@ class MeridLoop:
             logger.warning(f"Promotion sync failed: {e}")
             summary["actions"].append(f"promotion_sync:error:{e}")
 
-    async def _refresh_betting_odds(self, now: float, summary: Dict):
-        """Step 7a: Refresh sports betting odds and rebuild consensus."""
-        try:
-            client = self._betting_odds_client()
-            store = self._betting_store()
-
-            events = await asyncio.get_running_loop().run_in_executor(
-                None, client.fetch_events
-            )
-            for event in events:
-                store.upsert_event(event)
-
-            odds = await asyncio.get_running_loop().run_in_executor(
-                None, client.fetch_all_odds
-            )
-            for event, snapshot in odds:
-                store.store_odds_snapshot(snapshot)
-
-            # Rebuild consensus for all events with fresh odds
-            consensus_list = store.build_all_consensus()
-            summary["actions"].append(
-                f"betting_refreshed:{len(events)}events,{len(odds)}odds,{len(consensus_list)}consensus"
-            )
-        except ImportError:
-            pass  # betting module not installed
-
     async def _reconcile_positions(self, summary: Dict):
         """Step 7: Compare internal vs venue positions.
         
@@ -1891,13 +1914,25 @@ class MeridLoop:
         CPU-heavy lifecycle state processing is offloaded to thread pool
         to avoid blocking the event loop (BUG-EL12 fix).
         """
+        import os as _os
+        
+        # PROFILING: Track entry
+        _profiling = _os.getenv("MERID_PROFILING")
+        _prof_entry_ts = time.perf_counter() if _profiling else 0
+        
         # AGGRESSIVE: Skip order groups sync for first 100 ticks (~8.3 min)
         if self.metrics.total_ticks < 100:
+            if _profiling:
+                logger.debug("[PROF] order_groups:skipped_startup tick=%d", self.metrics.total_ticks)
             summary["actions"].append("order_groups:skipped_startup_cooldown")
             return
 
         try:
             og_lifecycle = self._order_group_lifecycle()
+            
+            # PHASE-3: Hard budget for order_groups — must complete within 1000ms
+            ORDER_GROUPS_BUDGET_MS = 1000.0
+            _og_budget_start = time.perf_counter()
 
             # Start lifecycle manager if not running (skip if previously failed)
             if not getattr(og_lifecycle, '_running', False):
@@ -1905,19 +1940,49 @@ class MeridLoop:
                     summary["actions"].append("order_groups:skipped_ws_unavailable")
                     return
                 try:
-                    await og_lifecycle.start()
+                    # PHASE-3: Add timeout to prevent indefinite blocking
+                    # GAP-1 fix: lifecycle.start() could hang indefinitely
+                    await asyncio.wait_for(og_lifecycle.start(), timeout=5.0)
                     summary["actions"].append("order_groups:lifecycle_started")
+                except asyncio.TimeoutError:
+                    self._og_start_failed = True
+                    logger.error("[BUDGET] order_groups: lifecycle start timed out after 5s")
+                    summary["actions"].append("order_groups:start_timeout")
+                    return
                 except Exception as start_exc:
                     self._og_start_failed = True
                     logger.info(f"Order group WS unavailable, will use REST only: {start_exc}")
                     summary["actions"].append("order_groups:ws_unavailable")
                     return
+            
+            # Check budget after lifecycle start
+            _og_elapsed_ms = (time.perf_counter() - _og_budget_start) * 1000
+            if _og_elapsed_ms > ORDER_GROUPS_BUDGET_MS:
+                logger.error(
+                    "[BUDGET] order_groups_budget_exceeded: lifecycle took %.1fms (budget %.0fms)",
+                    _og_elapsed_ms, ORDER_GROUPS_BUDGET_MS
+                )
+                summary["actions"].append("order_groups:budget_exceeded")
+                return
 
             # Get current state summary - offload sync processing to thread pool
             def _get_state_sync():
+                # PHASE-3: Yield point before state retrieval (GAP-3 fix)
+                time.sleep(0.001)
                 return og_lifecycle.get_lifecycle_state()
 
             loop = asyncio.get_running_loop()
+            
+            # Check remaining budget before thread pool call
+            _og_remaining_budget = ORDER_GROUPS_BUDGET_MS - ((time.perf_counter() - _og_budget_start) * 1000)
+            if _og_remaining_budget < 200:  # Need at least 200ms for state retrieval
+                logger.warning(
+                    "[BUDGET] order_groups: insufficient budget for state retrieval (%.0fms remaining)",
+                    _og_remaining_budget
+                )
+                summary["actions"].append("order_groups:insufficient_budget_for_state")
+                return
+            
             state = await loop.run_in_executor(_get_loop_executor(), _get_state_sync)
 
             # Add order group metrics to summary
@@ -1939,6 +2004,14 @@ class MeridLoop:
         except Exception as exc:
             logger.warning(f"Order group sync failed: {exc}")
             summary["actions"].append(f"order_groups:sync_failed:{exc}")
+        
+        # PROFILING: Log structured metrics
+        if _profiling:
+            total_ms = (time.perf_counter() - _prof_entry_ts) * 1000
+            logger.debug(
+                "[PROF] order_groups action=%s duration_ms=%.1f lag_ms=%.1f",
+                "order_groups", total_ms, self._get_event_loop_lag_ms()
+            )
 
     # ── Subscriber pattern ────────────────────────────────────────────
 

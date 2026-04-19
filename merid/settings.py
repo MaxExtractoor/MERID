@@ -537,9 +537,7 @@ class Settings(BaseSettings):
     KALSHI_MAX_CONTRACTS_PER_ASSET_FRACTION: float = Field(default=0.35, description="Fraction of total contracts per asset (e.g., 0.35 = 35%)")
     KALSHI_MAX_CONTRACTS_PER_CLUSTER_FRACTION: float = Field(default=0.15, description="Fraction of total contracts per cluster (asset+timeframe)")
     
-    # Spot-strike distance settings
-    # TODO: Remove KALSHI_SPOT_STRIKE_DISTANCE_DYNAMIC - always False, not used in current agent grid
-    KALSHI_SPOT_STRIKE_DISTANCE_DYNAMIC: bool = Field(default=False, description="Enable dynamic spot-strike distance scaling by vol/tenor/regime")
+    # Spot-strike guard (used by strike_selector.py)
     KALSHI_SPOT_STRIKE_GLOBAL_WARN_PCT: float = Field(default=0.85, description="Hard global guard - reject strikes beyond this distance from spot")
     
     # Computed properties for derived USD limits (bankroll * percentage)
@@ -573,22 +571,6 @@ class Settings(BaseSettings):
     KALSHI_MAX_ORDERS_PER_MINUTE: int = Field(default=60, description="Max orders per minute (self-throttle)")
     KALSHI_MAX_ORDERS_PER_HOUR: int = Field(default=1000, description="Max orders per hour (self-throttle)")
 
-    # =============================================================================
-    # FEATURE FLAGS (LEGACY/UNUSED - see docs/audit_feature_flags.md Section 18)
-    # =============================================================================
-    # TODO: Remove PHASE0_ENABLED - superseded by Kalshi-only mode, never enabled
-    PHASE0_ENABLED: bool = Field(default=False, description="Enable Phase0 minimal crypto scope")
-    # TODO: Remove MERID_ENABLE_CHAINLINK - unused, not on roadmap
-    MERID_ENABLE_CHAINLINK: bool = Field(default=False, description="Enable Chainlink integration")
-    # TODO: Remove MERID_ENABLE_AUGUR - unused, not on roadmap
-    MERID_ENABLE_AUGUR: bool = Field(default=False, description="Enable Augur integration")
-    # TODO: Remove MERID_ENABLE_NEWS_AGENT - superseded by social_stream_enabled
-    MERID_ENABLE_NEWS_AGENT: bool = Field(default=False, description="Enable news agent")
-    # TODO: Remove MERID_ENABLE_WHALE_INTEL - unused, not integrated
-    MERID_ENABLE_WHALE_INTEL: bool = Field(default=False, description="Enable whale intelligence")
-    # TODO: Remove MERID_ENABLE_POLYMARKET - not integrated, Kalshi is primary venue
-    MERID_ENABLE_POLYMARKET: bool = Field(default=False, description="Enable Polymarket integration")
-    
     # =============================================================================
     # WEB SERVER SETTINGS
     # =============================================================================
