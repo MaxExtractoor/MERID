@@ -447,6 +447,12 @@ class KalshiRiskConfig:
     max_total_notional_pct: float = 0.80     # 80 % of balance
     max_daily_loss_pct: float = 0.10         # 10 % of balance
     max_single_order_pct: float = 0.05       # 5 % of balance
+    _DAILY_LOSS_FRACTIONS: Dict[str, float] = {
+        "DEEP_UNDERWATER": 0.05,
+        "UNDERWATER": 0.08,
+        "BASELINE": 0.10,
+        "LOCK_IN_GAINS": 0.06,  # Tighter than baseline - lock in gains with reduced risk
+    }
     category_notional_pct: Dict[str, float] = field(default_factory=lambda: {
         "cross_category": 0.05,
         "crypto":     0.30,
@@ -1508,8 +1514,8 @@ class KalshiRiskManager:
             per_asset_frac = 0.35
             per_cluster_frac = 0.15
 
-        # Static safety caps
-        static_notional_total = self._config.max_total_notional_usd
+        # Static safety caps (convert fractions to avoid Decimal × float)
+        static_notional_total = float(self._config.max_total_notional_usd)
         static_notional_asset = static_notional_total * per_asset_frac
         static_notional_cluster = static_notional_total * per_cluster_frac
 
@@ -1529,9 +1535,10 @@ class KalshiRiskManager:
         total_frac, asset_frac, cluster_frac = self._CONTRACT_NOTIONAL_FRACTIONS[regime]
 
         # Compute dynamic notional caps
-        dynamic_notional_total = bankroll_usd * total_frac
-        dynamic_notional_asset = bankroll_usd * asset_frac
-        dynamic_notional_cluster = bankroll_usd * cluster_frac
+        bankroll_usd_float = float(bankroll_usd)
+        dynamic_notional_total = bankroll_usd_float * total_frac
+        dynamic_notional_asset = bankroll_usd_float * asset_frac
+        dynamic_notional_cluster = bankroll_usd_float * cluster_frac
 
         # Clamp dynamic values to static safety caps
         max_notional_usd_total = min(dynamic_notional_total, static_notional_total)
