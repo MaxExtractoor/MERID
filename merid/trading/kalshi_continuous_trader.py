@@ -3390,6 +3390,75 @@ class KalshiContinuousTrader:
                 else:
                     logger.debug("check_order pre-flight unavailable: %s", _rm_exc)
 
+            # ═══════════════════════════════════════════════════════════════════════
+            # DISTANCE SANITY INVARIANTS (v3 fix) — Second line of defense
+            # These invariants run AFTER risk manager approval but BEFORE order
+            # submission. They enforce that strikes are within sensible distance
+            # from spot, regardless of what the selection pipeline allowed.
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                _spot_check = spot_prices.get(_candidate_asset, 0.0)
+                _strike_check = float(c.strike) if hasattr(c, 'strike') and c.strike else 0.0
+
+                # Only apply distance check for strike-based markets (not directional)
+                if _strike_check > 0 and _spot_check > 0:
+                    _distance_abs_check = abs(_strike_check - _spot_check)
+                    _distance_pct_check = _distance_abs_check / _spot_check
+
+                    # Get the max allowed distance for this asset/timeframe
+                    from merid.prediction.kalshi_strike_selector import DEFAULT_MAX_DISTANCE
+                    _max_allowed_pct = DEFAULT_MAX_DISTANCE.get(
+                        (_candidate_asset, _candidate_tf),
+                        self.config.max_strike_distance_pct  # fallback
+                    )
+
+                    # INVARIANT 1: Strike must be within max distance band
+                    if _distance_pct_check > _max_allowed_pct:
+                        logger.error(
+                            "[DISTANCE-INVARIANT-VIOLATION] %s/%s: strike %.2f is %.2f%% from spot %.2f, "
+                            "exceeds max %.2f%% — REJECTING (wiring bug, pipeline should have filtered this)",
+                            c.ticker, _candidate_tf, _strike_check,
+                            _distance_pct_check * 100, _spot_check,
+                            _max_allowed_pct * 100,
+                        )
+                        # Record metric for observability
+                        try:
+                            from monitoring.metrics import get_metrics_registry
+                            get_metrics_registry().counter(
+                                "merid_ct_distance_invariant_violation",
+                                "Contract selection allowed far-OTM contract through pipeline",
+                                ["asset", "timeframe", "ticker"],
+                            ).inc(labels={
+                                "asset": _candidate_asset,
+                                "timeframe": _candidate_tf,
+                                "ticker": c.ticker,
+                            })
+                        except Exception:
+                            pass
+                        continue  # Skip this order — far OTM
+
+                    # INVARIANT 2: Extreme distance warning (within band but far)
+                    _target_band_pct = _max_allowed_pct * 0.5  # 50% of max = target band
+                    if _distance_pct_check > _target_band_pct:
+                        logger.warning(
+                            "[DISTANCE-WARNING] %s/%s: strike %.2f is %.2f%% from spot (beyond target %.2f%%) — "
+                            "allowing but monitoring",
+                            c.ticker, _candidate_tf, _strike_check,
+                            _distance_pct_check * 100, _target_band_pct * 100,
+                        )
+
+                    # TRACE LOG: Structured contract selection log
+                    logger.info(
+                        "[CONTRACT-SELECTION-TRACE] ticker=%s asset=%s tf=%s spot=%.2f strike=%.2f "
+                        "distance_pct=%.3f%% max_allowed=%.3f%% target_band=%.3f%% in_target=%s",
+                        c.ticker, _candidate_asset, _candidate_tf, _spot_check, _strike_check,
+                        _distance_pct_check * 100, _max_allowed_pct * 100, _target_band_pct * 100,
+                        str(_distance_pct_check <= _target_band_pct).lower(),
+                    )
+            except Exception as _dist_inv_exc:
+                # Fail-open for the invariant check itself (don't block on metric/logging errors)
+                logger.debug("Distance invariant check failed (non-fatal): %s", _dist_inv_exc)
+
             # LEAK-009: in-cycle duplicate guard — same (ticker, side) already submitted
             # this cycle (e.g. duplicate from overlap-group flattening).
             _inflight_key = (c.ticker, c.best_side)

@@ -234,32 +234,36 @@ def asset_in_ticker(ticker: str, expected_asset: str) -> bool:
 # will override these once MIN_OBS observations accumulate per (asset, timeframe).
 
 DEFAULT_MAX_DISTANCE: Dict[Tuple[str, str], float] = {
-    # Intraday: 15m / 1h - CALIBRATED FOR ACTUAL KALSHI MARKET AVAILABILITY
-    # v2 (2026-04-17): Increased to match available Kalshi strikes
-    # Previous restrictive values: BTC 0.05, ETH 0.045, SOL 0.06, XRP 0.035, DOGE 0.04
-    ("BTC", "15m"): 0.15, ("BTC", "1h"): 0.20,
-    ("ETH", "15m"): 0.15, ("ETH", "1h"): 0.20,
-    ("SOL", "15m"): 0.20, ("SOL", "1h"): 0.25,
-    ("XRP", "15m"): 0.20, ("XRP", "1h"): 0.25,
-    ("DOGE", "15m"): 0.30, ("DOGE", "1h"): 0.35,
-    # Daily - moderate widening for longer-dated
-    ("BTC", "daily"): 0.25,
-    ("ETH", "daily"): 0.25,
-    ("SOL", "daily"): 0.30,
-    ("XRP", "daily"): 0.30,
-    ("DOGE", "daily"): 0.40,
-    # Weekly - wider for longer time horizon
-    ("BTC", "weekly"): 0.35,
-    ("ETH", "weekly"): 0.35,
-    ("SOL", "weekly"): 0.40,
-    ("XRP", "weekly"): 0.40,
-    ("DOGE", "weekly"): 0.50,
-    # Monthly+ (extended coverage) - widest bands
-    ("BTC", "monthly"): 0.50, ("BTC", "annual"): 0.50,
-    ("ETH", "monthly"): 0.50, ("ETH", "annual"): 0.50,
-    ("SOL", "monthly"): 0.60, ("SOL", "annual"): 0.60,
-    ("XRP", "monthly"): 0.60, ("XRP", "annual"): 0.60,
-    ("DOGE", "monthly"): 0.70, ("DOGE", "annual"): 0.70,
+    # Intraday: 15m / 1h - SENSIBLE INTRADAY BANDS (v3 fix)
+    # v3 (2026-04-19): Reverted to sensible intraday bands. The v2 "wide bands" allowed
+    # far-OTM contracts (20-30% from spot) to be selected, causing wasted resting orders.
+    # v3 bands: intraday max 6-8% (tightened), daily 10-12%, weekly 15-18%.
+    # If no strikes exist within these bands, the selector returns empty (correct behavior).
+    #
+    # Intraday - tight bands (ATM to slightly OTM only)
+    ("BTC", "15m"): 0.06, ("BTC", "1h"): 0.08,
+    ("ETH", "15m"): 0.06, ("ETH", "1h"): 0.08,
+    ("SOL", "15m"): 0.07, ("SOL", "1h"): 0.09,
+    ("XRP", "15m"): 0.05, ("XRP", "1h"): 0.07,
+    ("DOGE", "15m"): 0.06, ("DOGE", "1h"): 0.08,
+    # Daily - moderate widening
+    ("BTC", "daily"): 0.10,
+    ("ETH", "daily"): 0.10,
+    ("SOL", "daily"): 0.12,
+    ("XRP", "daily"): 0.08,
+    ("DOGE", "daily"): 0.10,
+    # Weekly - wider but still sensible
+    ("BTC", "weekly"): 0.15,
+    ("ETH", "weekly"): 0.15,
+    ("SOL", "weekly"): 0.18,
+    ("XRP", "weekly"): 0.12,
+    ("DOGE", "weekly"): 0.15,
+    # Monthly+ - widest but not extreme
+    ("BTC", "monthly"): 0.20, ("BTC", "annual"): 0.25,
+    ("ETH", "monthly"): 0.20, ("ETH", "annual"): 0.25,
+    ("SOL", "monthly"): 0.25, ("SOL", "annual"): 0.30,
+    ("XRP", "monthly"): 0.15, ("XRP", "annual"): 0.20,
+    ("DOGE", "monthly"): 0.20, ("DOGE", "annual"): 0.25,
 }
 
 # Default preferred ATM band (fraction of spot).
@@ -268,23 +272,23 @@ DEFAULT_MAX_DISTANCE: Dict[Tuple[str, str], float] = {
 # Calibrated to roughly 40-50% of max distance for intraday ATM focus.
 DEFAULT_TARGET_BAND: Dict[Tuple[str, str], float] = {
     # Intraday: tighter ATM bands (40-50% of max distance)
-    # v2 (2026-04-17): Calibrated to match new max distances
-    ("BTC", "15m"):   0.06, ("BTC", "1h"):   0.08,   # max: 0.15, 0.20
-    ("ETH", "15m"):   0.06, ("ETH", "1h"):   0.08,   # max: 0.15, 0.20
-    ("SOL", "15m"):   0.08, ("SOL", "1h"):   0.10,   # max: 0.20, 0.25
-    ("XRP", "15m"):   0.08, ("XRP", "1h"):   0.10,   # max: 0.20, 0.25
-    ("DOGE", "15m"):  0.12, ("DOGE", "1h"):  0.14,   # max: 0.30, 0.35
+    # v3 (2026-04-19): Updated to match v3 max distances
+    ("BTC", "15m"):   0.025, ("BTC", "1h"):   0.035,   # max: 0.06, 0.08
+    ("ETH", "15m"):   0.025, ("ETH", "1h"):   0.035,   # max: 0.06, 0.08
+    ("SOL", "15m"):   0.030, ("SOL", "1h"):   0.040,   # max: 0.07, 0.09
+    ("XRP", "15m"):   0.020, ("XRP", "1h"):   0.030,   # max: 0.05, 0.07
+    ("DOGE", "15m"):  0.025, ("DOGE", "1h"):  0.035,   # max: 0.06, 0.08
     # Daily: moderate bands
-    ("BTC", "daily"): 0.10, ("BTC", "weekly"): 0.14,
-    ("BTC", "monthly"): 0.20, ("BTC", "annual"): 0.20,
-    ("ETH", "daily"): 0.10, ("ETH", "weekly"): 0.14,
-    ("ETH", "monthly"): 0.20, ("ETH", "annual"): 0.20,
-    ("SOL", "daily"): 0.12, ("SOL", "weekly"): 0.16,
-    ("SOL", "monthly"): 0.24, ("SOL", "annual"): 0.24,
-    ("XRP", "daily"): 0.12, ("XRP", "weekly"): 0.16,
-    ("XRP", "monthly"): 0.24, ("XRP", "annual"): 0.24,
-    ("DOGE", "daily"): 0.16, ("DOGE", "weekly"): 0.20,
-    ("DOGE", "monthly"): 0.28, ("DOGE", "annual"): 0.28,
+    ("BTC", "daily"): 0.040, ("BTC", "weekly"): 0.060,
+    ("BTC", "monthly"): 0.080, ("BTC", "annual"): 0.100,
+    ("ETH", "daily"): 0.040, ("ETH", "weekly"): 0.060,
+    ("ETH", "monthly"): 0.080, ("ETH", "annual"): 0.100,
+    ("SOL", "daily"): 0.050, ("SOL", "weekly"): 0.075,
+    ("SOL", "monthly"): 0.100, ("SOL", "annual"): 0.125,
+    ("XRP", "daily"): 0.035, ("XRP", "weekly"): 0.050,
+    ("XRP", "monthly"): 0.060, ("XRP", "annual"): 0.080,
+    ("DOGE", "daily"): 0.040, ("DOGE", "weekly"): 0.060,
+    ("DOGE", "monthly"): 0.080, ("DOGE", "annual"): 0.100,
 }
 
 # Global fallback when asset/timeframe combo is not in the default tables.
@@ -337,14 +341,17 @@ class StrikeSelectionResult:
     accepted: bool
     spot: Optional[float] = None
     strike: Optional[float] = None
-    distance_pct: Optional[float] = None  # |spot - strike| / strike
+    distance_pct: Optional[float] = None  # |spot - strike| / SPOT (consistent measure)
     max_allowed_pct: Optional[float] = None
     target_band_pct: Optional[float] = None
     in_target_band: bool = False
     is_deep_otm: bool = False
     is_directional: bool = False  # True for markets with no strike (up/down directional)
     rejection_reason: Optional[str] = None
-    risk_capped: bool = False  # True if accepted but with deep-OTM risk cap
+    risk_capped: bool = False  # True if accepted with deep-OTM risk cap
+    # WARNING: This is metadata only. The actual risk cap must be enforced by
+    # the calling code (KalshiRiskManager or position sizing logic).
+    # See: apply_deep_otm_risk_cap() helper below for wiring pattern.
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
@@ -513,8 +520,20 @@ class KalshiStrikeSelector:
             return self._reject(ticker, asset_upper, tf_lower, spot, strike,
                                 RejectionReason.ZERO_STRIKE)
 
-        # Compute distance
-        distance_pct = abs(spot - strike) / strike
+        # Compute distance: percentage relative to SPOT (not strike)
+        # This ensures consistent distance measurement regardless of strike level
+        distance_pct = abs(spot - strike) / spot if spot > 0 else float('inf')
+
+        # SAFETY CLAMP: Reject pathological tickers where strike is extremely far
+        # (e.g., >50% from spot in either direction). This catches mis-parsed or
+        # corrupted tickers that somehow passed basic validation.
+        if strike < spot * 0.5 or strike > spot * 1.5:
+            return self._reject(
+                ticker, asset_upper, tf_lower, spot, strike,
+                RejectionReason.EXCEEDS_MAX_DISTANCE,  # Extreme distance = reject
+                distance_pct=distance_pct,
+                max_allowed_pct=0.5,  # Hard clamp at 50%
+            )
 
         # Log observation for calibration (fire-and-forget)
         calibrator = _get_calibrator()
@@ -608,6 +627,51 @@ class KalshiStrikeSelector:
         Returns:
             StrikeSelectionResult with signal-aware rejection reasons.
         """
+        asset_upper = (asset or "").upper()
+        tf_lower = (timeframe or "").lower()
+
+        # SHARED GUARDS: Same as evaluate() — crypto-only + asset match
+        # Prevents cross-asset bugs and macro market leakage on this path too
+        if not is_crypto_market(ticker):
+            logger.debug(
+                "[STRIKE_SELECTOR_SKIP_SIGNAL] ticker=%s - non-crypto market, "
+                "bypassing crypto strike selector",
+                ticker,
+            )
+            return StrikeSelectionResult(
+                ticker=ticker,
+                asset=asset_upper,
+                timeframe=tf_lower,
+                accepted=False,
+                spot=spot,
+                strike=strike,
+                rejection_reason=RejectionReason.NON_CRYPTO_MARKET,
+            )
+
+        # P0-002: Hard validation — asset must match ticker
+        if not asset_in_ticker(ticker, asset_upper):
+            return StrikeSelectionResult(
+                ticker=ticker,
+                asset=asset_upper,
+                timeframe=tf_lower,
+                accepted=False,
+                spot=spot,
+                strike=strike,
+                rejection_reason=RejectionReason.ASSET_TICKER_MISMATCH,
+            )
+
+        # Gate: missing/invalid spot
+        if spot is None or spot <= 0:
+            return StrikeSelectionResult(
+                ticker=ticker,
+                asset=asset_upper,
+                timeframe=tf_lower,
+                accepted=False,
+                spot=spot,
+                strike=strike,
+                rejection_reason=RejectionReason.MISSING_SPOT,
+            )
+
         # Import here to avoid circular deps at module load
         from merid.signals.ta_models import FusedClusterSignal, MarketStructure
 
@@ -691,8 +755,22 @@ class KalshiStrikeSelector:
                 is_directional=True,
             )
 
-        # Distance calculation
-        distance_pct = abs(spot - strike) / strike
+        # Distance calculation: percentage relative to SPOT (not strike)
+        distance_pct = abs(spot - strike) / spot if spot > 0 else float('inf')
+
+        # SAFETY CLAMP: Hard reject if strike is extremely far (>50% from spot)
+        if strike < spot * 0.5 or strike > spot * 1.5:
+            return StrikeSelectionResult(
+                ticker=ticker,
+                asset=asset.upper(),
+                timeframe=timeframe.lower(),
+                accepted=False,
+                spot=spot,
+                strike=strike,
+                distance_pct=distance_pct,
+                max_allowed_pct=0.5,
+                rejection_reason="EXTREME_STRIKE_CLAMP",
+            )
 
         # Check against dynamic threshold
         if distance_pct > dynamic_max:
@@ -889,6 +967,55 @@ class KalshiStrikeSelector:
             json.dumps(result.to_dict(), default=str, sort_keys=True),
             self._config.deep_otm_max_risk_pct * 100,
         )
+
+
+# ── Risk cap wiring helper (for downstream integration) ────────────────
+
+def apply_deep_otm_risk_cap(
+    base_notional_cents: int,
+    selector_result: StrikeSelectionResult,
+    bankroll_cents: int,
+) -> int:
+    """Apply deep-OTM risk cap to position sizing.
+
+    This is the wiring pattern for enforcing `risk_capped` metadata from
+    StrikeSelectionResult. Call this in your position sizing logic when
+    selector_result.risk_capped is True.
+
+    Args:
+        base_notional_cents: The normally-calculated notional (e.g., from Kelly).
+        selector_result: The StrikeSelectionResult with risk_capped=True.
+        bankroll_cents: Current bankroll in cents for pct-based cap.
+
+    Returns:
+        Capped notional in cents, never exceeding base_notional.
+
+    Example::
+        result = selector.evaluate(ticker, asset, tf, spot, strike)
+        if result.accepted:
+            raw_size = kelly_size(...)  # Your normal sizing
+            final_size = apply_deep_otm_risk_cap(
+                raw_size, result, bankroll_cents
+            )
+            # Now final_size respects the deep-OTM cap
+    """
+    if not selector_result.risk_capped:
+        return base_notional_cents
+
+    # Deep OTM cap: 0.5% of bankroll (from config default)
+    deep_otm_max_risk_pct = 0.005  # 0.5%
+    max_notional = int(bankroll_cents * deep_otm_max_risk_pct)
+
+    capped = min(base_notional_cents, max_notional)
+    if capped < base_notional_cents:
+        logger.info(
+            "[DEEP_OTM_RISK_CAP] %s: notional %d¢ -> %d¢ (cap=%.2f%% of bankroll)",
+            selector_result.ticker,
+            base_notional_cents,
+            capped,
+            deep_otm_max_risk_pct * 100,
+        )
+    return capped
 
 
 # ── Config parser (for YAML integration) ─────────────────────────────

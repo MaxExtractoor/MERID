@@ -93,6 +93,78 @@ def kalshi_fee_rate(contracts: int) -> float:
 
 # ── Kelly sizing ─────────────────────────────────────────────────────────
 
+def _clamp_edge_for_kelly(edge_pct: float, config: Optional[KalshiRiskConfig] = None) -> float:
+    """Clamp edge percentage to safe range for Kelly calculation.
+
+    Args:
+        edge_pct: Raw edge percentage (e.g. 8.0 for 8%)
+        config: Risk config with clamp bounds (uses defaults if None)
+
+    Returns:
+        Clamped edge percentage, or 0 if outside safe bounds
+    """
+    cfg = config or KalshiRiskConfig()
+    if edge_pct < cfg.kelly_min_edge_pct:
+        return 0.0
+    if edge_pct > cfg.kelly_max_edge_pct:
+        logger.warning(
+            "Kelly edge clamped from %.2f%% to %.2f%% (max cap)",
+            edge_pct, cfg.kelly_max_edge_pct
+        )
+        return cfg.kelly_max_edge_pct
+    return edge_pct
+
+
+def _clamp_win_prob_for_kelly(win_prob: float, config: Optional[KalshiRiskConfig] = None) -> float:
+    """Clamp win probability to safe range for Kelly calculation.
+
+    Args:
+        win_prob: Raw win probability (0-1)
+        config: Risk config with clamp bounds (uses defaults if None)
+
+    Returns:
+        Clamped win probability
+    """
+    cfg = config or KalshiRiskConfig()
+    return max(cfg.kelly_min_win_prob, min(cfg.kelly_max_win_prob, win_prob))
+
+
+def is_risk_reducing_trade(
+    existing_position: int,
+    contracts: int,
+) -> Tuple[bool, str]:
+    """Determine if a trade reduces absolute risk exposure.
+
+    A trade is risk-reducing if the absolute value of the new position
+    is strictly less than the absolute value of the existing position.
+
+    Args:
+        existing_position: Current position (signed, positive=long, negative=short)
+        contracts: Contracts to trade (signed, positive=buy, negative=sell)
+
+    Returns:
+        Tuple of (is_risk_reducing, reason)
+        - is_risk_reducing: True if trade reduces absolute exposure
+        - reason: Explanation of the classification
+    """
+    new_position = existing_position + contracts
+    existing_abs = abs(existing_position)
+    new_abs = abs(new_position)
+
+    # Risk-reducing: new position is smaller in absolute terms
+    if new_abs < existing_abs:
+        return True, f"risk_reducing: |{new_position}| < |{existing_position}|"
+
+    # Risk-neutral (flat or same size): not reducing
+    if new_abs == existing_abs:
+        if existing_position == 0 and contracts == 0:
+            return False, "no_trade: zero contracts"
+        return False, f"risk_neutral: |{new_position}| == |{existing_position}|"
+
+    # Risk-increasing: new position is larger
+    return False, f"risk_increasing: |{new_position}| > |{existing_position}|"
+
+
 def kelly_size_kalshi(
     edge: float,
     price_cents: int,
@@ -247,8 +319,15 @@ def dynamic_position_sizes(
 
 # ── Multi-market Kelly sizing ────────────────────────────────────────────
 
-def _kelly_fraction(edge_pct: float, win_prob: float, price_cents: int = 50) -> float:
-    """Kelly fraction for a Kalshi binary contract.
+def _kelly_fraction(
+    edge_pct: float,
+    win_prob: float,
+    price_cents: int = 50,
+    *,
+    config: Optional[KalshiRiskConfig] = None,
+    apply_hard_cap: bool = True,
+) -> float:
+    """Kelly fraction for a Kalshi binary contract with safety clamps.
 
     For a binary paying $1 on win at cost ``price_cents / 100``:
       b = (100 - price_cents) / price_cents   (net odds)
@@ -258,16 +337,59 @@ def _kelly_fraction(edge_pct: float, win_prob: float, price_cents: int = 50) -> 
 
     ``edge_pct`` is added to ``win_prob`` as an adjustment
     (e.g. edge_pct=2 means we think true prob is win_prob + 0.02).
+
+    Safety features:
+    - Edge is clamped to [kelly_min_edge_pct, kelly_max_edge_pct]
+    - Win probability is clamped to [kelly_min_win_prob, kelly_max_win_prob]
+    - Hard cap on f* before frac_of_kelly multiplier (default 50%)
+
+    Args:
+        edge_pct: Edge percentage (e.g. 2.0 for 2%)
+        win_prob: Base win probability (0-1)
+        price_cents: Contract price in cents (1-99)
+        config: Optional risk config with safety parameters
+        apply_hard_cap: If True, apply kelly_hard_cap to f*
+
+    Returns:
+        Kelly fraction f* (0 to kelly_hard_cap), or 0 if invalid inputs
     """
-    if price_cents <= 0 or price_cents >= 100:
+    cfg = config or KalshiRiskConfig()
+
+    # Validate price
+    if price_cents < cfg.valid_price_cents_min or price_cents > cfg.valid_price_cents_max:
+        logger.debug("Kelly fraction rejected: price_cents=%d outside valid range [%d, %d]",
+                     price_cents, cfg.valid_price_cents_min, cfg.valid_price_cents_max)
         return 0.0
+
+    # Clamp inputs
+    clamped_edge = _clamp_edge_for_kelly(edge_pct, cfg)
+    if clamped_edge == 0.0:
+        logger.debug("Kelly fraction rejected: edge_pct=%.2f below minimum %.2f",
+                     edge_pct, cfg.kelly_min_edge_pct)
+        return 0.0
+
+    clamped_win_prob = _clamp_win_prob_for_kelly(win_prob, cfg)
+
     b = (100 - price_cents) / price_cents  # net odds ratio
-    p = min(win_prob + edge_pct / 100.0, 0.99)
+    p = min(clamped_win_prob + clamped_edge / 100.0, cfg.kelly_max_win_prob)
     q = 1.0 - p
+
     if b <= 0 or p <= 0:
         return 0.0
+
     f = (p * b - q) / b
-    return max(0.0, min(f, 1.0))
+
+    # Apply hard cap on Kelly fraction before frac_of_kelly
+    if apply_hard_cap:
+        hard_cap = cfg.kelly_hard_cap
+        if f > hard_cap:
+            logger.debug(
+                "Kelly fraction hard-capped: f=%.4f capped to %.4f (edge=%.2f%%, win_prob=%.4f)",
+                f, hard_cap, edge_pct, win_prob
+            )
+            f = min(f, hard_cap)
+
+    return max(0.0, f)
 
 
 def multi_market_kelly_sizes(
@@ -277,10 +399,12 @@ def multi_market_kelly_sizes(
     frac_of_kelly: float = 0.25,
     max_per_market_usd: float = 1000.0,
     max_contracts_per_market: int = 500,
+    config: Optional[KalshiRiskConfig] = None,
 ) -> Dict[str, int]:
     """Win-prob-based Kelly allocation across independent Kalshi markets.
 
     Each market is sized independently using Kelly criterion, then capped.
+    Enforces global notional cap to prevent excessive total exposure.
 
     Args:
         markets: List of dicts with keys:
@@ -290,41 +414,89 @@ def multi_market_kelly_sizes(
         frac_of_kelly: Fraction of full Kelly to use (default quarter-Kelly)
         max_per_market_usd: Dollar cap per market
         max_contracts_per_market: Contract cap per market
+        config: Risk config with safety parameters
 
     Returns:
         {ticker: contracts} for each market with positive allocation
     """
+    cfg = config or KalshiRiskConfig()
     if equity_usd <= 0:
         return {}
 
+    # Compute global notional cap
+    global_notional_cap = cfg.get_effective_max_total_notional(equity_usd)
+    global_notional_cap = min(
+        global_notional_cap,
+        equity_usd * cfg.kelly_global_notional_cap_pct  # Kelly-specific cap
+    )
+
     allocations: Dict[str, int] = {}
-    for m in markets:
+    total_notional = 0.0
+
+    # Sort markets by edge descending to prioritize best opportunities
+    sorted_markets = sorted(
+        [m for m in markets if m.get("edge_pct", 0) > 0],
+        key=lambda x: x.get("edge_pct", 0),
+        reverse=True
+    )
+
+    for m in sorted_markets:
         edge = m.get("edge_pct", 0)
         wp = m.get("win_prob", 0.5)
         if edge <= 0:
             continue
 
         price_cents = m.get("price_cents", 50)
-        f = _kelly_fraction(edge, wp, price_cents) * frac_of_kelly
+
+        # Check remaining global capacity
+        remaining_global = global_notional_cap - total_notional
+        if remaining_global <= 0:
+            logger.debug("Kelly allocation stopped: global notional cap reached")
+            break
+
+        # Compute Kelly fraction with safety clamps
+        f = _kelly_fraction(edge, wp, price_cents, config=cfg) * frac_of_kelly
         if f <= 0:
             continue
 
         bankroll = min(equity_usd, max_per_market_usd)
-        dollars = bankroll * f
+        dollars = min(bankroll * f, remaining_global)  # Respect global cap
         price_usd = price_cents / 100.0 if price_cents > 0 else 0.50
+
+        if price_usd <= 0:
+            continue
 
         contracts = int(dollars / price_usd)
         contracts = min(contracts, max_contracts_per_market)
 
-        # Fee check
+        # Fee check + fee anomaly detection
         if contracts > 0:
             fee = kalshi_fee_cents(price_cents, contracts)
+            notional = contracts * price_usd
+            fee_pct = (fee / 100.0) / notional * 100 if notional > 0 else 0
+
+            # Circuit breaker: reject if fee too high relative to notional
+            if fee_pct > cfg.max_fee_to_notional_pct:
+                logger.warning(
+                    "Kelly allocation rejected for %s: fee %.1f%% exceeds max %.1f%%",
+                    m["ticker"], fee_pct, cfg.max_fee_to_notional_pct
+                )
+                continue
+
             payout = (100 - price_cents) * contracts
             if payout - fee <= 0:
                 continue
 
         if contracts > 0:
             allocations[m["ticker"]] = contracts
+            total_notional += contracts * price_usd
+
+    # Log if we hit the global cap
+    if total_notional >= global_notional_cap * 0.99 and len(sorted_markets) > len(allocations):
+        logger.info(
+            "Kelly allocation hit global cap: $%.2f / $%.2f, %d markets allocated of %d considered",
+            total_notional, global_notional_cap, len(allocations), len(sorted_markets)
+        )
 
     return allocations
 
@@ -335,23 +507,67 @@ def edge_from_prediction(
     smoothed_price: float,
     current_price: float,
     fee_cents: float = 0.0,
+    *,
+    config: Optional[KalshiRiskConfig] = None,
 ) -> float:
     """Compute edge (%) from Kalman-smoothed price vs current market price.
 
     Positive if the filter says fair price > current price (buy signal).
 
+    Safety checks:
+    - Rejects prices outside (0, 100) cents range
+    - Rejects edges based on unrealistic price differences (>50 cents jump)
+    - Logs warnings for rejected inputs
+
     Args:
         smoothed_price: Kalman-estimated fair price (cents)
         current_price: Current market price (cents)
         fee_cents: Fee per contract in cents (default 0)
+        config: Risk config with validation parameters
 
     Returns:
-        Edge as a percentage (e.g. 2.5 means 2.5% edge)
+        Edge as a percentage (e.g. 2.5 means 2.5% edge), or 0 if invalid
     """
+    cfg = config or KalshiRiskConfig()
+
+    # Validate prices are in valid range (0, 100)
+    if not (cfg.valid_price_cents_min < smoothed_price < cfg.valid_price_cents_max):
+        logger.warning(
+            "edge_from_prediction rejected: smoothed_price=%.2f outside valid range (%d, %d)",
+            smoothed_price, cfg.valid_price_cents_min, cfg.valid_price_cents_max
+        )
+        return 0.0
+
+    if not (cfg.valid_price_cents_min < current_price < cfg.valid_price_cents_max):
+        logger.warning(
+            "edge_from_prediction rejected: current_price=%.2f outside valid range (%d, %d)",
+            current_price, cfg.valid_price_cents_min, cfg.valid_price_cents_max
+        )
+        return 0.0
+
+    # Detect unrealistic price jumps (>50 cents difference suggests data error)
+    price_diff = abs(smoothed_price - current_price)
+    if price_diff > 50:
+        logger.warning(
+            "edge_from_prediction rejected: price_diff=%.2f exceeds 50 cents (smoothed=%.2f, current=%.2f)",
+            price_diff, smoothed_price, current_price
+        )
+        return 0.0
+
     if current_price <= 0:
         return 0.0
+
     edge_frac = (smoothed_price - current_price - fee_cents) / current_price
-    return edge_frac * 100.0
+    edge_pct = edge_frac * 100.0
+
+    # Log if edge is extreme (may indicate model issues)
+    if abs(edge_pct) > cfg.kelly_max_edge_pct:
+        logger.warning(
+            "edge_from_prediction produced extreme edge: %.2f%% (smoothed=%.2f, current=%.2f)",
+            edge_pct, smoothed_price, current_price
+        )
+
+    return edge_pct
 
 
 def kelly_size_from_kalman(
@@ -360,11 +576,18 @@ def kelly_size_from_kalman(
     account_equity_usd: float,
     win_prob: float,
     frac_of_kelly: float = 0.25,
+    *,
+    config: Optional[KalshiRiskConfig] = None,
 ) -> int:
     """Compute contract count using Kalman-derived edge and Kelly criterion.
 
     Uses ``edge_from_prediction`` to get edge, then feeds into
     ``_kelly_fraction`` for sizing.
+
+    Safety: Returns 0 and logs warning if:
+    - Prices outside valid range (0, 100)
+    - Edge is extreme or negative
+    - Win probability outside safe bounds
 
     Args:
         smoothed_price: Kalman-estimated fair price (cents)
@@ -372,17 +595,88 @@ def kelly_size_from_kalman(
         account_equity_usd: Total portfolio equity in USD
         win_prob: Estimated win probability (0-1), e.g. from backtest hit rate
         frac_of_kelly: Fraction of full Kelly to use (default 0.25 = quarter-Kelly)
+        config: Risk config with safety parameters
 
     Returns:
-        Number of contracts to buy (0 if no edge)
+        Number of contracts to buy (0 if no edge or invalid inputs)
     """
-    edge_pct = edge_from_prediction(smoothed_price, current_price)
-    price_cents = int(round(current_price))
-    if price_cents <= 0 or price_cents >= 100:
+    cfg = config or KalshiRiskConfig()
+
+    # Validate equity
+    if account_equity_usd <= 0:
+        logger.debug("kelly_size_from_kalman rejected: account_equity_usd=%.2f", account_equity_usd)
         return 0
-    f = _kelly_fraction(edge_pct, win_prob, price_cents) * frac_of_kelly
+
+    # Compute edge with validation
+    edge_pct = edge_from_prediction(smoothed_price, current_price, config=cfg)
+
+    # Validate edge is meaningful
+    if edge_pct <= 0:
+        logger.debug(
+            "kelly_size_from_kalman rejected: non-positive edge %.2f%% (smoothed=%.2f, current=%.2f)",
+            edge_pct, smoothed_price, current_price
+        )
+        return 0
+
+    # Validate edge is not extreme (catches data errors)
+    if edge_pct > cfg.kelly_max_edge_pct:
+        logger.warning(
+            "kelly_size_from_kalman: edge %.2f%% exceeds max %.2f%%, returning 0",
+            edge_pct, cfg.kelly_max_edge_pct
+        )
+        return 0
+
+    price_cents = int(round(current_price))
+
+    # Validate price range
+    if not (cfg.valid_price_cents_min < price_cents < cfg.valid_price_cents_max):
+        logger.warning(
+            "kelly_size_from_kalman rejected: price_cents=%d outside valid range",
+            price_cents
+        )
+        return 0
+
+    # Clamp win probability
+    clamped_wp = _clamp_win_prob_for_kelly(win_prob, cfg)
+    if clamped_wp != win_prob:
+        logger.debug(
+            "kelly_size_from_kalman: win_prob clamped from %.4f to %.4f",
+            win_prob, clamped_wp
+        )
+
+    # Compute Kelly fraction with hard cap
+    f = _kelly_fraction(edge_pct, clamped_wp, price_cents, config=cfg) * frac_of_kelly
+
+    if f <= 0:
+        logger.debug(
+            "kelly_size_from_kalman: Kelly fraction <= 0 (edge=%.2f%%, win_prob=%.4f)",
+            edge_pct, clamped_wp
+        )
+        return 0
+
+    # Compute dollars and contracts
     dollars = account_equity_usd * f
-    return max(0, int(dollars))
+    contracts = max(0, int(dollars))
+
+    # Fee check
+    if contracts > 0:
+        fee = kalshi_fee_cents(price_cents, contracts)
+        notional = contracts * (price_cents / 100.0)
+        fee_pct = (fee / 100.0) / notional * 100 if notional > 0 else 0
+
+        if fee_pct > cfg.max_fee_to_notional_pct:
+            logger.warning(
+                "kelly_size_from_kalman rejected: fee %.1f%% exceeds max %.1f%%",
+                fee_pct, cfg.max_fee_to_notional_pct
+            )
+            return 0
+
+    logger.debug(
+        "kelly_size_from_kalman: edge=%.2f%%, f=%.4f, contracts=%d (equity=%.2f, frac=%.2f)",
+        edge_pct, f, contracts, account_equity_usd, frac_of_kelly
+    )
+
+    return contracts
 
 
 # ── Risk configuration ───────────────────────────────────────────────────
@@ -407,6 +701,25 @@ class KalshiRiskConfig:
     max_single_order_contracts: int = 250
     max_single_order_notional_usd: float = 2500.0
     max_position_per_contract: int = 500  # Kalshi typical retail limit
+
+    # ── Kelly sizing safety limits ────────────────────────────────────────
+    # Hard cap on Kelly fraction f* before frac_of_kelly multiplier
+    kelly_hard_cap: float = 0.50  # Max 50% of bankroll regardless of edge
+    # Edge clamping: reject edges that are unrealistically large
+    kelly_max_edge_pct: float = 25.0  # Max 25% edge (catches data errors)
+    kelly_min_edge_pct: float = 0.5   # Min 0.5% edge to trade
+    # Win probability clamping
+    kelly_min_win_prob: float = 0.01  # Min 1% win probability
+    kelly_max_win_prob: float = 0.99  # Max 99% win probability
+    # Global Kelly sum cap: sum of all Kelly notionals cannot exceed this fraction of equity
+    kelly_global_notional_cap_pct: float = 2.0  # Max 2x equity total exposure
+
+    # ── Circuit breakers ────────────────────────────────────────────────
+    # Fee anomaly detection: reject if effective fee > X% of notional
+    max_fee_to_notional_pct: float = 15.0  # 15% max fee/notional ratio
+    # Price jump detection: reject if price is outside normal range
+    valid_price_cents_min: int = 1
+    valid_price_cents_max: int = 99
     
     # Dynamic contract caps (populated by _compute_dynamic_contract_caps)
     max_contracts_total: int = 5000
@@ -429,6 +742,10 @@ class KalshiRiskConfig:
     # Minimum edge to trade
     min_edge: float = 0.02
     min_post_fee_edge: float = 0.01
+
+    # ── Equity-based fallback defaults ──────────────────────────────────
+    # When max_total_notional_usd is 0 or unset, derive from equity × multiplier
+    default_notional_to_equity_multiplier: float = 2.0  # 2× equity default cap
 
     # Rate limit awareness — load from settings if available
     max_orders_per_minute: int = 30  # default fallback
@@ -475,6 +792,22 @@ class KalshiRiskConfig:
     # ── Group-level exposure limits (per-asset/timeframe/overlap-window) ─────────────────
     group_limits_enabled: bool = True         # Enable group-level aggregation and caps
     group_notional_cap_usd: float = 2000.0  # Max notional per group (e.g., BTC-15m-2026-03-27T15:00)
+
+    def get_effective_max_total_notional(self, equity_usd: float) -> float:
+        """Return effective total notional cap, deriving from equity if config cap is 0.
+
+        Args:
+            equity_usd: Current equity in USD
+
+        Returns:
+            Effective max total notional in USD
+        """
+        if self.max_total_notional_usd > 0:
+            return self.max_total_notional_usd
+        # Fallback: derive from equity with safety multiplier
+        if equity_usd <= 0:
+            return 0.0
+        return equity_usd * self.default_notional_to_equity_multiplier
     asset_horizon_limits: Dict[str, Dict[str, float]] = field(default_factory=dict)  # asset -> tf -> max_notional
 
     def _compute_dynamic_category_limits(self) -> Dict[str, CategoryLimit]:
@@ -798,16 +1131,30 @@ class KalshiRiskManager:
             # 1. Kill switch - only blocks NEW orders, allows closing positions
             # Risk-reducing orders (exiting positions) are always allowed to lock in profits
             if self._state.kill_switch_active:
-                # Allow closing positions (risk-reducing) even with killswitch active
-                is_closing_trade = contracts < 0 or (existing_position > 0 and contracts < 0) or (existing_position < 0 and contracts > 0)
+                # Use helper to determine if trade is risk-reducing
+                is_closing_trade, rr_reason = is_risk_reducing_trade(existing_position, contracts)
+
                 if not is_closing_trade:
                     reason = f"Kill switch active: {self._state.kill_switch_reason}"
                     self._log_breach("kill_switch", reason)
                     return False, reason, "kill_switch"
+
+                # Verify invariant: new position must strictly reduce exposure
+                new_position = existing_position + contracts
+                if abs(new_position) >= abs(existing_position):
+                    # This should not happen if is_risk_reducing_trade works correctly
+                    reason = f"INVARIANT BREACH: classified as risk-reducing but |new| >= |existing|"
+                    logger.error(
+                        "[RISK] %s ticker=%s existing=%d contracts=%d new=%d reason=%s",
+                        reason, ticker, existing_position, contracts, new_position, rr_reason
+                    )
+                    self._log_breach("kill_switch_invariant_breach", reason)
+                    return False, reason, "kill_switch"
+
                 # Log that we're allowing a closing trade despite killswitch
                 logger.info(
-                    "[RISK] Allowing risk-reducing order despite killswitch: ticker=%s contracts=%d existing=%d",
-                    ticker, contracts, existing_position
+                    "[RISK] Allowing risk-reducing order despite killswitch: ticker=%s contracts=%d existing=%d new=%d",
+                    ticker, contracts, existing_position, new_position
                 )
 
             # 2. Single order size
@@ -911,10 +1258,19 @@ class KalshiRiskManager:
                 )
 
             # 5. Total portfolio notional
+            # Use effective cap that derives from equity if config cap is 0
+            effective_max_notional = self._config.get_effective_max_total_notional(
+                self._state.current_equity_usd
+            )
             total = self._state.total_notional_usd + notional_usd
-            if total > self._config.max_total_notional_usd:
-                reason = f"Total notional ${total:.2f} exceeds max ${self._config.max_total_notional_usd:.2f}"
+            if total > effective_max_notional:
+                reason = f"Total notional ${total:.2f} exceeds effective max ${effective_max_notional:.2f}"
                 self._log_breach("max_total_notional", reason)
+                logger.info(
+                    "[RISK] Total notional cap: current=%.2f proposed=%.2f total=%.2f cap=%.2f equity=%.2f",
+                    self._state.total_notional_usd, notional_usd, total,
+                    effective_max_notional, self._state.current_equity_usd
+                )
                 return False, reason, "max_total_notional"
 
             # 6. Daily loss — use equity-based tracking with per-day reset
@@ -926,12 +1282,13 @@ class KalshiRiskManager:
             if not allowed:
                 # Do NOT activate killswitch - allow closing trades to reduce loss
                 # Only block risk-INCREASING orders
-                is_closing_trade = contracts < 0 or (existing_position > 0 and contracts < 0) or (existing_position < 0 and contracts > 0)
+                is_closing_trade, _ = is_risk_reducing_trade(existing_position, contracts)
                 if not is_closing_trade:
+                    self._log_breach("daily_loss", reason)
                     return False, reason, "daily_loss"
                 logger.info(
-                    "[RISK] Allowing risk-reducing order despite daily loss limit: ticker=%s",
-                    ticker
+                    "[RISK] Allowing risk-reducing order despite daily loss limit: ticker=%s existing=%d contracts=%d",
+                    ticker, existing_position, contracts
                 )
 
             # 6b. Per-cluster stop loss — enforced independently of daily loss
@@ -949,19 +1306,31 @@ class KalshiRiskManager:
             # to close positions and lock in profits without permanent halts
             if self._state.peak_equity_usd > 0:
                 drawdown = (self._state.peak_equity_usd - self._state.current_equity_usd) / self._state.peak_equity_usd
-                if drawdown >= self._config.drawdown_unwind_pct:
-                    # Log breach but do NOT activate killswitch - allow closing trades
-                    reason = f"Drawdown {drawdown:.1%} exceeds unwind threshold {self._config.drawdown_unwind_pct:.1%}"
-                    self._log_breach("drawdown_unwind", reason)
-                    # Only block if this is a risk-INCREASING order (new exposure)
-                    if contracts > 0 and existing_position >= 0:
-                        return False, reason, "drawdown_unwind"
-                if drawdown >= self._config.drawdown_halt_pct:
-                    reason = f"Drawdown {drawdown:.1%} exceeds halt threshold {self._config.drawdown_halt_pct:.1%}"
-                    self._log_breach("drawdown_halt", reason)
-                    # Only block if this is a risk-INCREASING order (new exposure)
-                    if contracts > 0 and existing_position >= 0:
-                        return False, reason, "drawdown_halt"
+
+                # Helper to check if we should block based on drawdown
+                def _should_block_for_drawdown(threshold_pct: float, label: str) -> Tuple[bool, str]:
+                    if drawdown >= threshold_pct:
+                        reason = f"Drawdown {drawdown:.1%} exceeds {label} threshold {threshold_pct:.1%}"
+                        # Only block risk-INCREASING orders (new exposure)
+                        is_increasing, _ = is_risk_reducing_trade(existing_position, contracts)
+                        # is_risk_reducing returns True for reducing, so invert for blocking
+                        if not is_increasing and existing_position >= 0:
+                            return True, reason
+                    return False, ""
+
+                should_unwind, unwind_reason = _should_block_for_drawdown(
+                    self._config.drawdown_unwind_pct, "unwind"
+                )
+                if should_unwind:
+                    self._log_breach("drawdown_unwind", unwind_reason)
+                    return False, unwind_reason, "drawdown_unwind"
+
+                should_halt, halt_reason = _should_block_for_drawdown(
+                    self._config.drawdown_halt_pct, "halt"
+                )
+                if should_halt:
+                    self._log_breach("drawdown_halt", halt_reason)
+                    return False, halt_reason, "drawdown_halt"
 
             # 8. Post-fee edge
             if edge > 0:
@@ -998,10 +1367,10 @@ class KalshiRiskManager:
                     # Update cycle state with current equity
                     equity = self._state.current_equity_usd
                     cdm.update_cycle_state(equity)
-                    
-                    # Check if new risk can be opened
-                    is_closing_trade = contracts < 0 or (existing_position > 0 and contracts < 0) or (existing_position < 0 and contracts > 0)
-                    
+
+                    # Check if new risk can be opened (only for non-closing trades)
+                    is_closing_trade, _ = is_risk_reducing_trade(existing_position, contracts)
+
                     if not is_closing_trade:
                         if not cdm.can_open_new_risk(notional_usd):
                             cycle_status = cdm.current_status.value
@@ -1021,16 +1390,18 @@ class KalshiRiskManager:
                     is_increasing_exposure_check,
                     get_crypto15m_allocator,
                 )
-                
+
                 if is_15m_crypto_ticker(ticker):
+                    # Use is_risk_reducing_trade helper for consistency
+                    is_closing_trade, _ = is_risk_reducing_trade(existing_position, contracts)
                     # Determine if this is increasing exposure
-                    is_increasing = is_increasing_exposure_check(
+                    is_increasing = not is_closing_trade and is_increasing_exposure_check(
                         ticker=ticker,
                         side="YES" if contracts > 0 else "NO",
                         requested_contracts=abs(contracts),
                         existing_position_contracts=abs(existing_position),
                     )
-                    
+
                     # Only check budget for increasing exposure
                     if is_increasing:
                         # Get current bankroll from state
@@ -1077,16 +1448,18 @@ class KalshiRiskManager:
                     is_increasing_exposure_check,
                     get_crypto15m_allocator,
                 )
-                
+
                 if is_15m_crypto_ticker(ticker):
+                    # Use is_risk_reducing_trade helper for consistency
+                    is_closing_trade, _ = is_risk_reducing_trade(existing_position, contracts)
                     # Determine if this is increasing exposure
-                    is_increasing = is_increasing_exposure_check(
+                    is_increasing = not is_closing_trade and is_increasing_exposure_check(
                         ticker=ticker,
                         side="YES" if contracts > 0 else "NO",
                         requested_contracts=abs(contracts),
                         existing_position_contracts=abs(existing_position),
                     )
-                    
+
                     # Only check cap for increasing exposure
                     if is_increasing:
                         expiry_allowed, expiry_approved, expiry_reason = check_expiry_open_cap(
