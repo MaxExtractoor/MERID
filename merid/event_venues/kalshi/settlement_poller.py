@@ -204,13 +204,14 @@ def normalize_kalshi_ticker(ticker: str) -> str:
     if not ticker.startswith("KX"):
         ticker = "KX" + ticker.lstrip("-")
     
-    # Handle inline tenors (e.g., KXETHD1 → KXETH-D1)
+    # Handle inline tenors (e.g., KXETHD1 → KXETH-D1, KXBTC15M-26APR... → KXBTC-15M-26APR...)
     for tenor_code, suffix in [("D1", "-D1"), ("W1", "-W1"), ("15M", "-15M"), ("1M", "-1M")]:
         if tenor_code in ticker and suffix not in ticker:
             # Check it's not already separated
             idx = ticker.find(tenor_code)
             if idx > 0 and ticker[idx-1] != "-":
-                ticker = ticker[:idx] + suffix
+                # Preserve the rest of the ticker after the tenor code
+                ticker = ticker[:idx] + suffix + ticker[idx+len(tenor_code):]
     
     # Remove duplicate dashes
     while "--" in ticker:
