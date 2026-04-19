@@ -11,9 +11,9 @@
 This audit identifies **all feature flags, toggles, and conditional behaviors** in the MERID codebase that could gate trading, risk, WebSocket connectivity, or pipeline operations. **52 distinct flags/toggles** were identified across environment variables, config files, hardcoded constants, and runtime feature flag registry.
 
 **Risk Rating Distribution:**
-- **HIGH (14 flags):** Can disable trading, risk checks, or core connectivity
-- **MEDIUM (21 flags):** Can alter behavior significantly but with fallbacks
-- **LOW (17 flags):** Cosmetic, debug, or gracefully degrading
+- **HIGH (17 flags):** Can disable trading, risk checks, or core connectivity
+- **MEDIUM (20 flags):** Can alter behavior significantly but with fallbacks
+- **LOW (15 flags):** Cosmetic, debug, or gracefully degrading
 
 ---
 
@@ -161,10 +161,10 @@ Dynamic vs static allocation toggles.
 |------|----------|------|----------|---------------------------|------|--------|
 | `MERID_USE_DYNAMIC_ALLOCATION` | `merid/settings.py:226` | pydantic | Use risk-parity allocation | ON → dynamic allocation | **HIGH** | active |
 | `MERID_DYNAMIC_ALLOCATION_STRATEGY` | `merid/settings.py:230` | pydantic | Strategy: risk_parity/kelly/equal | "risk_parity" → risk parity | **HIGH** | active |
-| `KALSHI_DYNAMIC_DAILY_LOSS` | `merid/settings.py:530` | pydantic | Dynamic daily loss bands | OFF → static bands | **HIGH** | likely_stale |
-| `KALSHI_DYNAMIC_STOP_LOSS` | `merid/settings.py:531` | pydantic | Dynamic per-cluster stops | OFF → static stops | **HIGH** | likely_stale |
-| `KALSHI_DYNAMIC_CONTRACTS` | `merid/settings.py:532` | pydantic | Dynamic contract caps | OFF → static caps | **HIGH** | likely_stale |
-| `KALSHI_SPOT_STRIKE_DISTANCE_DYNAMIC` | `merid/settings.py:541` | pydantic | Dynamic spot-strike scaling | OFF → static distance | MEDIUM | likely_stale |
+| `KALSHI_DYNAMIC_DAILY_LOSS` | `merid/settings.py:530` | pydantic | Dynamic daily loss bands | OFF → static bands | **HIGH** | active |
+| `KALSHI_DYNAMIC_STOP_LOSS` | `merid/settings.py:531` | pydantic | Dynamic per-cluster stops | OFF → static stops | **HIGH** | active |
+| `KALSHI_DYNAMIC_CONTRACTS` | `merid/settings.py:532` | pydantic | Dynamic contract caps | OFF → static caps | **HIGH** | active |
+| `KALSHI_SPOT_STRIKE_DISTANCE_DYNAMIC` | `merid/settings.py:541` | pydantic | Dynamic spot-strike scaling | OFF → static distance | MEDIUM | unused |
 
 ---
 
@@ -282,10 +282,9 @@ These flags are **hardcoded** or **unused** and should be cleaned up:
 5. **`MERID_ENABLE_NEWS_AGENT`** (merid/settings.py:581) - Never enabled
 6. **`MERID_ENABLE_WHALE_INTEL`** (merid/settings.py:582) - Never enabled
 7. **`MERID_ENABLE_POLYMARKET`** (merid/settings.py:583) - Never enabled
-8. **`KALSHI_DYNAMIC_DAILY_LOSS`** (merid/settings.py:530) - Commented "production only" but OFF
-9. **`KALSHI_DYNAMIC_STOP_LOSS`** (merid/settings.py:531) - Commented "production only" but OFF
-10. **`KALSHI_DYNAMIC_CONTRACTS`** (merid/settings.py:532) - Commented "production only" but OFF
-11. **`KALSHI_SPOT_STRIKE_DISTANCE_DYNAMIC`** (merid/settings.py:541) - Always OFF
+**Note:** `KALSHI_DYNAMIC_DAILY_LOSS`, `KALSHI_DYNAMIC_STOP_LOSS`, and `KALSHI_DYNAMIC_CONTRACTS` were previously listed here but are **actively used** in `kalshi_risk.py` for production risk calculations. They are intentionally disabled (False) but wired into live code paths.
+
+8. **`KALSHI_SPOT_STRIKE_DISTANCE_DYNAMIC`** (merid/settings.py:541) - Always OFF, truly unused (only in settings.py)
 
 ---
 
@@ -382,7 +381,7 @@ Controls: Position sizing based on realized volatility
    - Fresh start mode enabled in live (should crash, but verify)
 
 ### Cleanup (Post-Stabilization)
-1. Remove 15 stale flags identified in Sections 18 and 22
+1. Remove 8 stale flags identified in Section 18 (7 legacy + 1 unused)
 2. Consolidate duplicate "enable live" flags (`MERID_PM_LIVE_ENABLED`, `MERID_LIVE_TRADING_UNLOCKED`, `MERID_ENABLE_KALSHI_CT` naming confusion)
 3. Document `kalshi-only` profile behavior in operator runbook
 4. Consolidate loop timeout overrides into single config
