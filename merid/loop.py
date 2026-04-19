@@ -1292,15 +1292,19 @@ class MeridLoop:
             alerts_total = 0
 
             # PHASE-3: Hard budget enforcement for liquidity sweep
-            # Track cumulative time and abort if approaching 1000ms budget
-            LIQUIDITY_HARD_BUDGET_MS = 1000.0
+            # Track cumulative time and abort if approaching budget
+            # Extended to 2000ms to better align with halt band and avoid premature aborts
+            LIQUIDITY_HARD_BUDGET_MS = float(os.getenv(
+                "MERID_LIQUIDITY_HARD_BUDGET_MS", "2000.0"
+            ))
             _budget_start = time.perf_counter()
-            
+
             def _check_budget_exceeded() -> bool:
                 elapsed_ms = (time.perf_counter() - _budget_start) * 1000
                 if elapsed_ms > LIQUIDITY_HARD_BUDGET_MS:
                     logger.error(
-                        "[BUDGET] liquidity_budget_exceeded: aborting after %.1fms (budget %.0fms)",
+                        "[BUDGET] liquidity_budget_exceeded: aborting sweep step after %.1fms "
+                        "(budget %.0fms). This aborts the sweep only, NOT the server.",
                         elapsed_ms, LIQUIDITY_HARD_BUDGET_MS
                     )
                     return True
