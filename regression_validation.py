@@ -76,7 +76,7 @@ def test_dynamic_risk_functions():
         
         # Test that result is clamped to static cap (10% of 50k = 5000)
         # Dynamic baseline is 14% of 50k = 7000, but should clamp to 5000
-        assert max_loss <= 5000, f"max_loss {max_loss} exceeds static cap 5000"
+        assert max_loss <= 5000, f"max_loss {max_loss} should not exceed static cap 5000"
         
         # Test underwater regime
         result = risk_mgr._compute_dynamic_daily_loss(35000.0, 5000000)  # 70% ratio
@@ -252,7 +252,7 @@ def test_strike_selector_edge_cases():
             timeframe="15m"
         )
         assert not result.accepted, "Should reject when spot <= 0"
-        assert "spot" in result.reason.lower() or result.distance_pct == float('inf'), f"Expected spot error, got: {result.reason}"
+        assert "spot" in result.rejection_reason.lower() or result.distance_pct == float('inf'), f"Expected spot error, got: {result.rejection_reason}"
         
         # Test 2: Distance slightly below global_warn should use normal logic
         # BTC weekly base is 12%, global_warn is 85%
@@ -274,7 +274,7 @@ def test_strike_selector_edge_cases():
             timeframe="weekly"
         )
         assert not result.accepted, "Should reject when distance > global_warn"
-        assert "range" in result.reason.lower() or "warn" in result.reason.lower(), f"Expected out_of_range, got: {result.reason}"
+        assert "range" in result.rejection_reason.lower() or "warn" in result.rejection_reason.lower(), f"Expected out_of_range, got: {result.rejection_reason}"
         
         # Test 4: Dynamic enabled with multiplier pushing above hard cap
         # Use a case where vol/tenor multipliers would push distance allowance high
@@ -311,7 +311,7 @@ def test_loop_pipeline_smoke():
         assert hasattr(loop_module, 'MeridLoop'), "MeridLoop class should exist"
         
         # Verify no betting-related code remains in module
-        loop_source = open(loop_module.__file__).read()
+        loop_source = open(loop_module.__file__, encoding='utf-8').read()
         assert '_betting_refresh' not in loop_source, "_betting_refresh should be removed from loop.py"
         assert '_refresh_betting_odds' not in loop_source, "_refresh_betting_odds should be removed"
         
