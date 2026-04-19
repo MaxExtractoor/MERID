@@ -527,8 +527,11 @@ class Settings(BaseSettings):
     KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT: float = Field(default=0.16, description="Max per-asset notional as % of bankroll (default 16%)")
     KALSHI_PORTFOLIO_MAX_MARGIN_UTIL_PCT: float = Field(default=0.75, description="Max margin utilization % (default 75%)")
     KALSHI_PORTFOLIO_CHECK_INTERVAL_S: int = Field(default=30, description="Portfolio risk check interval in seconds")
+    # TODO: Remove KALSHI_DYNAMIC_DAILY_LOSS - marked "production only" but always False, never enabled
     KALSHI_DYNAMIC_DAILY_LOSS: bool = Field(default=False, description="Enable aggressive dynamic daily loss bands based on equity/bankroll ratio (production only)")
+    # TODO: Remove KALSHI_DYNAMIC_STOP_LOSS - marked "production only" but always False, likely stale experiment
     KALSHI_DYNAMIC_STOP_LOSS: bool = Field(default=False, description="Enable dynamic per-cluster stop loss based on equity/bankroll ratio (production only)")
+    # TODO: Remove KALSHI_DYNAMIC_CONTRACTS - marked "production only" but always False, likely stale experiment
     KALSHI_DYNAMIC_CONTRACTS: bool = Field(default=False, description="Enable dynamic contract caps based on equity/bankroll ratio (production only)")
     KALSHI_PORTFOLIO_CLUSTER_STOP_PCT: float = Field(default=0.50, description="Static per-cluster stop loss as fraction of daily loss cap (used when dynamic stop loss disabled)")
     
@@ -538,6 +541,7 @@ class Settings(BaseSettings):
     KALSHI_MAX_CONTRACTS_PER_CLUSTER_FRACTION: float = Field(default=0.15, description="Fraction of total contracts per cluster (asset+timeframe)")
     
     # Spot-strike distance settings
+    # TODO: Remove KALSHI_SPOT_STRIKE_DISTANCE_DYNAMIC - always False, not used in current agent grid
     KALSHI_SPOT_STRIKE_DISTANCE_DYNAMIC: bool = Field(default=False, description="Enable dynamic spot-strike distance scaling by vol/tenor/regime")
     KALSHI_SPOT_STRIKE_GLOBAL_WARN_PCT: float = Field(default=0.85, description="Hard global guard - reject strikes beyond this distance from spot")
     
@@ -573,13 +577,19 @@ class Settings(BaseSettings):
     KALSHI_MAX_ORDERS_PER_HOUR: int = Field(default=1000, description="Max orders per hour (self-throttle)")
 
     # =============================================================================
-    # FEATURE FLAGS
+    # FEATURE FLAGS (LEGACY/UNUSED - see docs/audit_feature_flags.md Section 18)
     # =============================================================================
+    # TODO: Remove PHASE0_ENABLED - superseded by Kalshi-only mode, never enabled
     PHASE0_ENABLED: bool = Field(default=False, description="Enable Phase0 minimal crypto scope")
+    # TODO: Remove MERID_ENABLE_CHAINLINK - unused, not on roadmap
     MERID_ENABLE_CHAINLINK: bool = Field(default=False, description="Enable Chainlink integration")
+    # TODO: Remove MERID_ENABLE_AUGUR - unused, not on roadmap
     MERID_ENABLE_AUGUR: bool = Field(default=False, description="Enable Augur integration")
+    # TODO: Remove MERID_ENABLE_NEWS_AGENT - superseded by social_stream_enabled
     MERID_ENABLE_NEWS_AGENT: bool = Field(default=False, description="Enable news agent")
+    # TODO: Remove MERID_ENABLE_WHALE_INTEL - unused, not integrated
     MERID_ENABLE_WHALE_INTEL: bool = Field(default=False, description="Enable whale intelligence")
+    # TODO: Remove MERID_ENABLE_POLYMARKET - not integrated, Kalshi is primary venue
     MERID_ENABLE_POLYMARKET: bool = Field(default=False, description="Enable Polymarket integration")
     
     # =============================================================================
