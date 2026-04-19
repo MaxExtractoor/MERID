@@ -41,6 +41,7 @@ from merid.event_venues.kalshi.market_filter import (
     group_id_from_ticker,
     get_series_timeframe_bucket,
 )
+from merid.event_venues.kalshi.ticker_utils import is_valid_kalshi_ticker
 
 logger = get_logger("merid.event_venues.kalshi.order_router")
 
@@ -480,6 +481,29 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         return "invalid_side"
     if intent.action not in ("buy", "sell"):
         return "invalid_action"
+    return None
+
+
+def _check_ticker_valid(intent: OrderIntent) -> Optional[str]:
+    """Validate Kalshi ticker format before routing order.
+    
+    This guardrail prevents 404 errors from malformed tickers like
+    KXDOGE15M-26APR191645-45 which have invalid time formats or
+    synthetic suffixes that don't exist in Kalshi's canonical symbols.
+    
+    Returns rejection reason string, or None if OK.
+    """
+    if not intent.ticker:
+        return "missing_ticker"
+    
+    is_valid, error_msg = is_valid_kalshi_ticker(intent.ticker, require_cached=False)
+    if not is_valid:
+        logger.error(
+            "[ORDER_ROUTER_TICKER_REJECT] %s: %s",
+            intent.ticker, error_msg
+        )
+        return f"invalid_ticker: {error_msg}"
+    
     return None
 
 
