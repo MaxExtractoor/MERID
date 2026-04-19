@@ -30,7 +30,7 @@ import threading
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -447,7 +447,7 @@ class KalshiRiskConfig:
     max_total_notional_pct: float = 0.80     # 80 % of balance
     max_daily_loss_pct: float = 0.10         # 10 % of balance
     max_single_order_pct: float = 0.05       # 5 % of balance
-    _DAILY_LOSS_FRACTIONS: Dict[str, float] = {
+    _DAILY_LOSS_FRACTIONS: ClassVar[Dict[str, float]] = {
         "DEEP_UNDERWATER": 0.05,
         "UNDERWATER": 0.08,
         "BASELINE": 0.10,
