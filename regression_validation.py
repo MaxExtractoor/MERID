@@ -318,7 +318,7 @@ def test_loop_pipeline_smoke():
         # Verify core loop attributes are present in MeridLoop class
         from merid.loop import MeridLoop
         loop_attrs = dir(MeridLoop)
-        assert '_last_liquidity_update' in loop_attrs or 'last_liquidity_update' in loop_attrs, "liquidity tracking should exist"
+        assert '_last_liquidity_refresh' in loop_attrs or 'last_liquidity_refresh' in loop_attrs, "liquidity tracking should exist"
         
         print("✓ Loop pipeline smoke test OK (module structure verified)")
         return True
