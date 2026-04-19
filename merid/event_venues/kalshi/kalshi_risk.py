@@ -1360,37 +1360,31 @@ class KalshiRiskManager:
     ) -> Tuple[float, str, float]:
         """Compute dynamic daily loss limit based on equity/bankroll ratio.
 
+        Dynamic risk is now the primary path. Static caps from config act as
+        hard safety limits that dynamic values cannot exceed.
+
         Banded dynamic rule (fractions of bankroll, not balance):
         - ratio < 0.7:  daily_loss_frac = 0.25 (DEEP_UNDERWATER)
         - 0.7 <= ratio < 1.0: daily_loss_frac = 0.20 (UNDERWATER)
         - 1.0 <= ratio < 1.5: daily_loss_frac = 0.14 (BASELINE)
         - ratio >= 1.5: daily_loss_frac = 0.10 (LOCK_IN_GAINS)
 
+        Safety clamp: dynamic_daily_loss <= static_cap (config.max_daily_loss_pct)
+
         Returns:
             Tuple of (max_daily_loss_usd, regime, ratio)
         """
         bankroll_usd = bankroll_cents / 100.0 if bankroll_cents > 0 else 0.0
+        if bankroll_usd <= 0:
+            return (0.0, "NO_BANKROLL", 0.0)
 
-        # Check if dynamic daily loss is enabled (production only)
-        try:
-            from merid.settings import settings
-            dynamic_enabled = (
-                settings.KALSHI_DYNAMIC_DAILY_LOSS
-                and settings.is_production
-                and bankroll_usd > 0
-            )
-        except Exception:
-            dynamic_enabled = False
+        # Static safety cap from config (always computed as limit)
+        static_cap = bankroll_usd * self._config.max_daily_loss_pct
 
-        if not dynamic_enabled or bankroll_usd <= 0:
-            # Static fallback: use configured percentage of bankroll
-            static_frac = self._config.max_daily_loss_pct
-            max_daily_loss_usd = bankroll_usd * static_frac if bankroll_usd > 0 else 0.0
-            return (max_daily_loss_usd, "STATIC", 1.0 if bankroll_usd > 0 else 0.0)
-
-        # Compute ratio and determine regime
+        # Compute equity/bankroll ratio for dynamic regime
         ratio = equity_usd / bankroll_usd if bankroll_usd > 0 else 1.0
 
+        # Dynamic band selection
         if ratio < 0.7:
             daily_loss_frac = 0.25
             regime = "DEEP_UNDERWATER"
@@ -1404,7 +1398,10 @@ class KalshiRiskManager:
             daily_loss_frac = 0.10
             regime = "LOCK_IN_GAINS"
 
-        max_daily_loss_usd = bankroll_usd * daily_loss_frac
+        # Dynamic value clamped to static safety cap
+        dynamic_value = bankroll_usd * daily_loss_frac
+        max_daily_loss_usd = min(dynamic_value, static_cap)
+
         return (max_daily_loss_usd, regime, ratio)
 
     def _compute_dynamic_stop_loss(
@@ -1412,48 +1409,38 @@ class KalshiRiskManager:
     ) -> Tuple[float, str, float]:
         """Compute dynamic per-cluster stop loss limit based on equity/bankroll ratio.
 
+        Dynamic risk is now the primary path. Static caps act as hard safety limits.
+
         Banded dynamic rule (fractions of bankroll, not balance):
         - ratio < 0.7:  per_cluster_sl_frac = 0.20 (DEEP_UNDERWATER)
         - 0.7 <= ratio < 1.0: per_cluster_sl_frac = 0.14 (UNDERWATER)
         - 1.0 <= ratio < 1.5: per_cluster_sl_frac = 0.08 (BASELINE)
         - ratio >= 1.5: per_cluster_sl_frac = 0.04 (LOCK_IN_GAINS)
 
+        Safety clamp: dynamic_stop_loss <= static_cap (daily_loss * cluster_stop_pct)
+
         Returns:
             Tuple of (max_stop_loss_usd_per_cluster, regime, ratio)
         """
         bankroll_usd = bankroll_cents / 100.0 if bankroll_cents > 0 else 0.0
+        if bankroll_usd <= 0:
+            return (0.0, "NO_BANKROLL", 0.0)
 
-        # Check if dynamic stop loss is enabled (production only)
+        # Static safety cap from config
         try:
             from merid.settings import settings
-            dynamic_enabled = (
-                settings.KALSHI_DYNAMIC_STOP_LOSS
-                and settings.is_production
-                and bankroll_usd > 0
-            )
+            static_cluster_frac = settings.KALSHI_PORTFOLIO_CLUSTER_STOP_PCT
         except Exception:
-            dynamic_enabled = False
+            static_cluster_frac = 0.50  # default 50% of daily loss
+        base_daily_loss = self._config.max_daily_loss_usd
+        if base_daily_loss <= 0:
+            base_daily_loss = bankroll_usd * 0.10  # 10% default
+        static_cap = base_daily_loss * static_cluster_frac
 
-        if not dynamic_enabled or bankroll_usd <= 0:
-            # Static fallback: use configured percentage of daily loss or bankroll
-            try:
-                from merid.settings import settings
-                static_cluster_frac = settings.KALSHI_PORTFOLIO_CLUSTER_STOP_PCT
-                # Use daily loss cap as base if available, otherwise bankroll * 10%
-                base_daily_loss = self._config.max_daily_loss_usd
-                if base_daily_loss <= 0:
-                    base_daily_loss = bankroll_usd * 0.10  # 10% default
-                max_stop_loss_usd = base_daily_loss * static_cluster_frac
-            except Exception:
-                # Ultimate fallback: 5% of bankroll
-                max_stop_loss_usd = bankroll_usd * 0.05
-            regime = "STATIC"
-            ratio = 1.0 if bankroll_usd > 0 else 0.0
-            return (max_stop_loss_usd, regime, ratio)
+        # Compute equity/bankroll ratio for dynamic regime
+        ratio = equity_usd / bankroll_usd
 
-        # Compute ratio and determine regime
-        ratio = equity_usd / bankroll_usd if bankroll_usd > 0 else 1.0
-
+        # Dynamic band selection
         if ratio < 0.7:
             per_cluster_sl_frac = 0.20
             regime = "DEEP_UNDERWATER"
@@ -1467,7 +1454,10 @@ class KalshiRiskManager:
             per_cluster_sl_frac = 0.04
             regime = "LOCK_IN_GAINS"
 
-        max_stop_loss_usd = bankroll_usd * per_cluster_sl_frac
+        # Dynamic value clamped to static safety cap
+        dynamic_value = bankroll_usd * per_cluster_sl_frac
+        max_stop_loss_usd = min(dynamic_value, static_cap)
+
         return (max_stop_loss_usd, regime, ratio)
 
     # Regime-based notional fractions for contract caps
@@ -1484,6 +1474,8 @@ class KalshiRiskManager:
     ) -> Tuple[float, float, float, int, int, int, str, float]:
         """Compute dynamic contract caps based on equity/bankroll ratio.
 
+        Dynamic risk is now the primary path. Static caps act as hard safety limits.
+
         Returns:
             Tuple of (
                 max_notional_usd_total,
@@ -1497,42 +1489,27 @@ class KalshiRiskManager:
             )
         """
         bankroll_usd = bankroll_cents / 100.0 if bankroll_cents > 0 else 0.0
+        if bankroll_usd <= 0:
+            return (0.0, 0.0, 0.0, 0, 0, 0, "NO_BANKROLL", 0.0)
 
-        # Check if dynamic contracts is enabled (production only)
+        # Load static safety caps from config (these are hard limits)
         try:
             from merid.settings import settings
-            dynamic_enabled = (
-                settings.KALSHI_DYNAMIC_CONTRACTS
-                and settings.is_production
-                and bankroll_usd > 0
-            )
             max_contracts_total_hard = settings.KALSHI_MAX_CONTRACTS_TOTAL
             per_asset_frac = settings.KALSHI_MAX_CONTRACTS_PER_ASSET_FRACTION
             per_cluster_frac = settings.KALSHI_MAX_CONTRACTS_PER_CLUSTER_FRACTION
         except Exception:
-            dynamic_enabled = False
             max_contracts_total_hard = 5000
             per_asset_frac = 0.35
             per_cluster_frac = 0.15
 
-        if not dynamic_enabled or bankroll_usd <= 0:
-            # Static fallback: use existing config values
-            regime = "STATIC"
-            ratio = 1.0 if bankroll_usd > 0 else 0.0
-            max_notional_total = self._config.max_total_notional_usd
-            max_notional_asset = max_notional_total * per_asset_frac
-            max_notional_cluster = max_notional_total * per_cluster_frac
-            max_contracts_total = min(max_contracts_total_hard, int(max_notional_total))
-            max_contracts_asset = int(max_contracts_total * per_asset_frac)
-            max_contracts_cluster = int(max_contracts_total * per_cluster_frac)
-            return (
-                max_notional_total, max_notional_asset, max_notional_cluster,
-                max_contracts_total, max_contracts_asset, max_contracts_cluster,
-                regime, ratio
-            )
+        # Static safety caps
+        static_notional_total = self._config.max_total_notional_usd
+        static_notional_asset = static_notional_total * per_asset_frac
+        static_notional_cluster = static_notional_total * per_cluster_frac
 
-        # Compute ratio and determine regime
-        ratio = equity_usd / bankroll_usd if bankroll_usd > 0 else 1.0
+        # Compute equity/bankroll ratio for dynamic regime
+        ratio = equity_usd / bankroll_usd
 
         if ratio < 0.7:
             regime = "DEEP_UNDERWATER"
@@ -1546,10 +1523,15 @@ class KalshiRiskManager:
         # Get notional fractions for this regime
         total_frac, asset_frac, cluster_frac = self._CONTRACT_NOTIONAL_FRACTIONS[regime]
 
-        # Compute notional caps
-        max_notional_usd_total = bankroll_usd * total_frac
-        max_notional_usd_per_asset = bankroll_usd * asset_frac
-        max_notional_usd_per_cluster = bankroll_usd * cluster_frac
+        # Compute dynamic notional caps
+        dynamic_notional_total = bankroll_usd * total_frac
+        dynamic_notional_asset = bankroll_usd * asset_frac
+        dynamic_notional_cluster = bankroll_usd * cluster_frac
+
+        # Clamp dynamic values to static safety caps
+        max_notional_usd_total = min(dynamic_notional_total, static_notional_total)
+        max_notional_usd_per_asset = min(dynamic_notional_asset, static_notional_asset)
+        max_notional_usd_per_cluster = min(dynamic_notional_cluster, static_notional_cluster)
 
         # Convert to contract counts (approx 1 USD per contract on Kalshi)
         max_contracts_total = min(

@@ -527,10 +527,7 @@ class Settings(BaseSettings):
     KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT: float = Field(default=0.16, description="Max per-asset notional as % of bankroll (default 16%)")
     KALSHI_PORTFOLIO_MAX_MARGIN_UTIL_PCT: float = Field(default=0.75, description="Max margin utilization % (default 75%)")
     KALSHI_PORTFOLIO_CHECK_INTERVAL_S: int = Field(default=30, description="Portfolio risk check interval in seconds")
-    KALSHI_DYNAMIC_DAILY_LOSS: bool = Field(default=False, description="Enable aggressive dynamic daily loss bands based on equity/bankroll ratio (production only). Used in kalshi_risk.py — active but disabled.")
-    KALSHI_DYNAMIC_STOP_LOSS: bool = Field(default=False, description="Enable dynamic per-cluster stop loss based on equity/bankroll ratio (production only). Used in kalshi_risk.py — active but disabled.")
-    KALSHI_DYNAMIC_CONTRACTS: bool = Field(default=False, description="Enable dynamic contract caps based on equity/bankroll ratio (production only). Used in kalshi_risk.py — active but disabled.")
-    KALSHI_PORTFOLIO_CLUSTER_STOP_PCT: float = Field(default=0.50, description="Static per-cluster stop loss as fraction of daily loss cap (used when dynamic stop loss disabled)")
+    KALSHI_PORTFOLIO_CLUSTER_STOP_PCT: float = Field(default=0.50, description="Static per-cluster stop loss as fraction of daily loss cap (safety limit for dynamic calculations)")
     
     # Dynamic contract cap settings
     KALSHI_MAX_CONTRACTS_TOTAL: int = Field(default=5000, description="Hard ceiling for total contracts across all assets/timeframes")
