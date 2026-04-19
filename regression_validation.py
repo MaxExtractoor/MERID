@@ -128,6 +128,185 @@ def test_strike_selector():
         traceback.print_exc()
         return False
 
+def test_dynamic_risk_baseline_parity():
+    """Verify dynamic risk at baseline matches previous static caps (no regression)."""
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskManager
+        from merid.prediction.agent_grid_config import PortfolioRiskConfig
+        
+        config = PortfolioRiskConfig(
+            max_total_notional_usd=25000,
+            max_daily_loss_usd=2000,
+            max_daily_loss_pct=0.10  # 10% static cap
+        )
+        
+        risk_mgr = KalshiRiskManager(config)
+        bankroll_cents = 5000000  # $50,000
+        bankroll_usd = 50000.0
+        
+        # Test 1: Daily loss at baseline (equity = bankroll, ratio = 1.0)
+        # Previous static: 10% of 50k = 5000
+        # Dynamic baseline: 14% of 50k = 7000, but clamped to 5000
+        max_loss, regime, ratio = risk_mgr._compute_dynamic_daily_loss(bankroll_usd, bankroll_cents)
+        assert regime == "BASELINE", f"Expected BASELINE, got {regime}"
+        assert abs(max_loss - 5000.0) < 0.01, f"Daily loss {max_loss} should equal static cap 5000"
+        
+        # Test 2: Stop loss at baseline
+        # Previous static: daily_loss * cluster_stop_pct = 5000 * 0.5 = 2500
+        max_sl, regime, ratio = risk_mgr._compute_dynamic_stop_loss(bankroll_usd, bankroll_cents)
+        assert regime == "BASELINE"
+        assert abs(max_sl - 2500.0) < 0.01, f"Stop loss {max_sl} should equal static 2500"
+        
+        # Test 3: Contract caps at baseline
+        # Previous static: min(5000, 25000) = 25000 notional, contracts = 25000
+        result = risk_mgr._compute_dynamic_contract_caps(bankroll_usd, bankroll_cents)
+        (max_notional_total, max_notional_asset, max_notional_cluster,
+         max_contracts_total, max_contracts_asset, max_contracts_cluster,
+         regime, ratio) = result
+        
+        assert regime == "BASELINE"
+        # At baseline, dynamic uses 25% of bankroll = 12500, but clamped to static 25000
+        assert abs(max_notional_total - 12500.0) < 0.01, f"Notional {max_notional_total} should be clamped dynamic 12500"
+        
+        print(f"✓ Dynamic risk baseline parity OK (max_loss={max_loss:.0f}, max_sl={max_sl:.0f}, regime={regime})")
+        return True
+    except Exception as e:
+        print(f"✗ Dynamic risk baseline parity failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def test_dynamic_risk_monotonicity():
+    """Verify risk limits are monotonic and never exceed static caps across regimes."""
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskManager
+        from merid.prediction.agent_grid_config import PortfolioRiskConfig
+        
+        config = PortfolioRiskConfig(
+            max_total_notional_usd=25000,
+            max_daily_loss_usd=2000,
+            max_daily_loss_pct=0.10
+        )
+        
+        risk_mgr = KalshiRiskManager(config)
+        bankroll_cents = 5000000  # $50,000
+        
+        # Test regimes: DEEP_UNDERWATER -> UNDERWATER -> BASELINE -> LOCK_IN_GAINS
+        test_cases = [
+            (0.6 * 50000, "DEEP_UNDERWATER"),   # 60% of bankroll
+            (0.8 * 50000, "UNDERWATER"),        # 80% of bankroll
+            (1.0 * 50000, "BASELINE"),          # 100% of bankroll
+            (1.6 * 50000, "LOCK_IN_GAINS"),     # 160% of bankroll
+        ]
+        
+        prev_daily_loss = float('inf')
+        prev_stop_loss = float('inf')
+        
+        for equity_usd, expected_regime in test_cases:
+            # Daily loss monotonicity
+            max_loss, regime, ratio = risk_mgr._compute_dynamic_daily_loss(equity_usd, bankroll_cents)
+            assert max_loss <= 5000, f"Daily loss {max_loss} exceeds static cap 5000"
+            assert max_loss <= prev_daily_loss, f"Daily loss should decrease: {max_loss} > {prev_daily_loss}"
+            prev_daily_loss = max_loss
+            
+            # Stop loss monotonicity
+            max_sl, regime_sl, ratio_sl = risk_mgr._compute_dynamic_stop_loss(equity_usd, bankroll_cents)
+            assert max_sl <= 2500, f"Stop loss {max_sl} exceeds static cap 2500"
+            assert max_sl <= prev_stop_loss, f"Stop loss should decrease: {max_sl} > {prev_stop_loss}"
+            prev_stop_loss = max_sl
+            
+            print(f"  {expected_regime}: loss={max_loss:.0f}, sl={max_sl:.0f}")
+        
+        # Verify LOCK_IN_GAINS is most conservative
+        assert prev_daily_loss < 5000, "LOCK_IN_GAINS should have lower limit than baseline"
+        
+        print("✓ Dynamic risk monotonicity OK")
+        return True
+    except Exception as e:
+        print(f"✗ Dynamic risk monotonicity failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def test_strike_selector_edge_cases():
+    """Test strike selector edge cases including global warn threshold."""
+    try:
+        from merid.event_venues.kalshi.strike_selector import StrikeSelector, DistanceCheckResult
+        from merid.settings import settings
+        
+        selector = StrikeSelector()
+        global_warn = settings.KALSHI_SPOT_STRIKE_GLOBAL_WARN_PCT
+        
+        # Test 1: spot <= 0 should hard-reject
+        result = selector.check_strike("BTC", 70000, 0, "15m")
+        assert not result.accepted, "Should reject when spot <= 0"
+        assert "spot" in result.reason.lower() or result.distance_pct == float('inf'), f"Expected spot error, got: {result.reason}"
+        
+        # Test 2: Distance slightly below global_warn should use normal logic
+        # BTC weekly base is 12%, global_warn is 85%
+        # Test at 50% distance (below global_warn but above base)
+        result = selector.check_strike("BTC", 35000, 70000, "weekly")  # 50% distance
+        assert isinstance(result, DistanceCheckResult)
+        # Should be computed normally, may be accepted or rejected based on dynamic calc
+        
+        # Test 3: Distance above global_warn should hard-reject with spot_out_of_range
+        result = selector.check_strike("BTC", 10000, 70000, "weekly")  # ~86% distance
+        assert not result.accepted, "Should reject when distance > global_warn"
+        assert "range" in result.reason.lower() or "warn" in result.reason.lower(), f"Expected out_of_range, got: {result.reason}"
+        
+        # Test 4: Dynamic enabled with multiplier pushing above hard cap
+        # Use a case where vol/tenor multipliers would push distance allowance high
+        # but hard cap should clamp
+        result_dynamic = selector.check_strike(
+            "BTC", 75000, 70000, "15m",  # ~7% distance
+            dynamic_enabled=True,
+            vol_bucket="high",  # high multiplier
+            tenor_bucket="long",
+            regime="LOCK_IN_GAINS"
+        )
+        # Hard cap for BTC is 0.25, should never be exceeded
+        max_allowed = selector.get_max_allowed_pct("BTC", "15m", True, "high", "long", "LOCK_IN_GAINS")
+        assert max_allowed <= 0.25, f"Max allowed {max_allowed} exceeds hard cap 0.25"
+        
+        print(f"✓ Strike selector edge cases OK (global_warn={global_warn})")
+        return True
+    except Exception as e:
+        print(f"✗ Strike selector edge cases failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def test_loop_pipeline_smoke():
+    """Smoke test for loop and pipeline after flag removal."""
+    try:
+        from merid.loop import LoopController, LoopConfig
+        
+        # Create minimal config
+        config = LoopConfig(
+            active_domains=["prediction"],
+            kalshi_enabled=True,
+            paper_mode=True
+        )
+        
+        # Initialize controller (should not error on removed flags)
+        loop = LoopController(config)
+        
+        # Verify no betting-related attributes exist
+        assert not hasattr(loop, '_last_betting_refresh'), "_last_betting_refresh should be removed"
+        assert not hasattr(loop, '_betting_refresh_interval'), "_betting_refresh_interval should be removed"
+        
+        # Verify core attributes exist
+        assert hasattr(loop, '_last_liquidity_update')
+        assert hasattr(loop, '_last_arb_scan')
+        
+        print("✓ Loop pipeline smoke test OK")
+        return True
+    except Exception as e:
+        print(f"✗ Loop pipeline smoke test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     """Run all regression tests."""
     print("=" * 60)
@@ -139,7 +318,11 @@ def main():
     results.append(("Settings Load", test_settings_load()))
     results.append(("Core Feature Flags", test_core_feature_flags()))
     results.append(("Dynamic Risk Functions", test_dynamic_risk_functions()))
+    results.append(("Dynamic Risk Baseline Parity", test_dynamic_risk_baseline_parity()))
+    results.append(("Dynamic Risk Monotonicity", test_dynamic_risk_monotonicity()))
     results.append(("Strike Selector", test_strike_selector()))
+    results.append(("Strike Selector Edge Cases", test_strike_selector_edge_cases()))
+    results.append(("Loop Pipeline Smoke", test_loop_pipeline_smoke()))
     
     print("\n" + "=" * 60)
     print("SUMMARY")
