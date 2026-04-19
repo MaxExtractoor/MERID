@@ -1406,7 +1406,7 @@ class KalshiRiskManager:
             daily_loss_frac = 0.14
             regime = "BASELINE"
         else:
-            daily_loss_frac = 0.10
+            daily_loss_frac = 0.06  # Tighter than baseline - lock in gains
             regime = "LOCK_IN_GAINS"
 
         # Dynamic value clamped to static safety cap
