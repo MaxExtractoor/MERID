@@ -3638,7 +3638,30 @@ async def _app_lifespan(application: FastAPI):
     except Exception as e:
         logger.debug(f"Shutdown reason fetch failed: {e}")
 
-    # Log structured shutdown start
+    # Log structured shutdown start with full context
+    shutdown_context = {
+        "reason": _shutdown_reason.reason.value if _shutdown_reason else "unknown",
+        "sub_reason": getattr(_shutdown_reason, "sub_reason", None),
+        "fatal_error": getattr(_shutdown_reason, "fatal_error_type", None),
+        "timestamp": time.time(),
+    }
+    logger.critical("[SHUTDOWN-INITIATED] %s", json.dumps(shutdown_context))
+
+    # Add metrics snapshot before shutdown proceeds
+    try:
+        from merid.diagnostics.loop_lag import get_loop_lag_monitor
+        lag_stats = get_loop_lag_monitor().get_health()
+        logger.critical(
+            "[SHUTDOWN-METRICS] lag_ms=%.1f lag_p95=%.1f lag_max=%.1f samples=%d",
+            lag_stats["stats"]["current_ms"],
+            lag_stats["stats"]["p95_ms"],
+            lag_stats["stats"]["max_ms"],
+            lag_stats["stats"]["sample_count"],
+        )
+    except Exception:
+        pass
+
+    # Legacy detailed shutdown log (for compatibility)
     if _shutdown_reason:
         logger.critical(
             "🛑 MERID shutdown initiated - cancelling background tasks... "

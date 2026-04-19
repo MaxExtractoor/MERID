@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import uvicorn
 from utils.logger import get_logger
+from core.fault_manager import get_fault_manager
 
 logger = get_logger("web.asgi_guard")
 
@@ -90,11 +91,16 @@ def is_shutting_down() -> bool:
 class FatalErrorClassifier:
     """Classifies exceptions into shutdown reasons."""
 
+    # These Windows errors are often benign during WebSocket close/reconnect
+    WINDOWS_BENIGN_ERRORS = (
+        "WinError 995",           # ERROR_OPERATION_ABORTED - expected during close
+        "WinError 10054",         # WSAECONNRESET - connection reset during close
+    )
+
+    # These are genuinely fatal Windows errors
     WINDOWS_FATAL_ERRORS = (
-        "WinError 995",           # I/O operation aborted
-        "WinError 10038",         # Socket operation on non-socket
-        "WinError 10054",         # Connection reset by peer
-        "WinError 10060",         # Connection timed out
+        "WinError 10038",         # WSAENOTSOCK - socket operation on non-socket
+        "WinError 10060",         # WSAETIMEDOUT - connection timed out
     )
 
     ASGI_LOOP_ERRORS = (
@@ -104,14 +110,74 @@ class FatalErrorClassifier:
     )
 
     @classmethod
+    def is_benign_ws_error(cls, exc: BaseException) -> bool:
+        """Check if exception is a benign WebSocket/Windows error.
+
+        These errors are expected during forced WebSocket close or process shutdown
+        and should not trigger fatal error handling or server shutdown.
+
+        NOTE: This is the classmethod version used by ASGI fatal error classification.
+        A similar instance method exists in KalshiWebSocket._is_benign_ws_error()
+        for WebSocket-level error handling. Keep logic aligned between both.
+        """
+        import errno
+
+        # CancelledError is always benign
+        if isinstance(exc, asyncio.CancelledError):
+            return True
+
+        # Connection errors during close are benign
+        if isinstance(exc, (ConnectionError, ConnectionAbortedError, ConnectionResetError)):
+            return True
+
+        # OSError with specific Windows error codes
+        if isinstance(exc, OSError):
+            winerror = getattr(exc, "winerror", None)
+            if winerror in (995, 10054):  # ERROR_OPERATION_ABORTED, WSAECONNRESET
+                return True
+            errno_code = getattr(exc, "errno", None)
+            if errno_code in (errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE, 104, 10053, 10058):
+                return True
+
+        # RuntimeError with specific closed/transport messages
+        if isinstance(exc, RuntimeError):
+            msg = str(exc).lower()
+            if any(x in msg for x in ["websocket", "connection", "closed", "transport"]):
+                return True
+
+        # Check string representation for known benign patterns
+        exc_str = str(exc)
+        if any(code in exc_str for code in cls.WINDOWS_BENIGN_ERRORS):
+            return True
+
+        return False
+
+    @classmethod
     def classify(cls, exc: BaseException) -> ShutdownReason:
-        """Classify an exception into a shutdown reason."""
+        """Classify an exception into a shutdown reason.
+
+        Benign WebSocket close errors are downgraded to UNKNOWN to prevent
+        unnecessary server shutdown while still capturing them in logs.
+        """
         exc_type = type(exc).__name__
         exc_str = str(exc)
 
-        # Windows I/O fatal errors
+        # First check if this is a benign WebSocket close error
+        if cls.is_benign_ws_error(exc):
+            logger.debug(
+                "FatalErrorClassifier: Downgrading %s to benign (WebSocket close)",
+                exc_type,
+            )
+            return ShutdownReason.UNKNOWN
+
+        # Windows I/O fatal errors (excluding benign ones)
+        # Check both string representation and winerror attribute
         if any(code in exc_str for code in cls.WINDOWS_FATAL_ERRORS):
             return ShutdownReason.ASGI_FATAL
+        if isinstance(exc, OSError):
+            winerror = getattr(exc, "winerror", None)
+            if winerror in (10038, 10060):  # WSAENOTSOCK, WSAETIMEDOUT
+                return ShutdownReason.ASGI_FATAL
 
         # asyncio loop corruption
         if exc_type in cls.ASGI_LOOP_ERRORS:
@@ -119,7 +185,9 @@ class FatalErrorClassifier:
 
         # Connection/transport errors that indicate loop corruption
         if "transport" in exc_str.lower() and "closed" in exc_str.lower():
-            return ShutdownReason.ASGI_FATAL
+            # But not if it looks like a benign WebSocket close
+            if not cls.is_benign_ws_error(exc):
+                return ShutdownReason.ASGI_FATAL
 
         return ShutdownReason.UNKNOWN
 
@@ -133,7 +201,11 @@ class MERIDUvicornServer(uvicorn.Server):
         self._shutdown_reason: Optional[ShutdownReason] = None
 
     async def shutdown(self, sig: Optional[signal.Signals] = None) -> None:
-        """Override shutdown to capture attribution before calling parent."""
+        """Override shutdown to capture attribution before calling parent.
+        
+        DEGRADED-MODE: Only proceed with shutdown if FaultManager
+        determines multi-signal critical conditions are met.
+        """
         # Determine reason before shutdown starts
         if sig == signal.SIGINT:
             reason = ShutdownReason.SIGINT
@@ -147,6 +219,31 @@ class MERIDUvicornServer(uvicorn.Server):
         else:
             reason = ShutdownReason.UNKNOWN
             sub_reason = None
+
+        # DEGRADED-MODE: Check with FaultManager before allowing shutdown
+        if reason == ShutdownReason.ASGI_FATAL and self._fatal_error:
+            fm = get_fault_manager()
+            # Get lag metrics for decision
+            try:
+                from merid.diagnostics.loop_lag import get_loop_lag_monitor
+                lag_stats = get_loop_lag_monitor().get_health()
+                lag_ms = lag_stats["stats"]["current_ms"]
+                lag_p95 = lag_stats["stats"]["p95_ms"]
+            except Exception:
+                lag_ms = 0.0
+                lag_p95 = 0.0
+            
+            # Ask FaultManager if we should shutdown
+            should_shutdown = fm.should_initiate_shutdown(lag_ms, lag_p95)
+            if not should_shutdown:
+                logger.warning(
+                    "[SHUTDOWN-BLOCKED] ASGI_FATAL detected but FaultManager "
+                    "determined shutdown should not proceed. "
+                    "Venue degradation applied instead. Continuing operation."
+                )
+                # Reset fatal error so we don't keep trying to shutdown
+                self._fatal_error = None
+                return  # Don't shutdown - continue running
 
         # Build structured event
         event = ShutdownEvent(
@@ -166,39 +263,121 @@ class MERIDUvicornServer(uvicorn.Server):
         await super().shutdown(sig=sig)
 
     def handle_exception(self, loop: asyncio.AbstractEventLoop, context: dict) -> None:
-        """Handle event loop exceptions - capture fatal errors."""
+        """Handle event loop exceptions - capture fatal errors.
+        
+        DEGRADED-MODE: Venue-specific ASGI_FATAL errors degrade the venue,
+        not the entire system. Global shutdown only occurs for multi-signal
+        critical failures determined by FaultManager.
+        """
         exc = context.get("exception")
         message = context.get("message", "")
 
         if exc:
             # Classify the error
             reason = FatalErrorClassifier.classify(exc)
+            exc_type = type(exc).__name__
 
             # Log with context
             logger.error(
                 "ASGI_EXCEPTION reason=%s exc_type=%s message=%s",
                 reason.value,
-                type(exc).__name__,
+                exc_type,
                 message,
                 exc_info=exc if reason == ShutdownReason.ASGI_FATAL else None,
             )
 
             # Store fatal errors for attribution in shutdown
             if reason == ShutdownReason.ASGI_FATAL:
-                self._fatal_error = exc
-
-                # Increment metrics counter
-                try:
-                    from monitoring.metrics import MERID_ASGI_FATAL_ERRORS_TOTAL
-                    MERID_ASGI_FATAL_ERRORS_TOTAL.labels(
-                        error_type=type(exc).__name__,
-                        source="asgi",
-                    ).inc()
-                except Exception:
-                    pass
+                # DEGRADED-MODE: Check if this is a venue-specific error
+                # (e.g., Kalshi WebSocket errors) - degrade venue, not system
+                is_venue_error = self._is_venue_specific_error(exc, message)
+                
+                if is_venue_error:
+                    # Mark venue as degraded via FaultManager
+                    fm = get_fault_manager()
+                    venue = self._extract_venue_from_error(exc, message)
+                    fm.mark_venue_degraded(
+                        venue, 
+                        f"asgi_fatal: {exc_type}",
+                        metrics={"error_message": str(exc)[:200]}
+                    )
+                    logger.warning(
+                        "[VENUE-DEGRADED] venue=%s due to ASGI_FATAL. "
+                        "Server continues running in degraded mode.",
+                        venue
+                    )
+                else:
+                    # System-wide fatal error - store for shutdown decision
+                    self._fatal_error = exc
+                    # Increment metrics counter
+                    try:
+                        from monitoring.metrics import MERID_ASGI_FATAL_ERRORS_TOTAL
+                        MERID_ASGI_FATAL_ERRORS_TOTAL.labels(
+                            error_type=exc_type,
+                            source="asgi",
+                        ).inc()
+                    except Exception:
+                        pass
 
         # Call default handler
         super().handle_exception(loop, context)
+    
+    def _is_venue_specific_error(self, exc: BaseException, message: str) -> bool:
+        """Check if an error is specific to a venue (not system-wide).
+        
+        Venue-specific errors:
+        - WebSocket connection errors to external venues
+        - Venue-specific timeouts or resets
+        
+        System-wide errors:
+        - asyncio loop corruption
+        - Memory exhaustion
+        - Port binding failures
+        """
+        exc_str = str(exc).lower()
+        exc_type = type(exc).__name__
+        
+        # Check for Kalshi/WebSocket specific patterns
+        venue_patterns = [
+            "kalshi",
+            "websocket",
+            "ws.close",
+            "wss://",
+            "connection reset",
+            "connection refused",
+            "winerror 10054",  # WSAECONNRESET - benign during close
+            "winerror 10060",  # WSAETIMEDOUT - venue timeout
+        ]
+        
+        for pattern in venue_patterns:
+            if pattern in exc_str or pattern in message.lower():
+                return True
+        
+        # Check for venue-specific error types
+        if exc_type in ("ConnectionError", "ConnectionResetError"):
+            return True
+        
+        # Check winerror codes that are venue-specific
+        if isinstance(exc, OSError):
+            winerror = getattr(exc, "winerror", None)
+            if winerror in (10054, 10060):  # WSAECONNRESET, WSAETIMEDOUT
+                return True
+        
+        return False
+    
+    def _extract_venue_from_error(self, exc: BaseException, message: str) -> str:
+        """Extract venue name from error message/content."""
+        exc_str = str(exc).lower()
+        msg_lower = message.lower()
+        
+        if "kalshi" in exc_str or "kalshi" in msg_lower:
+            return "kalshi"
+        
+        # Default venue for WebSocket errors
+        if "websocket" in exc_str or "websocket" in msg_lower:
+            return "kalshi"  # Primary WebSocket venue
+        
+        return "unknown"
 
 
 def run_merid_guarded(

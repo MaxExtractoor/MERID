@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import time
 from collections import defaultdict
+
+from core.fault_manager import get_fault_manager, CircuitState
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
@@ -163,8 +166,56 @@ class KalshiWebSocket(EventVenueStream):
         self._lag_pause_count: int = 0  # Total times entered lag pause
         self._callback_failures: List[Dict[str, Any]] = []  # Last N failures with context
 
+        # CIRCUIT-BREAKER: Reconnect failure tracking
+        self._reconnect_circuit_failures: int = 0
+        self._reconnect_circuit_threshold: int = int(os.getenv("KALSHI_WS_RECONNECT_CIRCUIT_THRESHOLD", "5"))
+        self._reconnect_circuit_open: bool = False
+
         # B3: register graceful-shutdown snapshot handler
         self.register_sigterm_snapshot()
+
+    def _is_benign_ws_error(self, exc: BaseException) -> bool:
+        """Check if exception is a benign WebSocket/Windows error during close/shutdown.
+
+        These errors are expected during forced WebSocket close or process shutdown
+        and should not trigger fatal error handling.
+
+        NOTE: This is the instance method version. A similar classmethod exists in
+        web.asgi_guard.FatalErrorClassifier.is_benign_ws_error() for ASGI-level
+        error classification. Keep logic aligned between both implementations.
+        """
+        import errno
+
+        # CancelledError is always benign
+        if isinstance(exc, asyncio.CancelledError):
+            return True
+
+        # Connection errors during close are benign
+        if isinstance(exc, (ConnectionError, ConnectionAbortedError, ConnectionResetError)):
+            return True
+
+        # OSError with specific Windows error codes
+        if isinstance(exc, OSError):
+            # WinError codes (Windows-specific)
+            # Only 995 and 10054 are truly benign during close/reconnect
+            # 10038 (WSAENOTSOCK) and 10060 (WSAETIMEDOUT) indicate deeper issues
+            winerror = getattr(exc, "winerror", None)
+            if winerror in (995, 10054):
+                # 995 = ERROR_OPERATION_ABORTED - expected during forced close
+                # 10054 = WSAECONNRESET - connection reset during close
+                return True
+            # errno codes (cross-platform)
+            errno_code = getattr(exc, "errno", None)
+            if errno_code in (errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE, 104, 10053, 10058):
+                return True
+
+        # RuntimeError with specific closed/transport messages
+        if isinstance(exc, RuntimeError):
+            msg = str(exc).lower()
+            if any(x in msg for x in ["websocket", "connection", "closed", "transport"]):
+                return True
+
+        return False
         
     @property
     def venue_name(self) -> str:
@@ -247,35 +298,44 @@ class KalshiWebSocket(EventVenueStream):
             raise
     
     async def close(self) -> None:
-        """Close WebSocket connection and drain queues."""
+        """Close WebSocket with hardened error handling for Windows I/O errors."""
         self._running = False
+
         # Cancel supervisor first to prevent action during shutdown
         if self._supervisor_task and not self._supervisor_task.done():
             self._supervisor_task.cancel()
             try:
                 await self._supervisor_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, OSError):
+                # WinError 995 etc. are expected during shutdown
                 pass
             self._supervisor_task = None
+
         # Cancel the async processor
         if self._processor_task and not self._processor_task.done():
             self._processor_task.cancel()
             try:
                 await self._processor_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, OSError):
                 pass
             self._processor_task = None
+
+        # Close WebSocket with Windows error suppression
         if self._ws:
             try:
                 await self._ws.close()
-            except (ConnectionError, RuntimeError):
-                pass
+            except (ConnectionError, RuntimeError, OSError) as e:
+                # WinError 10054, 995 are benign during forced close
+                if not self._is_benign_ws_error(e):
+                    logger.warning("Unexpected WS close error: %r", e)
             self._ws = None
+
         self._subscriptions.clear()
         logger.info(
-            f"Kalshi WebSocket closed — "
-            f"{self._messages_received} msgs, {self._errors_received} errs, "
-            f"{self._reconnect_count} reconnects, {self._messages_dropped} dropped"
+            "Kalshi WebSocket closed — "
+            "%d msgs, %d errs, %d reconnects, %d dropped",
+            self._messages_received, self._errors_received,
+            self._reconnect_count, self._messages_dropped,
         )
     
     def _next_sub_id(self) -> int:
@@ -844,20 +904,32 @@ class KalshiWebSocket(EventVenueStream):
             return 0.0
 
     async def _reconnect(self) -> None:
-        """Reconnect with exponential backoff + jitter, then resubscribe.
-        
+        """Reconnect with exponential backoff + jitter + circuit breaker.
+
         CRASH-006: Uses asyncio.Lock to prevent concurrent reconnect storms.
         EVENT-LOOP-FIX: Skips reconnect if lag > 1000ms to prevent storm during starvation.
+        CIRCUIT-BREAKER: Opens after consecutive failures to prevent endless reconnection loops.
+        DEGRADED-MODE: Venue-level circuit breaker via FaultManager.
         """
         if not self._running:
             return
-        
+
+        # FAULT-MANAGER: Check circuit breaker state
+        fm = get_fault_manager()
+        if not fm.can_attempt_reconnect("kalshi"):
+            circuit = fm.get_venue_circuit_state("kalshi")
+            logger.warning(
+                "[KALSHI-CIRCUIT-OPEN] Cannot reconnect - circuit state=%s",
+                circuit.name
+            )
+            return
+
         # EVENT-LOOP-FIX: Check event-loop lag before attempting reconnect
         # If lag is severe, skip reconnect to prevent adding load to starving loop
         _LAG_THRESHOLD_MS = float(os.getenv("KALSHI_WS_RECONNECT_LAG_THRESHOLD_MS", "1000"))
         _HALT_BAND_MS = 2000.0  # Critical threshold for lag pause mode
         current_lag = self._get_event_loop_lag_ms()
-        
+
         if current_lag > _HALT_BAND_MS:
             # Enter lag pause mode - completely suspend reconnection attempts
             if not self._lag_pause_active:
@@ -878,7 +950,7 @@ class KalshiWebSocket(EventVenueStream):
                 f"[EVENT-LOOP-FIX] EXITING LAG PAUSE MODE — lag recovered to {current_lag:.0f}ms "
                 f"after {duration:.1f}s"
             )
-        
+
         # Skip individual reconnect if lag is elevated (but not in halt band)
         if current_lag > _LAG_THRESHOLD_MS:
             logger.warning(
@@ -891,17 +963,24 @@ class KalshiWebSocket(EventVenueStream):
                 self._max_reconnect_delay,
             )
             return
-        
+
         # CRASH-006: Prevent multiple concurrent reconnect attempts
         if self._reconnect_lock.locked():
             logger.debug("Reconnect already in progress, skipping duplicate attempt")
             return
-        
+
         async with self._reconnect_lock:
             if not self._running:
                 return
-            
+
             self._reconnect_in_progress = True
+            fm = get_fault_manager()
+            
+            # Track recovery attempt for half-open state
+            circuit_state = fm.get_venue_circuit_state("kalshi")
+            if circuit_state == CircuitState.HALF_OPEN:
+                fm.mark_recovery_attempt("kalshi", self._reconnect_count + 1, half_open=True)
+            
             try:
                 self._reconnect_count += 1
                 # Add jitter (±25%) to avoid thundering herd
@@ -909,17 +988,22 @@ class KalshiWebSocket(EventVenueStream):
                 delay = max(0.5, self._reconnect_delay + jitter)
 
                 logger.info(
-                    f"Reconnecting to Kalshi in {delay:.1f}s "
-                    f"(attempt #{self._reconnect_count})..."
+                    "Reconnecting to Kalshi in %.1fs (attempt #%d)...",
+                    delay, self._reconnect_count,
                 )
                 await asyncio.sleep(delay)
 
-                self._reconnect_delay = min(
-                    self._reconnect_delay * 2,
-                    self._max_reconnect_delay,
-                )
-
                 await self.connect()
+
+                # SUCCESS: Record circuit success and mark venue recovered
+                fm.record_circuit_success("kalshi")
+                if self._reconnect_circuit_failures > 0:
+                    logger.info(
+                        "[CIRCUIT-BREAKER] Resetting failure count after successful reconnect"
+                    )
+                    self._reconnect_circuit_failures = 0
+                self._reconnect_delay = 1.0  # Reset to initial delay
+                fm.mark_venue_recovered("kalshi", "reconnect_successful")
 
                 # Clear cached orderbook state — force fresh snapshots
                 self._ob_initialised.clear()
@@ -954,7 +1038,35 @@ class KalshiWebSocket(EventVenueStream):
                     ", order_group_updates" if self._order_group_updates_enabled else "",
                 )
             except (ConnectionError, RuntimeError, ValueError) as e:
-                logger.warning(f"Kalshi reconnection failed: {e}")
+                # FAILURE: Track and potentially open circuit breaker
+                self._reconnect_circuit_failures += 1
+                # Exponential backoff continues on failure
+                self._reconnect_delay = min(
+                    self._reconnect_delay * 2,
+                    self._max_reconnect_delay,
+                )
+
+                # DEGRADED-MODE: Record failure via FaultManager
+                fm.record_circuit_failure("kalshi")
+                
+                # Check if circuit is now open (threshold exceeded)
+                if fm.get_venue_circuit_state("kalshi") == CircuitState.OPEN:
+                    logger.error(
+                        "[KALSHI-OFFLINE] Circuit breaker opened after %d failures. "
+                        "Venue degraded - server continues running. Error: %r",
+                        self._reconnect_circuit_failures, e
+                    )
+                    fm.mark_venue_offline("kalshi", f"circuit_open: {e!r}", circuit_open=True)
+                else:
+                    # Still in degraded state, attempting recovery
+                    fm.mark_venue_degraded("kalshi", f"reconnect_failed: {e!r}")
+                    logger.warning(
+                        "Kalshi reconnection failed (attempt %d): %r. "
+                        "Backoff delay now %.1fs. Venue degraded but server continues.",
+                        self._reconnect_circuit_failures,
+                        e,
+                        self._reconnect_delay,
+                    )
             finally:
                 self._reconnect_in_progress = False
     
