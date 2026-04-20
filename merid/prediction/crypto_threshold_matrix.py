@@ -1,7 +1,11 @@
 """Load and resolve `config/crypto_threshold_matrix.yaml` — single tuning surface for crypto PM/MM.
 
 Override path: env ``MERID_CRYPTO_THRESHOLD_MATRIX_PATH`` (absolute or cwd-relative).
-Active profile key: ``legacy`` | ``modern`` from :func:`merid.prediction.crypto_edge_production.get_crypto_edge_runtime`.
+Active profile key: ``legacy`` | ``modern`` | ``modern_tradeable_kalshi_v1`` from env or runtime.
+
+Schema versions:
+  - v1: profiles.<name>.rows: List[Dict] (legacy, modern)
+  - v2: profiles.<name>.edge_grid, confidence_bands, fee_aware_settings, kelly_settings (modern_tradeable_kalshi_v1)
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
@@ -43,9 +47,24 @@ def normalize_crypto_timeframe(timeframe: str) -> str:
 
 
 def _get_threshold_mode() -> str:
-    from merid.prediction.crypto_edge_production import get_crypto_edge_runtime
-
-    return str(get_crypto_edge_runtime().threshold_mode or "legacy")
+    """Get active profile key from env or runtime.
+    
+    Priority:
+      1. MERID_CRYPTO_EDGE_PRODUCTION_PROFILE env var
+      2. crypto_edge_production runtime threshold_mode
+      3. Default "legacy"
+    """
+    env_profile = os.environ.get("MERID_CRYPTO_EDGE_PRODUCTION_PROFILE", "").strip()
+    if env_profile:
+        return env_profile
+    try:
+        from merid.prediction.crypto_edge_production import get_crypto_edge_runtime
+        runtime_mode = get_crypto_edge_runtime().threshold_mode
+        if runtime_mode:
+            return str(runtime_mode)
+    except Exception:
+        pass
+    return "legacy"
 
 
 _matrix_lock = threading.Lock()
@@ -237,6 +256,188 @@ def _coerce_row_types(merged: Dict[str, Any], path: str) -> Dict[str, Any]:
     return out
 
 
+def _resolve_v2_profile(
+    *,
+    asset: str,
+    timeframe: str,
+    archetype: str,
+    profile_key: str,
+    prof_block: Dict[str, Any],
+    doc: Dict[str, Any],
+    path: str,
+) -> Dict[str, Any]:
+    """Resolve a schema v2 profile (edge_grid-based) to a row-like dict.
+    
+    Schema v2 structure:
+      - edge_grid[asset][timeframe] -> base directional min edge
+      - confidence_bands: list of band configs with kelly_multiplier
+      - fee_aware_settings: min_edge_cents, avoid_mid_fee_band, etc.
+      - kelly_settings: base_fraction, confidence_tier_multiplier
+      - min_notional: contracts, usd
+    """
+    asset_u = (asset or "").strip().upper() or "*"
+    tf_n = normalize_crypto_timeframe(timeframe)
+    arch_l = (archetype or "directional").strip().lower().replace("-", "_")
+    
+    # Look up base edge from edge_grid
+    edge_grid = prof_block.get("edge_grid", {})
+    base_edge: Optional[Decimal] = None
+    
+    # Try exact match: asset -> timeframe
+    asset_grid = edge_grid.get(asset_u, {})
+    if isinstance(asset_grid, dict):
+        edge_val = asset_grid.get(tf_n)
+        if edge_val is not None:
+            base_edge = _decimal(edge_val, Decimal("0.04"))
+    
+    # Try wildcard asset if exact failed
+    if base_edge is None:
+        wildcard_grid = edge_grid.get("*", {})
+        if isinstance(wildcard_grid, dict):
+            edge_val = wildcard_grid.get(tf_n)
+            if edge_val is not None:
+                base_edge = _decimal(edge_val, Decimal("0.04"))
+    
+    # Try wildcard timeframe if still not found
+    if base_edge is None and asset_grid:
+        edge_val = asset_grid.get("*")
+        if edge_val is not None:
+            base_edge = _decimal(edge_val, Decimal("0.04"))
+    
+    # Final fallback to modern profile if edge not found
+    if base_edge is None:
+        logger.warning(
+            f"No edge found for {asset_u}/{tf_n} in profile {profile_key}, "
+            f"falling back to 'modern' rows profile"
+        )
+        return _resolve_rows_legacy(
+            asset=asset,
+            timeframe=timeframe,
+            archetype=archetype,
+            profile_key="modern",
+            doc=doc,
+            path=path,
+        )
+    
+    # Extract confidence bands
+    confidence_bands = prof_block.get("confidence_bands", [])
+    
+    # Extract Kelly settings
+    kelly_settings = prof_block.get("kelly_settings", {})
+    base_kelly_fraction = _decimal(kelly_settings.get("base_fraction"), Decimal("0.20"))
+    confidence_tier_mult = kelly_settings.get("confidence_tier_multiplier", {})
+    
+    # Build effective Kelly fractions per band
+    effective_kelly_by_band: Dict[str, Decimal] = {}
+    for band in confidence_bands:
+        band_name = band.get("name", "unknown")
+        mult = confidence_tier_mult.get(band_name, 1.0) if isinstance(confidence_tier_mult, dict) else 1.0
+        effective_kelly_by_band[band_name] = base_kelly_fraction * Decimal(str(mult))
+    
+    # Extract fee-aware settings
+    fee_settings = prof_block.get("fee_aware_settings", {})
+    
+    # Extract min_notional
+    min_notional = prof_block.get("min_notional", {"contracts": 1, "usd": 0.35})
+    
+    # Extract max_price_cents_grid if present
+    max_price_grid = fee_settings.get("max_price_cents_grid", {})
+    max_price_cents = None
+    asset_price_grid = max_price_grid.get(asset_u, {})
+    if isinstance(asset_price_grid, dict):
+        max_price_cents = asset_price_grid.get(tf_n)
+    
+    # Build result dict matching v1 structure where possible
+    out: Dict[str, Any] = {
+        # Core v1-compatible fields
+        "directional_min_edge": str(base_edge),
+        "sentiment_vol_regime_min_edge": str(base_edge),
+        "contrarian_sentiment_min": 75.0,  # Default, can be overridden per-band
+        "contrarian_model_gap_min": 0.10,
+        "mm_max_spread_cents": fee_settings.get("max_spread_cents", 10),
+        "pm_risk_max_spread_cents": fee_settings.get("max_spread_cents", 10),
+        "tier_min_edge_floor": str(base_edge),  # Use base edge as floor in v2
+        "kelly_fraction": str(base_kelly_fraction * Decimal("0.5")),  # Default cautious band
+        "min_order_notional_usd": min_notional.get("usd", 0.35),
+        "vol_low_threshold": None,
+        "vol_high_threshold": None,
+        "vol_size_mult_low": None,
+        "vol_size_mult_mid": None,
+        "vol_size_mult_high": None,
+        "spot_strike_veto_flag": False,
+        # Schema v2 metadata
+        "matrix_source_path": path,
+        "matrix_schema_version": 2,
+        "matrix_source_profile": profile_key,
+        "matrix_source_type": "edge_grid_v2",
+        "edge_grid_value": str(base_edge),
+        "confidence_bands": confidence_bands,
+        "fee_aware_settings": fee_settings,
+        "min_notional": min_notional,
+        "base_kelly_fraction": str(base_kelly_fraction),
+        "confidence_tier_multiplier": confidence_tier_mult if isinstance(confidence_tier_mult, dict) else {},
+        "effective_kelly_by_band": {k: str(v) for k, v in effective_kelly_by_band.items()},
+        "max_price_cents": max_price_cents,
+        # Identity
+        "asset": asset_u,
+        "timeframe": tf_n,
+        "archetype": arch_l,
+        "profile": profile_key,
+    }
+    
+    return _coerce_row_types(out, path)
+
+
+def _resolve_rows_legacy(
+    *,
+    asset: str,
+    timeframe: str,
+    archetype: str,
+    profile_key: str,
+    doc: Dict[str, Any],
+    path: str,
+) -> Dict[str, Any]:
+    """Resolve a schema v1 (rows-based) profile."""
+    prof_block = doc.get("profiles", {}).get(profile_key) or doc.get("profiles", {}).get("legacy")
+    if not prof_block:
+        prof_block = {"rows": _fallback_rows("legacy")}
+    
+    rows: List[Dict[str, Any]] = list(prof_block.get("rows") or [])
+    asset_u = (asset or "").strip().upper() or "*"
+    tf_n = normalize_crypto_timeframe(timeframe)
+    arch_l = (archetype or "directional").strip().lower().replace("-", "_")
+    
+    matching = [r for r in rows if _row_matches(r, asset_u, tf_n, arch_l)]
+    merged: Dict[str, Any] = {}
+    if matching:
+        # Low-specificity rows first, then overlays
+        for r in sorted(matching, key=_row_specificity):
+            for k, v in r.items():
+                if v is None:
+                    continue
+                merged[k] = v
+    
+    base = _fallback_rows("modern" if profile_key == "modern" else "legacy")
+    base_row = next(
+        (deepcopy(x) for x in base if normalize_crypto_timeframe(str(x.get("timeframe"))) == tf_n),
+        deepcopy(base[0]) if base else {},
+    )
+    
+    # Underlay defaults from fallback, then YAML merged
+    out = {**base_row, **merged}
+    
+    # Schema v1 metadata
+    out["matrix_schema_version"] = 1
+    out["matrix_source_profile"] = profile_key
+    out["matrix_source_type"] = "rows_legacy"
+    
+    out["asset"] = asset_u
+    out["timeframe"] = tf_n
+    out["archetype"] = arch_l
+    out["profile"] = profile_key
+    return _coerce_row_types(out, path)
+
+
 def resolve_merged_row(
     *,
     asset: str,
@@ -246,50 +447,55 @@ def resolve_merged_row(
 ) -> Dict[str, Any]:
     """Merge all matching YAML rows for profile; higher-specificity rows overlay lower.
     
+    Supports both schema v1 (rows-based) and schema v2 (edge_grid-based).
+    
     When MERID_USE_DYNAMIC_EDGE_CALIBRATOR=true, uses DynamicEdgeCalibrator to compute
     edge thresholds based on current market conditions instead of static YAML values.
     """
-    import os
-    
     doc = load_matrix_document()
     path = matrix_document_path()
     prof = (profile_key or _get_threshold_mode() or "legacy").lower()
-    prof_block = doc.get("profiles", {}).get(prof) or doc.get("profiles", {}).get("legacy")
-    if not prof_block:
-        prof_block = {"rows": _fallback_rows("legacy")}
-    rows: List[Dict[str, Any]] = list(prof_block.get("rows") or [])
-    asset_u = (asset or "").strip().upper() or "*"
-    tf_n = normalize_crypto_timeframe(timeframe)
-    arch_l = (archetype or "directional").strip().lower().replace("-", "_")
-
-    # Check if dynamic edge calibration is enabled
+    prof_block = doc.get("profiles", {}).get(prof)
+    
+    # Determine schema version
+    schema_version = (
+        prof_block.get("schema_version") if prof_block else None
+    ) or doc.get("schema_version") or 1
+    
+    # Dispatch based on schema
+    if schema_version >= 2 and prof_block and "edge_grid" in prof_block:
+        # Schema v2: edge_grid-based profile
+        out = _resolve_v2_profile(
+            asset=asset,
+            timeframe=timeframe,
+            archetype=archetype,
+            profile_key=prof,
+            prof_block=prof_block,
+            doc=doc,
+            path=path,
+        )
+    else:
+        # Schema v1: rows-based profile
+        out = _resolve_rows_legacy(
+            asset=asset,
+            timeframe=timeframe,
+            archetype=archetype,
+            profile_key=prof,
+            doc=doc,
+            path=path,
+        )
+    
+    # Apply dynamic edge calibration if enabled (works for both schemas)
+    asset_u = out.get("asset", "")
+    tf_n = out.get("timeframe", "")
     use_dynamic = os.getenv("MERID_USE_DYNAMIC_EDGE_CALIBRATOR", "false").lower() in ("true", "1", "yes")
     
-    matching = [r for r in rows if _row_matches(r, asset_u, tf_n, arch_l)]
-    merged: Dict[str, Any] = {}
-    if matching:
-        # Low-specificity rows first, then overlays (e.g. *|*|* then *|daily|*).
-        for r in sorted(matching, key=_row_specificity):
-            for k, v in r.items():
-                if v is None:
-                    continue
-                merged[k] = v
-    base = _fallback_rows("modern" if prof == "modern" else "legacy")
-    base_row = next(
-        (deepcopy(x) for x in base if normalize_crypto_timeframe(str(x.get("timeframe"))) == tf_n),
-        deepcopy(base[0]) if base else {},
-    )
-    # Underlay defaults from fallback row for this timeframe, then YAML merged (specific), then merged (wildcards)
-    out = {**base_row, **merged}
-    
-    # Apply dynamic edge calibration if enabled
     if use_dynamic and asset_u in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
         try:
             from merid.prediction.dynamic_edge_calibrator import get_dynamic_edge_calibrator
             calibrator = get_dynamic_edge_calibrator()
             dynamic_edge = calibrator.compute_edge_threshold(asset_u, tf_n)
             
-            # Override the static edge values with dynamic computation
             out["directional_min_edge"] = str(dynamic_edge)
             out["sentiment_vol_regime_min_edge"] = str(dynamic_edge)
             out["dynamic_edge_applied"] = True
@@ -297,7 +503,7 @@ def resolve_merged_row(
             
             logger.debug(
                 f"Dynamic edge applied for {asset_u}/{tf_n}: {dynamic_edge} "
-                f"(was {merged.get('directional_min_edge', base_row.get('directional_min_edge', 'N/A'))})"
+                f"(was {out.get('edge_grid_value', out.get('directional_min_edge', 'N/A'))})"
             )
         except Exception as e:
             logger.debug(f"Dynamic edge calibration failed for {asset_u}/{tf_n}: {e}")
@@ -305,16 +511,15 @@ def resolve_merged_row(
     else:
         out["dynamic_edge_applied"] = False
     
-    out["asset"] = asset_u
-    out["timeframe"] = tf_n
-    out["archetype"] = arch_l
-    out["profile"] = prof
-    return _coerce_row_types(out, path)
+    return out
 
 
 @dataclass(frozen=True)
 class EffectiveCryptoConfig:
-    """Resolved crypto tuning row for an agent × market context."""
+    """Resolved crypto tuning row for an agent × market context.
+    
+    Schema v2 adds confidence band handling, fee-aware settings, and min_notional.
+    """
 
     agent_name: str
     market_id: str
@@ -338,6 +543,15 @@ class EffectiveCryptoConfig:
     vol_size_mult_high: Optional[float]
     spot_strike_veto_flag: bool
     matrix_source_path: str
+    # Schema v2 fields
+    matrix_schema_version: int = 1
+    matrix_source_profile: str = ""
+    matrix_source_type: str = "rows_legacy"
+    confidence_bands: Optional[List[Dict[str, Any]]] = None
+    fee_aware_settings: Optional[Dict[str, Any]] = None
+    min_notional: Optional[Dict[str, Any]] = None
+    base_kelly_fraction: Optional[Decimal] = None
+    confidence_tier_multiplier: Optional[Dict[str, float]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -442,6 +656,17 @@ def get_effective_crypto_config(
         vol_size_mult_high=_float(row.get("vol_size_mult_high")),
         spot_strike_veto_flag=bool(row.get("spot_strike_veto_flag")),
         matrix_source_path=str(row.get("matrix_source_path", "")),
+        # Schema v2 fields
+        matrix_schema_version=int(row.get("matrix_schema_version", 1)),
+        matrix_source_profile=str(row.get("matrix_source_profile", row.get("profile", ""))),
+        matrix_source_type=str(row.get("matrix_source_type", "rows_legacy")),
+        confidence_bands=row.get("confidence_bands"),
+        fee_aware_settings=row.get("fee_aware_settings"),
+        min_notional=row.get("min_notional"),
+        base_kelly_fraction=_decimal(row.get("base_kelly_fraction"), None)
+        if row.get("base_kelly_fraction") is not None
+        else None,
+        confidence_tier_multiplier=row.get("confidence_tier_multiplier"),
     )
 
 
@@ -494,14 +719,112 @@ def enumerate_effective_rows_for_grid() -> List[Dict[str, Any]]:
 def effective_matrix_payload() -> Dict[str, Any]:
     """API / scripts: document path, runtime profile, and resolved rows."""
     doc = load_matrix_document()
-    return {
+    mode = _get_threshold_mode()
+    payload = {
         "matrix_path": matrix_document_path(),
         "schema_version": doc.get("schema_version", 1),
-        "threshold_mode": _get_threshold_mode(),
+        "threshold_mode": mode,
         "legacy_grid": enumerate_crypto_threshold_matrix_from_yaml("legacy"),
         "modern_grid": enumerate_crypto_threshold_matrix_from_yaml("modern"),
         "agents": enumerate_effective_rows_for_grid(),
     }
+    # Include v2 profile if active
+    if mode not in ("legacy", "modern"):
+        try:
+            payload["v2_grid"] = enumerate_crypto_threshold_matrix_from_yaml(mode)
+        except Exception as e:
+            logger.warning(f"Failed to enumerate v2 profile {mode}: {e}")
+    return payload
+
+
+def log_crypto_matrix_startup_danger_keys() -> Dict[str, Any]:
+    """Log critical crypto matrix configuration at startup for observability.
+    
+    Returns structured data suitable for logging and fingerprinting.
+    """
+    path = matrix_document_path()
+    doc = load_matrix_document()
+    mode = _get_threshold_mode()
+    schema_version = doc.get("schema_version", 1)
+    
+    # Sample key configurations for danger-key logging
+    sample_configs = []
+    for asset, tf in [("BTC", "15m"), ("DOGE", "annual")]:
+        try:
+            row = resolve_merged_row(asset=asset, timeframe=tf, archetype="directional")
+            sample_configs.append({
+                "asset": asset,
+                "timeframe": tf,
+                "directional_min_edge": str(row.get("directional_min_edge")),
+                "max_price_cents": row.get("max_price_cents"),
+                "base_kelly_fraction": row.get("base_kelly_fraction"),
+                "schema_version": row.get("matrix_schema_version", 1),
+                "source_type": row.get("matrix_source_type", "unknown"),
+            })
+        except Exception as e:
+            logger.warning(f"Failed to resolve sample config for {asset}/{tf}: {e}")
+    
+    # Extract fee-aware settings from first sample if v2
+    fee_settings = {}
+    if sample_configs and sample_configs[0].get("schema_version", 1) >= 2:
+        try:
+            row = resolve_merged_row(asset="BTC", timeframe="15m", archetype="directional")
+            fee_settings = row.get("fee_aware_settings", {})
+        except Exception:
+            pass
+    
+    danger_payload = {
+        "event": "crypto_matrix_startup",
+        "crypto_matrix_profile": mode,
+        "matrix_schema_version": schema_version,
+        "matrix_source_path": path,
+        "matrix_file_exists": os.path.isfile(path),
+        "sample_configs": sample_configs,
+        "fee_aware_settings_summary": {
+            "min_edge_cents": fee_settings.get("min_edge_cents"),
+            "avoid_mid_fee_band": fee_settings.get("avoid_mid_fee_band"),
+        } if fee_settings else None,
+    }
+    
+    # Log structured line for observability
+    logger.info(
+        f"CRYPTO_MATRIX_STARTUP profile={mode} schema={schema_version} path={path} "
+        f"btc_15m_edge={sample_configs[0]['directional_min_edge'] if sample_configs else 'N/A'} "
+        f"doge_annual_edge={sample_configs[1]['directional_min_edge'] if len(sample_configs) > 1 else 'N/A'}"
+    )
+    
+    return danger_payload
+
+
+def get_crypto_matrix_fingerprint() -> str:
+    """Generate a fingerprint of the current crypto matrix configuration.
+    
+    Used for drift detection in config-fingerprint endpoint.
+    """
+    import hashlib
+    import json
+    
+    doc = load_matrix_document()
+    mode = _get_threshold_mode()
+    
+    # Build deterministic content for hashing
+    fingerprint_data = {
+        "profile": mode,
+        "schema_version": doc.get("schema_version", 1),
+        "path": matrix_document_path(),
+    }
+    
+    # Include sample edge values in fingerprint
+    for asset, tf in [("BTC", "15m"), ("ETH", "1h"), ("DOGE", "annual")]:
+        try:
+            row = resolve_merged_row(asset=asset, timeframe=tf, archetype="directional")
+            fingerprint_data[f"{asset}_{tf}_edge"] = str(row.get("directional_min_edge"))
+        except Exception:
+            fingerprint_data[f"{asset}_{tf}_edge"] = "error"
+    
+    # Hash the deterministic JSON
+    content = json.dumps(fingerprint_data, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
 def enumerate_crypto_threshold_matrix_from_yaml(profile: str) -> Dict[str, Any]:

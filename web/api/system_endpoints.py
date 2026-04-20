@@ -1740,5 +1740,175 @@ async def kalshi_health() -> Dict[str, Any]:
         result["status"] = "degraded"
     else:
         result["status"] = "unhealthy"
-    
+
     return result
+
+
+@router.get("/api/v1/system/config-fingerprint")
+async def get_config_fingerprint_endpoint(
+    subsystem: str = None
+) -> Dict[str, Any]:
+    """Return config fingerprint for detecting drift between deploys.
+
+    Args:
+        subsystem: Optional filter (portfolio, risk, kalshi, feature_flags)
+
+    Returns:
+        Compact hash of effective config values with git/env metadata.
+    """
+    from core.config_loader import (
+        ExplicitConfigLoader,
+        get_config_fingerprint,
+        dump_config,
+    )
+
+    # Ensure config is loaded
+    loader = ExplicitConfigLoader()
+    loader.load_all()
+
+    # Get fingerprint
+    fingerprint = get_config_fingerprint(subsystem)
+
+    # Get git info if available
+    git_sha = "unknown"
+    git_branch = "unknown"
+    try:
+        import subprocess
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[3]),
+            stderr=subprocess.DEVNULL,
+            text=True
+        ).strip()
+        git_branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[3]),
+            stderr=subprocess.DEVNULL,
+            text=True
+        ).strip()
+    except Exception:
+        pass
+
+    result: Dict[str, Any] = {
+        "fingerprint": fingerprint,
+        "environment": os.getenv("MERID_ENV", "development"),
+        "subsystem": subsystem or "all",
+        "git": {
+            "sha": git_sha,
+            "branch": git_branch,
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Include per-subsystem fingerprints if no specific subsystem requested
+    if subsystem is None:
+        result["subsystems"] = {
+            "portfolio": get_config_fingerprint("portfolio"),
+            "risk": get_config_fingerprint("risk"),
+            "kalshi": get_config_fingerprint("kalshi"),
+            "feature_flags": get_config_fingerprint("feature_flags"),
+        }
+        # Add crypto threshold matrix fingerprint
+        try:
+            from merid.prediction.crypto_threshold_matrix import (
+                get_crypto_matrix_fingerprint,
+                _get_threshold_mode,
+            )
+            result["subsystems"]["crypto_matrix"] = get_crypto_matrix_fingerprint()
+            result["crypto_matrix_profile"] = _get_threshold_mode()
+        except Exception as e:
+            result["crypto_matrix_error"] = str(e)
+
+    # Include sample of danger keys with their sources
+    danger_keys = [
+        "portfolio.max_risk_usd",
+        "risk.max_daily_loss_usd",
+        "kalshi.spot_strike_max_pct",
+    ]
+
+    danger_sample = {}
+    dump = dump_config()
+    for key in danger_keys:
+        if key in dump:
+            entry = dump[key]
+            danger_sample[key] = {
+                "value": entry["value"],
+                "source": entry["source"]["source_name"],
+                "layer": entry["source"]["layer"],
+            }
+
+    # Add crypto matrix danger keys
+    try:
+        from merid.prediction.crypto_threshold_matrix import resolve_merged_row
+        btc_row = resolve_merged_row(asset="BTC", timeframe="15m", archetype="directional")
+        danger_sample["crypto_matrix.btc_15m_edge"] = {
+            "value": str(btc_row.get("directional_min_edge")),
+            "source": btc_row.get("matrix_source_type", "unknown"),
+            "layer": f"profile={btc_row.get('matrix_source_profile', 'unknown')},schema={btc_row.get('matrix_schema_version', 1)}",
+        }
+    except Exception as e:
+        danger_sample["crypto_matrix.btc_15m_edge"] = {"error": str(e)}
+
+    if danger_sample:
+        result["danger_keys_sample"] = danger_sample
+
+    return result
+
+
+@router.get("/api/v1/system/config-explain")
+async def explain_config_endpoint(
+    key: str
+) -> Dict[str, Any]:
+    """Explain why a specific config key has its value.
+
+    Args:
+        key: Dot-notation config key (e.g., portfolio.max_risk_usd)
+
+    Returns:
+        Full provenance chain showing all layers that contributed.
+    """
+    from core.config_loader import (
+        ExplicitConfigLoader,
+        explain_config,
+        get_config,
+        dump_config,
+    )
+
+    # Ensure config is loaded
+    loader = ExplicitConfigLoader()
+    loader.load_all()
+
+    # Get explanation
+    explanation = explain_config(key)
+
+    if explanation is None:
+        # Key not found - return available keys
+        all_keys = list(dump_config().keys())
+        suggestions = [k for k in all_keys if key.split(".")[0] in k]
+
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": f"Key '{key}' not found",
+                "suggestions": suggestions[:10],
+            }
+        )
+
+    # Get full metadata
+    value, meta = get_config(key, with_meta=True)
+
+    return {
+        "key": key,
+        "effective_value": value,
+        "explanation": explanation,
+        "provenance": [
+            {
+                "layer": src.layer.name,
+                "source": src.source_name,
+                "line": src.line,
+                "raw_value": str(src.raw_value) if src.raw_value is not None else None,
+                "is_effective": i == len(meta.all_sources) - 1,
+            }
+            for i, src in enumerate(meta.all_sources)
+        ] if meta else [],
+    }
