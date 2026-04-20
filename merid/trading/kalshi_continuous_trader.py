@@ -64,6 +64,21 @@ from merid.formulas import generate_correlation_id, FORMULAS_VERSION, AUDIT_SPEC
 # Market Regime Gate — crypto basket flatness filter
 from merid.market_regime import get_regime_gate, RegimeAction
 
+# Top-3 Edge Selector & Allocator — cross-agent selection and sizing
+from merid.trading.top3_edge_allocator import (
+    EdgeCandidate,
+    Top3Allocation,
+    Top3Batch,
+    BatchStatus,
+    get_top3_allocator,
+)
+from merid.trading.top3_batch_manager import (
+    get_top3_batch_manager,
+    REJECT_NO_ACTIVE_BATCH,
+    REJECT_ASSET_NOT_IN_TOP3,
+    REJECT_NOTIONAL_LIMIT_REACHED,
+)
+
 logger = get_logger(__name__)
 
 # Local transport/connection failures — not an HTTP status from Kalshi (avoid 503 confusion).
@@ -2968,6 +2983,72 @@ class KalshiContinuousTrader:
         tradeable.sort(key=lambda c: c.best_edge, reverse=True)
         logger.info("  %d tradeable market(s)", len(tradeable))
 
+        # ═══════════════════════════════════════════════════════════════════════
+        # TOP-3 SELECTION: Create candidates and compute allocations
+        # ═══════════════════════════════════════════════════════════════════════
+        _top3_enabled = os.getenv("TOP3_ENABLED", "true").lower() in ("true", "1", "yes")
+        _top3_batch = None
+        _top3_allocations: dict = {}
+        
+        if _top3_enabled and tradeable:
+            # Build edge candidates from tradeable markets
+            # Aggregate by asset, taking the best edge per asset
+            _asset_best_edge: dict = {}
+            _asset_candidates: dict = {}
+            for c in tradeable:
+                asset = c.asset or _CT_ASSET_KEY_FALLBACK
+                edge = float(c.best_edge) if c.best_edge else 0.0
+                if asset not in _asset_best_edge or edge > _asset_best_edge[asset]:
+                    _asset_best_edge[asset] = edge
+                    _asset_candidates[asset] = c
+            
+            # Create EdgeCandidate list
+            _edge_candidates = []
+            for asset, candidate in _asset_candidates.items():
+                # Compute per-asset max notional cap from config
+                _asset_max_pct = self.config.asset_max_exposure_pct.get(
+                    asset, self.config.asset_exposure_default_pct
+                )
+                _max_notional = int(balance_cents * _asset_max_pct)
+                
+                _edge_candidates.append(EdgeCandidate(
+                    asset=asset,
+                    edge=_asset_best_edge[asset],
+                    max_notional_cap=_max_notional,
+                    metadata={
+                        "ticker": candidate.ticker,
+                        "best_side": candidate.best_side,
+                        "limit_price_cents": candidate.limit_price_cents,
+                    }
+                ))
+            
+            # Get batch manager and check/create batch
+            _batch_mgr = get_top3_batch_manager()
+            _top3_batch = _batch_mgr.get_current_batch()
+            
+            # Create new batch if none active
+            if _top3_batch is None or _top3_batch.status != BatchStatus.ACTIVE:
+                _top3_batch = _batch_mgr.maybe_create_new_batch(
+                    bankroll_notional=balance_cents,
+                    candidates=_edge_candidates,
+                )
+            
+            # Build allocation lookup
+            if _top3_batch:
+                _top3_allocations = {
+                    a.asset: a for a in _top3_batch.allocations
+                }
+                logger.info(
+                    "[TOP3-BATCH] Active batch %s with %d assets: %s",
+                    _top3_batch.batch_id,
+                    len(_top3_batch.allocations),
+                    list(_top3_allocations.keys())
+                )
+            else:
+                logger.info("[TOP3-BATCH] No active batch (no valid allocations)")
+        else:
+            logger.debug("[TOP3-BATCH] Top-3 selector disabled or no tradeable candidates")
+
         # [BUG-007] Swarm consensus integration — query TaCo consensus for each
         # tradeable candidate and apply a consensus-weighted score adjustment.
         # Markets vetoed by consensus (score < threshold) are dropped entirely.
@@ -3127,6 +3208,25 @@ class KalshiContinuousTrader:
             _series_key = c.ticker.split("-")[0] if "-" in c.ticker else c.ticker
             _candidate_asset, _candidate_tf = self._infer_asset_timeframe(_series_key)
             self._warn_if_unk_asset_for_exposure(c.ticker, _series_key, _candidate_asset)
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # TOP-3 ENFORCEMENT GATE: Only allow assets in current batch allocation
+            # ═══════════════════════════════════════════════════════════════════
+            if _top3_enabled and _top3_allocations:
+                if _candidate_asset not in _top3_allocations:
+                    logger.info(
+                        "    Skip %s: asset %s not in top-3 allocation (batch assets: %s)",
+                        c.ticker, _candidate_asset, list(_top3_allocations.keys())
+                    )
+                    continue
+                
+                # Log top-3 allowance
+                _alloc = _top3_allocations[_candidate_asset]
+                logger.info(
+                    "[TOP3-ALLOW] %s | asset=%s edge=%.4f target=%d¢ weight=%.1f%%",
+                    c.ticker, _candidate_asset, _alloc.edge, 
+                    _alloc.target_notional, _alloc.weight * 100
+                )
             
             # DRY-RUN INSTRUMENTATION: Asset/Timeframe Inference
             logger.info(
@@ -3854,6 +3954,17 @@ class KalshiContinuousTrader:
                 self.tracker.record_order(order, cost_cents)
                 self.bankroll.record_trade_direction(c.ticker, c.best_side, float(c.best_edge))
                 orders_placed += 1
+                
+                # ═══════════════════════════════════════════════════════════════════
+                # TOP-3 BATCH TRACKING: Mark asset as filled in current batch
+                # ═══════════════════════════════════════════════════════════════════
+                if _top3_enabled and _top3_batch:
+                    try:
+                        _batch_mgr = get_top3_batch_manager()
+                        _batch_mgr.mark_asset_filled(_top3_batch.batch_id, _candidate_asset, cost_cents)
+                    except Exception as _top3_exc:
+                        logger.debug("[TOP3-BATCH] Mark filled tracking skipped: %s", _top3_exc)
+                
                 logger.info(
                     "[KALSHI_ORDER_RESULT] ticker=%s status=%s order_id=%s filled=%s "
                     "http=201 source=kalshi_ct",
