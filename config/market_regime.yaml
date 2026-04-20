@@ -1,0 +1,53 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Market Regime Gate Configuration
+# ═══════════════════════════════════════════════════════════════════════════
+# Config-driven crypto basket flatness filter — prevents trading in dead markets.
+#
+# Wired upstream of order intent creation and at execution adapter ingress.
+# See: merid/market_regime/gate.py, merid/market_regime/config.py
+#
+# Override path: MERID_MARKET_REGIME_CONFIG_PATH
+
+market_regime_gate:
+  enabled: true
+  shadow_mode: false  # Set true for Phase 1 (log only, don't block)
+  universe:
+    - BTC
+    - ETH
+    - SOL
+    - XRP
+    - DOGE
+
+  lookback:
+    bar_interval: "15m"
+    bars: 16  # 4 hours of 15m bars
+
+  flatness:
+    max_abs_return_pct: 0.75   # |return| < 0.75% → flat
+    min_atr_pct: 0.35          # ATR% < 0.35% → flat
+    min_volume_ratio: 0.80     # vol / 20-period avg < 0.8 → flat
+
+  basket_rules:
+    block_if_flat_count_gte: 4   # 4 of 5 flat → BLOCK new entries
+    reduce_if_flat_count_gte: 3  # 3 of 5 flat → REDUCE position size
+
+  trend_confirmation:
+    adx_min: 18                # Optional: require ADX > 18 for trend confirmation
+    breakout_range_pct_min: 1.2  # Optional: require 1.2% range for breakout
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase Rollout Guide
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Phase 1 (Shadow Mode):
+#   shadow_mode: true
+#   → Gate evaluates and logs but never blocks. Compare would_block vs actual.
+#
+# Phase 2 (Soft Enforcement):
+#   shadow_mode: false
+#   → Blocks NEW ENTRIES only. Position management and exits still allowed.
+#
+# Phase 3 (Full Enforcement):
+#   (same config, full blocking in place)
+#
+# ═══════════════════════════════════════════════════════════════════════════

@@ -375,3 +375,60 @@ async def post_cycle_reset(req: CycleResetRequest) -> Dict[str, Any]:
     except Exception as exc:
         logger.error("Cycle reset failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Cycle reset failed: {exc}")
+
+
+# ── GET /regime — Market Regime Gate status ──────────────────────────────
+
+@router.get("/regime")
+async def get_regime_status() -> Dict[str, Any]:
+    """Market Regime Gate status — basket flatness evaluation.
+
+    Returns current regime decision, per-asset flatness, and evaluation counters.
+    Use this to verify if trading is being blocked due to flat market conditions.
+    """
+    try:
+        from merid.market_regime import get_regime_gate, RegimeAction
+
+        gate = get_regime_gate()
+        last_decision = gate.get_last_decision()
+        counters = gate.get_counters()
+
+        result = {
+            "enabled": gate.cfg.enabled,
+            "shadow_mode": gate.cfg.shadow_mode,
+            "universe": list(gate.cfg.universe),
+            "flatness_thresholds": {
+                "max_abs_return_pct": gate.cfg.flatness.max_abs_return_pct,
+                "min_atr_pct": gate.cfg.flatness.min_atr_pct,
+                "min_volume_ratio": gate.cfg.flatness.min_volume_ratio,
+            },
+            "basket_rules": {
+                "block_if_flat_count_gte": gate.cfg.basket_rules.block_if_flat_count_gte,
+                "reduce_if_flat_count_gte": gate.cfg.basket_rules.reduce_if_flat_count_gte,
+            },
+            "counters": counters,
+        }
+
+        if last_decision:
+            result["last_decision"] = {
+                "action": last_decision.action.value,
+                "flat_count": last_decision.flat_count,
+                "total_assets": last_decision.total_assets,
+                "reason_codes": last_decision.reason_codes,
+                "per_asset_flat": last_decision.per_asset_flat,
+                "timestamp": last_decision.timestamp,
+                "shadow_mode": last_decision.shadow_mode,
+                "config_source": last_decision.config_source,
+            }
+            result["should_allow_new_entries"] = gate.should_allow_new_entries()
+            result["should_reduce_sizing"] = gate.should_reduce_position_size()
+        else:
+            result["last_decision"] = None
+            result["should_allow_new_entries"] = True
+            result["should_reduce_sizing"] = False
+
+        return result
+
+    except Exception as exc:
+        logger.warning("Regime metrics failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Regime metrics unavailable: {exc}")
