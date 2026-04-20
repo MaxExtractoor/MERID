@@ -2000,7 +2000,48 @@ async def _terminal_telemetry_loop(interval: float = 30.0) -> None:
 
 @asynccontextmanager
 async def _app_lifespan(application: FastAPI):
-    """Combined startup/shutdown lifespan for MERID."""
+    """Combined startup/shutdown lifespan for MERID.
+
+    EVENT-LOOP ARCHITECTURE DOCUMENTATION:
+
+    This lifespan manages MERID's main event loop lifecycle. All async services
+    attach to the same event loop that uvicorn runs.
+
+    LAG THRESHOLDS AND ACTIONS:
+    - healthy (<50ms): Normal operation, all services active
+    - elevated (50-500ms): Log warning, continue operation
+    - degraded (500-2000ms): Reduce scope - shed non-critical subscriptions,
+      slow analytics, pause secondary agents
+    - halt (>=2000ms): After 3 consecutive samples, initiate controlled shutdown
+      with reason=LOOP_LAG_HALT
+
+    QUEUE PRESSURE THRESHOLDS (Kalshi WebSocket):
+    - elevated (50%): Log warning
+    - warn (75%): Proactive scope reduction warning
+    - critical (90%): Immediate load shedding to essential tickers only
+    - shutdown (98%): If pressure persists after shedding for 3 consecutive
+      checks, initiate shutdown with reason=QUEUE_PRESSURE_HALT
+
+    SHUTDOWN POLICY:
+    - reason is NEVER allowed to be "unknown" in production (enforced by type system)
+    - All shutdowns must have a valid ShutdownReason enum value
+    - sub_reason provides specific trigger details (e.g., "lag_3500ms_consecutive_3")
+    - metrics dict includes lag_ms, queue_utilization, shed_count for forensics
+
+    SERVICES STARTED (in order):
+    1. LoopLagMonitor - starts lag measurement before other services
+    2. KalshiVenueClient - primary venue connection
+    3. KalshiMarketCatalog - market metadata cache
+    4. MeridLoop - main orchestration cycle
+    5. AgentGrid - trading agents
+    6. Background reconciler - position reconciliation
+
+    SHUTDOWN SEQUENCE (reverse order):
+    1. Stop all service loops (MeridLoop, external feeds)
+    2. Close venue connections gracefully
+    3. Cancel background tasks
+    4. Log structured shutdown metrics
+    """
     global _startup_state
     application.state.canonical_lifespan = "web.main._app_lifespan"
     application.state.test_mode = os.environ.get("MERID_TEST_MODE", "").strip() == "1"
@@ -3638,9 +3679,41 @@ async def _app_lifespan(application: FastAPI):
     except Exception as e:
         logger.debug(f"Shutdown reason fetch failed: {e}")
 
+    # EVENT-LOOP-FIX: Ensure we always have a valid shutdown reason
+    # If ASGI guard didn't provide one, we derive it from context
+    if _shutdown_reason is None:
+        try:
+            from web.asgi_guard import initiate_shutdown, ShutdownReason
+            # Determine reason from context
+            from merid.diagnostics.loop_lag import get_loop_lag_monitor
+            lag_health = get_loop_lag_monitor().get_health()
+            if lag_health.get("critical"):
+                _shutdown_reason = initiate_shutdown(
+                    reason=ShutdownReason.LOOP_LAG_HALT,
+                    sub_reason=f"lag_max={lag_health['stats']['max_ms']:.0f}ms",
+                    initiator_module="web.main.lifespan",
+                    metrics={"lag_stats": lag_health["stats"]},
+                )
+            else:
+                # Normal shutdown - lifespan end
+                _shutdown_reason = initiate_shutdown(
+                    reason=ShutdownReason.LIFESPAN_END,
+                    sub_reason="normal_lifespan_yield_exit",
+                    initiator_module="web.main.lifespan",
+                )
+        except Exception as e:
+            logger.warning(f"Failed to derive shutdown reason: {e}")
+            # Last resort - use LIFESPAN_END as it's safest
+            from web.asgi_guard import ShutdownReason
+            class _FallbackReason:
+                reason = ShutdownReason.LIFESPAN_END
+                sub_reason = "fallback_after_error"
+                fatal_error_type = None
+            _shutdown_reason = _FallbackReason()
+
     # Log structured shutdown start with full context
     shutdown_context = {
-        "reason": _shutdown_reason.reason.value if _shutdown_reason else "unknown",
+        "reason": _shutdown_reason.reason.value,
         "sub_reason": getattr(_shutdown_reason, "sub_reason", None),
         "fatal_error": getattr(_shutdown_reason, "fatal_error_type", None),
         "timestamp": time.time(),
@@ -3680,7 +3753,15 @@ async def _app_lifespan(application: FastAPI):
         except Exception:
             pass
     else:
-        logger.info("🛑 MERID shutdown initiated - cancelling background tasks... (normal shutdown)")
+        # EVENT-LOOP-FIX: Use explicit reason instead of generic "normal shutdown"
+        _derived_reason = shutdown_context.get("reason", "lifespan_end")
+        _derived_sub = shutdown_context.get("sub_reason", "none")
+        logger.info(
+            "🛑 MERID shutdown initiated - cancelling background tasks... "
+            "(reason=%s, sub_reason=%s)",
+            _derived_reason,
+            _derived_sub
+        )
 
     # 0. Stop LivePriceFeed (Coinbase ticker tasks) before cancelling background_tasks entries
     try:

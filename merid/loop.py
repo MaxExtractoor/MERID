@@ -247,6 +247,26 @@ class LoopMetrics:
 class MeridLoop:
     """Persistent orchestrator that drives the MERID swarm.
 
+    EVENT-LOOP ARCHITECTURE:
+    - This class runs ON the main asyncio event loop, NOT in a separate thread
+    - All periodic tasks use asyncio.sleep() for cooperative scheduling
+    - CPU-bound work (arb_scan, agent_cycles) is offloaded via run_in_executor()
+    - Each tick step has a strict timeout to prevent event-loop starvation
+
+    SCHEDULED TASKS:
+    - tick(): Main orchestration cycle (every ~5-30s based on config)
+    - _run_step(): Individual step execution with timeout guards
+    - Background tasks: agent_cycles, promotion_sync (fire-and-forget)
+
+    LAG DETECTION INTEGRATION:
+    - Slow actions are tracked and adaptively skipped if recently slow
+    - Global tick timeout prevents any single tick from starving the loop
+    - Per-step timing metrics are exposed for diagnostics
+
+    SHUTDOWN POLICY:
+    - stop() gracefully cancels the main loop
+    - Never initiates shutdown directly - reports health for external decision
+
     Each `tick()` runs one full cycle. The `run()` method drives
     ticks continuously on the configured cadence.
     """

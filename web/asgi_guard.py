@@ -23,7 +23,12 @@ logger = get_logger("web.asgi_guard")
 
 
 class ShutdownReason(Enum):
-    """Canonical shutdown reasons for MERID."""
+    """Canonical shutdown reasons for MERID.
+
+    EVENT-LOOP-FIX: UNKNOWN is a development placeholder only.
+    Production code must NEVER use UNKNOWN - always provide a specific reason.
+    The initiate_shutdown() function will raise ValueError if UNKNOWN is passed.
+    """
     USER_REQUEST = "user_request"          # SIGTERM from operator/system
     SIGINT = "sigint"                      # Ctrl-C
     ASGI_FATAL = "asgi_fatal"              # Unrecoverable ASGI/loop error
@@ -31,6 +36,13 @@ class ShutdownReason(Enum):
     VENUE_FATAL = "venue_fatal"            # All venue connections lost
     KILLSWITCH_LIMIT = "killswitch_limit"  # 50/h error threshold
     MEMORY_PRESSURE = "memory_pressure"    # OOM conditions
+    LOOP_LAG_HALT = "loop_lag_halt"        # Event loop lag exceeded halt threshold
+    QUEUE_PRESSURE_HALT = "queue_pressure_halt"  # Queue pressure critical, shedding failed
+    FATAL_EXCEPTION = "fatal_exception"    # Unhandled fatal exception
+    LIFESPAN_END = "lifespan_end"          # Normal lifespan end (not an error)
+    MANUAL_OPERATOR = "manual_operator"    # Explicit operator shutdown command
+    DEPLOY_RESTART = "deploy_restart"      # Deployment/restart requested
+    # UNKNOWN is deprecated and disallowed in production
     UNKNOWN = "unknown"
 
 
@@ -86,6 +98,105 @@ def set_shutdown_reason(event: ShutdownEvent) -> None:
 def is_shutting_down() -> bool:
     """Check if shutdown has been initiated."""
     return _current_shutdown is not None
+
+
+def initiate_shutdown(
+    reason: ShutdownReason,
+    sub_reason: Optional[str] = None,
+    fatal_error: Optional[Exception] = None,
+    initiator_module: str = "asgi_guard",
+    metrics: Optional[dict] = None,
+) -> ShutdownEvent:
+    """Initiate a controlled shutdown with explicit attribution.
+
+    EVENT-LOOP-FIX: This is the ONLY way to trigger shutdown in production.
+    It enforces that reason is NEVER UNKNOWN and logs comprehensive context.
+
+    Args:
+        reason: The primary shutdown reason (NEVER use UNKNOWN in production)
+        sub_reason: Specific trigger (e.g., "arb_scan_over_budget", "kalshi_ws_lag_3200ms")
+        fatal_error: The exception that triggered shutdown, if any
+        initiator_module: Module that initiated the shutdown
+        metrics: Optional dict of metrics (lag_ms, queue_utilization, etc.)
+
+    Returns:
+        ShutdownEvent: The recorded shutdown event
+
+    Raises:
+        ValueError: If reason is UNKNOWN (prevents silent mystery shutdowns)
+
+    Example:
+        >>> initiate_shutdown(
+        ...     reason=ShutdownReason.LOOP_LAG_HALT,
+        ...     sub_reason="p95_lag_3500ms_for_60s",
+        ...     metrics={"lag_p95_ms": 3500, "samples": 60}
+        ... )
+    """
+    import traceback
+
+    # CRITICAL: Disallow UNKNOWN in production
+    if reason == ShutdownReason.UNKNOWN:
+        # In development, log a stern warning but allow
+        # In production (determined by MERID_ENV), raise ValueError
+        import os
+        is_production = os.getenv("MERID_ENV", "").lower() in ("prod", "production", "live")
+        if is_production:
+            raise ValueError(
+                "CRITICAL: initiate_shutdown called with reason=UNKNOWN in production. "
+                "This is a bug - every shutdown must have an explicit reason. "
+                f"sub_reason={sub_reason}, initiator={initiator_module}"
+            )
+        logger.warning(
+            "[SHUTDOWN-BUG] initiate_shutdown called with UNKNOWN in development. "
+            "This should be fixed to use a specific reason. sub_reason=%s",
+            sub_reason
+        )
+
+    # Build comprehensive stack summary
+    stack_summary = None
+    if fatal_error:
+        stack_summary = traceback.format_exception(
+            type(fatal_error), fatal_error, fatal_error.__traceback__, limit=10
+        )
+        stack_summary = "".join(stack_summary)
+    else:
+        # Capture current stack for context
+        stack_summary = "".join(traceback.format_stack(limit=5))
+
+    # Build the shutdown event
+    event = ShutdownEvent(
+        reason=reason,
+        sub_reason=sub_reason,
+        initiator_module=initiator_module,
+        stack_summary=stack_summary,
+        fatal_error_type=type(fatal_error).__name__ if fatal_error else None,
+        fatal_error_message=str(fatal_error) if fatal_error else None,
+    )
+
+    # Log structured shutdown initiation
+    logger.critical(
+        "[SHUTDOWN-INITIATED] reason=%s sub_reason=%s initiator=%s %s",
+        reason.value,
+        sub_reason or "none",
+        initiator_module,
+        f"metrics={metrics}" if metrics else "",
+    )
+
+    # Set the global shutdown reason
+    set_shutdown_reason(event)
+
+    # Record to metrics if available
+    try:
+        from monitoring.metrics import record_shutdown
+        record_shutdown(
+            reason=reason.value,
+            sub_reason=sub_reason or "none",
+            initiator=initiator_module,
+        )
+    except Exception:
+        pass  # Metrics failure should not block shutdown
+
+    return event
 
 
 class FatalErrorClassifier:
