@@ -136,6 +136,15 @@ class KalshiWebSocketBridge:
         # CRASH-001: Task failure tracking for health degradation
         self._task_failures: List[Dict[str, Any]] = []
         self._emergency_reconnect_lock = asyncio.Lock()
+        
+        # PHASE-2: Circuit breaker for repeated WS failures (production hardening)
+        # Tracks recent connection failures to prevent reconnect storms
+        self._ws_failure_history: List[float] = []  # Timestamps of recent failures
+        self._circuit_breaker_tripped: bool = False
+        self._circuit_breaker_reset_ts: Optional[float] = None
+        self._CIRCUIT_BREAKER_THRESHOLD: int = 10  # failures in window
+        self._CIRCUIT_BREAKER_WINDOW_S: float = 60.0  # 60-second window
+        self._CIRCUIT_BREAKER_COOLDOWN_S: float = 30.0  # 30-second backoff when tripped
 
     def _record_task_failure(self, task_name: str, error: str) -> None:
         """Record task failure for health monitoring."""
@@ -148,6 +157,37 @@ class KalshiWebSocketBridge:
         if len(self._task_failures) > 100:
             self._task_failures = self._task_failures[-100:]
 
+    def _record_ws_failure(self) -> None:
+        """Record a WebSocket connection failure for circuit breaker tracking.
+        
+        PHASE-2: Production hardening — tracks failures in rolling window.
+        """
+        now = time.monotonic()
+        self._ws_failure_history.append(now)
+        # Prune old failures outside the window
+        cutoff = now - self._CIRCUIT_BREAKER_WINDOW_S
+        self._ws_failure_history = [ts for ts in self._ws_failure_history if ts > cutoff]
+        
+        # Log warning if approaching threshold
+        if len(self._ws_failure_history) >= self._CIRCUIT_BREAKER_THRESHOLD - 2:
+            logger.warning(
+                "[CIRCUIT-BREAKER] Approaching threshold: %d/%d failures in %.0fs",
+                len(self._ws_failure_history), self._CIRCUIT_BREAKER_THRESHOLD, self._CIRCUIT_BREAKER_WINDOW_S
+            )
+
+    def _check_circuit_breaker(self) -> bool:
+        """Check if circuit breaker should trip based on recent failure history.
+        
+        Returns:
+            True if breaker should trip, False otherwise.
+        """
+        # Prune old failures
+        now = time.monotonic()
+        cutoff = now - self._CIRCUIT_BREAKER_WINDOW_S
+        self._ws_failure_history = [ts for ts in self._ws_failure_history if ts > cutoff]
+        
+        return len(self._ws_failure_history) >= self._CIRCUIT_BREAKER_THRESHOLD
+
     def get_health_status(self) -> Dict[str, Any]:
         """Return health status for monitoring integration."""
         recent_failures = [
@@ -157,12 +197,33 @@ class KalshiWebSocketBridge:
         status = "GREEN"
         if len(recent_failures) > 0:
             status = "YELLOW" if len(recent_failures) < 3 else "RED"
+        
+        # EVENT-LOOP-FIX: Add queue depth and backpressure metrics
+        current_qsize = self._queue.qsize() if hasattr(self._queue, 'qsize') else 0
+        queue_pressure = current_qsize / _BRIDGE_QUEUE_SIZE if _BRIDGE_QUEUE_SIZE else 0
+        
+        # Upgrade status based on queue pressure
+        if queue_pressure > 0.9:
+            status = "RED"
+        elif queue_pressure > 0.75 and status == "GREEN":
+            status = "YELLOW"
+        
         return {
             "status": status,
             "running": self.is_running(),
             "recent_task_failures": len(recent_failures),
             "total_task_failures": len(self._task_failures),
             "uptime_s": time.monotonic() - self._start_ts if self._start_ts else 0,
+            # EVENT-LOOP-FIX: Queue metrics for observability
+            "queue_depth": current_qsize,
+            "queue_capacity": _BRIDGE_QUEUE_SIZE,
+            "queue_pressure": round(queue_pressure, 3),
+            "events_forwarded": self._events_forwarded,
+            "events_dropped": self._events_dropped,
+            "fills_received": self._fills_received,
+            "fills_dropped": self._fills_dropped,
+            "circuit_breaker_tripped": self._circuit_breaker_tripped,
+            "type_counts": dict(self._type_counts),
         }
 
     async def _emergency_reconnect(self) -> None:
@@ -201,17 +262,62 @@ class KalshiWebSocketBridge:
                 return
             logger.info(f"KalshiWebSocketBridge: config OK (key={cfg.api_key[:8]}..., key_file={cfg.private_key_path})")
 
+            # PHASE-2: Check circuit breaker before attempting connection
+            if self._circuit_breaker_tripped:
+                now = time.monotonic()
+                if self._circuit_breaker_reset_ts and now < self._circuit_breaker_reset_ts:
+                    remaining = self._circuit_breaker_reset_ts - now
+                    logger.warning(
+                        "[CIRCUIT-BREAKER] WS connection blocked — cooling down for %.0fs remaining",
+                        remaining
+                    )
+                    summary["actions"].append("ws_bridge:circuit_breaker_blocked")
+                    return
+                # Reset circuit breaker
+                logger.warning("[CIRCUIT-BREAKER] Resetting after cooldown period")
+                self._circuit_breaker_tripped = False
+                self._circuit_breaker_reset_ts = None
+                self._ws_failure_history.clear()
+            
             # Retry connection up to 3 times with exponential backoff
             connected = False
+            stability_confirmed = False
             for attempt in range(1, 4):
                 try:
                     await self._ws.connect()
+                    
+                    # PHASE-2: Connection stability gate — wait 500ms to confirm socket stays open
+                    # This catches immediate-close scenarios from auth failures
+                    await asyncio.sleep(0.5)
+                    
+                    # Check if connection is still alive after stability window
+                    if hasattr(self._ws, '_ws') and self._ws._ws:
+                        # Connection object exists, check if it's open
+                        is_open = getattr(self._ws._ws, 'open', True)  # Default to True if attr missing
+                        if not is_open:
+                            logger.warning(
+                                "WS connection closed within stability window (attempt %d/3) — likely auth failure",
+                                attempt
+                            )
+                            self._record_ws_failure()
+                            if attempt < 3:
+                                delay = 2 ** attempt
+                                await asyncio.sleep(delay)
+                                continue
+                            else:
+                                break
+                    
                     connected = True
+                    stability_confirmed = True
                     self._last_connect_time = time.monotonic()
                     if attempt > 1:
                         self._reconnect_count += 1
+                    # Clear failure history on successful stable connection
+                    self._ws_failure_history.clear()
                     break
+                    
                 except Exception as exc:
+                    self._record_ws_failure()
                     if attempt < 3:
                         delay = 2 ** attempt
                         logger.warning(
@@ -224,6 +330,16 @@ class KalshiWebSocketBridge:
                             "WS bridge failed to connect after 3 attempts: %s: %s",
                             type(exc).__name__, exc,
                         )
+            
+            # Check if circuit breaker should trip due to accumulated failures
+            if not connected and self._check_circuit_breaker():
+                logger.critical(
+                    "[CIRCUIT-BREAKER] TRIPPED — %d failures in %.0fs. Blocking WS reconnects for %.0fs",
+                    self._CIRCUIT_BREAKER_THRESHOLD, self._CIRCUIT_BREAKER_WINDOW_S, self._CIRCUIT_BREAKER_COOLDOWN_S
+                )
+                self._circuit_breaker_tripped = True
+                self._circuit_breaker_reset_ts = time.monotonic() + self._CIRCUIT_BREAKER_COOLDOWN_S
+            
             if not connected:
                 logger.error(
                     "KalshiWebSocketBridge: ABORTING - failed to establish WebSocket connection. "
@@ -451,6 +567,7 @@ class KalshiWebSocketBridge:
         """Put event into bounded queue; drop oldest if full.
         
         Also tracks sequence numbers for gap detection and fill-specific metrics.
+        EVENT-LOOP-FIX: Added backpressure check and queue depth metrics.
         """
         # Track fill-specific metrics
         if isinstance(event, dict) and event.get("type") == "fill":
@@ -470,6 +587,32 @@ class KalshiWebSocketBridge:
                         )
                 self._last_sequence = seq
         
+        # EVENT-LOOP-FIX: Check queue depth and apply backpressure
+        current_qsize = self._queue.qsize()
+        queue_pressure = current_qsize / _BRIDGE_QUEUE_SIZE
+        
+        # Log high queue pressure for observability
+        if queue_pressure > 0.8 and self._events_dropped % 10 == 0:
+            logger.warning(
+                "[BACKPRESSURE] WS bridge queue at %.0f%% capacity (%d/%d) — "
+                "forwarder may be stalled",
+                queue_pressure * 100, current_qsize, _BRIDGE_QUEUE_SIZE
+            )
+        
+        # CRITICAL: If queue is nearly full (>95%), drop non-fill events aggressively
+        # to preserve capacity for fills (order executions)
+        if queue_pressure > 0.95:
+            event_type = event.get("type") if isinstance(event, dict) else "unknown"
+            if event_type != "fill":
+                self._events_dropped += 1
+                # Log every 50 aggressive drops
+                if self._events_dropped % 50 == 1:
+                    logger.error(
+                        "[BACKPRESSURE] Dropping non-fill event (type=%s) — queue at %.0f%% capacity",
+                        event_type, queue_pressure * 100
+                    )
+                return  # Drop this event entirely
+        
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
@@ -487,25 +630,58 @@ class KalshiWebSocketBridge:
             if self._events_dropped % 100 == 1:
                 logger.warning(
                     "WS bridge queue overflow — %d events dropped total "
-                    "(queue_size=%d, forwarded=%d, fills_dropped=%d)",
+                    "(queue_size=%d, forwarded=%d, fills_dropped=%d, qsize=%d)",
                     self._events_dropped,
                     _BRIDGE_QUEUE_SIZE,
                     self._events_forwarded,
                     self._fills_dropped,
+                    current_qsize,
                 )
 
     # ── Forward loop (drains queue → event bus) ──────────────────────────
 
     async def _forward_loop(self) -> None:
-        """Continuously drain the queue and publish to the event bus."""
+        """Continuously drain the queue and publish to the event bus.
+        
+        EVENT-LOOP-FIX: Added batch processing and timeout budget to prevent
+        blocking the event loop when processing large queues.
+        """
+        # Budget tracking for fair scheduling
+        _MAX_BATCH_SIZE = 50  # Process max 50 events before yielding
+        _BATCH_TIMEOUT_MS = 100  # Max time per batch before yielding
+        
         while not self._shutdown.is_set():
+            batch_count = 0
+            batch_start = time.monotonic()
+            
             try:
-                event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
+                # Process events in batches with timeout budget
+                while batch_count < _MAX_BATCH_SIZE:
+                    # Check budget
+                    if (time.monotonic() - batch_start) * 1000 > _BATCH_TIMEOUT_MS:
+                        break
+                    
+                    # Try to get event with short timeout
+                    try:
+                        event = await asyncio.wait_for(self._queue.get(), timeout=0.001)
+                    except asyncio.TimeoutError:
+                        break  # No more events, yield
+                    except asyncio.CancelledError:
+                        raise
+                    
+                    await self._publish_event(event)
+                    batch_count += 1
+                    self._events_forwarded += 1
+                
+                # Yield control if we processed any events
+                if batch_count > 0:
+                    await asyncio.sleep(0)  # Yield to event loop
+                    
             except asyncio.CancelledError:
                 break
-            await self._publish_event(event)
+            except Exception as e:
+                logger.error(f"Forward loop error: {e}")
+                await asyncio.sleep(0.01)  # Brief pause on error
 
     async def _publish_to_bus(self, event_type: str, payload: Dict[str, Any]) -> None:
         """Publish one normalized event to MERID's core event bus."""
@@ -526,7 +702,7 @@ class KalshiWebSocketBridge:
                     "ts": event.timestamp.isoformat(),
                 }
                 await self._publish_to_bus("kalshi:price_update", payload)
-                self._events_forwarded += 1
+                # Count moved to forward loop to track actual forwarded events
                 self._type_counts["price_update"] += 1
 
                 # Bridge into streaming_bus.MARKET_DATA so AgentMesh streaming agents
@@ -593,7 +769,7 @@ class KalshiWebSocketBridge:
             elif isinstance(event, dict) and event.get("type") == "fill":
                 # Private authenticated **fill** channel — portfolio executions only
                 await self._handle_kalshi_user_fill(event.get("data") or {})
-                self._events_forwarded += 1
+                # Count moved to forward loop
                 self._type_counts["user_fill"] += 1
 
             elif isinstance(event, VenueTrade):
@@ -610,7 +786,7 @@ class KalshiWebSocketBridge:
                     "is_public_tape": True,
                 }
                 await self._publish_to_bus("kalshi:trade", trade_payload)
-                self._events_forwarded += 1
+                # Count moved to forward loop
                 self._type_counts["trade"] += 1
 
             elif isinstance(event, dict) and event.get("type") in (
@@ -618,7 +794,7 @@ class KalshiWebSocketBridge:
             ):
                 event_type = event["type"]
                 await self._publish_to_bus(f"kalshi:{event_type}", dict(event))
-                self._events_forwarded += 1
+                # Count moved to forward loop
                 self._type_counts[event_type] += 1
                 # Feed orderbook data into KalshiMarketStateStore so book fields
                 # (mid_cents, spread_cents, depth_10c) stay live for CryptoAlertRouter
@@ -649,7 +825,6 @@ class KalshiWebSocketBridge:
                         "timestamp": event.get("timestamp"),
                     }
                     await self._publish_to_bus("kalshi:order_group_update", payload)
-                    self._events_forwarded += 1
                     self._type_counts["order_group_update"] += 1
 
                     # Update order group manager cache
@@ -664,7 +839,6 @@ class KalshiWebSocketBridge:
 
             else:
                 await self._publish_to_bus("kalshi:ws_event", {"raw": str(event)})
-                self._events_forwarded += 1
                 self._type_counts["other"] += 1
 
         except Exception as exc:

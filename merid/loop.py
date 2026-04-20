@@ -192,7 +192,11 @@ class LoopConfig:
 
 @dataclass
 class LoopMetrics:
-    """Tracks loop performance and health."""
+    """Tracks loop performance and health.
+    
+    EVENT-LOOP-FIX: Added metrics for timeout counts, lag skips, and queue depth
+    for better observability during high-load conditions.
+    """
     total_ticks: int = 0
     total_errors: int = 0
     last_tick_at: float = 0.0
@@ -206,6 +210,13 @@ class LoopMetrics:
     plans_executed: int = 0
     cqi_updates: int = 0
     reconciliations_run: int = 0
+    
+    # EVENT-LOOP-FIX: New metrics for observability under load
+    timeout_count: int = 0  # Total step timeouts
+    lag_skip_count: int = 0  # Steps skipped due to high loop lag
+    slow_action_skips: int = 0  # Steps skipped due to recent slowness
+    global_tick_timeouts: int = 0  # Full tick global timeouts
+    last_lag_ms: float = 0.0  # Last recorded loop lag
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -222,6 +233,12 @@ class LoopMetrics:
             "plans_executed": self.plans_executed,
             "cqi_updates": self.cqi_updates,
             "reconciliations_run": self.reconciliations_run,
+            # EVENT-LOOP-FIX: New observability metrics
+            "timeout_count": self.timeout_count,
+            "lag_skip_count": self.lag_skip_count,
+            "slow_action_skips": self.slow_action_skips,
+            "global_tick_timeouts": self.global_tick_timeouts,
+            "last_lag_ms": round(self.last_lag_ms, 1),
         }
 
 
@@ -406,6 +423,7 @@ class MeridLoop:
             await asyncio.sleep(0.05)  # yield 50ms to event loop so HTTP stays responsive
         except asyncio.TimeoutError:
             self.metrics.total_errors += 1
+            self.metrics.timeout_count += 1  # EVENT-LOOP-FIX: Track timeout count
             self.metrics.last_error = f"{name}: step timeout ({timeout}s)"
             logger.warning("Loop step '%s' timed out after %ds", name, timeout)
             summary["actions"].append(f"step_timeout:{name}")
@@ -438,6 +456,9 @@ class MeridLoop:
 
         Each step is isolated — a failure in one step never prevents
         subsequent steps from running.  Returns a summary dict.
+        
+        EVENT-LOOP-FIX: Added hard global timeout around entire tick to prevent
+        any single tick from starving the event loop.
 
         Args:
             now: Optional timestamp to use (defaults to current time)
@@ -453,8 +474,32 @@ class MeridLoop:
         async with self._tick_lock:
             self._tick_in_progress = True
             self._tick_step_timings.clear()  # Reset per-step timings
+            
+            # EVENT-LOOP-FIX: Hard global timeout on entire tick
+            # Prevents a tick from running indefinitely and starving the event loop
+            _TICK_GLOBAL_TIMEOUT_S = float(os.getenv("MERID_TICK_GLOBAL_TIMEOUT_S", "60"))
+            tick_start = time.perf_counter()
+            
             try:
-                return await self._tick_body(now)
+                return await asyncio.wait_for(self._tick_body(now), timeout=_TICK_GLOBAL_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # Global tick timeout - this is a serious issue
+                elapsed = time.perf_counter() - tick_start
+                logger.critical(
+                    "[TICK-TIMEOUT] Global tick timeout after %.1fs (limit %.0fs) — "
+                    "event loop was stalled, forcing tick termination",
+                    elapsed, _TICK_GLOBAL_TIMEOUT_S
+                )
+                self.metrics.total_errors += 1
+                self.metrics.global_tick_timeouts += 1  # EVENT-LOOP-FIX: Track global timeout
+                self.metrics.last_error = f"tick_global_timeout:{elapsed:.1f}s"
+                return {
+                    "tick": "timeout",
+                    "reason": "global_tick_timeout",
+                    "elapsed_seconds": round(elapsed, 1),
+                    "timeout_seconds": _TICK_GLOBAL_TIMEOUT_S,
+                    "actions": ["tick_aborted:global_timeout"]
+                }
             finally:
                 self._tick_in_progress = False
 
@@ -472,6 +517,9 @@ class MeridLoop:
         start = time.perf_counter()
         tick_number = self.metrics.total_ticks + 1
         summary: Dict[str, Any] = {"tick": tick_number, "actions": []}
+        
+        # EVENT-LOOP-FIX: Record current lag for observability
+        self.metrics.last_lag_ms = self._get_event_loop_lag_ms()
 
         # BUG-8: set structured log context for this tick so every log line
         # emitted during this task carries tick, mode, and env dimensions.
@@ -513,6 +561,7 @@ class MeridLoop:
 
         if now - self._last_feature_refresh >= self.config.feature_refresh_interval:
             if self._should_skip_due_to_slowness("features", now):
+                self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
                 summary["actions"].append("features_refreshed:skipped_recently_slow")
             else:
                 parallel_coros.append(self._run_step("features", self._refresh_features(now, summary), summary))
@@ -524,6 +573,7 @@ class MeridLoop:
 
         if now - self._last_arb_scan >= self.config.arb_scan_interval:
             if self._should_skip_due_to_slowness("arb_scan", now):
+                self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
                 summary["actions"].append("arb_scan:skipped_recently_slow")
             else:
                 parallel_coros.append(self._run_step("arb_scan", self._run_arb_scan(now, summary), summary))
@@ -531,6 +581,7 @@ class MeridLoop:
 
         if now - self._last_liquidity_refresh >= self._liquidity_refresh_interval:
             if self._should_skip_due_to_slowness("liquidity", now):
+                self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
                 summary["actions"].append("liquidity_sweep:skipped_recently_slow")
             else:
                 parallel_coros.append(self._run_step("liquidity", self._refresh_liquidity(now, summary), summary))
@@ -2176,21 +2227,37 @@ class MeridLoop:
                 self._execution_subscriber = None
 
         while self._running:
-            summary = await self.tick()
-            tick_count += 1
-
-            # Persist structured tick record
+            # EVENT-LOOP-FIX: Check for cancellation before each tick
             try:
-                record = build_tick_record(summary)
-                record.kill_switch_active = self._execution_guard().kill_switch_active
-                tick_log.append(record)
-            except Exception as e:
-                logger.warning(f"Tick log write failed: {e}")
+                # Check if we've been cancelled (cooperative shutdown)
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelled():
+                    logger.info("[LOOP] Cancelled — exiting main loop cleanly")
+                    break
+                
+                summary = await self.tick()
+                tick_count += 1
 
-            if max_ticks and tick_count >= max_ticks:
-                logger.info(f"Reached max_ticks={max_ticks}, stopping")
-                self._running = False
+                # Persist structured tick record
+                try:
+                    record = build_tick_record(summary)
+                    record.kill_switch_active = self._execution_guard().kill_switch_active
+                    tick_log.append(record)
+                except Exception as e:
+                    logger.warning(f"Tick log write failed: {e}")
+
+                if max_ticks and tick_count >= max_ticks:
+                    logger.info(f"Reached max_ticks={max_ticks}, stopping")
+                    self._running = False
+                    break
+                    
+            except asyncio.CancelledError:
+                # EVENT-LOOP-FIX: Cooperative shutdown
+                logger.info("[LOOP] Cancelled during tick — exiting cleanly")
                 break
+            except Exception as e:
+                logger.error(f"[LOOP] Unexpected error in tick: {e}")
+                # Continue running despite errors
 
             await asyncio.sleep(sleep_time)
 
