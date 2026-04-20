@@ -2696,6 +2696,9 @@ class KalshiVenueClient(EventVenueClient):
             if not cursor:
                 break
 
+            # P1-HARDENING: Yield between pages to prevent event loop blocking
+            await asyncio.sleep(0)
+
             if page >= max_pages - 1:
                 logger.warning(f"get_positions: Hit max_pages limit ({max_pages}), returning {len(all_positions)} positions")
                 break

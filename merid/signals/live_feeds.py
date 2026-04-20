@@ -75,13 +75,39 @@ class LiveFeedManager:
     # ── Public API ────────────────────────────────────────────────────
 
     async def refresh_all(self, symbols: List[str], now: Optional[float] = None):
-        """Refresh all feeds for the given symbols (concurrently)."""
+        """Refresh all feeds for the given symbols (concurrently).
+        
+        P1-HARDENING: Per-feed timeouts (1.0s) prevent single slow feed from blocking.
+        """
         import asyncio
         now = now or time.time()
+        
+        # P1-HARDENING: Per-feed timeouts to stay within features budget
+        async def _timed_refresh_news():
+            try:
+                await asyncio.wait_for(self.refresh_news(symbols, now), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning("[BUDGET] News feed refresh timed out after 1.0s")
+                self._stats["errors"] += 1
+        
+        async def _timed_refresh_macro():
+            try:
+                await asyncio.wait_for(self.refresh_macro(now), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning("[BUDGET] Macro feed refresh timed out after 1.0s")
+                self._stats["errors"] += 1
+        
+        async def _timed_refresh_onchain():
+            try:
+                await asyncio.wait_for(self.refresh_onchain(symbols, now), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning("[BUDGET] On-chain feed refresh timed out after 1.0s")
+                self._stats["errors"] += 1
+        
         await asyncio.gather(
-            self.refresh_news(symbols, now),
-            self.refresh_macro(now),
-            self.refresh_onchain(symbols, now),
+            _timed_refresh_news(),
+            _timed_refresh_macro(),
+            _timed_refresh_onchain(),
             return_exceptions=True,
         )
 
