@@ -1319,14 +1319,14 @@ class MeridLoop:
                 return
 
             # PHASE-3: Lag-aware scope reduction — fewer markets when lag is elevated
-            # This prevents the 9.7s blocking observed in production
-            base_max = 3 if self.metrics.total_ticks < 120 else 5
-            if current_lag > 500:
+            # CRITICAL-FIX: More aggressive limits to prevent budget overruns
+            base_max = 2 if self.metrics.total_ticks < 120 else 3  # Reduced from 3/5
+            if current_lag > 400:  # Lowered from 500ms
                 MAX_TICKERS = 1  # Critical lag: absolute minimum
                 logger.warning("[BUDGET] liquidity: reduced scope to 1 market due to lag %.0fms", current_lag)
-            elif current_lag > 250:
-                MAX_TICKERS = 2  # Elevated lag: reduced scope
-                logger.warning("[BUDGET] liquidity: reduced scope to 2 markets due to lag %.0fms", current_lag)
+            elif current_lag > 150:  # Lowered from 250ms
+                MAX_TICKERS = 1  # Reduced from 2 - be more conservative
+                logger.warning("[BUDGET] liquidity: reduced scope to 1 market due to lag %.0fms", current_lag)
             else:
                 MAX_TICKERS = base_max
             
@@ -1344,9 +1344,9 @@ class MeridLoop:
 
             # PHASE-3: Hard budget enforcement for liquidity sweep
             # Track cumulative time and abort if approaching budget
-            # Extended to 2000ms to better align with halt band and avoid premature aborts
+            # CRITICAL-FIX: Reduced to 1000ms to match slow action budget and prevent loop lag
             LIQUIDITY_HARD_BUDGET_MS = float(os.getenv(
-                "MERID_LIQUIDITY_HARD_BUDGET_MS", "2000.0"
+                "MERID_LIQUIDITY_HARD_BUDGET_MS", "1000.0"
             ))
             _budget_start = time.perf_counter()
 
@@ -1361,8 +1361,9 @@ class MeridLoop:
                     return True
                 return False
             
-            # Fetch orderbooks concurrently (max 2 at a time via semaphore - reduced from 3)
-            _sem = asyncio.Semaphore(2)
+            # Fetch orderbooks concurrently (max 1 at a time via semaphore - reduced from 2)
+            # CRITICAL-FIX: More conservative to prevent budget overruns
+            _sem = asyncio.Semaphore(1)
 
             async def _fetch_ob(ticker: str):
                 async with _sem:
@@ -1374,7 +1375,8 @@ class MeridLoop:
                     if getattr(client, "is_circuit_open", False):
                         return (ticker, None)
                     try:
-                        ob = await asyncio.wait_for(client.get_orderbook(ticker), timeout=2.0)  # reduced timeout
+                        # CRITICAL-FIX: Reduced timeout to 1.0s to stay within 1000ms budget
+                        ob = await asyncio.wait_for(client.get_orderbook(ticker), timeout=1.0)
                         return (ticker, ob)
                     except Exception as _te:
                         logger.debug("liquidity_sweep %s skipped: %s", ticker, _te)

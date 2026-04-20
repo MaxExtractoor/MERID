@@ -212,11 +212,16 @@ class KalshiWebSocketService:
 
             # Derive and set essential tickers for load shedding protection
             # This prevents queue overflow by protecting active position tickers
+            # CRITICAL-FIX: Always set essential tickers; use fallback if derivation fails
             try:
                 await self._ws.derive_essential_tickers_from_positions()
                 logger.info("WebSocket essential tickers configured for load shedding")
             except Exception as _ete:
-                logger.debug(f"Essential tickers derivation skipped: {_ete}")
+                logger.warning(f"Essential tickers derivation failed: {_ete} — using emergency fallback")
+                # Emergency fallback: minimal BTC/ETH 15m set
+                emergency_tickers = ["KXBTC-15M", "KXETH-15M"]
+                self._ws.set_essential_tickers(emergency_tickers)
+                logger.critical(f"Using emergency essential tickers: {emergency_tickers}")
 
             # Subscribe to all currently subscribed tickers
             for ticker in self._subscriptions:
@@ -239,6 +244,14 @@ class KalshiWebSocketService:
                     
                     self._ws = KalshiWebSocket(self.config)
                     await self._ws.connect()
+                    
+                    # CRITICAL-FIX: Re-derive essential tickers on reconnect
+                    try:
+                        await self._ws.derive_essential_tickers_from_positions()
+                    except Exception as _ete:
+                        emergency_tickers = ["KXBTC-15M", "KXETH-15M"]
+                        self._ws.set_essential_tickers(emergency_tickers)
+                        logger.warning(f"Using emergency essential tickers after reconnect: {emergency_tickers}")
                     
                     # Resubscribe to all tickers
                     for ticker in self._subscriptions:
