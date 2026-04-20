@@ -1,0 +1,344 @@
+"""
+Regression tests for Top-3 system — preventing "spraying" across all 5 assets.
+
+These tests verify that the production bug (trading all 5 assets instead of top 3)
+cannot recur.
+"""
+
+import pytest
+from unittest.mock import Mock, patch, MagicMock
+
+from merid.trading.top3_edge_allocator import (
+    EdgeCandidate,
+    Top3Allocation,
+    Top3Batch,
+    BatchStatus,
+)
+from merid.trading.top3_batch_manager import (
+    get_top3_batch_manager,
+    reset_top3_batch_manager,
+)
+
+
+@pytest.fixture
+def reset_state():
+    """Reset and provide batch manager singleton before each test."""
+    reset_top3_batch_manager()
+    yield get_top3_batch_manager()
+    reset_top3_batch_manager()
+
+
+class TestNoSprayingRegression:
+    """
+    Regression tests for the "spraying" bug where the system would trade
+    all 5 assets (BTC, ETH, SOL, XRP, DOGE) instead of just the top 3 by edge.
+    """
+    
+    def test_at_most_3_assets_per_cycle(
+        self, reset_state
+    ):
+        """
+        CRITICAL REGRESSION: At most 3 assets can be selected per cycle.
+        
+        This was the original bug: the system would select all 5 assets
+        instead of respecting the top-3 constraint.
+        """
+        mgr = get_top3_batch_manager()
+        
+        # All 5 assets have positive edges
+        candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("XRP", edge=0.04, max_notional_cap=2000),
+            EdgeCandidate("DOGE", edge=0.02, max_notional_cap=1000),
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=candidates,
+        )
+        
+        # CRITICAL: Must be at most 3, not all 5
+        assert batch is not None
+        assert len(batch.allocations) <= 3, \
+            f"BUG: {len(batch.allocations)} assets selected, expected max 3"
+        
+        # Specifically must be top 3 by edge (BTC, ETH, SOL)
+        assets = {a.asset for a in batch.allocations}
+        assert "BTC" in assets
+        assert "ETH" in assets
+        assert "SOL" in assets
+        assert "XRP" not in assets, "XRP (4th by edge) should not be in top 3"
+        assert "DOGE" not in assets, "DOGE (5th by edge) should not be in top 3"
+    
+    def test_cannot_open_position_in_4th_or_5th_asset(
+        self, reset_state
+    ):
+        """
+        Regression: Agents should be blocked from opening positions in
+        assets outside the top-3 allocation.
+        """
+        mgr = get_top3_batch_manager()
+        
+        # Create batch with only top 3
+        candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("XRP", edge=0.04, max_notional_cap=2000),
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=candidates,
+        )
+        
+        # Top 3 should be allowed
+        for asset in ["BTC", "ETH", "SOL"]:
+            allowed, reason, _ = mgr.can_open_new_position(asset, 500)
+            assert allowed is True, f"{asset} should be allowed (top 3)"
+        
+        # 4th asset (XRP) should be rejected
+        allowed, reason, _ = mgr.can_open_new_position("XRP", 500)
+        assert allowed is False, "XRP should be rejected (not in top 3)"
+        assert "ASSET_NOT_IN_TOP3" in reason
+    
+    def test_batch_blocks_new_entries_until_closed(
+        self, reset_state
+    ):
+        """
+        Regression: Once a batch is opened, no new trades allowed
+        until all positions are closed.
+        """
+        mgr = get_top3_batch_manager()
+        
+        candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+        ]
+        
+        # Create batch
+        batch1 = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=candidates,
+        )
+        
+        # Mark BTC filled
+        mgr.mark_asset_filled(batch1.batch_id, "BTC", 1000)
+        
+        # Try to create new batch (should fail - current batch still active)
+        batch2 = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=candidates,
+        )
+        assert batch2 is None, "New batch should not be created while active batch exists"
+        
+        # Close remaining positions
+        for asset in ["BTC", "ETH", "SOL"]:
+            mgr.mark_asset_closed(batch1.batch_id, asset)
+        
+        # Now can create new batch
+        batch3 = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=candidates,
+        )
+        assert batch3 is not None
+        assert batch3.batch_id != batch1.batch_id
+    
+    def test_no_independent_per_asset_decisions(
+        self, reset_state
+    ):
+        """
+        Regression: Per-asset agents must NOT make independent entry decisions.
+        All entry decisions must go through the central batch manager.
+        """
+        mgr = get_top3_batch_manager()
+        
+        # Simulate 5 agents each with positive edge
+        candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+            EdgeCandidate("XRP", edge=0.05, max_notional_cap=2000),
+            EdgeCandidate("DOGE", edge=0.04, max_notional_cap=1000),
+        ]
+        
+        # Central selector creates batch
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=candidates,
+        )
+        
+        # Only 3 assets in batch - not all 5
+        assert len(batch.allocations) == 3
+        
+        # XRP and DOGE agents should be blocked
+        for asset in ["XRP", "DOGE"]:
+            allowed, reason, _ = mgr.can_open_new_position(asset, 500)
+            assert allowed is False, \
+                f"{asset} should be blocked - independent agent decision prevented"
+
+
+class TestBankrollCapEnforcement:
+    """
+    Regression tests for bankroll cap enforcement (1-2% per cycle).
+    """
+    
+    def test_total_notional_never_exceeds_2pct(
+        self, reset_state
+    ):
+        """
+        CRITICAL: Total notional across all 3 assets must never exceed 2%
+        of bankroll in a single cycle.
+        """
+        mgr = get_top3_batch_manager()
+        
+        bankroll = 50_000  # $500
+        
+        candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=50000),
+            EdgeCandidate("ETH", edge=0.09, max_notional_cap=40000),
+            EdgeCandidate("SOL", edge=0.08, max_notional_cap=30000),
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=bankroll,
+            candidates=candidates,
+        )
+        
+        # Total must be <= 2% of bankroll
+        total = batch.total_target_notional
+        max_allowed = int(0.02 * bankroll)  # 1000 cents = $10
+        
+        assert total <= max_allowed, \
+            f"CRITICAL: Total {total}c exceeds 2% cap ({max_allowed}c) for bankroll {bankroll}"
+    
+    def test_sum_of_allocations_equals_total(
+        self, reset_state
+    ):
+        """
+        Sum of individual allocations must equal the batch total
+        (accounting for integer rounding).
+        """
+        mgr = get_top3_batch_manager()
+        
+        candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=candidates,
+        )
+        
+        sum_allocations = sum(a.target_notional for a in batch.allocations)
+        
+        # Allow for rounding differences (max 2 cents off per allocation)
+        assert abs(sum_allocations - batch.total_target_notional) <= 2
+
+
+class TestEdgeRankingIntegrity:
+    """
+    Regression tests for edge ranking integrity.
+    """
+    
+    def test_highest_edge_gets_largest_allocation(
+        self, reset_state
+    ):
+        """
+        Highest edge asset should get the largest notional allocation.
+        """
+        mgr = get_top3_batch_manager()
+        
+        candidates = [
+            EdgeCandidate("BTC", edge=0.15, max_notional_cap=5000),  # Highest
+            EdgeCandidate("ETH", edge=0.10, max_notional_cap=4000),
+            EdgeCandidate("SOL", edge=0.05, max_notional_cap=3000),  # Lowest
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=candidates,
+        )
+        
+        # Get allocations
+        btc = batch.get_allocation_for_asset("BTC")
+        eth = batch.get_allocation_for_asset("ETH")
+        sol = batch.get_allocation_for_asset("SOL")
+        
+        assert btc.target_notional > eth.target_notional > sol.target_notional
+    
+    def test_equal_edges_get_equal_allocation(
+        self, reset_state
+    ):
+        """
+        Equal edges should result in equal allocations (split evenly).
+        """
+        mgr = get_top3_batch_manager()
+        
+        candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("ETH", edge=0.10, max_notional_cap=5000),  # Equal to BTC
+            EdgeCandidate("SOL", edge=0.10, max_notional_cap=5000),  # Equal to BTC
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=90_000,  # 2% = 1800 cents
+            candidates=candidates,
+        )
+        
+        # All should be equal (600 cents each)
+        for alloc in batch.allocations:
+            assert alloc.target_notional == 600
+            assert alloc.weight == pytest.approx(1/3, rel=0.01)
+
+
+class TestNoBypassPaths:
+    """
+    Regression tests ensuring no bypass paths exist.
+    """
+    
+    def test_no_direct_per_asset_entry(self, reset_state):
+        """
+        Per-asset agents cannot open positions without batch approval.
+        This tests that there's no "backdoor" around the batch manager.
+        """
+        mgr = get_top3_batch_manager()
+        
+        # No batch exists
+        assert mgr.get_current_batch() is None
+        
+        # Any attempt to open should fail
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            allowed, reason, _ = mgr.can_open_new_position(asset, 500)
+            assert allowed is False, \
+                f"{asset} should be blocked without batch - no bypass allowed"
+    
+    def test_batch_must_be_active(self, reset_state):
+        """
+        Only ACTIVE batches allow entries. PENDING, CLOSING, CLOSED
+        statuses must block new entries.
+        """
+        mgr = get_top3_batch_manager()
+        
+        # Create and immediately close batch
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=[
+                EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            ],
+        )
+        
+        # Close it
+        mgr.close_batch(batch.batch_id, reason="test")
+        
+        # Should be closed
+        assert batch.status == BatchStatus.CLOSED
+        
+        # Entry should be blocked
+        allowed, reason, _ = mgr.can_open_new_position("BTC", 500)
+        assert allowed is False, "Entry should be blocked when batch is closed"
