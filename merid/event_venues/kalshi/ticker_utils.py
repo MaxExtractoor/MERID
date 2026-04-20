@@ -107,7 +107,14 @@ def get_ticker_cache() -> KalshiTickerCache:
 
 
 def parse_kalshi_ticker(ticker: str) -> Optional[ParsedKalshiTicker]:
-    """Parse and validate a Kalshi 15m ticker string.
+    """Parse and validate a Kalshi 15m ticker string (STRICT validation).
+    
+    This is the strict parser used for validation. It enforces:
+    - Asset must be in VALID_CRYPTO_ASSETS
+    - Minute must be on 15m boundary (0, 15, 30, 45)
+    - Month must be valid 3-letter abbreviation
+    
+    For loose parsing (normalization), use _parse_kalshi_ticker_loose().
     
     Args:
         ticker: The ticker string to parse (e.g., "KXBTC15M-26MAR251500")
@@ -164,22 +171,76 @@ def parse_kalshi_ticker(ticker: str) -> Optional[ParsedKalshiTicker]:
     )
 
 
-def normalize_ticker_time(ticker: str, reference_time: Optional[datetime] = None) -> str:
-    """Normalize ticker time to the nearest 15m window floor.
+def _parse_kalshi_ticker_loose(ticker: str) -> Optional[ParsedKalshiTicker]:
+    """Parse a Kalshi ticker without enforcing 15m boundary constraint.
+    
+    Used internally for normalization when we need to accept any minute
+    value (0-59) and floor it to the nearest 15m boundary.
     
     Args:
-        ticker: The ticker string to normalize
-        reference_time: Optional reference time (defaults to UTC now)
+        ticker: The ticker string to parse
         
     Returns:
-        Normalized ticker string, or original if parsing fails
+        ParsedKalshiTicker with is_valid=True if structurally parsable,
+        or None if format is completely invalid
     """
-    parsed = parse_kalshi_ticker(ticker)
-    if not parsed or not parsed.is_valid:
-        return ticker
+    if not ticker:
+        return None
     
-    # If time is already valid, return original
-    if parsed.minute in VALID_15M_MINUTES:
+    match = KALSHI_15M_TICKER_PATTERN.match(ticker.upper())
+    if not match:
+        return None
+    
+    asset, day_str, month, year_short, time_str = match.groups()
+    
+    try:
+        day = int(day_str)
+        hour = int(time_str[:2])
+        minute = int(time_str[2:])
+        year = 2000 + int(year_short)
+    except ValueError:
+        return None
+    
+    # Basic validation: month must be valid
+    valid_months = {'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+                   'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'}
+    if month not in valid_months:
+        return None
+    
+    # Return as parsable (is_valid=True means "structurally valid")
+    # We don't check minute boundary here - that's for strict validation
+    return ParsedKalshiTicker(
+        asset=asset,
+        day=day,
+        month=month,
+        year=year,
+        hour=hour,
+        minute=minute,
+        is_valid=True
+    )
+
+
+def normalize_ticker_time(ticker: str) -> str:
+    """Normalize ticker time to the nearest 15m window floor.
+    
+    Accepts any structurally-valid ticker and floors its minute value
+    to the nearest 15m boundary (0, 15, 30, 45). Used to repair malformed
+    tickers with non-boundary minutes.
+    
+    Args:
+        ticker: The ticker string to normalize (e.g., "KXBTC15M-26MAR251713")
+        
+    Returns:
+        Normalized ticker string with minute floored to 15m boundary,
+        or original if parsing fails completely
+        
+    Example:
+        "KXBTC15M-26MAR251713" -> "KXBTC15M-26MAR251715"  (13 -> 15)
+        "KXBTC15M-26MAR251746" -> "KXBTC15M-26MAR251745"  (46 -> 45)
+        "KXBTC15M-26MAR251700" -> "KXBTC15M-26MAR251700"  (already valid)
+    """
+    parsed = _parse_kalshi_ticker_loose(ticker)
+    if not parsed:
         return ticker
     
     # Floor minute to nearest 15m boundary
@@ -189,7 +250,8 @@ def normalize_ticker_time(ticker: str, reference_time: Optional[datetime] = None
     new_time = f"{parsed.hour:02d}{floored_minute:02d}"
     normalized = f"KX{parsed.asset}15M-{parsed.day:02d}{parsed.month}{str(parsed.year)[2:]}{new_time}"
     
-    logger.warning(f"[KALSHI_TICKER_NORMALIZED] {ticker} -> {normalized}")
+    if normalized != ticker:
+        logger.warning(f"[KALSHI_TICKER_NORMALIZED] {ticker} -> {normalized}")
     
     return normalized
 
