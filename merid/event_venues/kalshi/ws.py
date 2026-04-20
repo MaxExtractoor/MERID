@@ -1446,13 +1446,28 @@ class KalshiWebSocket(EventVenueStream):
 
     async def _shed_load(self, pressure: Dict[str, Any]) -> None:
         """Emergency load shedding: reduce subscription scope."""
+        # CRITICAL-FIX: Auto-derive essential tickers if not set, with hardcoded emergency fallback
         if not self._essential_tickers:
             logger.warning(
                 "Queue pressure CRITICAL (%.1f%%) but no essential_tickers set! "
-                "Cannot auto-reduce scope. Set essential_tickers immediately.",
+                "Auto-deriving from positions or using emergency fallback.",
                 pressure["utilization_pct"]
             )
-            return
+            # Try to derive from positions first
+            try:
+                await self.derive_essential_tickers_from_positions()
+            except Exception as e:
+                logger.warning(f"Auto-derivation failed: {e}")
+            
+            # If still not set, use hardcoded emergency fallback
+            if not self._essential_tickers:
+                # Emergency fallback: minimal crypto set that must always work
+                emergency_tickers = ["KXBTC-15M", "KXETH-15M"]
+                self.set_essential_tickers(emergency_tickers)
+                logger.critical(
+                    "Using emergency fallback essential tickers: %s",
+                    emergency_tickers
+                )
         
         # Idempotency: already reduced to same essential set
         if self._is_reduced_scope and self._full_subscription_state:
