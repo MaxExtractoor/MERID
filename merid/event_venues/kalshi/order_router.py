@@ -484,6 +484,67 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     return None
 
 
+def _check_market_regime_gate(
+    intent: OrderIntent, mode: TradingMode, t0: float
+) -> Optional[OrderResult]:
+    """Market Regime Gate — block new entries when crypto basket is flat.
+
+    Safety-net check that prevents order execution when the market regime
+    gate has determined the basket is too flat for meaningful trading.
+    Applies to new BUY orders only (exits/position management still allowed).
+
+    Returns OrderResult if blocked, None if allowed.
+    """
+    # Only apply to BUY orders (new entries) — SELL/exit orders should pass
+    if intent.action != "buy":
+        return None
+
+    try:
+        from merid.market_regime import get_regime_gate, RegimeAction
+
+        gate = get_regime_gate()
+        if not gate.cfg.enabled:
+            return None
+
+        # Check last decision — if no decision yet, allow (fail-open)
+        last_decision = gate.get_last_decision()
+        if last_decision is None:
+            return None
+
+        # If BLOCK (and not shadow mode), reject new entries
+        if last_decision.action == RegimeAction.BLOCK and not last_decision.shadow_mode:
+            latency = (time.monotonic() - t0) * 1000
+            logger.warning(
+                "[order-router] REJECTED by market regime gate: %s — basket too flat (%d/%d assets) | "
+                "reasons=%s",
+                intent.ticker,
+                last_decision.flat_count,
+                last_decision.total_assets,
+                last_decision.reason_codes,
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"market_regime_block:{','.join(last_decision.reason_codes)}",
+                latency_ms=round(latency, 2),
+            )
+
+        # Log REDUCE state for observability (but don't block)
+        if last_decision.action == RegimeAction.REDUCE:
+            logger.debug(
+                "[order-router] Market regime REDUCE active: %s — sizing reduced (%d/%d flat)",
+                intent.ticker,
+                last_decision.flat_count,
+                last_decision.total_assets,
+            )
+
+    except Exception as exc:
+        # Fail-open: log but don't block if gate evaluation fails
+        logger.debug("[order-router] Market regime gate check failed (fail-open): %s", exc)
+
+    return None
+
+
 def _check_ticker_valid(intent: OrderIntent) -> Optional[str]:
     """Validate Kalshi ticker format before routing order.
     
@@ -1723,6 +1784,11 @@ def route_order(intent: OrderIntent) -> OrderResult:
     if sanity_rejection:
         return sanity_rejection
 
+    # ── Market Regime Gate: basket flatness check ────────────────────
+    _regime_rejection = _check_market_regime_gate(intent, mode, t0)
+    if _regime_rejection:
+        return _regime_rejection
+
     # ── Pre-trade gate: lease + dedup + fill-awareness ────────────────
     gate_rejection = _run_pre_trade_gate(intent, mode, t0)
     if gate_rejection:
@@ -1904,6 +1970,11 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     sanity_rejection = _check_sanity(intent, t0, mode)
     if sanity_rejection:
         return sanity_rejection
+
+    # ── Market Regime Gate: basket flatness check ────────────────────
+    _regime_rejection = _check_market_regime_gate(intent, mode, t0)
+    if _regime_rejection:
+        return _regime_rejection
 
     # ── Pre-trade gate: lease + dedup + fill-awareness ────────────────
     gate_rejection = _run_pre_trade_gate(intent, mode, t0)

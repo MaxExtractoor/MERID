@@ -61,6 +61,9 @@ from merid.trading.kalshi_filter_pipeline import FilterPipeline, FilterPipelineC
 from merid.guards import TradingGuardian, GoLiveChecklist, TradingMode
 from merid.formulas import generate_correlation_id, FORMULAS_VERSION, AUDIT_SPEC_VERSION
 
+# Market Regime Gate — crypto basket flatness filter
+from merid.market_regime import get_regime_gate, RegimeAction
+
 logger = get_logger(__name__)
 
 # Local transport/connection failures — not an HTTP status from Kalshi (avoid 503 confusion).
@@ -671,6 +674,19 @@ class KalshiContinuousTrader:
         except Exception:
             self._notifier = None
 
+        # Market Regime Gate — crypto basket flatness filter
+        try:
+            self._regime_gate = get_regime_gate()
+            self._regime_gate_enabled = self._regime_gate.cfg.enabled
+        except Exception as _rg_exc:
+            logger.warning("[REGIME-GATE-INIT-FAILED] %s — continuing without gate", _rg_exc)
+            self._regime_gate = None
+            self._regime_gate_enabled = False
+        # Per-cycle regime state (set in _run_cycle_inner, checked before new entries)
+        self._regime_block_new_entries: bool = False
+        self._regime_reduce_sizing: bool = False
+        self._last_regime_decision: Optional[Any] = None
+
         # Load RSA credentials (guarded — failure disables trading but keeps instance alive)
         kalshi_env = os.environ.get("KALSHI_ENV", "demo").lower()
         if kalshi_env == "live":
@@ -1211,6 +1227,45 @@ class KalshiContinuousTrader:
         """Pick one spot price for bankroll vol; see ``_vol_benchmark_spot_and_asset``."""
         v, _ = KalshiContinuousTrader._vol_benchmark_spot_and_asset(spot_prices, active_assets)
         return v
+
+    def _build_regime_snapshot(self, spot_prices: Dict[str, float]) -> Dict[str, Any]:
+        """Build basket snapshot for MarketRegimeGate evaluation.
+
+        Derives per-asset metrics from indicator stacks (ATR, returns, volume profile).
+        Returns dict mapping asset -> metrics for gate evaluation.
+        """
+        snapshot: Dict[str, Any] = {}
+        for asset, stack in self._indicator_stacks.items():
+            try:
+                snap = stack.snapshot()
+                # Derive return from recent price action (vs prior close)
+                current = getattr(snap, "current_price", spot_prices.get(asset, 0))
+                prior = getattr(snap, "prior_close", current)
+                return_pct = ((current - prior) / prior * 100) if prior and prior > 0 else 0.0
+
+                # ATR as % of price
+                atr = getattr(snap, "atr", 0.0)
+                atr_pct = (atr / current * 100) if current and current > 0 else 0.0
+
+                # Volume ratio (current vs average) — approximate from stack internals
+                vol_ratio = getattr(snap, "volume_ratio", 1.0)
+                if not vol_ratio or vol_ratio <= 0:
+                    vol_ratio = 1.0  # neutral if unknown
+
+                # ADX if available
+                adx = getattr(snap, "adx", None)
+
+                snapshot[asset] = {
+                    "return_pct": return_pct,
+                    "atr_pct": atr_pct,
+                    "vol_ratio": vol_ratio,
+                    "adx": adx,
+                    "price": current,
+                }
+            except Exception as _snap_exc:
+                logger.debug("[REGIME-SNAPSHOT] Failed for %s: %s", asset, _snap_exc)
+                continue
+        return snapshot
 
     def _format_band(self, pct_band: float | None = None, dollar_band: float | None = None) -> str:
         if pct_band is not None:
@@ -2216,6 +2271,56 @@ class KalshiContinuousTrader:
         except Exception:
             pass
 
+        # ═══════════════════════════════════════════════════════════════════════
+        # MARKET REGIME GATE — Evaluate basket flatness before trading
+        # ═══════════════════════════════════════════════════════════════════════
+        _regime_decision = None
+        if self._regime_gate_enabled and self._regime_gate:
+            try:
+                _regime_snapshot = self._build_regime_snapshot(spot_prices)
+                if _regime_snapshot:
+                    _regime_decision = self._regime_gate.evaluate(_regime_snapshot)
+                    _regime_action = _regime_decision.action
+
+                    # Log structured regime state
+                    logger.info(
+                        "[REGIME-GATE] action=%s flat=%d/%d reasons=%s shadow=%s",
+                        _regime_action.value,
+                        _regime_decision.flat_count,
+                        _regime_decision.total_assets,
+                        _regime_decision.reason_codes,
+                        _regime_decision.shadow_mode,
+                    )
+
+                    # Store regime state for downstream sizing decisions
+                    self._last_regime_decision = _regime_decision
+
+                    # If BLOCK (and not shadow mode), skip trading this cycle
+                    if _regime_action == RegimeAction.BLOCK and not _regime_decision.shadow_mode:
+                        logger.warning(
+                            "[REGIME-BLOCK] Basket too flat (%d/%d assets) — skipping new entries",
+                            _regime_decision.flat_count,
+                            _regime_decision.total_assets,
+                        )
+                        # Allow the cycle to continue for exits/position management,
+                        # but set a flag that will be checked before new entries
+                        self._regime_block_new_entries = True
+                    else:
+                        self._regime_block_new_entries = False
+
+                    # If REDUCE, mark for position sizing reduction
+                    if _regime_action == RegimeAction.REDUCE:
+                        self._regime_reduce_sizing = True
+                    else:
+                        self._regime_reduce_sizing = False
+            except Exception as _rg_eval_exc:
+                logger.warning("[REGIME-GATE-EVAL-FAILED] %s — continuing without gate", _rg_eval_exc)
+                self._regime_block_new_entries = False
+                self._regime_reduce_sizing = False
+        else:
+            self._regime_block_new_entries = False
+            self._regime_reduce_sizing = False
+
         # Feed spot prices to BTC-anchored model (auto-derives returns on 2nd+ call).
         # Include daily so alt agents on daily timeframe get proper beta estimates.
         if self._btc_anchored_model is not None:
@@ -3085,6 +3190,17 @@ class KalshiContinuousTrader:
                 )
                 continue
 
+            # ═══════════════════════════════════════════════════════════════════════
+            # MARKET REGIME GATE — Reduce position size when basket shows low activity
+            # ═══════════════════════════════════════════════════════════════════════
+            if self._regime_reduce_sizing and order_count > 1:
+                _reduced = max(1, order_count // 2)
+                logger.info(
+                    "[REGIME-REDUCE] %s | contracts: %d -> %d (50%% reduction for low-activity regime)",
+                    c.ticker, order_count, _reduced,
+                )
+                order_count = _reduced
+
             # ── Section 2 sizing caps — applied in order, all logged ─────────
             _caps_fired: list = []
 
@@ -3269,6 +3385,16 @@ class KalshiContinuousTrader:
                     _asset_current,
                     cost_cents,
                     _asset_cap_cents,
+                )
+                continue
+
+            # ═══════════════════════════════════════════════════════════════════════
+            # MARKET REGIME GATE — Block new entries when basket is flat
+            # ═══════════════════════════════════════════════════════════════════════
+            if self._regime_block_new_entries:
+                logger.warning(
+                    "  [REGIME-BLOCK-ORDER] Skip %s: market regime gate BLOCK (basket too flat)",
+                    c.ticker,
                 )
                 continue
 
