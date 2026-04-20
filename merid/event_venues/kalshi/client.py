@@ -54,6 +54,38 @@ from utils.logger import get_logger
 logger = get_logger("merid.event_venues.kalshi.client")
 
 
+async def _validate_ticker_exists(ticker: str) -> tuple[bool, Optional[str]]:
+    """Validate that a ticker exists in the Kalshi market catalog.
+
+    Args:
+        ticker: The Kalshi market ticker to validate (e.g., KXETH15M-26APR192030-30)
+
+    Returns:
+        Tuple of (exists: bool, error_message: Optional[str])
+        If exists is False, error_message explains why.
+    """
+    if not ticker:
+        return False, "Empty ticker"
+
+    # Basic format validation - Kalshi tickers should start with KX
+    if not ticker.startswith("KX"):
+        return False, f"Invalid ticker format (must start with KX): {ticker}"
+
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        catalog = get_market_catalog()
+        if catalog:
+            market = catalog.get_market(ticker)
+            if market:
+                return True, None
+            return False, f"Ticker not found in catalog: {ticker}"
+    except Exception as exc:
+        # If catalog is unavailable, log warning but allow (fail-open for resilience)
+        logger.debug(f"Could not validate ticker {ticker} against catalog: {exc}")
+
+    return True, None  # Fail-open if catalog check fails
+
+
 def merid_time_in_force_to_kalshi_api(tif: Optional[str]) -> str:
     """Map internal/MERID time-in-force labels to Kalshi Trade API v2 strings.
 
@@ -1415,19 +1447,26 @@ class KalshiVenueClient(EventVenueClient):
             order_group_id: Optional order group ID for aggregate limits
             self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
         """
-        # Normalize ticker to Kalshi canonical format (e.g., KXBTC15M-... -> KXBTC-15M-...)
-        from merid.event_venues.kalshi.settlement_poller import normalize_kalshi_ticker
-        normalized_ticker = normalize_kalshi_ticker(order.market_id)
-        
-        if normalized_ticker != order.market_id:
-            logger.info(
-                "[KALSHI_TICKER_NORMALIZE] original=%s normalized=%s",
-                order.market_id, normalized_ticker
+        # Use market_id directly as the ticker - it should already be in Kalshi's format
+        # from the market catalog. DO NOT normalize here - normalization is for internal
+        # grouping only and can break the actual Kalshi ticker format.
+        # Example: KXETH15M-26APR192030-30 is VALID from Kalshi catalog
+        #          KXETH-15M-26APR192030-30 is INVALID (normalization incorrectly adds dash)
+        ticker = order.market_id
+
+        # Pre-send validation: verify ticker exists in catalog to prevent 404s
+        valid, error_msg = await _validate_ticker_exists(ticker)
+        if not valid:
+            logger.error(f"[KALSHI_PRE_SEND_VALIDATION] Rejecting order for invalid ticker: {error_msg}")
+            return OperationResult.fail(
+                error_msg or f"Invalid ticker: {ticker}",
+                latency_ms=0.0,
+                retries=0,
             )
 
         outcome = order.outcome_id or "yes"
         kalshi_order: Dict[str, Any] = {
-            "ticker": normalized_ticker,
+            "ticker": ticker,
             "action": order.side,           # "buy" or "sell"
             "side": outcome,                # "yes" or "no"
             "count": int(order.size),
