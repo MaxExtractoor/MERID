@@ -604,7 +604,16 @@ class MeridLoop:
         # _execute_plans checks them.  Previously reconciliation was in the
         # parallel batch (step 7) while execution ran at step 5 — wrong order.
         if self.config.enable_reconciliation and now - self._last_reconciliation >= self.config.reconciliation_interval:
-            await self._run_step("reconciliation", self._reconcile_positions(summary), summary)
+            # P1-HARDENING: Wrap reconciliation in timeout to prevent blocking loop
+            try:
+                await self._run_step(
+                    "reconciliation",
+                    asyncio.wait_for(self._reconcile_positions(summary), timeout=1.2),
+                    summary
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[BUDGET] reconciliation timed out after 1.2s — will retry next tick")
+                summary["actions"].append("reconciliation:timeout_skip")
             self._last_reconciliation = now
 
         if self.config.enable_execution:
@@ -659,17 +668,41 @@ class MeridLoop:
         First tries live API feeds (Finnhub, FRED, CoinGecko).
         Then reads aggregated features through the feature service.
         For prediction domain: generates Kalshi-specific signals.
+        
+        P1-HARDENING: Added global budget enforcement (1500ms) and per-API timeouts
+        to prevent 10s+ stalls when external feeds are slow.
         """
         # AGGRESSIVE: Skip features refresh for first 120 ticks (~10 min) during startup
         if self.metrics.total_ticks < 120:
             summary["actions"].append("features_refreshed:skipped_startup_cooldown")
             return
+        
+        # P1-HARDENING: Global features budget
+        FEATURES_MAX_MS = float(os.getenv("MERID_FEATURES_MAX_MS", "1500"))
+        features_start = time.perf_counter()
+        
+        def _check_features_budget() -> bool:
+            elapsed_ms = (time.perf_counter() - features_start) * 1000
+            if elapsed_ms > FEATURES_MAX_MS:
+                logger.warning(
+                    "[BUDGET] features budget_exceeded after %.1fms (budget %.0fms) — exiting early",
+                    elapsed_ms, FEATURES_MAX_MS
+                )
+                return True
+            return False
 
-        # Try live data first
+        # Try live data first with timeout
         try:
             from merid.signals.live_feeds import get_live_feed_manager
             mgr = get_live_feed_manager()
-            await mgr.refresh_all(self.config.active_symbols, now)
+            # P1-HARDENING: 1.0s timeout for live feeds to stay within budget
+            await asyncio.wait_for(
+                mgr.refresh_all(self.config.active_symbols, now),
+                timeout=1.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[BUDGET] Live feed refresh timed out after 1.0s — using cached/synthetic")
+            summary["actions"].append("features_refreshed:live_feed_timeout")
         except Exception as e:
             logger.warning(f"Live feed refresh failed (using cached/synthetic): {e}")
 
@@ -683,6 +716,11 @@ class MeridLoop:
         # BUG-EL18 fix: Reduced from 5 symbols to prevent 6.5s+ blocking (budget is 1s)
         MAX_SYMBOLS_PER_TICK = 1
         symbols_this_tick = self.config.active_symbols[:MAX_SYMBOLS_PER_TICK]
+        
+        # P1-HARDENING: Check budget before expensive thread pool work
+        if _check_features_budget():
+            summary["actions"].append("features_refreshed:budget_exceeded_before_processing")
+            return
         
         def _sync_feature_refresh():
             batch = []
@@ -1939,10 +1977,11 @@ class MeridLoop:
                 # BUG-H4 fix: sync actual Kalshi position notional into ExecutionGuard
                 # so VenueExposureCap.current_exposure_usd reflects reality after
                 # restarts and position closes, not just the additive fill counter.
+                # P1-HARDENING: Reduced timeout from 5.0s to 1.0s to stay within budget
                 try:
                     from merid.event_venues.kalshi.client import get_kalshi_client as _gkc
                     _positions_result = await asyncio.wait_for(
-                        _gkc().get_positions(), timeout=5.0
+                        _gkc().get_positions(), timeout=1.0
                     )
                     if _positions_result and hasattr(_positions_result, "data"):
                         _pos_list = _positions_result.data or []
