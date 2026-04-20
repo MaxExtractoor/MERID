@@ -24,7 +24,7 @@ import time
 import threading
 import traceback
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Set
+from typing import List, Optional, Dict, Any, Set, Callable
 from collections import defaultdict
 
 from utils.logger import get_logger
@@ -105,7 +105,12 @@ class LoopLagStats:
 
 class LoopLagMonitor:
     """Monitor event-loop lag via periodic timer checks.
-    
+
+    EVENT-LOOP-FIX: Implements progressive load shedding based on lag thresholds:
+    - elevated (50ms): Log warning, notify health endpoint
+    - degraded (500ms): Trigger scope reduction callbacks (shed non-critical work)
+    - halt (2000ms): Consider shutdown after consecutive samples, if shedding fails
+
     Usage:
         monitor = LoopLagMonitor()
         monitor.start()  # Begins monitoring
@@ -113,10 +118,10 @@ class LoopLagMonitor:
         stats = monitor.get_stats()  # Get current stats
         monitor.stop()
     """
-    
+
     _instance: Optional[LoopLagMonitor] = None
     _lock = threading.Lock()
-    
+
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
@@ -124,11 +129,11 @@ class LoopLagMonitor:
                     cls._instance = super().__new__(cls)
                     cls._instance._initialized = False
         return cls._instance
-    
+
     def __init__(self, interval_ms: float = 1000.0):
         if self._initialized:
             return
-        
+
         self._initialized = True
         self._interval_ms = interval_ms
         self._running = False
@@ -136,11 +141,26 @@ class LoopLagMonitor:
         self._stats = LoopLagStats()
         self._expected_time: Optional[float] = None
         self._shutdown_event: Optional[asyncio.Event] = None
-        
+
         # Profiling data for high-lag periods
         self._profiling_enabled = True
         self._high_lag_profiles: List[Dict[str, Any]] = []
         self._max_profiles = 10
+
+        # EVENT-LOOP-FIX: Action callbacks for progressive load shedding
+        self._on_elevated_callbacks: List[Callable[[float], None]] = []
+        self._on_degraded_callbacks: List[Callable[[float], None]] = []
+        self._on_halt_callbacks: List[Callable[[float, int], Optional[bool]]] = []
+
+        # Consecutive halt-band tracking for shutdown decision
+        self._halt_consecutive_count: int = 0
+        self._halt_max_consecutive: int = int(os.getenv("KALSHI_LOOP_LAG_HALT_CONSECUTIVE", "3"))
+        self._last_action_ts: float = 0.0
+        self._action_cooldown_s: float = 5.0  # Min time between actions
+
+        # Load shedding state
+        self._scope_reduced: bool = False
+        self._scope_reduced_at: Optional[float] = None
         
     def _capture_task_snapshot(self) -> List[Dict[str, Any]]:
         """Capture snapshot of currently running asyncio tasks."""
@@ -204,12 +224,146 @@ class LoopLagMonitor:
         if self._task and not self._task.done():
             self._task.cancel()
     
+    def on_elevated(self, callback: Callable[[float], None]) -> None:
+        """Register callback for elevated lag events.
+
+        Callback receives the lag_ms value.
+        """
+        self._on_elevated_callbacks.append(callback)
+
+    def on_degraded(self, callback: Callable[[float], None]) -> None:
+        """Register callback for degraded lag events (scope reduction).
+
+        Callback receives the lag_ms value. Should trigger load shedding.
+        """
+        self._on_degraded_callbacks.append(callback)
+
+    def on_halt(self, callback: Callable[[float, int], Optional[bool]]) -> None:
+        """Register callback for halt-band lag events.
+
+        Callback receives (lag_ms, consecutive_count) and should return:
+        - True if shutdown should proceed
+        - False if load shedding was successful (stay alive)
+        - None for default behavior (shutdown after threshold)
+        """
+        self._on_halt_callbacks.append(callback)
+
+    def _check_rate_limit(self) -> bool:
+        """Check if action can be taken (rate limiting)."""
+        now = time.time()
+        if now - self._last_action_ts < self._action_cooldown_s:
+            return False
+        self._last_action_ts = now
+        return True
+
+    def _trigger_elevated(self, lag_ms: float) -> None:
+        """Trigger elevated lag callbacks."""
+        for cb in self._on_elevated_callbacks:
+            try:
+                cb(lag_ms)
+            except Exception as e:
+                logger.debug(f"Elevated callback error: {e}")
+
+    def _trigger_degraded(self, lag_ms: float) -> None:
+        """Trigger degraded lag callbacks (scope reduction)."""
+        if not self._scope_reduced and self._check_rate_limit():
+            self._scope_reduced = True
+            self._scope_reduced_at = time.time()
+            logger.warning(
+                "[LOOP-LAG] ENTERING DEGRADED MODE — lag %.1fms, reducing scope",
+                lag_ms
+            )
+
+        for cb in self._on_degraded_callbacks:
+            try:
+                cb(lag_ms)
+            except Exception as e:
+                logger.debug(f"Degraded callback error: {e}")
+
+    def _trigger_halt(self, lag_ms: float) -> None:
+        """Trigger halt-band callbacks (consider shutdown).
+
+        Returns True if shutdown should proceed, False otherwise.
+        """
+        self._halt_consecutive_count += 1
+
+        # Always call callbacks to allow custom handling
+        should_shutdown: Optional[bool] = None
+        for cb in self._on_halt_callbacks:
+            try:
+                result = cb(lag_ms, self._halt_consecutive_count)
+                if result is not None:
+                    should_shutdown = result
+            except Exception as e:
+                logger.debug(f"Halt callback error: {e}")
+
+        # If callbacks explicitly said don't shutdown, respect that
+        if should_shutdown is False:
+            logger.warning(
+                "[LOOP-LAG] HALT BAND (%.1fms, count=%d) — callbacks suppressed shutdown",
+                lag_ms, self._halt_consecutive_count
+            )
+            return
+
+        # Default: shutdown after consecutive threshold
+        if self._halt_consecutive_count >= self._halt_max_consecutive:
+            logger.critical(
+                "[LOOP-LAG] HALT BAND SHUTDOWN TRIGGERED — lag %.1fms for %d consecutive samples "
+                "(max=%d). Initiating controlled shutdown.",
+                lag_ms, self._halt_consecutive_count, self._halt_max_consecutive
+            )
+            try:
+                from web.asgi_guard import initiate_shutdown, ShutdownReason
+                initiate_shutdown(
+                    reason=ShutdownReason.LOOP_LAG_HALT,
+                    sub_reason=f"lag_{lag_ms:.0f}ms_consecutive_{self._halt_consecutive_count}",
+                    initiator_module="merid.diagnostics.loop_lag",
+                    metrics={
+                        "lag_ms": lag_ms,
+                        "consecutive_count": self._halt_consecutive_count,
+                        "scope_reduced": self._scope_reduced,
+                    }
+                )
+            except Exception as e:
+                logger.critical(f"Failed to initiate shutdown: {e}")
+        else:
+            logger.warning(
+                "[LOOP-LAG] HALT BAND (%.1fms, count=%d/%d) — approaching shutdown threshold",
+                lag_ms, self._halt_consecutive_count, self._halt_max_consecutive
+            )
+
+    def _reset_state_on_recovery(self, lag_ms: float) -> None:
+        """Reset state when lag recovers to healthy levels."""
+        if self._halt_consecutive_count > 0:
+            logger.info(
+                "[LOOP-LAG] Lag recovered to %.1fms, resetting halt counter (was %d)",
+                lag_ms, self._halt_consecutive_count
+            )
+            self._halt_consecutive_count = 0
+
+        if self._scope_reduced and self._scope_reduced_at:
+            # Only restore after sustained recovery
+            recovery_duration = time.time() - self._scope_reduced_at
+            if recovery_duration > 30.0:  # 30s of recovery before restoring scope
+                logger.info(
+                    "[LOOP-LAG] Scope restoration after %.1fs recovery",
+                    recovery_duration
+                )
+                self._scope_reduced = False
+                self._scope_reduced_at = None
+
     async def _monitor_loop(self) -> None:
-        """Main monitoring loop."""
+        """Main monitoring loop with progressive load shedding.
+
+        EVENT-LOOP-FIX: Implements concrete actions at each threshold:
+        - elevated (50ms): Log warning, notify health endpoint
+        - degraded (500ms): Trigger scope reduction callbacks
+        - halt (2000ms): Consider shutdown after consecutive samples
+        """
         while self._running:
             t0 = time.monotonic()
             self._expected_time = t0 + (self._interval_ms / 1000.0)
-            
+
             # Try to sleep exactly interval_ms
             try:
                 await asyncio.wait_for(
@@ -219,44 +373,45 @@ class LoopLagMonitor:
                 break  # Shutdown requested
             except asyncio.TimeoutError:
                 pass
-            
+
             # Measure how late we are
             t1 = time.monotonic()
             lag_ms = max(0.0, (t1 - self._expected_time) * 1000.0)
-            
+
             self._stats.add(LoopLagSample(timestamp=t1, lag_ms=lag_ms))
 
             th = get_loop_lag_thresholds_ms()
             h_ok = th["healthy_ms"]
             d_ms = th["degrade_ms"]
             halt_ms = th["halt_ms"]
-            
+
             # Capture profiling data for high lag
             if lag_ms >= d_ms and self._profiling_enabled:
                 tasks = self._capture_task_snapshot()
                 self._record_high_lag_profile(lag_ms, tasks)
-            
+
+            # EVENT-LOOP-FIX: Progressive action based on lag band
             if lag_ms >= halt_ms:
-                logger.warning(
-                    "Event-loop lag in halt band: %.1fms (halt>=%.0fms) — possible blocking operation",
-                    lag_ms,
-                    halt_ms,
-                )
+                self._trigger_halt(lag_ms)
             elif lag_ms >= d_ms:
-                logger.warning(
-                    "Event-loop lag degraded: %.1fms (degrade>=%.0fms)",
-                    lag_ms,
-                    d_ms,
-                )
+                self._trigger_degraded(lag_ms)
+                self._reset_state_on_recovery(lag_ms)
             elif lag_ms >= h_ok:
-                logger.warning("Event-loop lag elevated: %.1fms (healthy<%.0fms)", lag_ms, h_ok)
+                self._trigger_elevated(lag_ms)
+                self._reset_state_on_recovery(lag_ms)
+            else:
+                # Healthy - reset any elevated state
+                self._reset_state_on_recovery(lag_ms)
     
     def get_stats(self) -> LoopLagStats:
         """Get current lag statistics."""
         return self._stats
     
     def get_health(self) -> Dict[str, Any]:
-        """Get health status for monitoring endpoints."""
+        """Get health status for monitoring endpoints.
+
+        EVENT-LOOP-FIX: Includes load-shedding state for external health checks.
+        """
         stats = self._stats
         th = get_loop_lag_thresholds_ms()
         h_ms = th["healthy_ms"]
@@ -278,6 +433,11 @@ class LoopLagMonitor:
             "degraded": degraded,
             "critical": critical,
             "high_lag_profiles": len(self._high_lag_profiles),
+            # EVENT-LOOP-FIX: Load shedding state
+            "scope_reduced": self._scope_reduced,
+            "scope_reduced_at": self._scope_reduced_at,
+            "halt_consecutive_count": self._halt_consecutive_count,
+            "halt_max_consecutive": self._halt_max_consecutive,
         }
         return health
 

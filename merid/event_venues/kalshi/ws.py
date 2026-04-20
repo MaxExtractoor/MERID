@@ -130,6 +130,7 @@ class KalshiWebSocket(EventVenueStream):
             "elevated": 0.50,
             "warn": 0.75,
             "critical": 0.90,
+            "shutdown": 0.98,  # EVENT-LOOP-FIX: Shutdown if shedding fails
             "restore": 0.40,  # Hysteresis: restore only when below 40%
         }
         self._last_pressure_action: Optional[str] = None
@@ -137,7 +138,13 @@ class KalshiWebSocket(EventVenueStream):
         self._last_action_ts: float = 0.0
         self._essential_tickers: List[str] = []  # Set via set_essential_tickers()
         self._is_reduced_scope: bool = False  # Track if we've shed load
-        
+
+        # EVENT-LOOP-FIX: Queue pressure shutdown tracking
+        self._pressure_shutdown_consecutive: int = 0  # Consecutive critical samples
+        self._pressure_shutdown_max: int = int(os.getenv("KALSHI_WS_PRESSURE_SHUTDOWN_MAX", "3"))
+        self._pressure_post_shed_utilization: Optional[float] = None  # Utilization after last shed
+        self._shedding_failed_count: int = 0  # Times shedding didn't relieve pressure
+
         # ── Durable subscription state for restoration ───────────────────────
         self._full_subscription_state: Optional[Dict[str, Any]] = None  # Saved before shed
         self._last_shed_at: Optional[float] = None  # Monotonic timestamp
@@ -1408,6 +1415,48 @@ class KalshiWebSocket(EventVenueStream):
             now = time.monotonic()
             cooldown_elapsed = now - self._last_action_ts
             
+            # EVENT-LOOP-FIX: Track consecutive critical samples for shutdown decision
+            if utilization >= self._pressure_thresholds["critical"]:
+                self._pressure_shutdown_consecutive += 1
+            else:
+                # Reset counter on recovery (but keep if still elevated)
+                if utilization < self._pressure_thresholds["warn"]:
+                    if self._pressure_shutdown_consecutive > 0:
+                        logger.info(
+                            "[QUEUE-PRESSURE] Recovered to %.1f%%, resetting shutdown counter (was %d)",
+                            pressure["utilization_pct"], self._pressure_shutdown_consecutive
+                        )
+                        self._pressure_shutdown_consecutive = 0
+
+            # EVENT-LOOP-FIX: Check for queue pressure shutdown condition
+            # If we've shed load but pressure is still critical, consider shutdown
+            if (self._is_reduced_scope and
+                utilization >= self._pressure_thresholds["critical"] and
+                self._pressure_shutdown_consecutive >= self._pressure_shutdown_max):
+                logger.critical(
+                    "[QUEUE-PRESSURE] SHUTDOWN TRIGGERED — queue pressure %.1f%% "
+                    "persists after load shedding (consecutive=%d, shed_count=%d). "
+                    "Queue processing is failing — initiating controlled shutdown.",
+                    pressure["utilization_pct"],
+                    self._pressure_shutdown_consecutive,
+                    self._shed_count
+                )
+                try:
+                    from web.asgi_guard import initiate_shutdown, ShutdownReason
+                    initiate_shutdown(
+                        reason=ShutdownReason.QUEUE_PRESSURE_HALT,
+                        sub_reason=f"pressure_{pressure['utilization_pct']:.1f}pct_after_shed_{self._shed_count}",
+                        initiator_module="merid.event_venues.kalshi.ws",
+                        metrics={
+                            "utilization_pct": pressure["utilization_pct"],
+                            "messages_dropped": pressure["messages_dropped"],
+                            "shed_count": self._shed_count,
+                            "consecutive_critical": self._pressure_shutdown_consecutive,
+                        }
+                    )
+                except Exception as e:
+                    logger.critical(f"Failed to initiate queue-pressure shutdown: {e}")
+
             if action == "ok" and self._is_reduced_scope and cooldown_elapsed > 30.0:
                 # Recovery: try restoring full scope after 30s of ok pressure
                 # BUT only if utilization is below restore threshold (hysteresis)
@@ -1420,13 +1469,16 @@ class KalshiWebSocket(EventVenueStream):
                         pressure["utilization_pct"],
                         self._pressure_thresholds["restore"] * 100
                     )
-                
+
             elif action == "critical-reduce-scope" and cooldown_elapsed > self._pressure_action_cooldown_s:
                 # Critical: shed load immediately
+                pre_util = pressure["utilization_pct"]
                 await self._shed_load(pressure)
                 self._last_action_ts = now
                 self._last_pressure_action = action
-                
+                # Store for tracking effectiveness
+                self._pressure_post_shed_utilization = pre_util
+
             elif action == "warn-monitor" and self._last_pressure_action != "warn":
                 # Warning: log loudly so operators can prepare
                 logger.warning(
@@ -1435,7 +1487,7 @@ class KalshiWebSocket(EventVenueStream):
                     pressure["utilization_pct"], pressure["messages_dropped"]
                 )
                 self._last_pressure_action = action
-                
+
             elif action == "elevated" and self._last_pressure_action not in ("elevated", "warn", "critical"):
                 # Elevated: first sign of trouble
                 logger.info(

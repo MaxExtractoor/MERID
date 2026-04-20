@@ -90,6 +90,8 @@ class ExecutionGateStatus:
     gate_state: str = GateState.BLOCKED.value  # "clear" | "limited" | "blocked"
     reasons: List[BlockReason] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
+    # EVENT-LOOP-FIX: Diagnostic metrics (advisory only, never blocking)
+    diagnostics: dict = field(default_factory=dict)
 
     @property
     def is_limited(self) -> bool:
@@ -116,6 +118,7 @@ class ExecutionGateStatus:
                 for r in self.reasons
             ],
             "timestamp": self.timestamp,
+            "diagnostics": self.diagnostics,
         }
 
 
@@ -410,6 +413,42 @@ def check_execution_gate() -> ExecutionGateStatus:
     except Exception as exc:
         logger.debug("News feed health check failed: %s", exc)
 
+    # ── Diagnostic metrics collection (advisory only, never blocking) ──
+    # EVENT-LOOP-FIX: Collect loop lag and queue pressure for observability
+    # These do NOT affect the gate state - they are for operator visibility only
+    diagnostics = {}
+    try:
+        from merid.diagnostics.loop_lag import get_loop_lag_monitor
+        lag_health = get_loop_lag_monitor().get_health()
+        diagnostics["event_loop_lag"] = {
+            "current_ms": lag_health.get("stats", {}).get("current_ms", 0),
+            "p95_ms": lag_health.get("stats", {}).get("p95_ms", 0),
+            "max_ms": lag_health.get("stats", {}).get("max_ms", 0),
+            "healthy": lag_health.get("healthy", True),
+            "elevated": lag_health.get("elevated", False),
+            "degraded": lag_health.get("degraded", False),
+            "critical": lag_health.get("critical", False),
+            "scope_reduced": lag_health.get("scope_reduced", False),
+            "halt_consecutive_count": lag_health.get("halt_consecutive_count", 0),
+        }
+    except Exception as e:
+        diagnostics["event_loop_lag"] = {"error": str(e)}
+
+    try:
+        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
+        bridge = get_ws_bridge()
+        if hasattr(bridge, 'get_queue_pressure'):
+            pressure = bridge.get_queue_pressure()
+            diagnostics["queue_pressure"] = {
+                "utilization_pct": pressure.get("utilization_pct", 0),
+                "messages_dropped": pressure.get("messages_dropped", 0),
+                "action": pressure.get("action", "unknown"),
+                "is_reduced_scope": getattr(bridge, '_is_reduced_scope', False),
+                "shed_count": getattr(bridge, '_shed_count', 0),
+            }
+    except Exception as e:
+        diagnostics["queue_pressure"] = {"error": str(e)}
+
     # Event-loop lag: use ``merid.diagnostics.loop_lag`` + /health ``event_loop_lag`` only.
     # It is not a gate input — lag must not flip LIMITED/BLOCKED or appear in ``reasons``.
 
@@ -532,6 +571,7 @@ def check_execution_gate() -> ExecutionGateStatus:
         safe_to_trade=not blocked,
         gate_state=gate_state,
         reasons=reasons,
+        diagnostics=diagnostics,
     )
 
 
