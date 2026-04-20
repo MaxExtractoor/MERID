@@ -482,34 +482,95 @@ class WatchdogCoordinator:
         logger.info("WatchdogCoordinator stopped")
     
     async def _run_loop(self) -> None:
-        """Main watchdog loop."""
+        """Main watchdog loop.
+        
+        EVENT-LOOP-FIX: Added cooperative shutdown with cancellation handling.
+        """
         while self._running:
             try:
+                # Check for cancellation (cooperative shutdown)
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelled():
+                    logger.debug("[WATCHDOG] Cancelled — exiting loop cleanly")
+                    break
+                
                 # Run all checks
                 alerts = await self._run_checks()
                 
                 # Publish alerts
                 for alert in alerts:
+                    # Check cancellation before each publish
+                    if current_task and current_task.cancelled():
+                        break
                     await publish_event("watchdog_alert", alert.to_dict())
                 
-                # Wait for next check
-                await asyncio.sleep(self.check_interval)
+                # Wait for next check with cancellation support
+                try:
+                    await asyncio.sleep(self.check_interval)
+                except asyncio.CancelledError:
+                    logger.debug("[WATCHDOG] Cancelled during sleep — exiting cleanly")
+                    break
                 
+            except asyncio.CancelledError:
+                logger.debug("[WATCHDOG] Cancelled — exiting loop cleanly")
+                break
             except Exception as e:
                 logger.error(f"Watchdog check error: {e}", exc_info=True)
-                await asyncio.sleep(self.check_interval)
+                try:
+                    await asyncio.sleep(self.check_interval)
+                except asyncio.CancelledError:
+                    break
     
     async def _run_checks(self) -> List[WatchdogAlert]:
-        """Run all watchdog checks."""
+        """Run all watchdog checks.
+        
+        EVENT-LOOP-FIX: Added lag-aware gating and timeout budget to prevent
+        watchdog checks from adding pressure when event loop is degraded.
+        """
+        # Check event loop lag before running - skip if critically lagged
+        try:
+            from merid.diagnostics.loop_lag import get_current_lag_ms
+            current_lag_ms = get_current_lag_ms()
+            if current_lag_ms > 2000:  # Skip checks if lag is critical (>2s)
+                logger.debug(
+                    "[WATCHDOG-LAG-SKIP] Skipping checks due to high loop lag: %.0fms",
+                    current_lag_ms
+                )
+                return []
+        except Exception:
+            pass  # Continue with checks if lag check fails
+        
         alerts = []
+        check_start = time.time()
         
-        # Liveness checks
-        liveness_alerts = await self.liveness.check_liveness()
-        alerts.extend(liveness_alerts)
+        # EVENT-LOOP-FIX: Hard budget for all checks combined
+        _WATCHDOG_CHECK_BUDGET_S = 5.0
         
-        # Consensus checks
-        consensus_alerts = await self.consensus.check_consensus_health()
-        alerts.extend(consensus_alerts)
+        try:
+            # Liveness checks with timeout
+            liveness_task = asyncio.create_task(self.liveness.check_liveness())
+            liveness_alerts = await asyncio.wait_for(liveness_task, timeout=_WATCHDOG_CHECK_BUDGET_S)
+            alerts.extend(liveness_alerts)
+            
+            # Check budget remaining
+            elapsed = time.time() - check_start
+            if elapsed > _WATCHDOG_CHECK_BUDGET_S:
+                logger.warning(
+                    "[WATCHDOG-BUDGET] Check budget exceeded after liveness: %.1fs",
+                    elapsed
+                )
+                return alerts
+            
+            # Consensus checks with remaining budget
+            remaining_budget = _WATCHDOG_CHECK_BUDGET_S - elapsed
+            consensus_task = asyncio.create_task(self.consensus.check_consensus_health())
+            consensus_alerts = await asyncio.wait_for(consensus_task, timeout=remaining_budget)
+            alerts.extend(consensus_alerts)
+            
+        except asyncio.TimeoutError:
+            logger.warning("[WATCHDOG-TIMEOUT] Watchdog checks exceeded budget")
+        except Exception as e:
+            logger.error(f"Watchdog check error: {e}")
         
         return alerts
 
