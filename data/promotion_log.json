@@ -757,5 +757,16 @@
     "report_timestamp": 1776795324.9179866,
     "runbook_version": "1.0",
     "source": "automation"
+  },
+  {
+    "timestamp": 1776800205.1273942,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "eligible",
+    "reason": "all rings passing, domain meets requirements",
+    "report_timestamp": 1776800205.1273942,
+    "runbook_version": "1.0",
+    "source": "automation"
   }
 ]

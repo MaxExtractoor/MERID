@@ -123,14 +123,19 @@ class TestPortfolioOptimizerBasics(unittest.TestCase):
     """Basic initialization and configuration tests."""
     
     def test_default_initialization(self):
-        """Test optimizer initializes with defaults."""
+        """Test optimizer initializes with defaults (percent-based sizing)."""
         opt = PortfolioOptimizer()
         
         self.assertEqual(opt.assets, KALSHI_CRYPTO_ASSETS)
         self.assertEqual(opt.max_concurrent_assets, 3)
-        self.assertEqual(opt.min_risk_usd, 1)
-        self.assertEqual(opt.max_risk_usd, 3)
-        self.assertEqual(opt.global_risk_budget, 9)
+        # Percent-based mode is now default; legacy USD fields default to 0
+        self.assertEqual(opt.min_risk_pct, 0.005)  # 0.5%
+        self.assertEqual(opt.max_risk_pct, 0.02)  # 2%
+        self.assertEqual(opt.max_risk_pct_global, 0.06)  # 6% = 3 assets × 2%
+        # Legacy USD fields are deprecated and default to 0
+        self.assertEqual(opt.min_risk_usd, 0)
+        self.assertEqual(opt.max_risk_usd, 0)
+        self.assertEqual(opt.global_risk_budget, 0)
     
     def test_custom_initialization(self):
         """Test optimizer with custom config."""
@@ -495,8 +500,11 @@ class TestRebalanceLogic(unittest.TestCase):
             "SOL": np.random.normal(0.0012, 0.04, 50),
         }, index=dates)
         
+        # Explicit USD config triggers legacy USD mode for these tests
         self.opt = PortfolioOptimizer({
             "assets": ["BTC", "ETH", "SOL"],
+            "min_risk_usd_per_trade": 1,
+            "max_risk_usd_per_trade": 3,
             "global_risk_budget": 9,
         })
         self.opt.load_returns(returns)
