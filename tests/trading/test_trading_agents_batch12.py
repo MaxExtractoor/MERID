@@ -26,7 +26,7 @@ class TestOrderBookSnapshot:
         
         snapshot = OrderBookSnapshot(
             venue="binance",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             timestamp=time.time(),
             bids=bids,
             asks=asks,
@@ -35,7 +35,7 @@ class TestOrderBookSnapshot:
         )
         
         assert snapshot.venue == "binance"
-        assert snapshot.asset == "BTCUSDT"
+        assert snapshot.asset == "BTCUSD"
         assert snapshot.mid_price == 45050.0
         assert len(snapshot.bids) == 2
 
@@ -121,10 +121,10 @@ class TestSlippageAgent:
         bids = [(45000.0, 1.0), (44900.0, 2.0)]
         asks = [(45100.0, 1.5), (45200.0, 2.5)]
         
-        snapshot = agent.analyze_order_book("binance", "BTCUSDT", bids, asks)
+        snapshot = agent.analyze_order_book("binance", "BTCUSD", bids, asks)
         
         assert snapshot.venue == "binance"
-        assert snapshot.asset == "BTCUSDT"
+        assert snapshot.asset == "BTCUSD"
         assert snapshot.mid_price == 45050.0  # (45100 + 45000) / 2
         assert snapshot.spread_bps > 0
 
@@ -133,7 +133,7 @@ class TestSlippageAgent:
         bids = [(45000.0, 10.0)]
         asks = [(45100.0, 10.0)]
         
-        snapshot = agent.analyze_order_book("binance", "BTCUSDT", bids, asks)
+        snapshot = agent.analyze_order_book("binance", "BTCUSD", bids, asks)
         
         # Use urgent urgency to force market order
         strategy = agent.recommend_execution_strategy(
@@ -148,7 +148,7 @@ class TestSlippageAgent:
         bids = [(45000.0, 0.1)]
         asks = [(45100.0, 0.1)]
         
-        snapshot = agent.analyze_order_book("binance", "BTCUSDT", bids, asks)
+        snapshot = agent.analyze_order_book("binance", "BTCUSD", bids, asks)
         
         # Large order relative to liquidity
         strategy = agent.recommend_execution_strategy(
@@ -164,7 +164,7 @@ class TestSlippageAgent:
         bids = [(45000.0, 1.0)]
         asks = [(45100.0, 1.0)]
         
-        snapshot = agent.analyze_order_book("binance", "BTCUSDT", bids, asks)
+        snapshot = agent.analyze_order_book("binance", "BTCUSD", bids, asks)
         
         strategy = agent.recommend_execution_strategy(
             snapshot, 10000.0, "buy", urgency="patient"
@@ -229,7 +229,7 @@ class TestArbitrageOpportunity:
             type="cross_venue",
             venue_a="binance",
             venue_b="coinbase",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             price_a=45000.0,
             price_b=45100.0,
             spread_bps=22.2,
@@ -251,7 +251,7 @@ class TestArbitrageOpportunity:
             type="cross_venue",
             venue_a="binance",
             venue_b="coinbase",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             price_a=45000.0,
             price_b=45100.0,
             spread_bps=22.2,
@@ -272,7 +272,7 @@ class TestArbitrageOpportunity:
             type="cross_venue",
             venue_a="binance",
             venue_b="coinbase",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             price_a=45000.0,
             price_b=45100.0,
             spread_bps=22.2,

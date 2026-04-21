@@ -166,7 +166,7 @@ def _register_all() -> None:
 
 # ── Handler implementations ──────────────────────────────────────────
 
-async def _get_order_book(symbol: str = "BTC/USDT") -> ToolResult:
+async def _get_order_book(symbol: str = "BTC/USD") -> ToolResult:
     """Get order book snapshot from live price feed."""
     try:
         from data.live_price_feed import get_live_price_feed
@@ -200,7 +200,7 @@ async def _get_order_book(symbol: str = "BTC/USDT") -> ToolResult:
         return ToolResult.fail(ToolErrorCode.INTERNAL, str(exc))
 
 
-async def _get_ticker(symbol: str = "BTC/USDT") -> ToolResult:
+async def _get_ticker(symbol: str = "BTC/USD") -> ToolResult:
     """Get latest ticker from live price feed."""
     try:
         from data.live_price_feed import get_live_price_feed

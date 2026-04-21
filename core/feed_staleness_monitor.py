@@ -9,7 +9,7 @@ Readiness Impact: S8-03 (1→2) — safe degradation on bad data.
 Usage:
     from core.feed_staleness_monitor import get_feed_staleness_monitor
     monitor = get_feed_staleness_monitor()
-    monitor.record_update("binance", "BTC/USDT")
+    monitor.record_update("binance", "BTC/USD")
     stale = monitor.check_all()  # returns list of stale feeds
 """
 

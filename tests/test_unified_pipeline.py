@@ -107,9 +107,9 @@ class TestInstrumentRegistry:
         reg = InstrumentRegistry()
         reg.register(Instrument(
             merid_symbol="BTC-USD", domain="crypto",
-            venue_symbols={"binance": "BTCUSDT", "coinbase": "BTC-USD"},
+            venue_symbols={"binance": "BTCUSD", "coinbase": "BTC-USD"},
         ))
-        assert reg.resolve("BTC-USD", "binance") == "BTCUSDT"
+        assert reg.resolve("BTC-USD", "binance") == "BTCUSD"
         assert reg.resolve("BTC-USD", "coinbase") == "BTC-USD"
         assert reg.resolve("BTC-USD", "kraken") is None
 
@@ -117,22 +117,22 @@ class TestInstrumentRegistry:
         reg = InstrumentRegistry()
         reg.register(Instrument(
             merid_symbol="ETH-USD", domain="crypto",
-            venue_symbols={"binance": "ETHUSDT"},
+            venue_symbols={"binance": "ETHUSD"},
         ))
-        assert reg.reverse_lookup("binance", "ETHUSDT") == "ETH-USD"
+        assert reg.reverse_lookup("binance", "ETHUSD") == "ETH-USD"
         assert reg.reverse_lookup("binance", "UNKNOWN") is None
 
     def test_by_domain(self):
         reg = InstrumentRegistry()
-        reg.register(Instrument(merid_symbol="BTC-USD", domain="crypto", venue_symbols={"binance": "BTCUSDT"}))
+        reg.register(Instrument(merid_symbol="BTC-USD", domain="crypto", venue_symbols={"binance": "BTCUSD"}))
         reg.register(Instrument(merid_symbol="AAPL", domain="equity", venue_symbols={"alpaca": "AAPL"}))
         assert len(reg.by_domain("crypto")) == 1
         assert len(reg.by_domain("equity")) == 1
 
     def test_by_venue(self):
         reg = InstrumentRegistry()
-        reg.register(Instrument(merid_symbol="BTC-USD", domain="crypto", venue_symbols={"binance": "BTCUSDT"}))
-        reg.register(Instrument(merid_symbol="ETH-USD", domain="crypto", venue_symbols={"binance": "ETHUSDT", "coinbase": "ETH-USD"}))
+        reg.register(Instrument(merid_symbol="BTC-USD", domain="crypto", venue_symbols={"binance": "BTCUSD"}))
+        reg.register(Instrument(merid_symbol="ETH-USD", domain="crypto", venue_symbols={"binance": "ETHUSD", "coinbase": "ETH-USD"}))
         assert len(reg.by_venue("binance")) == 2
         assert len(reg.by_venue("coinbase")) == 1
 
@@ -156,7 +156,7 @@ class TestInstrumentRegistry:
         reg = InstrumentRegistry()
         reg.register(Instrument(
             merid_symbol="BTC-USD", domain="crypto",
-            venue_symbols={"binance": "BTCUSDT", "kraken": "XXBTZUSD"},
+            venue_symbols={"binance": "BTCUSD", "kraken": "XXBTZUSD"},
         ))
         assert sorted(reg.venues_for("BTC-USD")) == ["binance", "kraken"]
         assert reg.venues_for("UNKNOWN") == []
@@ -170,7 +170,7 @@ class TestInstrumentRegistry:
 
     def test_default_registry_has_crypto(self):
         reg = build_default_registry()
-        assert reg.resolve("BTC-USD", "binance") == "BTCUSDT"
+        assert reg.resolve("BTC-USD", "binance") == "BTCUSD"
 
     def test_default_registry_has_equities(self):
         reg = build_default_registry()
@@ -586,7 +586,7 @@ class TestTradeRouter:
         instruments = InstrumentRegistry()
         instruments.register(Instrument(
             merid_symbol="BTC-USD", domain="crypto",
-            venue_symbols={"binance": "BTCUSDT"},
+            venue_symbols={"binance": "BTCUSD"},
         ))
         instruments.register(Instrument(
             merid_symbol="AAPL", domain="equity",
@@ -620,7 +620,7 @@ class TestTradeRouter:
         assert result.status == ProposalStatus.FILLED
         assert result.execution_result is not None
         assert result.execution_result.status == "filled"
-        assert result.native_symbol == "BTCUSDT"
+        assert result.native_symbol == "BTCUSD"
 
     @pytest.mark.asyncio
     async def test_instrument_not_found(self):

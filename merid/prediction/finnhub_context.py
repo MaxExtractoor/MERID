@@ -275,7 +275,7 @@ class FinnhubContextService:
             releases, spy_sent, btc_sent = await asyncio.gather(
                 _fetch_economic_calendar(from_d, to_d),
                 _fetch_sentiment("SPY"),
-                _fetch_sentiment("BINANCE:BTCUSDT"),
+                _fetch_sentiment("BINANCE:BTCUSD"),
                 return_exceptions=True,
             )
             if isinstance(releases, Exception):
@@ -283,7 +283,7 @@ class FinnhubContextService:
             if isinstance(spy_sent, Exception):
                 spy_sent = SentimentScore(symbol="SPY")
             if isinstance(btc_sent, Exception):
-                btc_sent = SentimentScore(symbol="BINANCE:BTCUSDT")
+                btc_sent = SentimentScore(symbol="BINANCE:BTCUSD")
 
             real_data = bool(releases) and not isinstance(releases, Exception)
             snap = FinnhubContextSnapshot(

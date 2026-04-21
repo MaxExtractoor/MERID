@@ -76,7 +76,7 @@ class CryptoPredictionAgent(AgentInterface):
                 _default_syms = [a.symbol for a in get_swarm_eligible()
                                   if "/" in a.symbol and ":" not in a.symbol]
             except Exception:
-                _default_syms = ["BTC/USDT", "ETH/USDT"]
+                _default_syms = ["BTC/USD", "ETH/USD"]
         else:
             _default_syms = config["symbols"]
         self.symbols = _default_syms
@@ -339,7 +339,7 @@ class CryptoPredictionAgent(AgentInterface):
         """Build decision context from MarketState"""
         try:
             # Extract current symbol (use first available)
-            current_symbol = self.symbols[0] if self.symbols else "BTC/USDT"
+            current_symbol = self.symbols[0] if self.symbols else "BTC/USD"
             
             # Get current price from market state
             current_price = market_state.prices.get(current_symbol, 45000.0)

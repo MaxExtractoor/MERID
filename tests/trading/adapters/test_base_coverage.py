@@ -55,7 +55,7 @@ class TestTradeRequest:
     def test_minimal_creation(self):
         request = TradeRequest(
             venue="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0
         )
@@ -97,7 +97,7 @@ class TestOrderResult:
     def test_creation(self):
         result = OrderResult(
             venue="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
             executed_price=50000.0,
@@ -110,7 +110,7 @@ class TestOrderResult:
     def test_with_optional_fields(self):
         result = OrderResult(
             venue="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
             executed_price=50000.0,
@@ -150,13 +150,13 @@ class TestPositionSnapshot:
 
     def test_creation(self):
         position = PositionSnapshot(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             quantity=0.5,
             entry_price=48000.0,
             mark_price=50000.0,
             unrealized_pnl=1000.0
         )
-        assert position.symbol == "BTC/USDT"
+        assert position.symbol == "BTC/USD"
         assert position.unrealized_pnl == 1000.0
 
 
@@ -314,7 +314,7 @@ class TestSubmitOrder:
         adapter = TradingVenueAdapterBase()
         request = TradeRequest(
             venue="test",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0
         )
@@ -328,7 +328,7 @@ class TestSubmitOrder:
         
         request = TradeRequest(
             venue="test",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0
         )
@@ -342,7 +342,7 @@ class TestSubmitOrder:
         
         request = TradeRequest(
             venue="test",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0
         )

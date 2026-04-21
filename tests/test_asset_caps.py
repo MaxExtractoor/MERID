@@ -180,7 +180,7 @@ class TestPreTradeCheckAssetCap:
         # Should not block even though cap exists
         verdict = guard.pre_trade_check(
             plan_id="test1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             domain="crypto",
             size_usd=5000,  # Exceeds cap
             asset="",  # No asset specified
@@ -193,7 +193,7 @@ class TestPreTradeCheckAssetCap:
         # No asset caps configured
         verdict = guard.pre_trade_check(
             plan_id="test2",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             domain="crypto",
             size_usd=999999,
             asset="BTC",
@@ -206,7 +206,7 @@ class TestPreTradeCheckAssetCap:
         guard.set_asset_cap("BTC", 4000, 1000)
         verdict = guard.pre_trade_check(
             plan_id="test3",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             domain="crypto",
             size_usd=500,
             asset="BTC",
@@ -222,7 +222,7 @@ class TestPreTradeCheckAssetCap:
         guard.record_execution("crypto", 700, asset="BTC")
         verdict = guard.pre_trade_check(
             plan_id="test4",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             domain="crypto",
             size_usd=500,  # Would exceed remaining 300
             asset="BTC",
@@ -239,7 +239,7 @@ class TestPreTradeCheckAssetCap:
         guard.record_execution("crypto", 1000, asset="BTC")
         verdict = guard.pre_trade_check(
             plan_id="test5",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             domain="crypto",
             size_usd=100,
             asset="BTC",
@@ -254,7 +254,7 @@ class TestPreTradeCheckAssetCap:
         guard.set_asset_cap("BTC", 4000, 500)  # Low single trade max
         verdict = guard.pre_trade_check(
             plan_id="test6",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             domain="crypto",
             size_usd=1000,  # Exceeds single trade max
             asset="BTC",
@@ -330,7 +330,7 @@ class TestIntegration:
         guard.set_asset_cap("ETH", 3000, 750)
         # Trade 1: $500
         verdict1 = guard.pre_trade_check(
-            plan_id="flow1", symbol="ETH/USDT", domain="crypto",
+            plan_id="flow1", symbol="ETH/USD", domain="crypto",
             size_usd=500, asset="ETH"
         )
         if verdict1.allowed:
@@ -338,7 +338,7 @@ class TestIntegration:
         assert guard.get_asset_cap("ETH").daily_notional_usd == 500.0
         # Trade 2: $500
         verdict2 = guard.pre_trade_check(
-            plan_id="flow2", symbol="ETH/USDT", domain="crypto",
+            plan_id="flow2", symbol="ETH/USD", domain="crypto",
             size_usd=500, asset="ETH"
         )
         if verdict2.allowed:
@@ -379,7 +379,7 @@ class TestIntegration:
         # Simulate multiple small M5 trades
         for i in range(4):
             verdict = guard.pre_trade_check(
-                plan_id=f"m5_{i}", symbol="BTC/USDT", domain="crypto",
+                plan_id=f"m5_{i}", symbol="BTC/USD", domain="crypto",
                 size_usd=200, asset="BTC"
             )
             if verdict.allowed:
@@ -390,7 +390,7 @@ class TestIntegration:
 
         # Simulate M15 trade (will be clamped to single trade max of $500)
         verdict = guard.pre_trade_check(
-            plan_id="m15", symbol="BTC/USDT", domain="crypto",
+            plan_id="m15", symbol="BTC/USD", domain="crypto",
             size_usd=600, asset="BTC"
         )
         assert verdict.adjusted_size_usd == 500.0  # Clamped to single trade max
@@ -402,7 +402,7 @@ class TestIntegration:
 
         # Try large H1 trade that would exceed remaining $700
         verdict = guard.pre_trade_check(
-            plan_id="h1_large", symbol="BTC/USDT", domain="crypto",
+            plan_id="h1_large", symbol="BTC/USD", domain="crypto",
             size_usd=1000, asset="BTC"
         )
         # Clamped to single trade max $500 (which is <= remaining $700)
@@ -417,7 +417,7 @@ class TestIntegration:
 
         # Final small trade should be allowed (200 <= remaining 200)
         final_verdict = guard.pre_trade_check(
-            plan_id="final", symbol="BTC/USDT", domain="crypto",
+            plan_id="final", symbol="BTC/USD", domain="crypto",
             size_usd=200, asset="BTC"
         )
         assert final_verdict.allowed

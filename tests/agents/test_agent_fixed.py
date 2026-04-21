@@ -27,7 +27,7 @@ async def test_agent_initialization():
             "agent_id": "test_crypto_agent",
             "expertise_score": 0.8,
             "risk_factor": 0.4,
-            "symbols": ["BTC/USDT", "ETH/USDT"],
+            "symbols": ["BTC/USD", "ETH/USD"],
             "confidence_threshold": 0.6,
             "max_position_size": 0.1
         }
@@ -65,7 +65,7 @@ async def test_observe_analyze_loop():
             "agent_id": "test_analyze_agent",
             "expertise_score": 0.7,
             "risk_factor": 0.5,
-            "symbols": ["BTC/USDT"]
+            "symbols": ["BTC/USD"]
         }
         
         agent = CryptoPredictionAgent(config)
@@ -73,9 +73,9 @@ async def test_observe_analyze_loop():
         # Create market state
         market_state = MarketState(
             timestamp=time.time(),
-            prices={"BTC/USDT": 45000.0, "ETH/USDT": 3000.0},
-            volumes={"BTC/USDT": 1000000.0, "ETH/USDT": 500000.0},
-            funding_rates={"BTC/USDT": 0.0001, "ETH/USDT": 0.0002},
+            prices={"BTC/USD": 45000.0, "ETH/USD": 3000.0},
+            volumes={"BTC/USD": 1000000.0, "ETH/USD": 500000.0},
+            funding_rates={"BTC/USD": 0.0001, "ETH/USD": 0.0002},
             news_sentiment=0.5,
             volatility_index=0.3
         )
@@ -129,7 +129,7 @@ async def test_voting():
                 "signal": "buy",
                 "confidence": 0.8,
                 "reasoning": "Strong bullish momentum detected",
-                "symbol": "BTC/USDT"
+                "symbol": "BTC/USD"
             },
             created_at=time.time(),
             expires_at=time.time() + 3600,
@@ -235,7 +235,7 @@ async def test_complete_workflow():
             "agent_id": "test_workflow_agent",
             "expertise_score": 0.8,
             "risk_factor": 0.4,
-            "symbols": ["BTC/USDT"],
+            "symbols": ["BTC/USD"],
             "confidence_threshold": 0.6
         }
         
@@ -244,9 +244,9 @@ async def test_complete_workflow():
         # Step 1: Observe market state
         market_state = MarketState(
             timestamp=time.time(),
-            prices={"BTC/USDT": 45000.0},
-            volumes={"BTC/USDT": 1000000.0},
-            funding_rates={"BTC/USDT": 0.0001},
+            prices={"BTC/USD": 45000.0},
+            volumes={"BTC/USD": 1000000.0},
+            funding_rates={"BTC/USD": 0.0001},
             news_sentiment=0.6,
             volatility_index=0.25
         )

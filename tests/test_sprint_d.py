@@ -160,7 +160,7 @@ class TestDeribitIV(unittest.TestCase):
         }
         with patch("merid.prediction.perp_context._fetch_json", new_callable=AsyncMock) as m:
             m.return_value = mock_resp
-            iv = asyncio.get_event_loop().run_until_complete(_fetch_iv("BTCUSDT"))
+            iv = asyncio.get_event_loop().run_until_complete(_fetch_iv("BTCUSD"))
         self.assertGreater(iv, 0.0)
 
     def test_realized_vol_fallback_on_deribit_fail(self):
@@ -176,7 +176,7 @@ class TestDeribitIV(unittest.TestCase):
             return [[i, 50.0 + i, 55.0 + i, 48.0 + i, 52.0 + i, 1000] for i in range(30)]
 
         with patch("merid.prediction.perp_context._fetch_json", side_effect=mock_fetch):
-            iv = asyncio.get_event_loop().run_until_complete(_fetch_iv("BTCUSDT"))
+            iv = asyncio.get_event_loop().run_until_complete(_fetch_iv("BTCUSD"))
         # Should have called both Deribit (failed) and Binance (succeeded)
         self.assertGreaterEqual(call_count, 2)
         self.assertGreaterEqual(iv, 0.0)

@@ -42,7 +42,7 @@ _DERIBIT_VOL   = _DERIBIT_BASE + "/get_volatility_index_data?currency={currency}
 
 @dataclass
 class AssetPerpData:
-    symbol: str                   # e.g. "BTCUSDT"
+    symbol: str                   # e.g. "BTCUSD"
     funding_rate: float = 0.0     # current 8h funding rate (signed)
     mark_price: float = 0.0
     index_price: float = 0.0
@@ -52,8 +52,8 @@ class AssetPerpData:
 
 @dataclass
 class PerpContextSnapshot:
-    btc: AssetPerpData = field(default_factory=lambda: AssetPerpData("BTCUSDT"))
-    eth: AssetPerpData = field(default_factory=lambda: AssetPerpData("ETHUSDT"))
+    btc: AssetPerpData = field(default_factory=lambda: AssetPerpData("BTCUSD"))
+    eth: AssetPerpData = field(default_factory=lambda: AssetPerpData("ETHUSD"))
     fetched_at: float = field(default_factory=time.time)
     source: str = "live"          # "live" | "stub"
 
@@ -192,11 +192,11 @@ class PerpContextService:
     async def _fetch(self, ts: float) -> PerpContextSnapshot:
         try:
             btc_task, eth_task = asyncio.gather(
-                _fetch_premium_index("BTCUSDT"),
-                _fetch_premium_index("ETHUSDT"),
+                _fetch_premium_index("BTCUSD"),
+                _fetch_premium_index("ETHUSD"),
             ), asyncio.gather(
-                _fetch_iv("BTCUSDT"),
-                _fetch_iv("ETHUSDT"),
+                _fetch_iv("BTCUSD"),
+                _fetch_iv("ETHUSD"),
             )
             (btc, eth), (btc_iv, eth_iv) = await asyncio.gather(btc_task, eth_task)
             btc.iv_30d = btc_iv   # Deribit DVOL or realized-vol fallback
@@ -209,8 +209,8 @@ class PerpContextService:
         except Exception as exc:
             logger.warning("perp_context: Binance fetch failed (%s) — using stub", exc)
             return PerpContextSnapshot(
-                btc=AssetPerpData("BTCUSDT"),
-                eth=AssetPerpData("ETHUSDT"),
+                btc=AssetPerpData("BTCUSD"),
+                eth=AssetPerpData("ETHUSD"),
                 fetched_at=ts,
                 source="stub",
             )

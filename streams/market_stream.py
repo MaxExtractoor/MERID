@@ -34,7 +34,7 @@ class MarketConfig:
                 from data.asset_universe import get_watchlist_symbols
                 self.symbols = get_watchlist_symbols()
             except Exception:
-                self.symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+                self.symbols = ["BTC/USD", "ETH/USD", "SOL/USD"]
 
 
 class MarketDataStream:

@@ -8,7 +8,7 @@ actual system activity.
 Usage:
     from core.reward_event_hooks import get_reward_hooks
     hooks = get_reward_hooks()
-    hooks.on_trade_executed(user_id="agent-1", symbol="BTC/USDT", side="buy", notional=5000)
+    hooks.on_trade_executed(user_id="agent-1", symbol="BTC/USD", side="buy", notional=5000)
     hooks.on_risk_check_passed(user_id="agent-1")
 """
 

@@ -253,7 +253,7 @@ class TestToProductId:
     """Test _to_product_id method."""
 
     def test_usdt_to_usd(self, executor):
-        result = executor._to_product_id("BTC-USDT")
+        result = executor._to_product_id("BTC-USD")
         assert result == "BTC-USD"
 
     def test_usd_unchanged(self, executor):

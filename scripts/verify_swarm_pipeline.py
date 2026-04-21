@@ -40,7 +40,7 @@ class PipelineVerifier:
         self.consensus_received = 0
         self.trades_received = 0
         self.orders_received = 0
-        self.test_symbol = "BTC/USDT"
+        self.test_symbol = "BTC/USD"
         
     async def run_verification(self) -> bool:
         """Run full pipeline verification."""

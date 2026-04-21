@@ -53,9 +53,9 @@ def run_demo():
     # 3. Simulate some prices (in real usage, these come from live feeds)
     print("\n[3/5] Setting up simulated prices...")
     simulated_prices = {
-        "BTC/USDT": 67500.0,
-        "ETH/USDT": 3450.0,
-        "SOL/USDT": 145.0,
+        "BTC/USD": 67500.0,
+        "ETH/USD": 3450.0,
+        "SOL/USD": 145.0,
         "BTC": 67500.0,
         "ETH": 3450.0,
         "SOL": 145.0,
@@ -102,7 +102,7 @@ def run_demo():
     
     # Simulate price movement
     print("\n[Bonus] Simulating 5% BTC price increase...")
-    simulated_prices["BTC/USDT"] = 70875.0  # +5%
+    simulated_prices["BTC/USD"] = 70875.0  # +5%
     simulated_prices["BTC"] = 70875.0
     engine.update_prices(simulated_prices)
     

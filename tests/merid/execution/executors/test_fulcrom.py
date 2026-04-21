@@ -100,7 +100,7 @@ class TestFulcromExecutorGetQuote:
             })
         )
         
-        quote = await executor.get_quote("ETH-USDT", "sell", 2.5)
+        quote = await executor.get_quote("ETH-USD", "sell", 2.5)
         
         assert quote.side == "sell"
         assert quote.price == 0.00048
@@ -166,7 +166,7 @@ class TestFulcromExecutorExecuteTrade:
         )
         
         result = await executor.execute_trade(
-            symbol="ETH-USDT",
+            symbol="ETH-USD",
             side="sell",
             amount=5.0,
             order_type="limit",
@@ -219,7 +219,7 @@ class TestFulcromExecutorExecuteTrade:
         
         with pytest.raises(ExecutionError) as exc_info:
             await executor.execute_trade(
-                symbol="ETH-USDT",
+                symbol="ETH-USD",
                 side="sell",
                 amount=2.0
             )
@@ -272,7 +272,7 @@ class TestFulcromExecutorGetPositions:
         assert positions[0].metadata["position_id"] == "pos_1"
         
         # Second position
-        assert positions[1].symbol == "ETH-USDT"
+        assert positions[1].symbol == "ETH-USD"
         assert positions[1].size == 10.0
         assert positions[1].metadata["position_id"] == "pos_2"
         

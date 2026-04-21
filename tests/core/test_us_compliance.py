@@ -148,7 +148,7 @@ class TestBinanceUSAdapter:
         
         await adapter.connect()
         result = await adapter.place_order(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             amount=Decimal("0.1")
@@ -396,7 +396,7 @@ class TestUniversalRouter:
         from core.venue_adapter import OrderSide, OrderType
         
         result = await router.execute_auto(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             amount=Decimal("0.1"),
@@ -464,7 +464,7 @@ class TestUSComplianceIntegration:
         from core.venue_adapter import OrderSide, OrderType
         
         result = await universal_router.execute_auto(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             amount=Decimal("0.1"),

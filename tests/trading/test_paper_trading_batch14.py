@@ -43,7 +43,7 @@ class TestPaperOrder:
         order = PaperOrder(
             order_id="order_123",
             user_id="user_456",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             side="long",
             order_type=PaperOrderType.MARKET,
             size_usd=1000.0,
@@ -51,7 +51,7 @@ class TestPaperOrder:
         )
         assert order.order_id == "order_123"
         assert order.user_id == "user_456"
-        assert order.asset == "BTCUSDT"
+        assert order.asset == "BTCUSD"
         assert order.side == "long"
         assert order.status == PaperOrderStatus.PENDING
         assert order.leverage == 2
@@ -61,7 +61,7 @@ class TestPaperOrder:
         order = PaperOrder(
             order_id="order_123",
             user_id="user_456",
-            asset="ETHUSDT",
+            asset="ETHUSD",
             side="short",
             order_type=PaperOrderType.LIMIT,
             size_usd=500.0
@@ -79,7 +79,7 @@ class TestPaperPosition:
         position = PaperPosition(
             position_id="pos_123",
             user_id="user_456",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             side="long",
             size_usd=1000.0,
             entry_price=45000.0,
@@ -87,7 +87,7 @@ class TestPaperPosition:
             leverage=2
         )
         assert position.position_id == "pos_123"
-        assert position.asset == "BTCUSDT"
+        assert position.asset == "BTCUSD"
         assert position.size_usd == 1000.0
 
 
@@ -134,11 +134,11 @@ class TestPaperTradingEngine:
 
     def test_symbols_match_exact(self, engine):
         """Test symbol matching - exact match."""
-        assert engine._symbols_match("BTC/USDT", "BTC/USDT") is True
+        assert engine._symbols_match("BTC/USD", "BTC/USD") is True
 
     def test_symbols_match_base(self, engine):
         """Test symbol matching - base asset match."""
-        assert engine._symbols_match("BTC", "BTC/USDT") is True
+        assert engine._symbols_match("BTC", "BTC/USD") is True
 
     def test_get_global_stats_empty(self, engine):
         """Test global stats with no portfolios."""
@@ -148,11 +148,11 @@ class TestPaperTradingEngine:
 
     def test_place_order_market(self, engine):
         """Test placing market order."""
-        engine.current_prices = {"BTCUSDT": 45000.0}
+        engine.current_prices = {"BTCUSD": 45000.0}
         
         order = engine.place_order(
             user_id="user_123",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             side="long",
             size_usd=1000.0,
             order_type="market"
@@ -168,7 +168,7 @@ class TestPaperTradingEngine:
         
         order = engine.place_order(
             user_id="user_123",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             side="long",
             size_usd=1000.0,
             order_type="market"
@@ -178,11 +178,11 @@ class TestPaperTradingEngine:
 
     def test_position_created_after_order(self, engine):
         """Test position created after market order."""
-        engine.current_prices = {"BTCUSDT": 45000.0}
+        engine.current_prices = {"BTCUSD": 45000.0}
         
         order = engine.place_order(
             user_id="user_123",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             side="long",
             size_usd=1000.0,
             order_type="market"
@@ -193,11 +193,11 @@ class TestPaperTradingEngine:
 
     def test_close_position(self, engine):
         """Test closing position."""
-        engine.current_prices = {"BTCUSDT": 45000.0}
+        engine.current_prices = {"BTCUSD": 45000.0}
 
         engine.place_order(
             user_id="user_123",
-            asset="BTCUSDT",
+            asset="BTCUSD",
             side="long",
             size_usd=1000.0,
             order_type="market"

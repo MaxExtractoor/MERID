@@ -202,7 +202,7 @@ class CCXTTrader:
         return [
             Order(
                 id=f"order_{i}",
-                symbol=symbol or "BTC/USDT",
+                symbol=symbol or "BTC/USD",
                 side=OrderSide.BUY,
                 type=OrderType.LIMIT,
                 amount=Decimal("0.1"),
@@ -222,7 +222,7 @@ class CCXTTrader:
         # Mock positions
         return [
             Position(
-                symbol=symbol or "BTC/USDT:USDT",
+                symbol=symbol or "BTC/USD:USD",
                 side="long",
                 size=Decimal("1.0"),
                 entry_price=Decimal("50000"),

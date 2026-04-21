@@ -21,7 +21,7 @@ async def test_basic_functionality():
     # Test configuration
     config = {
         "source_type": "mock",
-        "symbols": ["BTC/USDT", "ETH/USDT"],
+        "symbols": ["BTC/USD", "ETH/USD"],
         "polling_interval": 1.0
     }
     
@@ -71,7 +71,7 @@ async def test_stream_lifecycle():
     
     config = {
         "source_type": "mock",
-        "symbols": ["BTC/USDT"],
+        "symbols": ["BTC/USD"],
         "polling_interval": 0.5
     }
     
@@ -109,7 +109,7 @@ async def test_event_subscription():
     
     config = {
         "source_type": "mock",
-        "symbols": ["BTC/USDT"],
+        "symbols": ["BTC/USD"],
         "polling_interval": 0.3
     }
     

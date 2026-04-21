@@ -67,7 +67,7 @@ class TestCryptoComExecutorSymbolConversion:
         executor = CryptoComExecutor()
         
         assert executor._symbol_to_instrument("BTC-USD") == "BTCUSD"
-        assert executor._symbol_to_instrument("ETH-USDT") == "ETHUSDT"
+        assert executor._symbol_to_instrument("ETH-USD") == "ETHUSD"
         assert executor._symbol_to_instrument("BTC") == "BTC"
 
     def test_instrument_to_symbol(self):
@@ -76,7 +76,7 @@ class TestCryptoComExecutorSymbolConversion:
         
         # Implementation assumes 4-char quote currency
         assert executor._instrument_to_symbol("BTCUSDC") == "BTC-USDC"
-        assert executor._instrument_to_symbol("ETHUSDT") == "ETH-USDT"
+        assert executor._instrument_to_symbol("ETHUSD") == "ETH-USD"
         assert executor._instrument_to_symbol("BTC") == "BTC"
 
     def test_instrument_to_symbol_short_names(self):
@@ -267,7 +267,7 @@ class TestCryptoComExecutorGetPositions:
                             "unrealized_pnl": "7500.00"
                         },
                         {
-                            "instrument_name": "ETHUSDT",
+                            "instrument_name": "ETHUSD",
                             "size": "10.0",
                             "entry_price": "2000.00",
                             "unrealized_pnl": "500.00"
@@ -289,9 +289,9 @@ class TestCryptoComExecutorGetPositions:
         assert positions[0].venue == "crypto_com"
         
         # Second position
-        assert positions[1].symbol == "ETH-USDT"
+        assert positions[1].symbol == "ETH-USD"
         assert positions[1].size == 10.0
-        assert positions[1].metadata["instrument_name"] == "ETHUSDT"
+        assert positions[1].metadata["instrument_name"] == "ETHUSD"
         
         assert route.called
 

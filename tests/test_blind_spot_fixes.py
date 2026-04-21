@@ -302,7 +302,7 @@ class TestBacktestingFixes:
             config = BacktestConfig(
                 backtest_id="test-live-block",
                 strategy_name="momentum",
-                symbols=["BTC/USDT"],
+                symbols=["BTC/USD"],
                 start_date=datetime(2024, 1, 1),
                 end_date=datetime(2024, 1, 31),
             )

@@ -407,7 +407,7 @@ class AgentOrchestrator:
         # Get current market data for context
         prices = self.price_feed.get_all_prices()
         proposal_type = proposal.get("type", "unknown")
-        symbol = proposal.get("symbol", "BTC/USDT")
+        symbol = proposal.get("symbol", "BTC/USD")
         
         if role == AgentRole.PRICE_FEED:
             # Price feed evaluates based on data freshness

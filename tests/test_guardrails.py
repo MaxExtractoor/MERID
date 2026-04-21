@@ -139,9 +139,9 @@ class TestAgentCapabilityMap:
 
     def test_symbol_check(self):
         from merid.guardrails.capabilities import AgentCapabilityMap
-        m = AgentCapabilityMap(agent_id="a1", allowed_symbols={"BTC/USDT", "ETH/USDT"})
-        assert m.can_access_symbol("BTC/USDT")
-        assert not m.can_access_symbol("SOL/USDT")
+        m = AgentCapabilityMap(agent_id="a1", allowed_symbols={"BTC/USD", "ETH/USD"})
+        assert m.can_access_symbol("BTC/USD")
+        assert not m.can_access_symbol("SOL/USD")
 
     def test_venue_check(self):
         from merid.guardrails.capabilities import AgentCapabilityMap

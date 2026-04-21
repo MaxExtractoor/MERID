@@ -262,9 +262,9 @@ class TestLivePriceFeedStats:
             mock_net.return_value = Mock()
             feed = LivePriceFeed()
             
-            feed.symbols = ['BTC/USDT', 'ETH/USDT']
+            feed.symbols = ['BTC/USD', 'ETH/USD']
             feed.subscribers = [Mock(), Mock()]
-            feed.price_cache = {"BTC/USDT": Mock()}
+            feed.price_cache = {"BTC/USD": Mock()}
             feed.exchange_failures["kraken"] = 2
             
             stats = feed.get_stats()

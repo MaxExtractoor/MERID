@@ -85,9 +85,9 @@ class TestGetQuote:
         with patch.object(executor, "_request", new_callable=AsyncMock) as mock_request:
             mock_request.return_value = mock_response
             
-            quote = await executor.get_quote("BTC-USDT", "buy", 1.0)
+            quote = await executor.get_quote("BTC-USD", "buy", 1.0)
         
-        assert quote.symbol == "BTC-USDT"
+        assert quote.symbol == "BTC-USD"
         assert quote.side == "buy"
         assert quote.price == 50000.0
         assert quote.venue == "crypto_com"
@@ -102,7 +102,7 @@ class TestGetQuote:
         with patch.object(executor, "_request", new_callable=AsyncMock) as mock_request:
             mock_request.return_value = mock_response
             
-            quote = await executor.get_quote("ETH-USDT", "sell", 10.0)
+            quote = await executor.get_quote("ETH-USD", "sell", 10.0)
         
         assert quote.price == 50100.0
 
@@ -128,7 +128,7 @@ class TestExecuteTrade:
             mock_request.return_value = mock_response
             
             result = await executor.execute_trade(
-                symbol="BTC-USDT",
+                symbol="BTC-USD",
                 side="buy",
                 amount=1.0
             )
@@ -151,7 +151,7 @@ class TestExecuteTrade:
             mock_request.return_value = mock_response
             
             result = await executor.execute_trade(
-                symbol="BTC-USDT",
+                symbol="BTC-USD",
                 side="buy",
                 amount=1.0,
                 order_type="limit",
@@ -166,7 +166,7 @@ class TestExecuteTrade:
             mock_request.side_effect = ConnectionError("Network error")
             
             result = await executor.execute_trade(
-                symbol="BTC-USDT",
+                symbol="BTC-USD",
                 side="buy",
                 amount=1.0
             )
@@ -180,7 +180,7 @@ class TestExecuteTrade:
             mock_request.side_effect = RuntimeError("API error")
             
             result = await executor.execute_trade(
-                symbol="ETH-USDT",
+                symbol="ETH-USD",
                 side="sell",
                 amount=10.0
             )
@@ -193,7 +193,7 @@ class TestExecuteTrade:
             mock_request.side_effect = ValueError("Invalid response")
             
             result = await executor.execute_trade(
-                symbol="SOL-USDT",
+                symbol="SOL-USD",
                 side="buy",
                 amount=100.0,
                 price=150.0
@@ -217,13 +217,13 @@ class TestGetPositions:
             "result": {
                 "list": [
                     {
-                        "instrument_name": "BTCUSDT",
+                        "instrument_name": "BTCUSD",
                         "size": "0.5",
                         "entry_price": "48000.00",
                         "unrealized_pnl": "1000.00"
                     },
                     {
-                        "instrument_name": "ETHUSDT",
+                        "instrument_name": "ETHUSD",
                         "size": "10.0",
                         "entry_price": "2800.00",
                         "unrealized_pnl": "200.00"
@@ -238,7 +238,7 @@ class TestGetPositions:
             positions = await executor.get_positions()
         
         assert len(positions) == 2
-        assert positions[0].symbol == "BTC-USDT"
+        assert positions[0].symbol == "BTC-USD"
         assert positions[0].size == 0.5
 
     @pytest.mark.asyncio
@@ -262,16 +262,16 @@ class TestSymbolConversion:
     """Test symbol conversion methods."""
 
     def test_symbol_to_instrument(self, executor):
-        result = executor._symbol_to_instrument("BTC-USDT")
-        assert result == "BTCUSDT"
+        result = executor._symbol_to_instrument("BTC-USD")
+        assert result == "BTCUSD"
 
     def test_symbol_to_instrument_no_dash(self, executor):
-        result = executor._symbol_to_instrument("BTCUSDT")
-        assert result == "BTCUSDT"
+        result = executor._symbol_to_instrument("BTCUSD")
+        assert result == "BTCUSD"
 
     def test_instrument_to_symbol_standard(self, executor):
-        result = executor._instrument_to_symbol("BTCUSDT")
-        assert result == "BTC-USDT"
+        result = executor._instrument_to_symbol("BTCUSD")
+        assert result == "BTC-USD"
 
     def test_instrument_to_symbol_short(self, executor):
         result = executor._instrument_to_symbol("BTC")

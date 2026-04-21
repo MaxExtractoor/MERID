@@ -408,7 +408,7 @@ def create_market_event(
     
     Args:
         source: Data source (e.g., "coinbase", "binance")
-        symbol: Trading symbol (e.g., "BTC/USDT")
+        symbol: Trading symbol (e.g., "BTC/USD")
         price: Current price
         volume: Trading volume
         correlation_id: Optional correlation ID

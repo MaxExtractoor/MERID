@@ -40,7 +40,7 @@ class MarketStreamConfig(StreamConfig):
     """Configuration for market data stream."""
     
     exchanges: List[str] = field(default_factory=lambda: ["binance", "coinbase"])
-    symbols: List[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
+    symbols: List[str] = field(default_factory=lambda: ["BTC/USD", "ETH/USD", "SOL/USD"])
     
     ticker_interval_seconds: float = 1.0
     funding_interval_seconds: float = 60.0
@@ -386,10 +386,10 @@ class MarketStream(BaseStream):
         Convert spot symbol to perpetual symbol format.
         
         Args:
-            symbol: Spot symbol (e.g., "BTC/USDT")
+            symbol: Spot symbol (e.g., "BTC/USD")
             
         Returns:
-            Perpetual symbol (e.g., "BTC/USDT:USDT")
+            Perpetual symbol (e.g., "BTC/USD:USD")
         """
         if ":" in symbol:
             return symbol

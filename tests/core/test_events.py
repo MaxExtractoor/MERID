@@ -249,10 +249,10 @@ class TestFactoryFunctions:
 
     def test_create_market_event(self):
         """Test create_market_event."""
-        event = create_market_event("coinbase", "BTC/USDT", 50000.0, 100.0)
+        event = create_market_event("coinbase", "BTC/USD", 50000.0, 100.0)
         assert event.event_type == EventType.MARKET_DATA
         assert event.source == "coinbase"
-        assert event.payload["symbol"] == "BTC/USDT"
+        assert event.payload["symbol"] == "BTC/USD"
         assert event.payload["price"] == 50000.0
         assert event.priority == EventPriority.HIGH
 

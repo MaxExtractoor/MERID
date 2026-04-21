@@ -22,7 +22,7 @@ async def test_market_stream():
     print("\n1. Testing Mock Data Source")
     mock_config = {
         "source_type": "mock",
-        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+        "symbols": ["BTC/USD", "ETH/USD", "SOL/USD"],
         "polling_interval": 1.0
     }
     
@@ -81,7 +81,7 @@ async def test_event_subscription():
     
     mock_config = {
         "source_type": "mock",
-        "symbols": ["BTC/USDT"],
+        "symbols": ["BTC/USD"],
         "polling_interval": 0.5
     }
     

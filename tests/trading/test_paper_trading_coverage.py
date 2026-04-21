@@ -55,7 +55,7 @@ class TestPaperOrder:
         order = PaperOrder(
             order_id="order_1",
             user_id="user_1",
-            asset="BTC/USDT",
+            asset="BTC/USD",
             side="long",
             order_type=PaperOrderType.MARKET,
             size_usd=1000.0
@@ -67,7 +67,7 @@ class TestPaperOrder:
         order = PaperOrder(
             order_id="order_2",
             user_id="user_2",
-            asset="ETH/USDT",
+            asset="ETH/USD",
             side="short",
             order_type=PaperOrderType.LIMIT,
             size_usd=500.0
@@ -84,7 +84,7 @@ class TestPaperPosition:
         position = PaperPosition(
             position_id="pos_1",
             user_id="user_1",
-            asset="BTC/USDT",
+            asset="BTC/USD",
             side="long",
             size_usd=1000.0,
             entry_price=50000.0,
@@ -97,7 +97,7 @@ class TestPaperPosition:
         position = PaperPosition(
             position_id="pos_2",
             user_id="user_2",
-            asset="ETH/USDT",
+            asset="ETH/USD",
             side="short",
             size_usd=500.0,
             entry_price=3000.0,
@@ -134,9 +134,9 @@ def engine():
         mock_feed.return_value = mock_price_feed
         
         engine = PaperTradingEngine(starting_balance=10000.0)
-        engine.current_prices["BTC/USDT"] = 50000.0
+        engine.current_prices["BTC/USD"] = 50000.0
         engine.current_prices["BTC"] = 50000.0
-        engine.current_prices["ETH/USDT"] = 3000.0
+        engine.current_prices["ETH/USD"] = 3000.0
         engine.current_prices["ETH"] = 3000.0
         return engine
 
@@ -264,7 +264,7 @@ class TestExecuteOrder:
     def test_execute_order_no_price(self, engine):
         # Remove price for asset
         engine.current_prices.pop("BTC", None)
-        engine.current_prices.pop("BTC/USDT", None)
+        engine.current_prices.pop("BTC/USD", None)
         
         order = engine.place_order(
             user_id="user_1",
@@ -290,7 +290,7 @@ class TestClosePosition:
         
         # Simulate price increase
         engine.current_prices["BTC"] = 55000.0
-        engine.current_prices["BTC/USDT"] = 55000.0
+        engine.current_prices["BTC/USD"] = 55000.0
 
         portfolio = engine.get_portfolio("user_1")
         position_keys = list(portfolio.positions.keys())
@@ -309,7 +309,7 @@ class TestClosePosition:
 
         # Simulate price decrease
         engine.current_prices["ETH"] = 2500.0
-        engine.current_prices["ETH/USDT"] = 2500.0
+        engine.current_prices["ETH/USD"] = 2500.0
 
         portfolio = engine.get_portfolio("user_1")
         position_keys = list(portfolio.positions.keys())
@@ -327,13 +327,13 @@ class TestSymbolsMatch:
     """Test _symbols_match static method."""
 
     def test_exact_match(self):
-        assert PaperTradingEngine._symbols_match("BTC/USDT", "BTC/USDT") is True
+        assert PaperTradingEngine._symbols_match("BTC/USD", "BTC/USD") is True
 
     def test_base_match(self):
-        assert PaperTradingEngine._symbols_match("BTC", "BTC/USDT") is True
+        assert PaperTradingEngine._symbols_match("BTC", "BTC/USD") is True
 
     def test_no_match(self):
-        assert PaperTradingEngine._symbols_match("ETH", "BTC/USDT") is False
+        assert PaperTradingEngine._symbols_match("ETH", "BTC/USD") is False
 
 
 class TestSubscriptions:
@@ -465,23 +465,23 @@ class TestSubscriptionAndPriceUpdates:
         
         # Mock price data
         price_data = MagicMock()
-        price_data.symbol = "BTC/USDT"
+        price_data.symbol = "BTC/USD"
         price_data.price = 55000.0
         
         engine._on_price_update(price_data)
         
-        assert engine.current_prices.get("BTC/USDT") == 55000.0
+        assert engine.current_prices.get("BTC/USD") == 55000.0
         assert engine.current_prices.get("BTC") == 55000.0
 
     def test_symbols_match_with_slash(self, engine):
         """Test symbol matching with slash format (line 237)."""
-        assert PaperTradingEngine._symbols_match("BTC/USDT", "BTC/USD") is True
-        assert PaperTradingEngine._symbols_match("ETH/USDT", "BTC/USD") is False
+        assert PaperTradingEngine._symbols_match("BTC/USD", "BTC/USD") is True
+        assert PaperTradingEngine._symbols_match("ETH/USD", "BTC/USD") is False
 
     def test_get_live_price_cached(self, engine):
         """Test getting cached live price (lines 240-249)."""
-        engine.current_prices["ETH/USDT"] = 3000.0
-        price = engine._get_live_price("ETH/USDT")
+        engine.current_prices["ETH/USD"] = 3000.0
+        price = engine._get_live_price("ETH/USD")
         assert price == 3000.0
 
     def test_get_live_price_from_feed(self, engine):
@@ -492,14 +492,14 @@ class TestSubscriptionAndPriceUpdates:
         
         price = engine._get_live_price("SOL")
         assert price == 4000.0
-        assert engine.current_prices.get("SOL/USDT") == 4000.0
+        assert engine.current_prices.get("SOL/USD") == 4000.0
 
     def test_get_live_price_fallback(self, engine):
         """Test getting live price fallback (line 249)."""
         engine.price_feed.get_current_price.return_value = None
         engine.current_prices["DOGE"] = 0.15
         
-        price = engine._get_live_price("DOGE/USDT")
+        price = engine._get_live_price("DOGE/USD")
         assert price == 0.15
 
 
@@ -548,7 +548,7 @@ class TestPositionAveraging:
             engine = PaperTradingEngine()
             # Set up mock prices to avoid rejection
             engine.current_prices["BTC"] = 50000.0
-            engine.current_prices["BTC/USDT"] = 50000.0
+            engine.current_prices["BTC/USD"] = 50000.0
             yield engine
 
     def test_add_to_existing_position_averages_entry(self, engine):

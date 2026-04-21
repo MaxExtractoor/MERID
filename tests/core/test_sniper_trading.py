@@ -70,14 +70,14 @@ class TestSpotPerpTrading:
     
     @pytest.mark.asyncio
     async def test_get_ticker(self, trader):
-        ticker = await trader.get_ticker("BTC/USDT")
+        ticker = await trader.get_ticker("BTC/USD")
         assert ticker is not None
         assert ticker.bid > 0
     
     @pytest.mark.asyncio
     async def test_place_order(self, trader):
         from core.spot_perp_trading import OrderSide, OrderType, MarketType
-        result = await trader.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, Decimal("0.1"))
+        result = await trader.place_order("BTC/USD", OrderSide.BUY, OrderType.MARKET, Decimal("0.1"))
         assert result["status"] == "filled"
     
     @pytest.mark.asyncio

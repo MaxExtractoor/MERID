@@ -246,7 +246,7 @@ class ExecutionService:
             await self.venue_manager.connect_all()
             
             # Setup market data sources
-            binance_config = create_binance_websocket_config(["BTCUSDT", "ETHUSDT"])
+            binance_config = create_binance_websocket_config(["BTCUSD", "ETHUSD"])  # Binance USD pairs
             kraken_config = create_kraken_websocket_config(["BTC/USD", "ETH/USD"])
             
             self.market_data_ingestor.add_source("binance", binance_config)

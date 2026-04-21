@@ -26,7 +26,7 @@ def _default_arb_symbols() -> List[str]:
         return [a.symbol for a in get_arb_candidates()
                 if '/' in a.symbol and ':' not in a.symbol]
     except Exception:
-        return ["BTC/USDT", "ETH/USDT"]
+        return ["BTC/USD", "ETH/USD"]
 
 
 class ScannerState(Enum):

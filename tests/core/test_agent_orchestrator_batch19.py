@@ -153,7 +153,7 @@ class TestAgentOrchestrator:
         """Test consensus formation."""
         proposal = {
             "type": "test_proposal",
-            "symbol": "BTC/USDT",
+            "symbol": "BTC/USD",
             "amount": 1000.0
         }
         
@@ -169,9 +169,9 @@ class TestAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_evaluate_agent_vote_price_feed(self, orchestrator):
         """Test price feed agent vote evaluation."""
-        proposal = {"type": "test", "symbol": "BTC/USDT"}
+        proposal = {"type": "test", "symbol": "BTC/USD"}
         
-        with patch.object(orchestrator.price_feed, 'get_all_prices', return_value={"BTC/USDT": MagicMock()}):
+        with patch.object(orchestrator.price_feed, 'get_all_prices', return_value={"BTC/USD": MagicMock()}):
             confidence, reasoning = await orchestrator._evaluate_agent_vote(
                 AgentRole.PRICE_FEED,
                 orchestrator.agents[AgentRole.PRICE_FEED],
@@ -184,10 +184,10 @@ class TestAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_evaluate_agent_vote_arbitrage(self, orchestrator):
         """Test arbitrage agent vote evaluation."""
-        proposal = {"type": "test", "symbol": "BTC/USDT"}
+        proposal = {"type": "test", "symbol": "BTC/USD"}
         
         mock_price = MagicMock(bid=45000.0, ask=45100.0)
-        with patch.object(orchestrator.price_feed, 'get_all_prices', return_value={"BTC/USDT": mock_price}):
+        with patch.object(orchestrator.price_feed, 'get_all_prices', return_value={"BTC/USD": mock_price}):
             confidence, reasoning = await orchestrator._evaluate_agent_vote(
                 AgentRole.ARBITRAGE,
                 orchestrator.agents[AgentRole.ARBITRAGE],
@@ -200,7 +200,7 @@ class TestAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_evaluate_agent_vote_execution(self, orchestrator):
         """Test execution agent vote evaluation."""
-        proposal = {"type": "order", "symbol": "BTC/USDT", "amount": 5000.0}
+        proposal = {"type": "order", "symbol": "BTC/USD", "amount": 5000.0}
         
         confidence, reasoning = await orchestrator._evaluate_agent_vote(
             AgentRole.EXECUTION,
@@ -214,10 +214,10 @@ class TestAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_evaluate_agent_vote_slippage(self, orchestrator):
         """Test slippage agent vote evaluation."""
-        proposal = {"type": "test", "symbol": "BTC/USDT"}
+        proposal = {"type": "test", "symbol": "BTC/USD"}
         
         mock_price = MagicMock(volume_24h=2000000.0)
-        with patch.object(orchestrator.price_feed, 'get_all_prices', return_value={"BTC/USDT": mock_price}):
+        with patch.object(orchestrator.price_feed, 'get_all_prices', return_value={"BTC/USD": mock_price}):
             confidence, reasoning = await orchestrator._evaluate_agent_vote(
                 AgentRole.SLIPPAGE,
                 orchestrator.agents[AgentRole.SLIPPAGE],

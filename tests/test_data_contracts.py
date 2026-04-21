@@ -39,7 +39,7 @@ class TestDataContractValidation(unittest.TestCase):
         )
 
     def test_valid_data_passes(self):
-        data = {"price": 50000.0, "volume": 1.5, "symbol": "BTC/USDT"}
+        data = {"price": 50000.0, "volume": 1.5, "symbol": "BTC/USD"}
         result = self.contract.validate(data)
         self.assertTrue(result.valid)
         self.assertEqual(len(result.errors), 0)
@@ -295,7 +295,7 @@ class TestDefaultContracts(unittest.TestCase):
         result = reg.validate("binance", {
             "price": 50000.0,
             "volume": 1.5,
-            "symbol": "BTC/USDT",
+            "symbol": "BTC/USD",
             "timestamp": time.time(),
         })
         self.assertTrue(result.valid)
@@ -304,7 +304,7 @@ class TestDefaultContracts(unittest.TestCase):
         reg = build_default_contracts()
         result = reg.validate("binance", {
             "price": -1.0,
-            "symbol": "BTC/USDT",
+            "symbol": "BTC/USD",
         })
         self.assertFalse(result.valid)
 

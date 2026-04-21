@@ -108,7 +108,7 @@ class SwarmE2ETest:
         await asyncio.sleep(0.5)
         
         # Each agent processes same signal and emits opinion
-        symbol = "BTC/USDT"
+        symbol = "BTC/USD"
         price = 50000.0
         
         for i, agent in enumerate(agents):

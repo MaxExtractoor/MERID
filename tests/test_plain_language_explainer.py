@@ -27,7 +27,7 @@ from core.explainability import (
 
 def _make_context(**overrides):
     defaults = dict(
-        inputs={"symbol": "BTC/USDT", "price": 50000.0},
+        inputs={"symbol": "BTC/USD", "price": 50000.0},
         agent_id="strategy-agent",
         strategy="momentum",
         constraints={"max_position": 5000},
@@ -41,7 +41,7 @@ def _make_context(**overrides):
 def _make_rationale(**overrides):
     defaults = dict(
         reason="Strong momentum signal with favorable risk/reward",
-        inputs={"symbol": "BTC/USDT", "price": 50000.0},
+        inputs={"symbol": "BTC/USD", "price": 50000.0},
         features=[
             FeatureAttribution("momentum_score", 0.85, importance=0.9),
             FeatureAttribution("volume_surge", True, importance=0.7),

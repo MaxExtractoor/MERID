@@ -187,7 +187,7 @@ class TestTradeNotificationIntegration:
         engine.portfolios = {"operator": PaperPortfolio(user_id="operator", starting_balance=100000.0, current_balance=100000.0)}
         engine.order_counter = 0
         engine.position_counter = 0
-        engine.current_prices = {"BTC-USD": 68000.0, "BTC/USDT": 68000.0}
+        engine.current_prices = {"BTC-USD": 68000.0, "BTC/USD": 68000.0}
         engine.price_feed = None
         engine._listeners = {"trade": set(), "summary": set(), "position": set()}
         engine._summary_dirty = False
@@ -203,7 +203,7 @@ class TestTradeNotificationIntegration:
         pd_mock = MagicMock()
         pd_mock.price = 68000.0
         feed = MagicMock()
-        feed.price_cache = {"BTC/USDT": pd_mock}
+        feed.price_cache = {"BTC/USD": pd_mock}
 
         with patch("web.api.missing_endpoints.get_paper_engine", return_value=engine), \
              patch("web.api.missing_endpoints.get_live_price_feed", return_value=feed), \

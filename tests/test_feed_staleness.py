@@ -31,15 +31,15 @@ class TestFeedRegistration(unittest.TestCase):
         mon.register_feed(FeedConfig(
             feed_id="binance",
             max_age_seconds=30,
-            instruments=["BTC/USDT", "ETH/USDT"],
+            instruments=["BTC/USD", "ETH/USD"],
         ))
         summary = mon.get_summary()
         self.assertEqual(summary["total_feeds"], 2)
 
     def test_record_update_creates_entry(self):
         mon = FeedStalenessMonitor()
-        mon.record_update("binance", "BTC/USDT")
-        self.assertFalse(mon.is_instrument_paused("BTC/USDT"))
+        mon.record_update("binance", "BTC/USD")
+        self.assertFalse(mon.is_instrument_paused("BTC/USD"))
 
     def test_unregistered_feed_uses_defaults(self):
         mon = FeedStalenessMonitor(default_max_age=10)
@@ -53,15 +53,15 @@ class TestStalenessDetection(unittest.TestCase):
 
     def test_fresh_data_not_stale(self):
         mon = FeedStalenessMonitor(default_max_age=60)
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
-        status = mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time())
+        status = mon.check_feed("binance", "BTC/USD")
         self.assertFalse(status.stale)
         self.assertFalse(status.paused)
 
     def test_old_data_is_stale(self):
         mon = FeedStalenessMonitor(default_max_age=60)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 120)
-        status = mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 120)
+        status = mon.check_feed("binance", "BTC/USD")
         self.assertTrue(status.stale)
         self.assertTrue(status.paused)
 
@@ -70,9 +70,9 @@ class TestStalenessDetection(unittest.TestCase):
         mon.register_feed(FeedConfig(
             feed_id="kraken",
             max_age_seconds=10,
-            instruments=["SOL/USDT"],
+            instruments=["SOL/USD"],
         ))
-        status = mon.check_feed("kraken", "SOL/USDT")
+        status = mon.check_feed("kraken", "SOL/USD")
         self.assertTrue(status.stale)
 
     def test_custom_threshold_per_feed(self):
@@ -92,15 +92,15 @@ class TestCriticalStaleness(unittest.TestCase):
 
     def test_critical_threshold(self):
         mon = FeedStalenessMonitor(default_max_age=60, default_critical_age=300)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 400)
-        status = mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 400)
+        status = mon.check_feed("binance", "BTC/USD")
         self.assertTrue(status.stale)
         self.assertTrue(status.critical)
 
     def test_stale_but_not_critical(self):
         mon = FeedStalenessMonitor(default_max_age=60, default_critical_age=300)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 120)
-        status = mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 120)
+        status = mon.check_feed("binance", "BTC/USD")
         self.assertTrue(status.stale)
         self.assertFalse(status.critical)
 
@@ -110,33 +110,33 @@ class TestAutoPause(unittest.TestCase):
 
     def test_stale_instrument_paused(self):
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 60)
-        mon.check_feed("binance", "BTC/USDT")
-        self.assertTrue(mon.is_instrument_paused("BTC/USDT"))
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 60)
+        mon.check_feed("binance", "BTC/USD")
+        self.assertTrue(mon.is_instrument_paused("BTC/USD"))
 
     def test_fresh_instrument_not_paused(self):
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
-        mon.check_feed("binance", "BTC/USDT")
-        self.assertFalse(mon.is_instrument_paused("BTC/USDT"))
+        mon.record_update("binance", "BTC/USD", ts=time.time())
+        mon.check_feed("binance", "BTC/USD")
+        self.assertFalse(mon.is_instrument_paused("BTC/USD"))
 
     def test_paused_instruments_dict(self):
         mon = FeedStalenessMonitor(default_max_age=10)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 20)
-        mon.record_update("binance", "ETH/USDT", ts=time.time() - 20)
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 20)
+        mon.record_update("binance", "ETH/USD", ts=time.time() - 20)
         mon.check_all()
         paused = mon.get_paused_instruments()
-        self.assertIn("BTC/USDT", paused)
-        self.assertIn("ETH/USDT", paused)
+        self.assertIn("BTC/USD", paused)
+        self.assertIn("ETH/USD", paused)
 
     def test_check_all_returns_stale_only(self):
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 60)
-        mon.record_update("binance", "ETH/USDT", ts=time.time())
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 60)
+        mon.record_update("binance", "ETH/USD", ts=time.time())
         stale = mon.check_all()
         symbols = [s.instrument for s in stale]
-        self.assertIn("BTC/USDT", symbols)
-        self.assertNotIn("ETH/USDT", symbols)
+        self.assertIn("BTC/USD", symbols)
+        self.assertNotIn("ETH/USD", symbols)
 
 
 class TestRecovery(unittest.TestCase):
@@ -144,21 +144,21 @@ class TestRecovery(unittest.TestCase):
 
     def test_recovery_unpauses_instrument(self):
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 60)
-        mon.check_feed("binance", "BTC/USDT")
-        self.assertTrue(mon.is_instrument_paused("BTC/USDT"))
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 60)
+        mon.check_feed("binance", "BTC/USD")
+        self.assertTrue(mon.is_instrument_paused("BTC/USD"))
 
         # Fresh data arrives
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
-        self.assertFalse(mon.is_instrument_paused("BTC/USDT"))
+        mon.record_update("binance", "BTC/USD", ts=time.time())
+        self.assertFalse(mon.is_instrument_paused("BTC/USD"))
 
     def test_recovery_clears_stale_set(self):
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 60)
-        mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 60)
+        mon.check_feed("binance", "BTC/USD")
         self.assertEqual(len(mon._stale_set), 1)
 
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
+        mon.record_update("binance", "BTC/USD", ts=time.time())
         self.assertEqual(len(mon._stale_set), 0)
 
 
@@ -169,41 +169,41 @@ class TestCallbacks(unittest.TestCase):
         cb = MagicMock()
         mon = FeedStalenessMonitor(default_max_age=10)
         mon.on_stale(cb)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 20)
-        mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 20)
+        mon.check_feed("binance", "BTC/USD")
         cb.assert_called_once()
         args = cb.call_args[0]
         self.assertEqual(args[0], "binance")
-        self.assertEqual(args[1], "BTC/USDT")
+        self.assertEqual(args[1], "BTC/USD")
 
     def test_on_critical_callback(self):
         cb = MagicMock()
         mon = FeedStalenessMonitor(default_max_age=10, default_critical_age=30)
         mon.on_critical(cb)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 60)
-        mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 60)
+        mon.check_feed("binance", "BTC/USD")
         cb.assert_called_once()
 
     def test_on_recovered_callback(self):
         cb = MagicMock()
         mon = FeedStalenessMonitor(default_max_age=10)
         mon.on_recovered(cb)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 20)
-        mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 20)
+        mon.check_feed("binance", "BTC/USD")
 
         # Recover
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
-        cb.assert_called_once_with("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time())
+        cb.assert_called_once_with("binance", "BTC/USD")
 
     def test_callback_error_does_not_crash(self):
         def bad_cb(*args):
             raise RuntimeError("boom")
         mon = FeedStalenessMonitor(default_max_age=10)
         mon.on_stale(bad_cb)
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 20)
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 20)
         # Should not raise
-        mon.check_feed("binance", "BTC/USDT")
-        self.assertTrue(mon.is_instrument_paused("BTC/USDT"))
+        mon.check_feed("binance", "BTC/USD")
+        self.assertTrue(mon.is_instrument_paused("BTC/USD"))
 
 
 class TestSummary(unittest.TestCase):
@@ -212,8 +212,8 @@ class TestSummary(unittest.TestCase):
     def test_summary_serializable(self):
         import json
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
-        mon.record_update("kraken", "ETH/USDT", ts=time.time() - 60)
+        mon.record_update("binance", "BTC/USD", ts=time.time())
+        mon.record_update("kraken", "ETH/USD", ts=time.time() - 60)
         summary = mon.get_summary()
         serialized = json.dumps(summary)
         self.assertIn("total_feeds", serialized)
@@ -221,13 +221,13 @@ class TestSummary(unittest.TestCase):
 
     def test_summary_sorted_worst_first(self):
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
-        mon.record_update("kraken", "ETH/USDT", ts=time.time() - 120)
+        mon.record_update("binance", "BTC/USD", ts=time.time())
+        mon.record_update("kraken", "ETH/USD", ts=time.time() - 120)
         summary = mon.get_summary()
         feeds = summary["feeds"]
         self.assertEqual(len(feeds), 2)
         # Worst (oldest) first
-        self.assertEqual(feeds[0]["instrument"], "ETH/USDT")
+        self.assertEqual(feeds[0]["instrument"], "ETH/USD")
 
 
 class TestHaltManagerIntegration(unittest.TestCase):
@@ -245,8 +245,8 @@ class TestHaltManagerIntegration(unittest.TestCase):
 
         mon.on_stale(on_stale)
 
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 30)
-        mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 30)
+        mon.check_feed("binance", "BTC/USD")
 
         self.assertTrue(halt_mgr.is_halted)
         self.assertIn("Stale data", halt_mgr.halt_reason)
@@ -267,12 +267,12 @@ class TestHaltManagerIntegration(unittest.TestCase):
         mon.on_recovered(on_recovered)
 
         # Go stale
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 30)
-        mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 30)
+        mon.check_feed("binance", "BTC/USD")
         self.assertTrue(halt_mgr.is_halted)
 
         # Recover
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
+        mon.record_update("binance", "BTC/USD", ts=time.time())
         self.assertFalse(halt_mgr.is_halted)
 
 

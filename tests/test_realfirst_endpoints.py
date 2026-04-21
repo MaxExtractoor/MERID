@@ -97,8 +97,8 @@ class TestDataFreshnessRealFirst:
         """When price_cache has entries, _stub should be absent."""
         feed = _mock_price_feed(
             prices={
-                "BTC/USDT": _make_price_data("BTC/USDT", "kraken", 1),
-                "ETH/USDT": _make_price_data("ETH/USDT", "coinbase", 2),
+                "BTC/USD": _make_price_data("BTC/USD", "kraken", 1),
+                "ETH/USD": _make_price_data("ETH/USD", "coinbase", 2),
             },
             fetches={"kraken": time.time() - 1, "coinbase": time.time() - 2},
         )
@@ -151,9 +151,9 @@ class TestAnalyticsOverviewRealFirst:
         """When paper engine has trade history, _stub should be absent."""
         now = time.time()
         trades = [
-            _make_order("BTC/USDT", 500.0, now - 3600),
-            _make_order("ETH/USDT", 300.0, now - 1800),
-            _make_order("BTC/USDT", 200.0, now - 900),
+            _make_order("BTC/USD", 500.0, now - 3600),
+            _make_order("ETH/USD", 300.0, now - 1800),
+            _make_order("BTC/USD", 200.0, now - 900),
         ]
         engine = MagicMock()
         engine.portfolios = {"default": _make_portfolio(trades)}
@@ -172,8 +172,8 @@ class TestAnalyticsOverviewRealFirst:
         assert data["success_rate"] > 0
         labels = data["market_distribution"]["labels"]
         values = data["market_distribution"]["values"]
-        assert "BTC/USDT" in labels
-        assert "ETH/USDT" in labels
+        assert "BTC/USD" in labels
+        assert "ETH/USD" in labels
         assert values[0] == 700.0  # BTC total
         assert values[1] == 300.0  # ETH total
 

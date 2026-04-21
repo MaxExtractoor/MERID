@@ -79,9 +79,9 @@ class StrategyAgent(StreamingAgent):
                 from data.asset_universe import get_swarm_eligible
                 _eligible = [a.symbol for a in get_swarm_eligible()
                              if "/" in a.symbol and ":" not in a.symbol]
-                symbol = _eligible[0] if _eligible else "BTC/USDT"
+                symbol = _eligible[0] if _eligible else "BTC/USD"
             except Exception:
-                symbol = "BTC/USDT"
+                symbol = "BTC/USD"
         
         # Get volatility-adjusted stops
         volatility = self.volatility.get(symbol, 0.02)

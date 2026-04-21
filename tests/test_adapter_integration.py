@@ -235,11 +235,11 @@ def _build_router_with_mocks():
 
     instruments = InstrumentRegistry()
     instruments.register(Instrument(
-        merid_symbol="BTC/USDT", domain="crypto",
+        merid_symbol="BTC/USD", domain="crypto",
         venue_symbols={"binanceus": "BTCUSD"},
     ))
     instruments.register(Instrument(
-        merid_symbol="ETH/USDT", domain="crypto",
+        merid_symbol="ETH/USD", domain="crypto",
         venue_symbols={"binanceus": "ETHUSD"},
     ))
     instruments.register(Instrument(
@@ -331,7 +331,7 @@ class TestRouterWithMockAdapters(unittest.TestCase):
         proposal = TradeProposal(
             domain=TradeDomain.CRYPTO,
             venue="binanceus",
-            instrument_id="BTC/USDT",
+            instrument_id="BTC/USD",
             side=OrderSide.BUY,
             qty=Decimal("0.1"),
             price=Decimal("50000"),
@@ -418,7 +418,7 @@ class TestMultiVenueRouting(unittest.TestCase):
         proposal = TradeProposal(
             domain=TradeDomain.CRYPTO,
             venue="binanceus",
-            instrument_id="BTC/USDT",
+            instrument_id="BTC/USD",
             side=OrderSide.BUY,
             qty=Decimal("0.01"),
             price=Decimal("50000"),
@@ -440,7 +440,7 @@ class TestMultiVenueRouting(unittest.TestCase):
 
     def test_batch_submit(self):
         proposals = [
-            TradeProposal(domain=TradeDomain.CRYPTO, venue="binanceus", instrument_id="BTC/USDT", side=OrderSide.BUY, qty=Decimal("0.01"), price=Decimal("50000")),
+            TradeProposal(domain=TradeDomain.CRYPTO, venue="binanceus", instrument_id="BTC/USD", side=OrderSide.BUY, qty=Decimal("0.01"), price=Decimal("50000")),
             TradeProposal(domain=TradeDomain.EQUITY, venue="alpaca", instrument_id="AAPL", side=OrderSide.BUY, qty=Decimal("5"), price=Decimal("175")),
         ]
         results = _run(self.router.submit_batch(proposals))
@@ -487,7 +487,7 @@ class TestExecutionResultDetails(unittest.TestCase):
 
     def test_fee_recorded(self):
         proposal = TradeProposal(
-            domain=TradeDomain.CRYPTO, venue="binanceus", instrument_id="BTC/USDT",
+            domain=TradeDomain.CRYPTO, venue="binanceus", instrument_id="BTC/USD",
             side=OrderSide.BUY, qty=Decimal("0.1"), price=Decimal("50000"),
         )
         result = _run(self.router.submit(proposal))
@@ -495,7 +495,7 @@ class TestExecutionResultDetails(unittest.TestCase):
 
     def test_latency_recorded(self):
         proposal = TradeProposal(
-            domain=TradeDomain.CRYPTO, venue="binanceus", instrument_id="BTC/USDT",
+            domain=TradeDomain.CRYPTO, venue="binanceus", instrument_id="BTC/USD",
             side=OrderSide.BUY, qty=Decimal("0.1"), price=Decimal("50000"),
         )
         result = _run(self.router.submit(proposal))

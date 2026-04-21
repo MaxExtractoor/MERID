@@ -44,7 +44,7 @@ class TestSendExecuteSuccess:
         result = await mock_telegram_agent.send_execute_success(
             episode_id="abc123def456",
             assets=["BTC"],
-            summary="LONG BTC/USDT $500",
+            summary="LONG BTC/USD $500",
             throttle="80%",
             cqi="0.67",
         )

@@ -38,12 +38,12 @@ class TestPortfolioAsset:
     def test_creation(self):
         """Test PortfolioAsset creation."""
         asset = PortfolioAsset(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             quantity=1.5,
             avg_cost=50000.0,
             current_price=55000.0
         )
-        assert asset.symbol == "BTC/USDT"
+        assert asset.symbol == "BTC/USD"
         assert asset.quantity == 1.5
         assert asset.avg_cost == 50000.0
         assert asset.current_price == 55000.0
@@ -51,7 +51,7 @@ class TestPortfolioAsset:
     def test_to_dict(self):
         """Test PortfolioAsset to_dict."""
         asset = PortfolioAsset(
-            symbol="BTC/USDT",
+            symbol="ETH/USD",
             quantity=2.0,
             avg_cost=50000.0,
             current_price=55000.0,
@@ -61,7 +61,7 @@ class TestPortfolioAsset:
             pnl_pct=10.0
         )
         d = asset.to_dict()
-        assert d["symbol"] == "BTC/USDT"
+        assert d["symbol"] == "ETH/USD"
         assert d["quantity"] == 2.0
         assert d["market_value"] == 110000.0
         assert d["pnl"] == 10000.0
@@ -73,7 +73,7 @@ class TestRebalanceOrder:
     def test_creation(self):
         """Test RebalanceOrder creation."""
         order = RebalanceOrder(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=0.5,
             current_weight=0.45,
@@ -81,7 +81,7 @@ class TestRebalanceOrder:
             weight_diff=0.05,
             estimated_value=5000.0
         )
-        assert order.symbol == "BTC/USDT"
+        assert order.symbol == "BTC/USD"
         assert order.action == "buy"
         assert order.weight_diff == 0.05
 
@@ -115,20 +115,20 @@ class TestPortfolioManagerProperties:
     def test_total_value_with_positions(self):
         """Test total value with positions."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
         assert manager.total_value == 100000.0  # Cash + invested
 
     def test_invested_value(self):
         """Test invested value calculation."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
         assert manager.invested_value == 50000.0
 
     def test_pnl_calculation(self):
         """Test P&L calculation."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
-        manager.update_price("BTC/USDT", 55000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
+        manager.update_price("BTC/USD", 55000.0)
         assert manager.pnl == 5000.0
         assert manager.pnl_pct == 5.0
 
@@ -139,20 +139,20 @@ class TestPortfolioManagerPositionManagement:
     def test_add_new_position(self):
         """Test adding a new position."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
         
-        assert "BTC/USDT" in manager._assets
-        assert manager._assets["BTC/USDT"].quantity == 1.0
-        assert manager._assets["BTC/USDT"].avg_cost == 50000.0
+        assert "BTC/USD" in manager._assets
+        assert manager._assets["BTC/USD"].quantity == 1.0
+        assert manager._assets["BTC/USD"].avg_cost == 50000.0
         assert manager._cash == 50000.0
 
     def test_add_to_existing_position(self):
         """Test adding to existing position."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
-        manager.add_position("BTC/USDT", 0.5, 55000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
+        manager.add_position("BTC/USD", 0.5, 55000.0)
         
-        asset = manager._assets["BTC/USDT"]
+        asset = manager._assets["BTC/USD"]
         assert asset.quantity == 1.5
         # Avg cost should be weighted average
         assert asset.avg_cost == (50000.0 + 27500.0) / 1.5
@@ -160,25 +160,25 @@ class TestPortfolioManagerPositionManagement:
     def test_remove_position(self):
         """Test removing from position."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
-        pnl = manager.remove_position("BTC/USDT", 0.5, 55000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
+        pnl = manager.remove_position("BTC/USD", 0.5, 55000.0)
         
         assert pnl == 2500.0  # (55000 - 50000) * 0.5
-        assert manager._assets["BTC/USDT"].quantity == 0.5
+        assert manager._assets["BTC/USD"].quantity == 0.5
         assert manager._cash == 50000.0 + 27500.0
 
     def test_remove_entire_position(self):
         """Test removing entire position."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
-        manager.remove_position("BTC/USDT", 1.0, 55000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
+        manager.remove_position("BTC/USD", 1.0, 55000.0)
         
-        assert "BTC/USDT" not in manager._assets
+        assert "BTC/USD" not in manager._assets
 
     def test_remove_nonexistent_position(self):
         """Test removing from non-existent position."""
         manager = PortfolioManager(initial_capital=100000.0)
-        pnl = manager.remove_position("BTC/USDT", 1.0, 50000.0)
+        pnl = manager.remove_position("BTC/USD", 1.0, 50000.0)
         
         assert pnl == 0.0
 
@@ -189,10 +189,10 @@ class TestPortfolioManagerPriceUpdates:
     def test_update_price(self):
         """Test updating asset price."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
-        manager.update_price("BTC/USDT", 55000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
+        manager.update_price("BTC/USD", 55000.0)
         
-        asset = manager._assets["BTC/USDT"]
+        asset = manager._assets["BTC/USD"]
         assert asset.current_price == 55000.0
         assert asset.pnl == 5000.0
         assert asset.pnl_pct == 10.0
@@ -200,7 +200,7 @@ class TestPortfolioManagerPriceUpdates:
     def test_update_price_nonexistent(self):
         """Test updating price for non-existent asset."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.update_price("BTC/USDT", 55000.0)  # Should not raise
+        manager.update_price("BTC/USD", 55000.0)  # Should not raise
 
 
 class TestPortfolioManagerTargetWeights:
@@ -209,20 +209,20 @@ class TestPortfolioManagerTargetWeights:
     def test_set_target_weights(self):
         """Test setting target weights."""
         manager = PortfolioManager(initial_capital=100000.0)
-        weights = {"BTC/USDT": 0.6, "ETH/USDT": 0.4}
+        weights = {"BTC/USD": 0.6, "ETH/USD": 0.4}
         manager.set_target_weights(weights)
         
-        assert manager._target_weights["BTC/USDT"] == 0.6
-        assert manager._target_weights["ETH/USDT"] == 0.4
+        assert manager._target_weights["BTC/USD"] == 0.6
+        assert manager._target_weights["ETH/USD"] == 0.4
 
     def test_set_target_weights_normalization(self):
         """Test target weights normalization."""
         manager = PortfolioManager(initial_capital=100000.0)
-        weights = {"BTC/USDT": 60, "ETH/USDT": 40}  # Sum = 100, not 1
+        weights = {"BTC/USD": 60, "ETH/USD": 40}  # Sum = 100, not 1
         manager.set_target_weights(weights)
         
-        assert manager._target_weights["BTC/USDT"] == 0.6
-        assert manager._target_weights["ETH/USDT"] == 0.4
+        assert manager._target_weights["BTC/USD"] == 0.6
+        assert manager._target_weights["ETH/USD"] == 0.4
 
 
 class TestPortfolioManagerRebalancing:
@@ -238,10 +238,10 @@ class TestPortfolioManagerRebalancing:
         """Test rebalancing when drift is below threshold."""
         manager = PortfolioManager(initial_capital=100000.0)
         # Set up 2 assets at 50%/50% weights
-        manager.add_position("BTC/USDT", 1.0, 50000.0)  # 50% weight ($50k)
-        manager.add_position("ETH/USDT", 1.0, 50000.0)  # 50% weight ($50k)
+        manager.add_position("BTC/USD", 1.0, 50000.0)  # 50% weight ($50k)
+        manager.add_position("ETH/USD", 1.0, 50000.0)  # 50% weight ($50k)
         # Target: BTC=0.52 (2% drift), ETH=0.48 (2% drift) - sums to 1.0
-        manager.set_target_weights({"BTC/USDT": 0.52, "ETH/USDT": 0.48})
+        manager.set_target_weights({"BTC/USD": 0.52, "ETH/USD": 0.48})
 
         orders = manager.calculate_rebalance_orders()
         # Both drifts are 2%, below 5% threshold - no orders expected
@@ -250,15 +250,15 @@ class TestPortfolioManagerRebalancing:
     def test_calculate_rebalance_orders_buy(self):
         """Test rebalancing buy order."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 0.5, 50000.0)  # 25% weight
+        manager.add_position("BTC/USD", 0.5, 50000.0)  # 25% weight
         manager._cash = 75000.0  # 75% cash
         # Set up weights that sum to 1.0 with a second asset
-        manager.set_target_weights({"BTC/USDT": 0.5, "ETH/USDT": 0.5})  # Target 50% BTC
+        manager.set_target_weights({"BTC/USD": 0.5, "ETH/USD": 0.5})  # Target 50% BTC
 
         with patch.object(manager, '_get_current_price', return_value=50000.0):
             orders = manager.calculate_rebalance_orders()
 
-        btc_orders = [o for o in orders if o.symbol == "BTC/USDT"]
+        btc_orders = [o for o in orders if o.symbol == "BTC/USD"]
         assert len(btc_orders) == 1
         assert btc_orders[0].action == "buy"
         assert btc_orders[0].weight_diff > 0
@@ -266,15 +266,15 @@ class TestPortfolioManagerRebalancing:
     def test_calculate_rebalance_orders_sell(self):
         """Test rebalancing sell order."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.5, 50000.0)  # 75% weight ($75k)
+        manager.add_position("BTC/USD", 1.5, 50000.0)  # 75% weight ($75k)
         manager._cash = 25000.0  # 25% cash
         # Set up weights that sum to 1.0 with a second asset to hold remaining
-        manager.set_target_weights({"BTC/USDT": 0.5, "ETH/USDT": 0.5})  # Target 50% BTC
+        manager.set_target_weights({"BTC/USD": 0.5, "ETH/USD": 0.5})  # Target 50% BTC
 
         with patch.object(manager, '_get_current_price', return_value=50000.0):
             orders = manager.calculate_rebalance_orders()
 
-        btc_orders = [o for o in orders if o.symbol == "BTC/USDT"]
+        btc_orders = [o for o in orders if o.symbol == "BTC/USD"]
         assert len(btc_orders) == 1
         assert btc_orders[0].action == "sell"
         assert btc_orders[0].weight_diff < 0
@@ -287,7 +287,7 @@ class TestPortfolioManagerPositionSizing:
         """Test fixed amount position sizing."""
         manager = PortfolioManager(initial_capital=100000.0)
         manager._sizing_method = PositionSizingMethod.FIXED_AMOUNT
-        size = manager.calculate_position_size("BTC/USDT", 50000.0, 48000.0)
+        size = manager.calculate_position_size("BTC/USD", 50000.0, 48000.0)
         
         assert size == 1000 / 50000.0  # $1000 per trade
 
@@ -295,7 +295,7 @@ class TestPortfolioManagerPositionSizing:
         """Test fixed percent position sizing."""
         manager = PortfolioManager(initial_capital=100000.0)
         manager._sizing_method = PositionSizingMethod.FIXED_PERCENT
-        size = manager.calculate_position_size("BTC/USDT", 50000.0, 48000.0)
+        size = manager.calculate_position_size("BTC/USD", 50000.0, 48000.0)
         
         assert size == 10000 / 50000.0  # 10% of portfolio
 
@@ -303,7 +303,7 @@ class TestPortfolioManagerPositionSizing:
         """Test volatility adjusted position sizing."""
         manager = PortfolioManager(initial_capital=100000.0)
         manager._sizing_method = PositionSizingMethod.VOLATILITY_ADJUSTED
-        size = manager.calculate_position_size("BTC/USDT", 50000.0, 48000.0, risk_per_trade=0.02)
+        size = manager.calculate_position_size("BTC/USD", 50000.0, 48000.0, risk_per_trade=0.02)
         
         # Risk amount = 2% of 100k = 2000, risk per unit = 2000, size = 1
         expected_size = (100000.0 * 0.02) / 2000.0
@@ -313,7 +313,7 @@ class TestPortfolioManagerPositionSizing:
         """Test Kelly criterion position sizing."""
         manager = PortfolioManager(initial_capital=100000.0)
         manager._sizing_method = PositionSizingMethod.KELLY_CRITERION
-        size = manager.calculate_position_size("BTC/USDT", 50000.0, 48000.0)
+        size = manager.calculate_position_size("BTC/USD", 50000.0, 48000.0)
         
         # Kelly fraction should be between 0 and 0.25
         assert size > 0
@@ -325,7 +325,7 @@ class TestPortfolioManagerSnapshots:
     def test_take_snapshot(self):
         """Test taking portfolio snapshot."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
         snapshot = manager.take_snapshot()
         
         assert isinstance(snapshot, PortfolioSnapshot)
@@ -350,7 +350,7 @@ class TestPortfolioManagerSummary:
     def test_get_summary(self):
         """Test getting portfolio summary."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
         summary = manager.get_summary()
         
         assert summary["total_value"] == 100000.0
@@ -362,23 +362,23 @@ class TestPortfolioManagerSummary:
     def test_get_holdings(self):
         """Test getting holdings."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
+        manager.add_position("BTC/USD", 1.0, 50000.0)
         holdings = manager.get_holdings()
         
         assert len(holdings) == 1
-        assert holdings[0]["symbol"] == "BTC/USDT"
+        assert holdings[0]["symbol"] == "BTC/USD"
 
     def test_get_allocation(self):
         """Test getting allocation."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
-        manager.set_target_weights({"BTC/USDT": 0.6, "ETH/USDT": 0.4})
+        manager.add_position("BTC/USD", 1.0, 50000.0)
+        manager.set_target_weights({"BTC/USD": 0.6, "ETH/USD": 0.4})
         allocation = manager.get_allocation()
         
-        assert "BTC/USDT" in allocation
-        assert "ETH/USDT" in allocation  # Target but not held
-        assert allocation["BTC/USDT"]["current_weight"] == 0.5
-        assert allocation["ETH/USDT"]["current_weight"] == 0
+        assert "BTC/USD" in allocation
+        assert "ETH/USD" in allocation  # Target but not held
+        assert allocation["BTC/USD"]["current_weight"] == 0.5
+        assert allocation["ETH/USD"]["current_weight"] == 0
 
 
 class TestGetPortfolioManager:

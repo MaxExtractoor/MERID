@@ -19,9 +19,9 @@ class TestInstrument:
         inst = Instrument(
             merid_symbol="BTC-USD",
             domain="crypto",
-            venue_symbols={"binance": "BTCUSDT", "coinbase": "BTC-USD"},
+            venue_symbols={"binance": "BTCUSD", "coinbase": "BTC-USD"},
         )
-        assert inst.native("binance") == "BTCUSDT"
+        assert inst.native("binance") == "BTCUSD"
         assert inst.native("coinbase") == "BTC-USD"
         assert inst.native("missing") is None
 
@@ -29,7 +29,7 @@ class TestInstrument:
         inst = Instrument(
             merid_symbol="ETH-USD",
             domain="crypto",
-            venue_symbols={"binance": "ETHUSDT", "kraken": "XETHZUSD"},
+            venue_symbols={"binance": "ETHUSD", "kraken": "XETHZUSD"},
         )
         assert set(inst.venues()) == {"binance", "kraken"}
 
@@ -51,7 +51,7 @@ class TestInstrument:
             merid_symbol="BTC-USD",
             domain="crypto",
             display_name="Bitcoin",
-            venue_symbols={"binance": "BTCUSDT"},
+            venue_symbols={"binance": "BTCUSD"},
             tags=["tier1"],
         )
         d = inst.to_dict()
@@ -68,7 +68,7 @@ class TestInstrumentRegistry:
 
     def test_register_and_get(self):
         reg = self._reg()
-        inst = Instrument("BTC-USD", "crypto", venue_symbols={"binance": "BTCUSDT"})
+        inst = Instrument("BTC-USD", "crypto", venue_symbols={"binance": "BTCUSD"})
         reg.register(inst)
         assert reg.get("BTC-USD") is inst
 
@@ -84,10 +84,10 @@ class TestInstrumentRegistry:
 
     def test_reverse_lookup(self):
         reg = self._reg()
-        reg.register(Instrument("BTC-USD", "crypto", venue_symbols={"binance": "BTCUSDT"}))
-        assert reg.reverse_lookup("binance", "BTCUSDT") == "BTC-USD"
-        assert reg.reverse_lookup("binance", "ETHUSDT") is None
-        assert reg.reverse_lookup("unknown", "BTCUSDT") is None
+        reg.register(Instrument("BTC-USD", "crypto", venue_symbols={"binance": "BTCUSD"}))
+        assert reg.reverse_lookup("binance", "BTCUSD") == "BTC-USD"
+        assert reg.reverse_lookup("binance", "ETHUSD") is None
+        assert reg.reverse_lookup("unknown", "BTCUSD") is None
 
     def test_by_domain(self):
         reg = self._reg()
@@ -99,7 +99,7 @@ class TestInstrumentRegistry:
 
     def test_by_venue(self):
         reg = self._reg()
-        reg.register(Instrument("BTC-USD", "crypto", venue_symbols={"binance": "BTCUSDT"}))
+        reg.register(Instrument("BTC-USD", "crypto", venue_symbols={"binance": "BTCUSD"}))
         reg.register(Instrument("ETH-USD", "crypto", venue_symbols={"coinbase": "ETH-USD"}))
         assert len(reg.by_venue("binance")) == 1
         assert len(reg.by_venue("coinbase")) == 1
@@ -115,7 +115,7 @@ class TestInstrumentRegistry:
 
     def test_summary_structure(self):
         reg = self._reg()
-        reg.register(Instrument("BTC-USD", "crypto", venue_symbols={"binance": "BTCUSDT"}))
+        reg.register(Instrument("BTC-USD", "crypto", venue_symbols={"binance": "BTCUSD"}))
         reg.register(Instrument("AAPL", "equity", venue_symbols={"alpaca": "AAPL"}))
         s = reg.summary()
         assert s["total_instruments"] == 2
@@ -144,7 +144,7 @@ class TestBuildCryptoInstruments:
         btc = reg.get("BTC-USD")
         assert btc is not None
         assert btc.domain == "crypto"
-        assert reg.resolve("BTC-USD", "binance") == "BTCUSDT"
+        assert reg.resolve("BTC-USD", "binance") == "BTCUSD"
         assert reg.resolve("BTC-USD", "coinbase") == "BTC-USD"
 
     def test_btc_has_tier1_tag(self):
@@ -194,7 +194,7 @@ class TestBuildCryptoInstruments:
     def test_kraken_generic_fallback_for_sol(self):
         reg = InstrumentRegistry()
         _build_crypto_instruments(reg)
-        assert reg.resolve("SOL-USD", "kraken") == "SOLUSDT"
+        assert reg.resolve("SOL-USD", "kraken") == "SOLUSD"
 
 
 # ── build_default_registry ────────────────────────────────────────────

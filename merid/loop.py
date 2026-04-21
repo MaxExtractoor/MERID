@@ -148,7 +148,7 @@ class LoopConfig:
         for d in pc.active_domains():
             if d.feed_type == "price":
                 for s in d.symbols:
-                    # "BTC/USDT" -> "BTC", "AAPL" -> "AAPL"
+                    # "BTC/USD" -> "BTC", "AAPL" -> "AAPL"
                     short = s.split("/")[0] if "/" in s else s
                     price_symbols.append(short)
 

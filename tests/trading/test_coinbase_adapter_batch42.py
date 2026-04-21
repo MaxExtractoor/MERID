@@ -242,14 +242,14 @@ class TestCoinbaseSpotAdapter:
 
         request = TradeRequest(
             venue="coinbase",
-            symbol="BTC/USDT",  # Already has slash
+            symbol="BTC/USD",  # Already has slash
             side=TradeSide.BUY,
             quantity=1.0,
             order_type=OrderType.MARKET,
         )
 
         result = adapter_with_credentials._submit_order_live(request)
-        assert result.symbol == "BTC/USDT"  # Unchanged
+        assert result.symbol == "BTC/USD"  # Unchanged
 
     def test_register_adapter(self, monkeypatch):
         """Test that adapter is registered on import when multi-venue mode is on."""

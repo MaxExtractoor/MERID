@@ -8,7 +8,7 @@ swap in real dxFeed connectivity when credentials are available.
 Usage:
     from core.market_data_dxfeed import get_dxfeed_adapter
     adapter = get_dxfeed_adapter()
-    snapshot = adapter.get_snapshot("BTC/USDT")
+    snapshot = adapter.get_snapshot("BTC/USD")
     watchlist = adapter.get_watchlist()
 """
 
@@ -58,7 +58,7 @@ def _build_default_watchlist() -> list:
         from data.asset_universe import get_watchlist_symbols
         return get_watchlist_symbols()
     except Exception:
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        return ["BTC/USD", "ETH/USD", "SOL/USD"]
 
 
 DEFAULT_WATCHLIST = _build_default_watchlist()

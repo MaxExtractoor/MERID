@@ -58,7 +58,7 @@ async def run_soak(duration_seconds: float, target_entries: int, storage_dir: st
             source=f"agent-{count % 5}",
             data={
                 "order_id": f"ORD-{count:06d}",
-                "symbol": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "AAPL", "KXBTCD"][count % 5],
+                "symbol": ["BTC/USD", "ETH/USD", "SOL/USD", "AAPL", "KXBTCD"][count % 5],
                 "side": "buy" if count % 2 == 0 else "sell",
                 "quantity": round(0.01 + (count % 100) * 0.001, 4),
                 "price": round(50000 + (count % 1000), 2),

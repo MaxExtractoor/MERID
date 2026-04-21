@@ -275,7 +275,7 @@ class TestConsensusTradeIntegration:
         engine.portfolios = {"operator": PaperPortfolio(user_id="operator", starting_balance=100000.0, current_balance=100000.0)}
         engine.order_counter = 0
         engine.position_counter = 0
-        engine.current_prices = {"BTC-USD": 68000.0, "BTC/USDT": 68000.0}
+        engine.current_prices = {"BTC-USD": 68000.0, "BTC/USD": 68000.0}
         engine.price_feed = None
         engine._listeners = {"trade": set(), "summary": set(), "position": set()}
         engine._summary_dirty = False
@@ -290,7 +290,7 @@ class TestConsensusTradeIntegration:
         pd_mock = MagicMock()
         pd_mock.price = 68000.0
         feed = MagicMock()
-        feed.price_cache = {"BTC/USDT": pd_mock}
+        feed.price_cache = {"BTC/USD": pd_mock}
         pf_mod = MagicMock()
         pf_mod.get_live_price_feed = MagicMock(return_value=feed)
 
@@ -679,7 +679,7 @@ class TestNotificationEnrichment:
         engine.portfolios = {"operator": PaperPortfolio(user_id="operator", starting_balance=100000.0, current_balance=100000.0)}
         engine.order_counter = 0
         engine.position_counter = 0
-        engine.current_prices = {"BTC-USD": 68000.0, "BTC/USDT": 68000.0}
+        engine.current_prices = {"BTC-USD": 68000.0, "BTC/USD": 68000.0}
         engine.price_feed = None
         engine._listeners = {"trade": set(), "summary": set(), "position": set()}
         engine._summary_dirty = False
@@ -694,7 +694,7 @@ class TestNotificationEnrichment:
         pd_mock = MagicMock()
         pd_mock.price = 68000.0
         feed = MagicMock()
-        feed.price_cache = {"BTC/USDT": pd_mock}
+        feed.price_cache = {"BTC/USD": pd_mock}
         pf_mod = MagicMock()
         pf_mod.get_live_price_feed = MagicMock(return_value=feed)
 

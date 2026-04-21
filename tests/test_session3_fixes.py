@@ -240,7 +240,7 @@ class TestPerpContextFallback:
         from merid.prediction import perp_context
         with patch.object(perp_context, "_fetch_json", side_effect=mock_fetch):
             result = asyncio.get_event_loop().run_until_complete(
-                perp_context._fetch_premium_index("BTCUSDT")
+                perp_context._fetch_premium_index("BTCUSD")
             )
 
         assert result.mark_price == 87000.5
@@ -255,10 +255,10 @@ class TestPerpContextFallback:
         from merid.prediction import perp_context
         with patch.object(perp_context, "_fetch_json", side_effect=mock_fetch):
             result = asyncio.get_event_loop().run_until_complete(
-                perp_context._fetch_premium_index("BTCUSDT")
+                perp_context._fetch_premium_index("BTCUSD")
             )
 
-        assert result.symbol == "BTCUSDT"
+        assert result.symbol == "BTCUSD"
         assert result.mark_price == 0.0
         assert result.funding_rate == 0.0
 
@@ -279,7 +279,7 @@ class TestPerpContextFallback:
         from merid.prediction import perp_context
         with patch.object(perp_context, "_fetch_json", side_effect=mock_fetch):
             result = asyncio.get_event_loop().run_until_complete(
-                perp_context._fetch_premium_index("BTCUSDT")
+                perp_context._fetch_premium_index("BTCUSD")
             )
 
         assert result.mark_price == 86500.0

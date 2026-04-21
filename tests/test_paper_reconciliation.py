@@ -114,7 +114,7 @@ class TestModeGuardOnAdapter(unittest.TestCase):
             adapter.supports_trading = True
             request = TradeRequest(
                 venue="test",
-                symbol="BTC/USDT",
+                symbol="BTC/USD",
                 side=TradeSide.BUY,
                 quantity=1.0,
             )
@@ -140,7 +140,7 @@ class TestModeGuardOnAdapter(unittest.TestCase):
             adapter.supports_trading = True
             request = TradeRequest(
                 venue="test",
-                symbol="BTC/USDT",
+                symbol="BTC/USD",
                 side=TradeSide.BUY,
                 quantity=1.0,
             )
@@ -331,7 +331,7 @@ class TestAuditTrail(unittest.TestCase):
                 agent_id="test-agent",
                 strategy_id="momentum-v1",
                 venue="paper",
-                symbol="BTC/USDT",
+                symbol="BTC/USD",
                 side="long",
                 size=100.0,
                 price=69000.0,
@@ -343,7 +343,7 @@ class TestAuditTrail(unittest.TestCase):
                 intent_id=intent_id,
                 order_id="ord_123",
                 venue="paper",
-                symbol="BTC/USDT",
+                symbol="BTC/USD",
                 side="long",
                 size=100.0,
                 price=69050.0,
@@ -439,7 +439,7 @@ class TestRuntimeConfigAlignment(unittest.TestCase):
         with patch.dict(os.environ, {"MERID_TRADE_MODE": "paper"}):
             tm._reset_for_tests()
             ctrl = TradingModeController()
-            can_exec, reason = ctrl.can_execute_live("BTC/USDT", 100.0)
+            can_exec, reason = ctrl.can_execute_live("BTC/USD", 100.0)
             self.assertFalse(can_exec)
             self.assertIn("Paper", reason)
 

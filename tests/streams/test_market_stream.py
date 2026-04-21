@@ -22,7 +22,7 @@ async def test_market_stream():
     print("\n1. Testing Mock Data Source")
     mock_config = {
         "source_type": "mock",
-        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+        "symbols": ["BTC/USD", "ETH/USD", "SOL/USD"],
         "polling_interval": 1.0
     }
     
@@ -83,7 +83,7 @@ async def test_websocket_stream():
     websocket_config = {
         "source_type": "websocket",
         "source_url": "wss://api.binance.com/ws/btcusdt@kline_1m",
-        "symbols": ["BTCUSDT"],
+        "symbols": ["BTCUSD"],
         "api_key": os.getenv("BINANCE_API_KEY", ""),
         "polling_interval": 1.0
     }
@@ -116,7 +116,7 @@ async def test_http_stream():
     http_config = {
         "source_type": "http",
         "source_url": "https://api.binance.com/api/v3/ticker/price",
-        "symbols": ["BTCUSDT", "ETHUSDT"],
+        "symbols": ["BTCUSD", "ETHUSD"],
         "api_key": os.getenv("BINANCE_API_KEY", ""),
         "polling_interval": 5.0
     }

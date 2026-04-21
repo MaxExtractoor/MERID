@@ -81,21 +81,21 @@ PRICE_TOPICS: Dict[str, TopicConfig] = {
         cleanup_policy="delete",
         description="Raw SOL/USD ticks from Kraken",
     ),
-    "prices.binance.BTCUSDT": TopicConfig(
-        name="prices.binance.BTCUSDT",
+    "prices.binance.BTCUSD": TopicConfig(
+        name="prices.binance.BTCUSD",
         partitions=1,
         replication_factor=1,
         retention_ms=86400000,
         cleanup_policy="delete",
-        description="Raw BTC/USDT ticks from Binance",
+        description="Raw BTC/USD ticks from Binance",
     ),
-    "prices.binance.ETHUSDT": TopicConfig(
-        name="prices.binance.ETHUSDT",
+    "prices.binance.ETHUSD": TopicConfig(
+        name="prices.binance.ETHUSD",
         partitions=1,
         replication_factor=1,
         retention_ms=86400000,
         cleanup_policy="delete",
-        description="Raw ETH/USDT ticks from Binance",
+        description="Raw ETH/USD ticks from Binance",
     ),
 }
 

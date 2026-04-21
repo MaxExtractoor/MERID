@@ -43,8 +43,8 @@ class TestPositionPersistence(unittest.TestCase):
 
     def test_save_and_load_positions(self):
         positions = {
-            "BTC/USDT": {"qty": 0.5, "entry_price": 48000, "venue": "binanceus"},
-            "ETH/USDT": {"qty": 2.0, "entry_price": 3200, "venue": "coinbase"},
+            "BTC/USD": {"qty": 0.5, "entry_price": 48000, "venue": "binanceus"},
+            "ETH/USD": {"qty": 2.0, "entry_price": 3200, "venue": "coinbase"},
         }
         _run(self.sm.update_state(positions))
         _run(self.sm._save_state())
@@ -54,22 +54,22 @@ class TestPositionPersistence(unittest.TestCase):
         _run(sm2.initialize())
         loaded = _run(sm2.get_state())
 
-        self.assertEqual(loaded["BTC/USDT"]["qty"], 0.5)
-        self.assertEqual(loaded["ETH/USDT"]["entry_price"], 3200)
+        self.assertEqual(loaded["BTC/USD"]["qty"], 0.5)
+        self.assertEqual(loaded["ETH/USD"]["entry_price"], 3200)
 
     def test_position_update_persists(self):
-        _run(self.sm.update_state({"BTC/USDT": {"qty": 1.0, "entry_price": 50000}}))
+        _run(self.sm.update_state({"BTC/USD": {"qty": 1.0, "entry_price": 50000}}))
         _run(self.sm._save_state())
 
         # Update position
-        _run(self.sm.update_state({"BTC/USDT": {"qty": 0.5, "entry_price": 50000}}))
+        _run(self.sm.update_state({"BTC/USD": {"qty": 0.5, "entry_price": 50000}}))
         _run(self.sm._save_state())
 
         # Restart
         sm2 = StateManager("positions", persistence_dir=self.tmpdir)
         _run(sm2.initialize())
         loaded = _run(sm2.get_state())
-        self.assertEqual(loaded["BTC/USDT"]["qty"], 0.5)
+        self.assertEqual(loaded["BTC/USD"]["qty"], 0.5)
 
     def test_multiple_positions_roundtrip(self):
         positions = {
@@ -99,14 +99,14 @@ class TestRecoveryPoint(unittest.TestCase):
 
     def test_recovery_point_created(self):
         _run(self.sm.update_state(
-            {"BTC/USDT": {"qty": 1.0}},
+            {"BTC/USD": {"qty": 1.0}},
             create_recovery_point=True,
         ))
         self.assertEqual(len(self.sm.recovery_points), 1)
 
     def test_recovery_restores_state(self):
         # Save good state with recovery point
-        good_state = {"BTC/USDT": {"qty": 1.0, "entry_price": 50000}}
+        good_state = {"BTC/USD": {"qty": 1.0, "entry_price": 50000}}
         _run(self.sm.update_state(good_state, create_recovery_point=True))
 
         # Corrupt state
@@ -119,15 +119,15 @@ class TestRecoveryPoint(unittest.TestCase):
         self.assertEqual(self.sm.state_status, StateStatus.HEALTHY)
 
         recovered = _run(self.sm.get_state())
-        self.assertEqual(recovered["BTC/USDT"]["qty"], 1.0)
+        self.assertEqual(recovered["BTC/USD"]["qty"], 1.0)
 
     def test_multiple_recovery_points_uses_newest(self):
         _run(self.sm.update_state(
-            {"BTC/USDT": {"qty": 1.0}},
+            {"BTC/USD": {"qty": 1.0}},
             create_recovery_point=True,
         ))
         _run(self.sm.update_state(
-            {"BTC/USDT": {"qty": 2.0}},
+            {"BTC/USD": {"qty": 2.0}},
             create_recovery_point=True,
         ))
         self.assertEqual(len(self.sm.recovery_points), 2)
@@ -138,7 +138,7 @@ class TestRecoveryPoint(unittest.TestCase):
         _run(self.sm._attempt_recovery())
 
         recovered = _run(self.sm.get_state())
-        self.assertEqual(recovered["BTC/USDT"]["qty"], 2.0)
+        self.assertEqual(recovered["BTC/USD"]["qty"], 2.0)
 
 
 class TestCorruptedState(unittest.TestCase):
@@ -182,14 +182,14 @@ class TestChecksumIntegrity(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_checksum_computed(self):
-        _run(self.sm.update_state({"BTC/USDT": {"qty": 1.0}}))
+        _run(self.sm.update_state({"BTC/USD": {"qty": 1.0}}))
         self.assertGreater(len(self.sm.state_history), 0)
         self.assertTrue(len(self.sm.state_history[-1].checksum) > 0)
 
     def test_different_states_different_checksums(self):
-        _run(self.sm.update_state({"BTC/USDT": {"qty": 1.0}}))
+        _run(self.sm.update_state({"BTC/USD": {"qty": 1.0}}))
         cs1 = self.sm.state_history[-1].checksum
-        _run(self.sm.update_state({"BTC/USDT": {"qty": 2.0}}))
+        _run(self.sm.update_state({"BTC/USD": {"qty": 2.0}}))
         cs2 = self.sm.state_history[-1].checksum
         self.assertNotEqual(cs1, cs2)
 
@@ -211,7 +211,7 @@ class TestStateManagerStatus(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_status_report(self):
-        _run(self.sm.update_state({"BTC/USDT": {"qty": 1.0}}))
+        _run(self.sm.update_state({"BTC/USD": {"qty": 1.0}}))
         status = self.sm.get_status()
         self.assertEqual(status["component"], "positions")
         self.assertEqual(status["status"], "healthy")
@@ -275,7 +275,7 @@ class TestPositionReconciliationUnderLoad(unittest.TestCase):
     def test_recovery_point_under_load(self):
         """Recovery points remain valid after many updates."""
         # Create recovery point with known-good state
-        good_state = {"BTC/USDT": {"qty": 1.0, "entry_price": 50000}}
+        good_state = {"BTC/USD": {"qty": 1.0, "entry_price": 50000}}
         _run(self.sm.update_state(good_state, create_recovery_point=True))
 
         # Hammer with 500 updates
@@ -290,7 +290,7 @@ class TestPositionReconciliationUnderLoad(unittest.TestCase):
         result = _run(self.sm._attempt_recovery())
         self.assertTrue(result)
         recovered = _run(self.sm.get_state())
-        self.assertIn("BTC/USDT", recovered)
+        self.assertIn("BTC/USD", recovered)
 
     def test_large_position_book_persistence(self):
         """100-position book persists and reloads correctly."""
@@ -314,7 +314,7 @@ class TestPositionReconciliationUnderLoad(unittest.TestCase):
 
     def test_checksum_stable_under_load(self):
         """Checksum is deterministic even after many updates."""
-        state = {"BTC/USDT": {"qty": 1.0, "entry_price": 50000}}
+        state = {"BTC/USD": {"qty": 1.0, "entry_price": 50000}}
         cs1 = self.sm._calculate_checksum(state)
 
         # Do 200 unrelated updates

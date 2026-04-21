@@ -58,14 +58,14 @@ class TestTradeIntent:
             intent_id="intent_123",
             trader=trader,
             venue_id="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side="buy",
             size=1.0
         )
         
         assert intent.intent_id == "intent_123"
         assert intent.venue_id == "binance"
-        assert intent.symbol == "BTC/USDT"
+        assert intent.symbol == "BTC/USD"
         assert intent.side == "buy"
         assert intent.size == 1.0
         assert intent.price is None
@@ -79,7 +79,7 @@ class TestTradeIntent:
             intent_id="intent_123",
             trader=trader,
             venue_id="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side="buy",
             size=1.0,
             price=50000.0,
@@ -175,7 +175,7 @@ class TestExecutionRouterSubmitTrade:
             await router.submit_trade(
                 trader=trader,
                 venue_id="unknown",
-                symbol="BTC/USDT",
+                symbol="BTC/USD",
                 side="buy",
                 size=1.0
             )
@@ -214,7 +214,7 @@ class TestExecutionRouterSubmitTrade:
             result = await router.submit_trade(
                 trader=trader,
                 venue_id="binance",
-                symbol="BTC/USDT",
+                symbol="BTC/USD",
                 side="buy",
                 size=1.0
             )
@@ -256,7 +256,7 @@ class TestExecutionRouterSubmitTrade:
             result = await router.submit_trade(
                 trader=trader,
                 venue_id="binance",
-                symbol="BTC/USDT",
+                symbol="BTC/USD",
                 side="buy",
                 size=1.0
             )
@@ -275,7 +275,7 @@ class TestExecutionRouterExecute:
         mock_executor.execute_trade.return_value = TradeResult(
             success=True,
             venue="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side="buy",
             size=1.0,
             price=50000.0
@@ -311,7 +311,7 @@ class TestExecutionRouterExecute:
             intent_id="i1",
             trader=trader,
             venue_id="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side="buy",
             size=1.0
         )

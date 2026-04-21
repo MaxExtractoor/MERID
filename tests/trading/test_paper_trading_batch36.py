@@ -132,13 +132,13 @@ class TestPaperTradingEngine:
         assert portfolio1 is portfolio2
 
     def test_symbols_match_exact(self, engine):
-        assert engine._symbols_match("BTC/USDT", "BTC/USDT") is True
+        assert engine._symbols_match("BTC/USD", "BTC/USD") is True
 
     def test_symbols_match_base(self, engine):
-        assert engine._symbols_match("BTC", "BTC/USDT") is True
+        assert engine._symbols_match("BTC", "BTC/USD") is True
 
     def test_symbols_match_different(self, engine):
-        assert engine._symbols_match("BTC", "ETH/USDT") is False
+        assert engine._symbols_match("BTC", "ETH/USD") is False
 
     def test_place_order_market(self, engine):
         engine.current_prices["BTC"] = 50000.0

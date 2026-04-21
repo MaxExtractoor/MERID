@@ -57,7 +57,7 @@ class TestSpectatorTrade:
         trade = SpectatorTrade(
             trade_id="trade_1",
             agent_id="agent_1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=1.0,
             price=50000.0,
@@ -72,7 +72,7 @@ class TestSpectatorTrade:
         trade = SpectatorTrade(
             trade_id="trade_1",
             agent_id="agent_1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=1.0,
             price=50000.0,
@@ -250,7 +250,7 @@ class TestCanExecuteLive:
     @patch.dict("os.environ", {"MERID_TRADE_MODE": "paper", "MERID_ALLOW_LIVE_TRADES": "true"}, clear=True)
     def test_paper_mode_rejects(self):
         controller = TradingModeController()
-        can_execute, reason = controller.can_execute_live("BTC/USDT", 100.0)
+        can_execute, reason = controller.can_execute_live("BTC/USD", 100.0)
         assert can_execute is False
         assert "Paper mode" in reason
 
@@ -261,7 +261,7 @@ class TestCanExecuteLive:
     def test_live_mode_allows(self):
         controller = TradingModeController()
         controller.set_mode("live")
-        can_execute, reason = controller.can_execute_live("BTC/USDT", 100.0)
+        can_execute, reason = controller.can_execute_live("BTC/USD", 100.0)
         assert can_execute is True
 
     def test_autonomous_symbol_not_allowed(self):
@@ -288,21 +288,21 @@ class TestRecordTrade:
         controller = TradingModeController()
         trade = controller.record_trade(
             agent_id="agent_1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=1.0,
             price=50000.0
         )
         
         assert trade.agent_id == "agent_1"
-        assert trade.symbol == "BTC/USDT"
+        assert trade.symbol == "BTC/USD"
         assert trade.status == "open"
 
     def test_record_trade_with_metadata(self):
         controller = TradingModeController()
         trade = controller.record_trade(
             agent_id="agent_1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=1.0,
             price=50000.0,
@@ -322,7 +322,7 @@ class TestRecordTrade:
         
         controller.record_trade(
             agent_id="agent_1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=1.0,
             price=50000.0
@@ -338,7 +338,7 @@ class TestCloseTrade:
         controller = TradingModeController()
         trade = controller.record_trade(
             agent_id="agent_1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=1.0,
             price=50000.0
@@ -370,7 +370,7 @@ class TestGetSpectatorTrades:
         for i in range(10):
             controller.record_trade(
                 agent_id="agent_1",
-                symbol="BTC/USDT",
+                symbol="BTC/USD",
                 action="buy",
                 quantity=1.0,
                 price=50000.0
