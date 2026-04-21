@@ -112,13 +112,18 @@ class TestP2OrderGateCleanup:
         )
         
         # Cleanup with 24 hour TTL
-        removed = gate.cleanup_stale(ttl_s=86400)
-        
-        # Should remove 2 terminal records but not the pending one
-        assert removed == 2
+        result = gate.cleanup_stale(ttl_s=86400)
+
+        # Should remove 2 terminal records.  The PENDING one is not
+        # *deleted* (that would drop an in-flight order); it is instead
+        # marked as REJECTED by the orphan sweep so the next terminal
+        # prune can sweep it on a later pass.
+        assert result["pruned_terminal"] == 2
+        assert result["orphaned_pending"] == 1
         assert "test-1" not in gate.store._orders
         assert "test-2" not in gate.store._orders
         assert "test-3" in gate.store._orders
+        assert gate.store._orders["test-3"].status == OrderStatus.REJECTED
 
 
 class TestP2FeeCalculationConsistency:

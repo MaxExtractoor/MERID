@@ -2227,9 +2227,15 @@ class KalshiAutoCancelMakerBot(KalshiOptimizedMakerBot):
         
         # Start queue polling loop
         self.queue_poll_task = asyncio.create_task(
-            queue_poll_loop(self.auto_cancel, self.active_orders, 15.0)
+            queue_poll_loop(self.auto_cancel, self.active_orders, 15.0),
+            name="maker-bot-queue-poll",
         )
-        
+        self.queue_poll_task.add_done_callback(
+            lambda t: logger.error(
+                "maker-bot queue-poll task crashed: %s", t.exception()
+            ) if not t.cancelled() and t.exception() else None
+        )
+
         logger.info("Auto-cancel maker bot started with queue management")
     
     async def _evaluate_trading_opportunity(self, orderbook: KalshiOrderbookSnapshot):
@@ -2628,14 +2634,21 @@ class KalshiRealTimeQueueBot(KalshiAutoCancelMakerBot):
         
     async def start(self):
         """Start real-time bot with WebSocket and queue polling."""
+        def _log_task_crash(task_name: str):
+            return lambda t: logger.error(
+                "%s task crashed: %s", task_name, t.exception()
+            ) if not t.cancelled() and t.exception() else None
+
         # Start WebSocket for yes_price updates
-        self.ws_task = asyncio.create_task(self._yes_price_stream())
-        
+        self.ws_task = asyncio.create_task(self._yes_price_stream(), name="realtime-bot-ws")
+        self.ws_task.add_done_callback(_log_task_crash("realtime-bot-ws"))
+
         # Start queue polling loop
         self.queue_task = asyncio.create_task(
-            self._production_queue_poll_loop()
+            self._production_queue_poll_loop(), name="realtime-bot-queue-poll",
         )
-        
+        self.queue_task.add_done_callback(_log_task_crash("realtime-bot-queue-poll"))
+
         logger.info("Real-time queue bot started with WebSocket + queue polling")
     
     async def _yes_price_stream(self):

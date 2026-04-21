@@ -1,0 +1,452 @@
+"""Process-wide GlobalRiskGuard singleton.
+
+Canonical risk gate for all Kalshi PM order submissions. Extracted from
+``merid.trading.kalshi_continuous_trader`` so that every caller — the
+``KalshiContinuousTrader`` loop, ``KalshiTradingAgent`` (agent grid, 35 agents),
+crypto lanes (``btc15m_lane``, ``crypto15m_lane``), web manual trades, and any
+future order source — shares the **same** per-cycle / total risk envelope
+on a **unified** ``equity_cents`` source.
+
+See ``docs/TRADING_OWNERSHIP_DECISION.md`` for the policy context and
+``docs/ORDER_FLOW_AND_OVERTRADING_AUDIT.md`` for the full wiring.
+
+Invariants enforced (per ``check_order`` call):
+    1. Sum of ``max_loss_cents`` for all approved orders in the current cycle
+       ≤ ``max_cycle_risk_pct * equity_cents``.
+    2. ``existing_risk_cents + cycle_new_risk_cents`` ≤
+       ``max_total_risk_pct * equity_cents``.
+    3. If any invariant would be violated, the guard logs CRITICAL and
+       returns ``(False, reason)``.
+
+Thread-safe via a single re-entrant lock. Cycle accumulator is process-wide
+so concurrent callers (CT + agent grid + lanes) cannot each consume the full
+envelope independently.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+from dataclasses import dataclass
+from typing import Callable, Optional, Tuple
+
+logger = logging.getLogger("merid.guards.global_risk_guard")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Data
+# ────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class PendingOrderRisk:
+    """Risk metadata for a pending order.
+
+    ``max_loss_cents`` is the canonical field — callers MUST compute it
+    correctly (typically ``contracts * entry_price_cents`` for a long YES,
+    or ``contracts * (100 - entry_price_cents)`` for a long NO).
+    """
+
+    ticker: str
+    asset: str
+    contracts: int
+    entry_price_cents: int
+    direction: str  # "long" or "short"
+    max_loss_cents: int
+    edge: float = 0.0
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Guard
+# ────────────────────────────────────────────────────────────────────────────
+
+class GlobalRiskGuard:
+    """Last-line global risk guard enforcing hard caps before any submit.
+
+    A single instance is shared process-wide via :func:`get_global_risk_guard`.
+    """
+
+    def __init__(
+        self,
+        max_cycle_risk_pct: float = 0.02,
+        max_total_risk_pct: float = 0.02,
+        scalper_single_batch_mode: bool = False,
+        max_trades_per_batch: int = 3,
+    ) -> None:
+        self.max_cycle_risk_pct = float(max_cycle_risk_pct)
+        self.max_total_risk_pct = float(max_total_risk_pct)
+        self.scalper_single_batch_mode = bool(scalper_single_batch_mode)
+        self.max_trades_per_batch = max(1, int(max_trades_per_batch))
+        self._cycle_new_risk_cents: int = 0
+        self._cycle_approved_count: int = 0
+        self._batch_id: int = 0
+        self._lock = threading.Lock()
+        # Telemetry
+        self._approvals: int = 0
+        self._rejections: int = 0
+        self._last_reject_reason: str = ""
+        self._scalper_blocks: int = 0
+
+    # ── cycle boundary ──────────────────────────────────────────────────
+    def reset_cycle(self) -> None:
+        """Call at the start of each decision cycle.
+
+        Also increments ``batch_id`` so downstream consumers can key
+        intents/orders to the current batch.
+        """
+        with self._lock:
+            self._cycle_new_risk_cents = 0
+            self._cycle_approved_count = 0
+            self._batch_id += 1
+
+    @property
+    def batch_id(self) -> int:
+        with self._lock:
+            return self._batch_id
+
+    def configure_scalper(
+        self,
+        enabled: bool,
+        max_trades_per_batch: Optional[int] = None,
+    ) -> None:
+        """Toggle scalper single-batch mode at runtime (tests / ops)."""
+        with self._lock:
+            self.scalper_single_batch_mode = bool(enabled)
+            if max_trades_per_batch is not None:
+                self.max_trades_per_batch = max(1, int(max_trades_per_batch))
+
+    # ── core check ──────────────────────────────────────────────────────
+    def check_order(
+        self,
+        equity_cents: int,
+        existing_risk_cents: int,
+        pending_order: PendingOrderRisk,
+    ) -> Tuple[bool, str]:
+        """Check if an order can be submitted.
+
+        Returns ``(allowed, reason)``. When ``allowed`` is False, ``reason``
+        explains which invariant would be violated.
+
+        If ``equity_cents`` is non-positive, fail-closed with a clear reason.
+        """
+        with self._lock:
+            # ── Scalper single-batch mode (hard veto) ──────────────────
+            if self.scalper_single_batch_mode:
+                if max(0, int(existing_risk_cents)) > 0:
+                    reason = (
+                        "SCALPER_MODE_BLOCK: existing open risk, new batch not allowed | "
+                        f"existing_risk_cents={existing_risk_cents} | "
+                        f"ticker={pending_order.ticker} | batch_id={self._batch_id}"
+                    )
+                    logger.warning(reason)
+                    self._rejections += 1
+                    self._scalper_blocks += 1
+                    self._last_reject_reason = reason
+                    return False, reason
+                if self._cycle_approved_count >= self.max_trades_per_batch:
+                    reason = (
+                        "SCALPER_MODE_BLOCK: max trades per batch exceeded | "
+                        f"approved_this_batch={self._cycle_approved_count} | "
+                        f"max={self.max_trades_per_batch} | "
+                        f"ticker={pending_order.ticker} | batch_id={self._batch_id}"
+                    )
+                    logger.warning(reason)
+                    self._rejections += 1
+                    self._scalper_blocks += 1
+                    self._last_reject_reason = reason
+                    return False, reason
+
+            if equity_cents <= 0:
+                reason = (
+                    f"GLOBAL RISK GUARD BLOCK: non-positive equity "
+                    f"equity_cents={equity_cents} — fail-closed"
+                )
+                logger.critical(reason)
+                self._rejections += 1
+                self._last_reject_reason = reason
+                return False, reason
+
+            cycle_risk_cents = int(equity_cents * self.max_cycle_risk_pct)
+            max_total_risk_cents = int(equity_cents * self.max_total_risk_pct)
+
+            # 1. Per-cycle cap
+            new_cycle_total = self._cycle_new_risk_cents + max(0, pending_order.max_loss_cents)
+            if new_cycle_total > cycle_risk_cents:
+                reason = (
+                    f"GLOBAL RISK GUARD BLOCK: Cycle risk cap exceeded | "
+                    f"equity=${equity_cents/100:.2f} | "
+                    f"cycle_cap=${cycle_risk_cents/100:.2f} | "
+                    f"already_approved=${self._cycle_new_risk_cents/100:.2f} | "
+                    f"this_order=${pending_order.max_loss_cents/100:.2f} | "
+                    f"would_be_total=${new_cycle_total/100:.2f} | "
+                    f"ticker={pending_order.ticker} | asset={pending_order.asset}"
+                )
+                logger.critical(reason)
+                self._rejections += 1
+                self._last_reject_reason = reason
+                return False, reason
+
+            # 2. Total open risk cap
+            new_total_risk = max(0, existing_risk_cents) + new_cycle_total
+            if new_total_risk > max_total_risk_cents:
+                reason = (
+                    f"GLOBAL RISK GUARD BLOCK: Total risk cap exceeded | "
+                    f"equity=${equity_cents/100:.2f} | "
+                    f"total_cap=${max_total_risk_cents/100:.2f} | "
+                    f"existing=${existing_risk_cents/100:.2f} | "
+                    f"new_cycle=${new_cycle_total/100:.2f} | "
+                    f"would_be_total=${new_total_risk/100:.2f}"
+                )
+                logger.critical(reason)
+                self._rejections += 1
+                self._last_reject_reason = reason
+                return False, reason
+
+            # Approved
+            self._cycle_new_risk_cents = new_cycle_total
+            self._cycle_approved_count += 1
+            self._approvals += 1
+            logger.info(
+                "[GLOBAL-RISK-GUARD] APPROVED | ticker=%s | max_loss=$%.2f | "
+                "cycle_used=$%.2f / $%.2f | total_would_be=$%.2f",
+                pending_order.ticker,
+                pending_order.max_loss_cents / 100,
+                new_cycle_total / 100,
+                cycle_risk_cents / 100,
+                new_total_risk / 100,
+            )
+            return True, ""
+
+    # ── telemetry ───────────────────────────────────────────────────────
+    def metrics(self) -> dict:
+        with self._lock:
+            return {
+                "max_cycle_risk_pct": self.max_cycle_risk_pct,
+                "max_total_risk_pct": self.max_total_risk_pct,
+                "scalper_single_batch_mode": self.scalper_single_batch_mode,
+                "max_trades_per_batch": self.max_trades_per_batch,
+                "batch_id": self._batch_id,
+                "cycle_new_risk_cents": self._cycle_new_risk_cents,
+                "cycle_approved_count": self._cycle_approved_count,
+                "approvals": self._approvals,
+                "rejections": self._rejections,
+                "scalper_blocks": self._scalper_blocks,
+                "last_reject_reason": self._last_reject_reason,
+            }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Singleton + equity/existing-risk providers
+# ────────────────────────────────────────────────────────────────────────────
+
+_guard_lock = threading.Lock()
+_guard: Optional[GlobalRiskGuard] = None
+
+_equity_provider: Optional[Callable[[], int]] = None
+_existing_risk_provider: Optional[Callable[[], int]] = None
+
+
+def _load_canonical_pcts() -> Tuple[float, float]:
+    """Load the canonical 1-2% caps from ``core.settings`` with env fallback."""
+    try:
+        from core.settings import MAX_CYCLE_RISK_PCT, MAX_TOTAL_RISK_PCT  # type: ignore
+        return float(MAX_CYCLE_RISK_PCT), float(MAX_TOTAL_RISK_PCT)
+    except Exception:
+        try:
+            cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.02"))
+            total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.02"))
+            return cycle, total
+        except Exception:
+            return 0.02, 0.02
+
+
+def _load_scalper_config() -> Tuple[bool, int]:
+    """Load scalper single-batch flag + max-trades-per-batch from settings."""
+    try:
+        from core.settings import (  # type: ignore
+            SCALPER_SINGLE_BATCH_MODE,
+            SCALPER_MAX_TRADES_PER_BATCH,
+        )
+        return bool(SCALPER_SINGLE_BATCH_MODE), int(SCALPER_MAX_TRADES_PER_BATCH)
+    except Exception:
+        enabled = str(os.getenv("SCALPER_SINGLE_BATCH_MODE", "false")).lower() in (
+            "1", "true", "yes", "on",
+        )
+        try:
+            n = max(1, int(os.getenv("SCALPER_MAX_TRADES_PER_BATCH", "3")))
+        except Exception:
+            n = 3
+        return enabled, n
+
+
+def get_global_risk_guard() -> GlobalRiskGuard:
+    """Return the process-wide ``GlobalRiskGuard`` singleton.
+
+    Lazy double-checked construction.  Uses canonical ``MAX_CYCLE_RISK_PCT`` /
+    ``MAX_TOTAL_RISK_PCT`` from ``core.settings`` (env-overridable).
+    """
+    global _guard
+    if _guard is None:
+        with _guard_lock:
+            if _guard is None:
+                cycle_pct, total_pct = _load_canonical_pcts()
+                scalper_on, max_trades = _load_scalper_config()
+                _guard = GlobalRiskGuard(
+                    max_cycle_risk_pct=cycle_pct,
+                    max_total_risk_pct=total_pct,
+                    scalper_single_batch_mode=scalper_on,
+                    max_trades_per_batch=max_trades,
+                )
+                logger.info(
+                    "[GLOBAL-RISK-GUARD] Singleton initialized | "
+                    "max_cycle_risk_pct=%.4f | max_total_risk_pct=%.4f | "
+                    "scalper_single_batch=%s | max_trades_per_batch=%d",
+                    cycle_pct, total_pct, scalper_on, max_trades,
+                )
+    return _guard
+
+
+def reset_global_risk_guard_for_tests() -> None:
+    """Test-only: tear down the singleton so fresh state can be constructed."""
+    global _guard, _equity_provider, _existing_risk_provider
+    with _guard_lock:
+        _guard = None
+        _equity_provider = None
+        _existing_risk_provider = None
+
+
+# ── providers ───────────────────────────────────────────────────────────
+
+def set_equity_provider(fn: Optional[Callable[[], int]]) -> None:
+    """Register a zero-arg callable returning the canonical ``equity_cents``.
+
+    Intended to be called once at startup by the component that owns the
+    canonical bankroll view (typically the AgentGrid's portfolio cache or
+    the ``KalshiContinuousTrader`` bankroll manager when CT is active).
+
+    Passing ``None`` clears the provider; callers that did not register a
+    provider fall back to :func:`default_equity_cents`.
+    """
+    global _equity_provider
+    _equity_provider = fn
+
+
+def set_existing_risk_provider(fn: Optional[Callable[[], int]]) -> None:
+    """Register a zero-arg callable returning open-position risk in cents."""
+    global _existing_risk_provider
+    _existing_risk_provider = fn
+
+
+def default_equity_cents() -> int:
+    """Fallback equity lookup when no provider is registered.
+
+    Tries, in order:
+      1. ``KalshiPositionCache.total_value_cents()``
+      2. ``MERID_INITIAL_CAPITAL`` env var (dollars → cents)
+      3. ``0`` (causes guard to fail-closed)
+    """
+    # 1. Canonical position cache
+    try:
+        from merid.event_venues.kalshi.position_cache import (  # type: ignore
+            get_kalshi_position_cache,
+        )
+        cache = get_kalshi_position_cache()
+        val = getattr(cache, "total_value_cents", None)
+        if callable(val):
+            v = int(val() or 0)
+            if v > 0:
+                return v
+        if isinstance(val, (int, float)) and val and val > 0:
+            return int(val)
+    except Exception as _e:
+        logger.debug("default_equity_cents: position cache unavailable: %s", _e)
+
+    # 2. Env fallback (dollars)
+    try:
+        raw = os.getenv("MERID_INITIAL_CAPITAL")
+        if raw:
+            dollars = float(raw)
+            if dollars > 0:
+                return int(round(dollars * 100))
+    except Exception:
+        pass
+
+    return 0
+
+
+def resolve_equity_cents() -> int:
+    """Return current equity in cents via registered provider or fallback."""
+    if _equity_provider is not None:
+        try:
+            return int(_equity_provider() or 0)
+        except Exception as e:
+            logger.warning("[GLOBAL-RISK-GUARD] equity_provider raised: %s — using default", e)
+    return default_equity_cents()
+
+
+def resolve_existing_risk_cents() -> int:
+    """Return open-position risk in cents via registered provider, else 0."""
+    if _existing_risk_provider is not None:
+        try:
+            return max(0, int(_existing_risk_provider() or 0))
+        except Exception as e:
+            logger.warning("[GLOBAL-RISK-GUARD] existing_risk_provider raised: %s — using 0", e)
+    return 0
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Convenience helpers for routers
+# ────────────────────────────────────────────────────────────────────────────
+
+def compute_intent_max_loss_cents(
+    side: str,
+    action: str,
+    price_cents: int,
+    count: int,
+) -> int:
+    """Compute max-loss for an ``OrderIntent`` in cents.
+
+    Binary Kalshi contracts settle at 100¢ or 0¢.
+        long YES bought at P:  max_loss = P * count
+        long NO  bought at P:  max_loss = P * count  (same — pay P, lose P if wrong)
+    Only meaningful for ``action == "buy"``; sells reduce exposure and should
+    not be passed through the guard.
+    """
+    p = max(0, min(100, int(price_cents)))
+    n = max(0, int(count))
+    return p * n
+
+
+def check_intent(
+    ticker: str,
+    asset: str,
+    side: str,
+    action: str,
+    price_cents: int,
+    count: int,
+    edge: float = 0.0,
+) -> Tuple[bool, str]:
+    """Convenience: build ``PendingOrderRisk`` and run ``check_order``.
+
+    Returns ``(True, "")`` automatically for ``action != "buy"`` (exits are
+    exempt — they reduce exposure).
+    """
+    if (action or "").lower() != "buy":
+        return True, "exit_exempt"
+
+    max_loss = compute_intent_max_loss_cents(side, action, price_cents, count)
+    pending = PendingOrderRisk(
+        ticker=ticker,
+        asset=asset or "UNKNOWN",
+        contracts=int(count),
+        entry_price_cents=int(price_cents),
+        direction="long" if (side or "").lower() == "yes" else "short",
+        max_loss_cents=max_loss,
+        edge=float(edge),
+    )
+    guard = get_global_risk_guard()
+    return guard.check_order(
+        equity_cents=resolve_equity_cents(),
+        existing_risk_cents=resolve_existing_risk_cents(),
+        pending_order=pending,
+    )

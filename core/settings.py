@@ -27,6 +27,42 @@ X_POST_INTERVAL = int(os.getenv("MERID_X_POST_INTERVAL", "3600"))
 POLYMARKET_SCAN_INTERVAL = int(os.getenv("MERID_POLYMARKET_INTERVAL", "600"))
 MAX_TOOL_RESULTS = int(os.getenv("MERID_MAX_TOOL_RESULTS", "4"))
 
+# ═══════════════════════════════════════════════════════════════════════════
+# RISK MANAGEMENT — Top-N Allocator Feature Flag
+# ═══════════════════════════════════════════════════════════════════════════
+# When TRUE: Uses TopNEdgeAllocator with 1-2% cycle-wide risk cap + GlobalRiskGuard
+# When FALSE: Uses legacy Kelly per-trade sizing (DANGEROUS — can cause oversizing)
+# 
+# This flag is the primary defense against the 7-BTC-orders-with-28-equity bug.
+# See: tests/trading/test_risk_oversizing_regression.py
+# ═══════════════════════════════════════════════════════════════════════════
+USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "false")).lower() in ("1", "true", "yes", "on")
+MAX_CYCLE_RISK_PCT: float = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.02"))  # 2% default
+MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.02"))  # 2% default
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MOMENTUM SCALPER STRATEGY MODE
+# ═══════════════════════════════════════════════════════════════════════════
+# When ``STRATEGY_MODE=MOMENTUM_SCALPER`` + ``SCALPER_SINGLE_BATCH_MODE=true``,
+# the GlobalRiskGuard enforces:
+#   - at most one active batch of positions at a time (no new entry while
+#     ``existing_risk_cents > 0``),
+#   - at most ``SCALPER_MAX_TRADES_PER_BATCH`` new entries per cycle/batch.
+# Exits/sells are always exempt (they reduce exposure).
+# See ``docs/MOMENTUM_SCALPER_SPEC.md`` (target) and the master spec for intent.
+# ═══════════════════════════════════════════════════════════════════════════
+STRATEGY_MODE: str = os.getenv("STRATEGY_MODE", "DEFAULT").upper()
+SCALPER_MODE: bool = (STRATEGY_MODE == "MOMENTUM_SCALPER") or str(
+    os.getenv("SCALPER_MODE", "false")
+).lower() in ("1", "true", "yes", "on")
+SCALPER_SINGLE_BATCH_MODE: bool = str(
+    os.getenv("SCALPER_SINGLE_BATCH_MODE", "true" if SCALPER_MODE else "false")
+).lower() in ("1", "true", "yes", "on")
+SCALPER_MAX_TRADES_PER_BATCH: int = max(1, int(os.getenv("SCALPER_MAX_TRADES_PER_BATCH", "3")))
+SCALPER_MAX_BATCH_RISK_PCT: float = float(
+    os.getenv("SCALPER_MAX_BATCH_RISK_PCT", str(MAX_CYCLE_RISK_PCT))
+)
+
 # Canonical port configuration (single source of truth for all services)
 HTTP_PORT = int(os.getenv("MERID_HTTP_PORT", os.getenv("MERID_BACKEND_PORT", "8011")))
 API_BASE_URL = os.getenv("MERID_API_BASE_URL", f"http://127.0.0.1:{HTTP_PORT}")
@@ -49,6 +85,14 @@ __all__ = [
     "X_POST_INTERVAL",
     "POLYMARKET_SCAN_INTERVAL",
     "MAX_TOOL_RESULTS",
+    "USE_TOPN_ALLOCATOR",
+    "MAX_CYCLE_RISK_PCT",
+    "MAX_TOTAL_RISK_PCT",
+    "STRATEGY_MODE",
+    "SCALPER_MODE",
+    "SCALPER_SINGLE_BATCH_MODE",
+    "SCALPER_MAX_TRADES_PER_BATCH",
+    "SCALPER_MAX_BATCH_RISK_PCT",
     "HTTP_PORT",
     "API_BASE_URL",
     "WS_PORT",

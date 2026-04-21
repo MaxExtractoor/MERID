@@ -66,7 +66,9 @@ _ALLOWED_CALLER_PREFIXES = (
     "merid.event_venues.kalshi.take_profit",
     "merid.event_venues.kalshi.universe",
     "merid.lanes.btc15m_lane",
+    "merid.lanes.crypto15m_lane",
     "merid.prediction.universal_agent",
+    "merid.trading.ct_execution_adapter",  # CT → router migration (Phase 2/3)
     "web.api.kalshi_api",  # API endpoints
     "web.api.kalshi_grid_api",
     # Test modules that legitimately test the router
@@ -1858,6 +1860,24 @@ def _run_pre_trade_gate(
 
         # ── 2. Pre-trade gate (dedup + fill-awareness) ────────────────
         gate = get_pre_trade_gate()
+
+        # Upstream-reservation fast-path (BUG: dual-PENDING leak fix):
+        # If the caller has already passed a ``client_tag`` that maps to an
+        # existing PENDING record in the gate's idempotent store (e.g. CT
+        # reserved the slot itself before routing), skip the fresh check()
+        # — otherwise we'd insert a *second* PENDING record with a different
+        # deterministic COID and the original one would leak forever
+        # (PENDING records are excluded from prune_old).
+        _upstream_coid = intent.client_tag
+        if _upstream_coid:
+            _existing = gate.store.lookup(_upstream_coid)
+            if _existing is not None:
+                logger.debug(
+                    "[order-router] pre_trade_gate using upstream reservation coid=%s ticker=%s",
+                    _upstream_coid[:16], intent.ticker,
+                )
+                return None  # lease acquired above; upstream owns the gate record
+
         verdict = gate.check(
             agent_id=_agent,
             strategy_group=_strategy,
@@ -1897,6 +1917,129 @@ def _run_pre_trade_gate(
         )
 
     return None  # all clear
+
+
+def _infer_asset_from_ticker(ticker: str) -> str:
+    """Best-effort asset-symbol extraction from a Kalshi ticker prefix.
+
+    KXBTC15M-..., KXBTC-..., KXETH-..., etc. → "BTC" / "ETH" / ...
+    Returns "UNKNOWN" if no known prefix matches.
+    """
+    t = (ticker or "").upper()
+    for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+        if f"KX{sym}" in t or t.startswith(sym):
+            return sym
+    return "UNKNOWN"
+
+
+def _run_shared_risk_guard_and_dedup(
+    intent: OrderIntent, mode: TradingMode, t0: float, caller: str
+) -> Optional[OrderResult]:
+    """Cross-caller dedup + shared GlobalRiskGuard check for entry intents.
+
+    Skips exits (``action == "sell"``) — they reduce exposure.
+
+    Returns a rejection ``OrderResult`` or ``None`` to continue.
+    """
+    action = (intent.action or "").lower()
+    if action != "buy":
+        return None  # exits are exempt
+
+    # ── Step 1: cross-caller dedup ─────────────────────────────────────
+    try:
+        from merid.guards.order_dedup_registry import get_order_dedup_registry
+
+        registry = get_order_dedup_registry()
+        admitted, existing = registry.try_admit(
+            ticker=intent.ticker,
+            side=intent.side,
+            action=action,
+            caller=caller,
+        )
+        if not admitted:
+            latency = (time.monotonic() - t0) * 1000
+            reason = (
+                f"order_dedup:duplicate_in_bucket|"
+                f"original_caller={existing.caller if existing else 'unknown'}"
+            )
+            logger.warning(
+                "[ORDER-DEDUP] REJECTED %s side=%s caller=%s | %s",
+                intent.ticker, intent.side, caller, reason,
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=reason,
+                latency_ms=round(latency, 2),
+            )
+    except Exception as _dedup_exc:
+        # Dedup failure is non-fatal (fail-open); guard below still runs.
+        logger.debug("dedup registry unavailable: %s", _dedup_exc)
+
+    # ── Step 2: shared GlobalRiskGuard ─────────────────────────────────
+    try:
+        from merid.guards.global_risk_guard import (
+            get_global_risk_guard,
+            resolve_equity_cents,
+            resolve_existing_risk_cents,
+            compute_intent_max_loss_cents,
+            PendingOrderRisk,
+        )
+
+        max_loss = compute_intent_max_loss_cents(
+            side=intent.side,
+            action=action,
+            price_cents=int(intent.price_cents),
+            count=int(intent.count),
+        )
+        asset = _infer_asset_from_ticker(intent.ticker)
+        pending = PendingOrderRisk(
+            ticker=intent.ticker,
+            asset=asset,
+            contracts=int(intent.count),
+            entry_price_cents=int(intent.price_cents),
+            direction="long" if (intent.side or "").lower() == "yes" else "short",
+            max_loss_cents=max_loss,
+            edge=float(intent.edge_pct or 0.0),
+        )
+        guard = get_global_risk_guard()
+        equity = resolve_equity_cents()
+        existing = resolve_existing_risk_cents()
+        allowed, reason = guard.check_order(
+            equity_cents=equity,
+            existing_risk_cents=existing,
+            pending_order=pending,
+        )
+        if not allowed:
+            latency = (time.monotonic() - t0) * 1000
+            # Release the dedup slot so a corrected/reduced intent can retry.
+            try:
+                from merid.guards.order_dedup_registry import get_order_dedup_registry
+                get_order_dedup_registry().release(intent.ticker, intent.side, action)
+            except Exception:
+                pass
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"global_risk_guard:{reason[:200]}",
+                latency_ms=round(latency, 2),
+            )
+    except Exception as _guard_exc:
+        # Fail-closed on guard infrastructure failure — the whole point of
+        # this gate is to bound aggregate risk.  If we can't evaluate it,
+        # reject rather than silently let the order through.
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            "[GLOBAL-RISK-GUARD] infrastructure failure — fail-closed: %s", _guard_exc,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"global_risk_guard:infra_error:{type(_guard_exc).__name__}",
+            latency_ms=round(latency, 2),
+        )
+
+    return None
 
 
 async def route_order_async(intent: OrderIntent) -> OrderResult:
@@ -1980,6 +2123,24 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     gate_rejection = _run_pre_trade_gate(intent, mode, t0)
     if gate_rejection:
         return gate_rejection
+
+    # ── Cross-caller order dedup + shared GlobalRiskGuard (LIVE only) ─
+    # Ensures CT, agent-grid (35 agents), lanes, and web all share the same
+    # 1-2% envelope and cannot double-submit on the same signal in the same
+    # time bucket.  CT is a documented bypass (it calls the guard upstream
+    # with its own unified equity_cents) and skips these checks here.
+    # Paper / mock intents skip the shared guard so synthetic bankrolls in
+    # tests don't inadvertently trip the env-fallback equity check; the CT
+    # loop owns its own paper-mode cap separately.
+    _skip_shared_guard = (
+        _caller in _KNOWN_BYPASS_PATHS
+        or not _is_live_mode(mode)
+        or os.getenv("MERID_DISABLE_SHARED_RISK_GUARD", "").lower() in ("1", "true", "yes")
+    )
+    if not _skip_shared_guard:
+        _shared_guard_rejection = _run_shared_risk_guard_and_dedup(intent, mode, t0, _caller)
+        if _shared_guard_rejection is not None:
+            return _shared_guard_rejection
 
     if _is_live_mode(mode):
         return await _route_live(intent, mode, t0)

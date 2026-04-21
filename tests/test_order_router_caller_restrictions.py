@@ -32,6 +32,7 @@ _ALLOWED_CALLER_PREFIXES = (
     "merid.event_venues.kalshi.take_profit",
     "merid.event_venues.kalshi.universe",
     "merid.lanes.btc15m_lane",
+    "merid.lanes.crypto15m_lane",
     "merid.prediction.universal_agent",
     "merid.trading.ct_execution_adapter",  # CT migration adapter
     "web.api.kalshi_api",

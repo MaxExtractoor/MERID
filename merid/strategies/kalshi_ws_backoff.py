@@ -398,9 +398,14 @@ class KalshiWebSocketAdvanced:
             market_tickers: List of market tickers to subscribe to
         """
         self._should_stop = False
-        
+
         # Start monitoring task
-        monitor_task = asyncio.create_task(self.monitor_connection())
+        monitor_task = asyncio.create_task(self.monitor_connection(), name="kalshi-ws-backoff-monitor")
+        monitor_task.add_done_callback(
+            lambda t: logger.error(
+                "kalshi-ws-backoff monitor task crashed: %s", t.exception()
+            ) if not t.cancelled() and t.exception() else None
+        )
         
         while not self._should_stop:
             try:

@@ -125,7 +125,18 @@ class CoinbasePriceFeed:
             return
 
         self._running = True
-        self._task = asyncio.create_task(self._run_loop())
+        self._task = asyncio.create_task(self._run_loop(), name="coinbase-ws-price-feed")
+        # Surface silent crashes: without this callback, a raised exception
+        # leaves the feed marked ``_running=True`` but dead, silently starving
+        # downstream consumers of price updates.
+        def _on_feed_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Coinbase WS price-feed task crashed: %s", exc, exc_info=exc)
+                self._running = False
+        self._task.add_done_callback(_on_feed_done)
         logger.info(f"Coinbase WS feed starting for {self._product_ids}")
 
     async def disconnect(self):

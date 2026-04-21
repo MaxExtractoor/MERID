@@ -1,6 +1,6 @@
 {
   "active": true,
-  "reason": "manual",
-  "details": "Test kill",
-  "activated_at": "2026-04-18T03:27:10.619641+00:00"
+  "reason": "circuit_breaker",
+  "details": "5 consecutive order rejections (last: unknown)",
+  "activated_at": "2026-04-21T17:14:56.650471+00:00"
 }
