@@ -237,37 +237,47 @@ class TestPortfolioManagerRebalancing:
     def test_calculate_rebalance_orders_below_threshold(self):
         """Test rebalancing when drift is below threshold."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.0, 50000.0)
-        manager.set_target_weights({"BTC/USDT": 0.51})  # Small drift
-        
+        # Set up 2 assets at 50%/50% weights
+        manager.add_position("BTC/USDT", 1.0, 50000.0)  # 50% weight ($50k)
+        manager.add_position("ETH/USDT", 1.0, 50000.0)  # 50% weight ($50k)
+        # Target: BTC=0.52 (2% drift), ETH=0.48 (2% drift) - sums to 1.0
+        manager.set_target_weights({"BTC/USDT": 0.52, "ETH/USDT": 0.48})
+
         orders = manager.calculate_rebalance_orders()
-        assert orders == []  # Below 5% threshold
+        # Both drifts are 2%, below 5% threshold - no orders expected
+        assert orders == []
 
     def test_calculate_rebalance_orders_buy(self):
         """Test rebalancing buy order."""
         manager = PortfolioManager(initial_capital=100000.0)
         manager.add_position("BTC/USDT", 0.5, 50000.0)  # 25% weight
-        manager.set_target_weights({"BTC/USDT": 0.5})  # Target 50%
-        
+        manager._cash = 75000.0  # 75% cash
+        # Set up weights that sum to 1.0 with a second asset
+        manager.set_target_weights({"BTC/USDT": 0.5, "ETH/USDT": 0.5})  # Target 50% BTC
+
         with patch.object(manager, '_get_current_price', return_value=50000.0):
             orders = manager.calculate_rebalance_orders()
-        
-        assert len(orders) == 1
-        assert orders[0].action == "buy"
-        assert orders[0].weight_diff > 0
+
+        btc_orders = [o for o in orders if o.symbol == "BTC/USDT"]
+        assert len(btc_orders) == 1
+        assert btc_orders[0].action == "buy"
+        assert btc_orders[0].weight_diff > 0
 
     def test_calculate_rebalance_orders_sell(self):
         """Test rebalancing sell order."""
         manager = PortfolioManager(initial_capital=100000.0)
-        manager.add_position("BTC/USDT", 1.5, 50000.0)  # 75% weight
-        manager.set_target_weights({"BTC/USDT": 0.5})  # Target 50%
-        
+        manager.add_position("BTC/USDT", 1.5, 50000.0)  # 75% weight ($75k)
+        manager._cash = 25000.0  # 25% cash
+        # Set up weights that sum to 1.0 with a second asset to hold remaining
+        manager.set_target_weights({"BTC/USDT": 0.5, "ETH/USDT": 0.5})  # Target 50% BTC
+
         with patch.object(manager, '_get_current_price', return_value=50000.0):
             orders = manager.calculate_rebalance_orders()
-        
-        assert len(orders) == 1
-        assert orders[0].action == "sell"
-        assert orders[0].weight_diff < 0
+
+        btc_orders = [o for o in orders if o.symbol == "BTC/USDT"]
+        assert len(btc_orders) == 1
+        assert btc_orders[0].action == "sell"
+        assert btc_orders[0].weight_diff < 0
 
 
 class TestPortfolioManagerPositionSizing:
