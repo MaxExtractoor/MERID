@@ -308,7 +308,7 @@ def load_portfolio_config(
         return PortfolioOptimizerConfig()
     
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             raw_config = yaml.safe_load(f)
     except yaml.YAMLError as e:
         raise ConfigValidationError(f"Invalid YAML in {path}: {e}")
