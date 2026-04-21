@@ -3,8 +3,8 @@
 // Environment-based URLs - fallback for non-Vite environments (Jest)
 const getEnv = (key: string, fallback: string): string => {
   try {
-    const metaEnv = (import.meta as { env?: Record<string, string | undefined> }).env;
-    return metaEnv?.[key] ?? fallback;
+    const meta = (globalThis as any).import?.meta;
+    return meta?.env?.[key] ?? fallback;
   } catch {
     return fallback;
   }
@@ -15,8 +15,8 @@ export const API_BASE_URL = getEnv('VITE_API_BASE', "http://localhost:8011");
 // T-034: Warn if API_BASE_URL is empty in production
 if (!API_BASE_URL && typeof window !== 'undefined') {
   try {
-    const metaEnv = (import.meta as { env?: Record<string, string | undefined> }).env;
-    if (metaEnv?.PROD) {
+    const meta = (globalThis as any).import?.meta;
+    if (meta?.env?.PROD) {
       console.error("CRITICAL: VITE_API_BASE not set in production! All API calls will use relative URLs.");
     }
   } catch { /* non-Vite environment */ }

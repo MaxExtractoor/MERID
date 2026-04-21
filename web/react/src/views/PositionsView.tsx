@@ -237,7 +237,7 @@ export default function PositionsView({ onNavigate }: { onNavigate?: (view: View
                           const agentName = p.initiated_by || p.agent_name;
                           if (agentName) {
                             sessionStorage.setItem('merid:focus-agent', agentName);
-                            onNavigate('kalshi-grid');
+                            onNavigate('promote-grid');
                           }
                         }}
                         className="text-[10px] text-blue-400 hover:text-blue-300 underline"

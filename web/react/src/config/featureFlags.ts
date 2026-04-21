@@ -17,10 +17,16 @@ function isTruthy(val: string | null | undefined): boolean {
   return ['true', '1', 'yes'].includes(val.trim().toLowerCase());
 }
 
+declare const __KALSHI_ONLY__: string | undefined;
+
 function resolveKalshiOnly(): boolean {
-  // 1. Vite env
+  // 1. Vite env (safe access for test environments)
   try {
-    if (isTruthy(import.meta.env.VITE_KALSHI_ONLY)) return true;
+    // Check for Vite's injected global or import.meta.env
+    if (typeof __KALSHI_ONLY__ !== 'undefined' && isTruthy(__KALSHI_ONLY__)) return true;
+    // Safe access to import.meta.env (only exists in Vite builds)
+    const meta = (globalThis as any).import?.meta;
+    if (meta?.env?.VITE_KALSHI_ONLY && isTruthy(meta.env.VITE_KALSHI_ONLY)) return true;
   } catch { /* not in Vite context */ }
 
   // 2. localStorage

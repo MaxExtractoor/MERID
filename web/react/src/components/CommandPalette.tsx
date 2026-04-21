@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid, Target, Globe, TrendingUp, ClipboardList } from 'lucide-react';
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Shield, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid, Target, Globe, TrendingUp, ClipboardList, Flame, MessageSquare, Wallet, Sliders, DollarSign, Heart, Rocket, Bell, FileText, Crosshair, Award, LayoutGrid } from 'lucide-react';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -14,28 +14,50 @@ interface CommandItem {
 }
 
 const COMMANDS: CommandItem[] = [
-  // Trading
-  { id: 'overview', label: 'Overview', section: 'Trading', icon: LayoutDashboard, keywords: ['home', 'dashboard', 'summary'] },
-  { id: 'kalshi-terminal', label: 'Terminal', section: 'Trading', icon: Monitor, keywords: ['terminal', 'trade', 'kalshi', 'orderbook', 'ticket'] },
-  { id: 'kalshi-dashboard', label: 'Markets', section: 'Trading', icon: BarChart3, keywords: ['kalshi', 'markets', 'catalog', 'discovery'] },
-  { id: 'kalshi-all-markets', label: 'All Markets', section: 'Trading', icon: Globe, keywords: ['all', 'markets', 'universe', 'categories', 'sweep', 'global'] },
-  { id: 'kalshi-portfolio', label: 'Portfolio', section: 'Trading', icon: Briefcase, keywords: ['kalshi', 'portfolio', 'fills', 'pnl', 'equity'] },
-  { id: 'positions', label: 'Positions', section: 'Trading', icon: TrendingUp, keywords: ['positions', 'holdings', 'open', 'exposure'] },
-  { id: 'orders', label: 'Orders', section: 'Trading', icon: ClipboardList, keywords: ['orders', 'resting', 'pending', 'cancel', 'open orders'] },
-  // Swarm Intelligence
-  { id: 'kalshi-grid', label: 'Agent Grid', section: 'Swarm Intelligence', icon: BarChart3, keywords: ['kalshi', 'grid', 'agents', 'paper'] },
-  { id: 'swarm-consensus', label: 'Swarm Matrix', section: 'Swarm Intelligence', icon: Grid, keywords: ['swarm', 'consensus', 'matrix', 'agents', 'voting', 'direction'] },
-  { id: 'kalshi-performance', label: 'Performance', section: 'Swarm Intelligence', icon: BarChart3, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
-  { id: 'calibration-dashboard', label: 'Calibration', section: 'Swarm Intelligence', icon: Target, keywords: ['calibration', 'brier', 'forecaster', 'weight', 'correlation', 'resolver', 'accuracy'] },
-  { id: 'lane-control', label: 'Lane Control', section: 'Swarm Intelligence', icon: GitBranch, keywords: ['lane', 'timeframe', 'cross', 'xtf', 'promoter', 'deployment', 'phase'] },
-  // Analytics
-  { id: 'kalshi-sentiment', label: 'Fear / Greed', section: 'Analytics', icon: Activity, keywords: ['fear', 'greed', 'sentiment', 'regime', 'index'] },
-  { id: 'kalshi-vol-dashboard', label: 'Vol & Sizing', section: 'Analytics', icon: Gauge, keywords: ['kalshi', 'volatility', 'sizing', 'kelly', 'sharpe'] },
-  // Operator
-  { id: 'operator', label: 'Operator', section: 'Operator', icon: Monitor, keywords: ['ops', 'control', 'status', 'operator', 'orchestrator'] },
-  { id: 'kill-switch', label: 'Kill Switch', section: 'Operator', icon: ShieldAlert, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
+  // Stage 1: Discover
+  { id: 'discover', label: 'Markets', section: 'Discover', icon: Search, keywords: ['kalshi', 'markets', 'catalog', 'discovery', 'trade'] },
+  { id: 'discover-all-markets', label: 'All Markets', section: 'Discover', icon: Globe, keywords: ['all', 'markets', 'universe', 'categories', 'sweep', 'global'] },
+  { id: 'discover-trending', label: 'Trending', section: 'Discover', icon: Flame, keywords: ['trending', 'hot', 'popular', 'volume'] },
+  
+  // Stage 2: Analyze
+  { id: 'analyze-edge', label: 'Edge Signals', section: 'Analyze', icon: Target, keywords: ['edge', 'alpha', 'signal', 'opportunity'] },
+  { id: 'analyze-sentiment', label: 'Sentiment', section: 'Analyze', icon: Activity, keywords: ['fear', 'greed', 'sentiment', 'regime', 'index'] },
+  { id: 'analyze-vol', label: 'Vol & ATR', section: 'Analyze', icon: Gauge, keywords: ['volatility', 'atr', 'sizing', 'kelly', 'sharpe'] },
+  
+  // Stage 3: Consensus
+  { id: 'consensus-swarm', label: 'Swarm Matrix', section: 'Consensus', icon: Grid, keywords: ['swarm', 'consensus', 'matrix', 'agents', 'voting', 'direction'] },
+  { id: 'consensus-debates', label: 'Debates', section: 'Consensus', icon: MessageSquare, keywords: ['debate', 'argument', 'bull', 'bear', 'discussion'] },
+  { id: 'consensus-performance', label: 'Performance', section: 'Consensus', icon: Award, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
+  { id: 'consensus-calibration', label: 'Calibration', section: 'Consensus', icon: Crosshair, keywords: ['calibration', 'brier', 'forecaster', 'weight', 'accuracy'] },
+  
+  // Stage 4: Size
+  { id: 'size-bankroll', label: 'Bankroll', section: 'Size', icon: Wallet, keywords: ['bankroll', 'capital', 'equity', 'balance'] },
+  { id: 'size-lanes', label: 'Lane Control', section: 'Size', icon: GitBranch, keywords: ['lane', 'timeframe', 'cross', 'xtf', 'promoter', 'deployment'] },
+  { id: 'size-sizing', label: 'Sizing Metrics', section: 'Size', icon: Sliders, keywords: ['sizing', 'kelly', 'position', 'risk', 'allocation'] },
+  
+  // Stage 5: Execute
+  { id: 'execute-terminal', label: 'Terminal', section: 'Execute', icon: Terminal, keywords: ['terminal', 'trade', 'orderbook', 'ticket', 'execute'] },
+  { id: 'execute-orders', label: 'Orders', section: 'Execute', icon: ClipboardList, keywords: ['orders', 'resting', 'pending', 'cancel', 'open orders'] },
+  { id: 'execute-positions', label: 'Positions', section: 'Execute', icon: TrendingUp, keywords: ['positions', 'holdings', 'open', 'exposure'] },
+  
+  // Stage 6: Monitor
+  { id: 'monitor-portfolio', label: 'Portfolio', section: 'Monitor', icon: Briefcase, keywords: ['portfolio', 'fills', 'pnl', 'equity', 'returns'] },
+  { id: 'monitor-pnl', label: 'PnL History', section: 'Monitor', icon: DollarSign, keywords: ['pnl', 'profit', 'loss', 'history', 'performance'] },
+  { id: 'monitor-health', label: 'System Health', section: 'Monitor', icon: Heart, keywords: ['health', 'status', 'diagnostics', 'checks'] },
+  
+  // Stage 7: Promote
+  { id: 'promote-pipeline', label: 'Pipeline', section: 'Promote', icon: Rocket, keywords: ['pipeline', 'promote', 'paper', 'shadow', 'live', 'deployment'] },
+  { id: 'promote-grid', label: 'Agent Grid', section: 'Promote', icon: LayoutGrid, keywords: ['grid', 'agents', 'paper', 'ladder'] },
+  
+  // Stage 8: Protect
+  { id: 'protect-risk', label: 'Risk Center', section: 'Protect', icon: ShieldAlert, keywords: ['risk', 'alerts', 'exposure', 'limits'] },
+  { id: 'protect-kill-switch', label: 'Kill Switch', section: 'Protect', icon: Shield, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
+  { id: 'protect-alerts', label: 'Alerts', section: 'Protect', icon: Bell, keywords: ['alerts', 'notifications', 'warnings', 'errors'] },
+  
   // System
-  { id: 'logs', label: 'Logs', section: 'System', icon: Terminal, keywords: ['log', 'error', 'debug'] },
+  { id: 'overview', label: 'Overview', section: 'System', icon: LayoutDashboard, keywords: ['home', 'dashboard', 'summary'] },
+  { id: 'operator', label: 'Operator', section: 'System', icon: Sliders, keywords: ['ops', 'control', 'status', 'operator', 'orchestrator'] },
+  { id: 'logs', label: 'Logs', section: 'System', icon: FileText, keywords: ['log', 'error', 'debug'] },
   { id: 'settings', label: 'Settings', section: 'System', icon: Settings, keywords: ['config', 'preference', 'theme'] },
 ];
 
