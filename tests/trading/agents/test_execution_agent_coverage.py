@@ -65,7 +65,7 @@ class TestOrder:
         order = Order(
             order_id="test_001",
             venue="binance",
-            asset="BTC/USDT",
+            asset="BTC/USD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             size=100.0
@@ -80,7 +80,7 @@ class TestOrder:
         order = Order(
             order_id="test_002",
             venue="coinbase",
-            asset="ETH/USDT",
+            asset="ETH/USD",
             side=OrderSide.SELL,
             order_type=OrderType.LIMIT,
             size=50.0,
@@ -94,7 +94,7 @@ class TestOrder:
         order = Order(
             order_id="test_003",
             venue="kraken",
-            asset="SOL/USDT",
+            asset="SOL/USD",
             side=OrderSide.SELL,
             order_type=OrderType.STOP_LOSS,
             size=200.0,
@@ -108,7 +108,7 @@ class TestOrder:
         order = Order(
             order_id="test_004",
             venue="binance",
-            asset="BTC/USDT",
+            asset="BTC/USD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             size=100.0
@@ -121,7 +121,7 @@ class TestOrder:
         order = Order(
             order_id="test_005",
             venue="binance",
-            asset="BTC/USDT",
+            asset="BTC/USD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             size=100.0,
@@ -183,7 +183,7 @@ class TestTradeExecution:
         order = Order(
             order_id="order_123",
             venue="binance",
-            asset="BTC/USDT",
+            asset="BTC/USD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             size=100.0
@@ -207,7 +207,7 @@ class TestTradeExecution:
         order = Order(
             order_id="order_124",
             venue="coinbase",
-            asset="ETH/USDT",
+            asset="ETH/USD",
             side=OrderSide.SELL,
             order_type=OrderType.LIMIT,
             size=50.0,

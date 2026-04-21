@@ -79,7 +79,7 @@ class TestPromotionState:
         guard._promotion_eligible_domains = set()  # empty = nothing eligible
         # Even with no eligible domains, enforcement off → passes
         verdict = guard.pre_trade_check(
-            plan_id="test", symbol="BTC/USDT",
+            plan_id="test", symbol="BTC/USD",
             domain="crypto", size_usd=100.0,
         )
         # Should not fail on promotion_eligibility
@@ -122,7 +122,7 @@ class TestLiveBlocking:
 
         guard = self._make_guard_with_eligible(["equity"])
         verdict = guard.pre_trade_check(
-            plan_id="live-test", symbol="BTC/USDT",
+            plan_id="live-test", symbol="BTC/USD",
             domain="crypto", size_usd=500.0,
         )
         assert verdict.allowed is False
@@ -143,7 +143,7 @@ class TestLiveBlocking:
 
         guard = self._make_guard_with_eligible(["crypto", "equity"])
         verdict = guard.pre_trade_check(
-            plan_id="live-ok", symbol="BTC/USDT",
+            plan_id="live-ok", symbol="BTC/USD",
             domain="crypto", size_usd=500.0,
         )
         # v2: promotion check only runs if earlier checks pass
@@ -171,7 +171,7 @@ class TestLiveBlocking:
         guard._last_execution_at = 0
 
         v_crypto = guard.pre_trade_check(
-            plan_id="t1", symbol="BTC/USDT",
+            plan_id="t1", symbol="BTC/USD",
             domain="crypto", size_usd=100.0,
         )
         # Crypto is eligible - should pass promotion (may be blocked by other checks)
@@ -215,7 +215,7 @@ class TestPaperPassthrough:
 
         guard = self._make_guard_with_nothing_eligible()
         verdict = guard.pre_trade_check(
-            plan_id="paper-test", symbol="BTC/USDT",
+            plan_id="paper-test", symbol="BTC/USD",
             domain="crypto", size_usd=500.0,
         )
         # v2: In paper mode, promotion check is skipped (not run)
@@ -268,7 +268,7 @@ class TestPaperPassthrough:
 
         # Don't mock — let the import fail naturally in test context
         verdict = guard.pre_trade_check(
-            plan_id="no-ctrl", symbol="BTC/USDT",
+            plan_id="no-ctrl", symbol="BTC/USD",
             domain="crypto", size_usd=100.0,
         )
         
@@ -345,7 +345,7 @@ class TestCheckOrdering:
         guard.activate_kill_switch("test")
 
         verdict = guard.pre_trade_check(
-            plan_id="ks-test", symbol="BTC/USDT",
+            plan_id="ks-test", symbol="BTC/USD",
             domain="crypto", size_usd=100.0,
         )
         assert verdict.allowed is False
@@ -375,7 +375,7 @@ class TestCheckOrdering:
         guard.activate_domain_kill_switch("crypto", "test")
 
         verdict = guard.pre_trade_check(
-            plan_id="dk-test", symbol="BTC/USDT",
+            plan_id="dk-test", symbol="BTC/USD",
             domain="crypto", size_usd=100.0,
         )
         assert verdict.allowed is False
@@ -404,7 +404,7 @@ class TestCheckOrdering:
         guard.update_cqi("crypto", 0.1)  # Very low CQI
 
         verdict = guard.pre_trade_check(
-            plan_id="order-test", symbol="BTC/USDT",
+            plan_id="order-test", symbol="BTC/USD",
             domain="crypto", size_usd=100.0,
         )
         assert verdict.allowed is False

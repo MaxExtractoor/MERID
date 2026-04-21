@@ -2,7 +2,7 @@
 Golden-path end-to-end test: price feed → order → position → PnL → analytics.
 
 Exercises the core MERID trading loop through the API surface:
-  1. Seed price feed with a live price for BTC/USDT.
+  1. Seed price feed with a live price for BTC/USD.
   2. Submit a market BUY order via POST /api/v1/orders/submit.
   3. Assert order fills with correct price.
   4. GET /api/v1/positions — new position exists, non-stub.
@@ -44,7 +44,7 @@ def _build_seeded_engine(price: float = 68000.0):
     engine.portfolios = {}
     engine.order_counter = 0
     engine.position_counter = 0
-    engine.current_prices = {"BTC-USD": price, "BTC/USDT": price}
+    engine.current_prices = {"BTC-USD": price, "BTC/USD": price}
     engine.price_feed = None
     engine._listeners = {"trade": set(), "summary": set(), "position": set()}
     engine._summary_dirty = False
@@ -63,13 +63,13 @@ def _build_seeded_engine(price: float = 68000.0):
 
     # Build a matching price feed mock
     pd_mock = MagicMock()
-    pd_mock.symbol = "BTC/USDT"
+    pd_mock.symbol = "BTC/USD"
     pd_mock.exchange = "kraken"
     pd_mock.price = price
     pd_mock.timestamp = datetime.utcnow()
 
     feed = MagicMock()
-    feed.price_cache = {"BTC/USDT": pd_mock}
+    feed.price_cache = {"BTC/USD": pd_mock}
     feed.last_successful_fetch = {"kraken": time.time()}
     feed.get_all_prices.return_value = feed.price_cache.copy()
 

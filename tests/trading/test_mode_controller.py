@@ -39,7 +39,7 @@ class TestSpectatorTrade:
         trade = SpectatorTrade(
             trade_id="t1",
             agent_id="a1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=1.0,
             price=50000.0,
@@ -47,19 +47,19 @@ class TestSpectatorTrade:
             mode="paper"
         )
         assert trade.trade_id == "t1"
-        assert trade.symbol == "BTC/USDT"
+        assert trade.symbol == "BTC/USD"
         assert trade.status == "open"
 
     def test_to_dict(self):
         """Test SpectatorTrade to_dict."""
         trade = SpectatorTrade(
-            trade_id="t1", agent_id="a1", symbol="BTC/USDT",
+            trade_id="t1", agent_id="a1", symbol="BTC/USD",
             action="buy", quantity=1.0, price=50000.0,
             timestamp=1234567890.0, mode="paper"
         )
         d = trade.to_dict()
         assert d["trade_id"] == "t1"
-        assert d["symbol"] == "BTC/USDT"
+        assert d["symbol"] == "BTC/USD"
 
 
 class TestModeChangeEvent:
@@ -144,7 +144,7 @@ class TestCanExecuteLive:
     def test_paper_mode_blocks(self):
         """Test paper mode blocks live execution."""
         controller = TradingModeController()
-        can_execute, reason = controller.can_execute_live("BTC/USDT", 1000.0)
+        can_execute, reason = controller.can_execute_live("BTC/USD", 1000.0)
         assert can_execute is False
         assert "Paper mode" in reason
 
@@ -173,20 +173,20 @@ class TestRecordAndCloseTrade:
         controller = TradingModeController()
         trade = controller.record_trade(
             agent_id="a1",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             action="buy",
             quantity=1.0,
             price=50000.0
         )
         assert trade.agent_id == "a1"
-        assert trade.symbol == "BTC/USDT"
+        assert trade.symbol == "BTC/USD"
         assert trade.status == "open"
 
     def test_close_trade(self):
         """Test closing a trade."""
         controller = TradingModeController()
         trade = controller.record_trade(
-            agent_id="a1", symbol="BTC/USDT",
+            agent_id="a1", symbol="BTC/USD",
             action="buy", quantity=1.0, price=50000.0,
             trade_id="t1"
         )
@@ -208,8 +208,8 @@ class TestGetSpectatorTrades:
     def test_filter_by_agent(self):
         """Test filtering trades by agent."""
         controller = TradingModeController()
-        controller.record_trade("a1", "BTC/USDT", "buy", 1.0, 50000.0)
-        controller.record_trade("a2", "ETH/USDT", "buy", 2.0, 3000.0)
+        controller.record_trade("a1", "BTC/USD", "buy", 1.0, 50000.0)
+        controller.record_trade("a2", "ETH/USD", "buy", 2.0, 3000.0)
         
         trades = controller.get_spectator_trades(agent_id="a1")
         assert len(trades) == 1
@@ -218,12 +218,12 @@ class TestGetSpectatorTrades:
     def test_filter_by_symbol(self):
         """Test filtering trades by symbol."""
         controller = TradingModeController()
-        controller.record_trade("a1", "BTC/USDT", "buy", 1.0, 50000.0)
-        controller.record_trade("a1", "ETH/USDT", "buy", 2.0, 3000.0)
+        controller.record_trade("a1", "BTC/USD", "buy", 1.0, 50000.0)
+        controller.record_trade("a1", "ETH/USD", "buy", 2.0, 3000.0)
         
-        trades = controller.get_spectator_trades(symbol="BTC/USDT")
+        trades = controller.get_spectator_trades(symbol="BTC/USD")
         assert len(trades) == 1
-        assert trades[0].symbol == "BTC/USDT"
+        assert trades[0].symbol == "BTC/USD"
 
 
 class TestSubscriber:

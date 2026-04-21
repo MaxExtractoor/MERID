@@ -660,7 +660,7 @@ class NetProfitCalculator:
         for leg in legs:
             venue = leg.get("venue", "unknown")
             venue_type = VenueType(leg.get("venue_type", "cex"))
-            symbol = leg.get("symbol", "BTC/USDT")
+            symbol = leg.get("symbol", "BTC/USD")
             side = leg.get("side", "buy")
             leg_size = leg.get("size_usd", size_usd / len(legs))
             

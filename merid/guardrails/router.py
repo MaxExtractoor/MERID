@@ -59,7 +59,7 @@ class GuardedToolRouter:
 
         router = get_guarded_router()
         ctx = AgentContext(agent_id="arb-01", scope="paper", ...)
-        result = await router.call_tool("get_order_book", {"symbol": "BTC/USDT"}, ctx)
+        result = await router.call_tool("get_order_book", {"symbol": "BTC/USD"}, ctx)
     """
 
     def __init__(

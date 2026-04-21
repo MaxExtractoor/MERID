@@ -214,10 +214,10 @@ class USCompliantDataAggregator:
             # Kraken uses different symbol format
             kraken_symbols = []
             for symbol in symbols:
-                if symbol == 'BTC/USDT':
-                    kraken_symbols.append('XBTUSDT')
-                elif symbol == 'ETH/USDT':
-                    kraken_symbols.append('ETHUSDT')
+                if symbol == 'BTC/USD':
+                    kraken_symbols.append('XBTUSD')
+                elif symbol == 'ETH/USD':
+                    kraken_symbols.append('ETHUSD')
                 else:
                     kraken_symbols.append(symbol.replace('/', ''))
             
@@ -237,7 +237,7 @@ class USCompliantDataAggregator:
                             # Map back to original symbol
                             original_symbol = None
                             for symbol in symbols:
-                                if symbol == 'BTC/USDT' and kraken_symbol == 'XBTUSDT':
+                                if symbol == 'BTC/USD' and kraken_symbol == 'XBTUSD':
                                     original_symbol = symbol
                                     break
                                 elif symbol.replace('/', '') == kraken_symbol:
@@ -375,7 +375,7 @@ class USCompliantDataAggregator:
         ]
         
         # Add Bitcoin-specific source
-        if 'BTC/USDT' in symbols or 'BTC/USD' in symbols:
+        if 'BTC/USD' in symbols:
             tasks.append(self.fetch_blockchain_data())
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -557,7 +557,7 @@ class PredictionMarketsAggregator:
 # Usage example and testing
 async def test_data_sources():
     """Test the US-compliant data sources."""
-    symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+    symbols = ['BTC/USD', 'ETH/USD', 'SOL/USD']
     
     async with USCompliantDataAggregator() as aggregator:
         # Test single fetch

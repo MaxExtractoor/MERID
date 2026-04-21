@@ -133,7 +133,7 @@ class TestAgentOrchestratorConsensus:
             return_value=(0.8, ["Reason 1", "Reason 2"])
         )
         
-        proposal = {"type": "test", "symbol": "BTC/USDT"}
+        proposal = {"type": "test", "symbol": "BTC/USD"}
         result = await orchestrator.form_consensus(proposal)
         
         assert isinstance(result, ConsensusResult)
@@ -151,7 +151,7 @@ class TestAgentOrchestratorConsensus:
             return_value=(0.3, ["Low confidence"])
         )
         
-        proposal = {"type": "test", "symbol": "BTC/USDT"}
+        proposal = {"type": "test", "symbol": "BTC/USD"}
         result = await orchestrator.form_consensus(proposal)
         
         assert result.approved is False
@@ -240,9 +240,9 @@ class TestEvaluateAgentVote:
         price_data = MagicMock()
         price_data.bid = 100
         price_data.ask = 101
-        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USDT": price_data}
+        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USD": price_data}
         
-        proposal = {"type": "trade", "symbol": "BTC/USDT"}
+        proposal = {"type": "trade", "symbol": "BTC/USD"}
         confidence, reasoning = await orchestrator._evaluate_agent_vote(
             AgentRole.PRICE_FEED, orchestrator.price_feed, proposal
         )
@@ -269,9 +269,9 @@ class TestEvaluateAgentVote:
         price_data = MagicMock()
         price_data.bid = 100
         price_data.ask = 104  # 4% spread = 400 bps
-        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USDT": price_data}
+        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USD": price_data}
         
-        proposal = {"type": "arbitrage", "symbol": "BTC/USDT"}
+        proposal = {"type": "arbitrage", "symbol": "BTC/USD"}
         confidence, reasoning = await orchestrator._evaluate_agent_vote(
             AgentRole.ARBITRAGE, orchestrator.arbitrage_agent, proposal
         )
@@ -306,9 +306,9 @@ class TestEvaluateAgentVote:
         """Test slippage agent with high liquidity."""
         price_data = MagicMock()
         price_data.volume_24h = 2000000  # $2M volume
-        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USDT": price_data}
+        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USD": price_data}
         
-        proposal = {"type": "order", "symbol": "BTC/USDT"}
+        proposal = {"type": "order", "symbol": "BTC/USD"}
         confidence, reasoning = await orchestrator._evaluate_agent_vote(
             AgentRole.SLIPPAGE, orchestrator.slippage_agent, proposal
         )
@@ -367,7 +367,7 @@ class TestAgentOrchestratorArbitrage:
         price_data.ask = 106  # 6% spread = 600 bps
         price_data.price = 103
         price_data.exchange = "test"
-        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USDT": price_data}
+        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USD": price_data}
         orchestrator.twitter_agent.enabled = False  # Disable to avoid broadcast
         orchestrator.telegram_agent.enabled = False
         
@@ -387,7 +387,7 @@ class TestAgentOrchestratorArbitrage:
         price_data.ask = 100.5  # 0.5% spread = 50 bps (at threshold)
         price_data.price = 100.25
         price_data.exchange = "test"
-        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USDT": price_data}
+        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USD": price_data}
         
         await orchestrator._check_arbitrage_opportunities()
         

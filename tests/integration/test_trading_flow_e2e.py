@@ -170,9 +170,9 @@ class TestPaperTradingIntegration:
             from trading.paper_trading import PaperTradingEngine
             engine = PaperTradingEngine(starting_balance=10000.0)
             engine.current_prices["BTC"] = 50000.0
-            engine.current_prices["BTC/USDT"] = 50000.0
+            engine.current_prices["BTC/USD"] = 50000.0
             engine.current_prices["ETH"] = 3000.0
-            engine.current_prices["ETH/USDT"] = 3000.0
+            engine.current_prices["ETH/USD"] = 3000.0
             return engine
 
     def test_paper_trading_full_cycle(self, paper_engine):

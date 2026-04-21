@@ -32,7 +32,7 @@ class DomainMode(str, Enum):
 @dataclass
 class InstrumentConfig:
     """Per-instrument configuration with asset-class-specific overrides."""
-    id: str                            # e.g. "BTC/USDT", "BTC260220C00036000", "NFL_GAME_1234"
+    id: str                            # e.g. "BTC/USD", "BTC260220C00036000", "NFL_GAME_1234"
     domain: str                        # crypto, equity, prediction, betting, macro
     enabled: bool = True
 

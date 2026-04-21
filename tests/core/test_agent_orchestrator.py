@@ -95,12 +95,12 @@ class TestAgentOrchestrator:
         mock_price_data.volume_24h = 5000000
         
         orchestrator.price_feed.get_all_prices.return_value = {
-            "BTC/USDT": mock_price_data
+            "BTC/USD": mock_price_data
         }
         
         proposal = {
             "type": "trade",
-            "symbol": "BTC/USDT",
+            "symbol": "BTC/USD",
             "amount": 1000
         }
         
@@ -117,7 +117,7 @@ class TestAgentOrchestrator:
         """Test consensus formation without price data."""
         orchestrator.price_feed.get_all_prices.return_value = {}
         
-        proposal = {"type": "trade", "symbol": "BTC/USDT"}
+        proposal = {"type": "trade", "symbol": "BTC/USD"}
         
         result = await orchestrator.form_consensus(proposal)
         
@@ -128,7 +128,7 @@ class TestAgentOrchestrator:
     async def test__evaluate_agent_vote_price_feed(self, orchestrator):
         """Test price feed agent vote evaluation."""
         mock_price_data = MagicMock()
-        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USDT": mock_price_data}
+        orchestrator.price_feed.get_all_prices.return_value = {"BTC/USD": mock_price_data}
         
         proposal = {"type": "trade"}
         agent = orchestrator.agents[AgentRole.PRICE_FEED]
@@ -163,10 +163,10 @@ class TestAgentOrchestrator:
         mock_price_data.ask = 45100.0  # 100 bps spread
         
         orchestrator.price_feed.get_all_prices.return_value = {
-            "BTC/USDT": mock_price_data
+            "BTC/USD": mock_price_data
         }
         
-        proposal = {"type": "trade", "symbol": "BTC/USDT"}
+        proposal = {"type": "trade", "symbol": "BTC/USD"}
         agent = orchestrator.agents[AgentRole.ARBITRAGE]
         
         confidence, reasoning = await orchestrator._evaluate_agent_vote(

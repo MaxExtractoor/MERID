@@ -67,26 +67,26 @@ class TestStalenessConfig:
         set_staleness_config([
             SymbolGroupConfig(
                 name="major_crypto",
-                symbols={"BTC/USDT", "ETH/USDT", "SOL/USDT"},
+                symbols={"BTC/USD", "ETH/USD", "SOL/USD"},
                 threshold_seconds=60,
                 critical=True,
             ),
             SymbolGroupConfig(
                 name="alt_crypto",
-                symbols={"DOGE/USDT", "LINK/USDT"},
+                symbols={"DOGE/USD", "LINK/USDT"},
                 threshold_seconds=120,
                 critical=False,
             ),
         ])
 
     def test_get_threshold_major(self):
-        threshold, critical, group = _get_threshold_for_symbol("BTC/USDT")
+        threshold, critical, group = _get_threshold_for_symbol("BTC/USD")
         assert threshold == 60
         assert critical is True
         assert group == "major_crypto"
 
     def test_get_threshold_alt(self):
-        threshold, critical, group = _get_threshold_for_symbol("DOGE/USDT")
+        threshold, critical, group = _get_threshold_for_symbol("DOGE/USD")
         assert threshold == 120
         assert critical is False
         assert group == "alt_crypto"
@@ -125,13 +125,13 @@ class TestPriceFeedStaleness:
         set_staleness_config([
             SymbolGroupConfig(
                 name="major",
-                symbols={"BTC/USDT", "ETH/USDT"},
+                symbols={"BTC/USD", "ETH/USD"},
                 threshold_seconds=60,
                 critical=True,
             ),
             SymbolGroupConfig(
                 name="alt",
-                symbols={"DOGE/USDT"},
+                symbols={"DOGE/USD"},
                 threshold_seconds=120,
                 critical=False,
             ),
@@ -147,9 +147,9 @@ class TestPriceFeedStaleness:
     def test_all_fresh_safe(self, mock_feed_fn):
         feed = MagicMock()
         feed.price_cache = {
-            "BTC/USDT": self._make_price_data("BTC/USDT", 10),
-            "ETH/USDT": self._make_price_data("ETH/USDT", 20),
-            "DOGE/USDT": self._make_price_data("DOGE/USDT", 30),
+            "BTC/USD": self._make_price_data("BTC/USD", 10),
+            "ETH/USD": self._make_price_data("ETH/USD", 20),
+            "DOGE/USD": self._make_price_data("DOGE/USD", 30),
         }
         mock_feed_fn.return_value = feed
 
@@ -163,23 +163,23 @@ class TestPriceFeedStaleness:
     def test_major_stale_blocks(self, mock_feed_fn):
         feed = MagicMock()
         feed.price_cache = {
-            "BTC/USDT": self._make_price_data("BTC/USDT", 90),  # 90s > 60s threshold
-            "ETH/USDT": self._make_price_data("ETH/USDT", 10),
+            "BTC/USD": self._make_price_data("BTC/USD", 90),  # 90s > 60s threshold
+            "ETH/USD": self._make_price_data("ETH/USD", 10),
         }
         mock_feed_fn.return_value = feed
 
         result = check_price_feed_staleness()
         assert result["safe_to_trade"] is False
         assert result["critical_count"] == 1
-        assert result["stale_symbols"][0]["symbol"] == "BTC/USDT"
+        assert result["stale_symbols"][0]["symbol"] == "BTC/USD"
         assert result["stale_symbols"][0]["critical"] is True
 
     @patch("data.live_price_feed.get_live_price_feed")
     def test_alt_stale_does_not_block(self, mock_feed_fn):
         feed = MagicMock()
         feed.price_cache = {
-            "BTC/USDT": self._make_price_data("BTC/USDT", 10),
-            "DOGE/USDT": self._make_price_data("DOGE/USDT", 200),  # 200s > 120s
+            "BTC/USD": self._make_price_data("BTC/USD", 10),
+            "DOGE/USD": self._make_price_data("DOGE/USD", 200),  # 200s > 120s
         }
         mock_feed_fn.return_value = feed
 
@@ -259,7 +259,7 @@ class TestCheckExecutionGate:
     @pytest.mark.kalshi_live_ready
     @patch("core.dependency_health.check_all_dependencies", return_value=_EXEC_GATE_DEP_OK)
     @patch("core.execution_gate.check_pnl_consistency", return_value={"consistent": True, "max_divergence_usd": 0, "threshold_usd": 5})
-    @patch("core.execution_gate.check_price_feed_staleness", return_value={"safe_to_trade": False, "stale_symbols": [{"symbol": "BTC/USDT"}], "critical_count": 1})
+    @patch("core.execution_gate.check_price_feed_staleness", return_value={"safe_to_trade": False, "stale_symbols": [{"symbol": "BTC/USD"}], "critical_count": 1})
     def test_gate_blocked_on_stale_feeds(self, mock_stale, mock_pnl, _mock_deps):
         mock_rc = MagicMock()
         mock_rc._global_kill = False

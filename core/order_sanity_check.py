@@ -86,7 +86,7 @@ class OrderSanityChecker:
         """Run all sanity checks on a proposed order.
 
         Args:
-            symbol: Instrument symbol (e.g. "BTC/USDT")
+            symbol: Instrument symbol (e.g. "BTC/USD")
             quantity: Order quantity (units)
             price: Order price per unit (USD)
             portfolio_value: Current total portfolio value (USD)

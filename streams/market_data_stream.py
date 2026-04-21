@@ -64,7 +64,7 @@ class MarketDataStream(BaseStream):
             from data.asset_universe import get_watchlist_symbols
             _default_syms = get_watchlist_symbols()
         except Exception:
-            _default_syms = ["BTC/USDT", "ETH/USDT"]
+            _default_syms = ["BTC/USD", "ETH/USD"]
         self.symbols = config.get("symbols", _default_syms)
         
         # Stream state

@@ -43,7 +43,7 @@ async def test_binance_adapter():
         
         # Test funding rate fetching
         print("\n💰 Testing Funding Rate Fetching")
-        funding_rates = adapter.fetch_funding_rates(["BTCUSDT", "ETHUSDT"])
+        funding_rates = adapter.fetch_funding_rates(["BTCUSD", "ETHUSD"])
         print(f"✅ Fetched {len(funding_rates)} funding rates")
         
         if funding_rates:
@@ -75,7 +75,7 @@ async def test_binance_adapter():
         print("\n🔍 Testing Symbol Support")
         supported = adapter.get_supported_symbols()
         print(f"✅ Supported symbols: {len(supported)}")
-        print(f"   BTC supported: {adapter.is_symbol_supported('BTCUSDT')}")
+        print(f"   BTC supported: {adapter.is_symbol_supported('BTCUSD')}")
         print(f"   INVALID supported: {adapter.is_symbol_supported('INVALID')}")
         
         print("\n🎉 Binance Adapter Test: PASSED")
@@ -108,7 +108,7 @@ async def test_trading_execution():
         print("\n📋 Testing Market Order Execution")
         market_order = TradeOrder(
             order_id=str(uuid.uuid4()),
-            symbol="BTCUSDT",
+            symbol="BTCUSD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             quantity=0.1  # 0.1 BTC
@@ -124,7 +124,7 @@ async def test_trading_execution():
         print("\n📋 Testing Limit Order Execution")
         limit_order = TradeOrder(
             order_id=str(uuid.uuid4()),
-            symbol="ETHUSDT",
+            symbol="ETHUSD",
             side=OrderSide.SELL,
             order_type=OrderType.LIMIT,
             quantity=1.0,
@@ -152,7 +152,7 @@ async def test_trading_execution():
         # Test oversized order (should be rejected)
         oversized_order = TradeOrder(
             order_id=str(uuid.uuid4()),
-            symbol="BTCUSDT",
+            symbol="BTCUSD",
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             quantity=10.0  # 10 BTC = ~$450K (exceeds $50K limit)
@@ -330,7 +330,7 @@ async def test_performance():
         for i in range(10):
             order = TradeOrder(
                 order_id=f"perf_test_{i}",
-                symbol="BTCUSDT",
+                symbol="BTCUSD",
                 side=OrderSide.BUY if i % 2 == 0 else OrderSide.SELL,
                 order_type=OrderType.MARKET,
                 quantity=0.01

@@ -129,17 +129,17 @@ class TestPaperTradingEngine:
     def test_symbols_match_exact(self):
         """Test _symbols_match with exact match."""
         engine = PaperTradingEngine.__new__(PaperTradingEngine)
-        assert engine._symbols_match("BTC/USDT", "BTC/USDT") is True
+        assert engine._symbols_match("BTC/USD", "BTC/USD") is True
 
     def test_symbols_match_base(self):
         """Test _symbols_match with base asset only."""
         engine = PaperTradingEngine.__new__(PaperTradingEngine)
-        assert engine._symbols_match("BTC", "BTC/USDT") is True
+        assert engine._symbols_match("BTC", "BTC/USD") is True
 
     def test_symbols_match_no_match(self):
         """Test _symbols_match with no match."""
         engine = PaperTradingEngine.__new__(PaperTradingEngine)
-        assert engine._symbols_match("ETH", "BTC/USDT") is False
+        assert engine._symbols_match("ETH", "BTC/USD") is False
 
     @patch('trading.paper_trading.get_live_price_feed')
     def test_place_order_insufficient_balance(self, mock_feed):
@@ -160,7 +160,7 @@ class TestPaperTradingEngine:
         """Test successful order placement."""
         mock_feed.return_value = Mock()
         engine = PaperTradingEngine()
-        engine.current_prices["BTC/USDT"] = 50000.0
+        engine.current_prices["BTC/USD"] = 50000.0
         engine.current_prices["BTC"] = 50000.0
         order = engine.place_order(
             user_id="user_123",
@@ -178,7 +178,7 @@ class TestPaperTradingEngine:
         """Test successful position close."""
         mock_feed.return_value = Mock()
         engine = PaperTradingEngine()
-        engine.current_prices["BTC/USDT"] = 50000.0
+        engine.current_prices["BTC/USD"] = 50000.0
         engine.current_prices["BTC"] = 50000.0
 
         # Open position

@@ -32,23 +32,23 @@ class TestMaxOrderPctOfPortfolio(unittest.TestCase):
         ))
 
     def test_within_limit_passes(self):
-        result = self.checker.check("BTC/USDT", 0.01, 50000, portfolio_value=100_000)
+        result = self.checker.check("BTC/USD", 0.01, 50000, portfolio_value=100_000)
         # 0.01 * 50000 = 500, which is 0.5% of 100K
         self.assertTrue(result.passed)
 
     def test_at_limit_passes(self):
-        result = self.checker.check("BTC/USDT", 0.2, 50000, portfolio_value=100_000)
+        result = self.checker.check("BTC/USD", 0.2, 50000, portfolio_value=100_000)
         # 0.2 * 50000 = 10000, which is 10% of 100K
         self.assertTrue(result.passed)
 
     def test_over_limit_rejected(self):
-        result = self.checker.check("BTC/USDT", 0.5, 50000, portfolio_value=100_000)
+        result = self.checker.check("BTC/USD", 0.5, 50000, portfolio_value=100_000)
         # 0.5 * 50000 = 25000, which is 25% of 100K
         self.assertFalse(result.passed)
         self.assertTrue(any(v["check"] == "max_order_pct_of_portfolio" for v in result.violations))
 
     def test_zero_portfolio_rejected(self):
-        result = self.checker.check("BTC/USDT", 0.01, 50000, portfolio_value=0)
+        result = self.checker.check("BTC/USD", 0.01, 50000, portfolio_value=0)
         self.assertFalse(result.passed)
 
 
@@ -62,17 +62,17 @@ class TestMaxAbsoluteNotional(unittest.TestCase):
         ))
 
     def test_within_limit_passes(self):
-        result = self.checker.check("ETH/USDT", 1.0, 3000, portfolio_value=1_000_000)
+        result = self.checker.check("ETH/USD", 1.0, 3000, portfolio_value=1_000_000)
         self.assertTrue(result.passed)
 
     def test_over_limit_rejected(self):
-        result = self.checker.check("ETH/USDT", 5.0, 3000, portfolio_value=1_000_000)
+        result = self.checker.check("ETH/USD", 5.0, 3000, portfolio_value=1_000_000)
         # 5 * 3000 = 15000 > 10000
         self.assertFalse(result.passed)
         self.assertTrue(any(v["check"] == "max_order_notional_usd" for v in result.violations))
 
     def test_exact_limit_passes(self):
-        result = self.checker.check("ETH/USDT", 2.0, 5000, portfolio_value=1_000_000)
+        result = self.checker.check("ETH/USD", 2.0, 5000, portfolio_value=1_000_000)
         # 2 * 5000 = 10000 == limit
         self.assertTrue(result.passed)
 
@@ -88,11 +88,11 @@ class TestMinOrderNotional(unittest.TestCase):
         ))
 
     def test_above_min_passes(self):
-        result = self.checker.check("SOL/USDT", 1.0, 100, portfolio_value=100_000)
+        result = self.checker.check("SOL/USD", 1.0, 100, portfolio_value=100_000)
         self.assertTrue(result.passed)
 
     def test_below_min_rejected(self):
-        result = self.checker.check("SOL/USDT", 0.001, 1.0, portfolio_value=100_000)
+        result = self.checker.check("SOL/USD", 0.001, 1.0, portfolio_value=100_000)
         # 0.001 * 1.0 = 0.001 < 10
         self.assertFalse(result.passed)
         self.assertTrue(any(v["check"] == "min_order_notional_usd" for v in result.violations))
@@ -134,26 +134,26 @@ class TestPerSymbolDailyNotional(unittest.TestCase):
         ))
 
     def test_single_order_within_limit(self):
-        result = self.checker.check("BTC/USDT", 0.05, 50000, portfolio_value=1_000_000)
+        result = self.checker.check("BTC/USD", 0.05, 50000, portfolio_value=1_000_000)
         # 0.05 * 50000 = 2500 < 5000
         self.assertTrue(result.passed)
 
     def test_cumulative_exceeds_limit(self):
         # First order: 2500
-        r1 = self.checker.check("BTC/USDT", 0.05, 50000, portfolio_value=1_000_000)
+        r1 = self.checker.check("BTC/USD", 0.05, 50000, portfolio_value=1_000_000)
         self.assertTrue(r1.passed)
         # Second order: 2500 more → total 5000 (at limit, passes)
-        r2 = self.checker.check("BTC/USDT", 0.05, 50000, portfolio_value=1_000_000)
+        r2 = self.checker.check("BTC/USD", 0.05, 50000, portfolio_value=1_000_000)
         self.assertTrue(r2.passed)
         # Third order: 2500 more → total 7500 > 5000
-        r3 = self.checker.check("BTC/USDT", 0.05, 50000, portfolio_value=1_000_000)
+        r3 = self.checker.check("BTC/USD", 0.05, 50000, portfolio_value=1_000_000)
         self.assertFalse(r3.passed)
         self.assertTrue(any(v["check"] == "max_order_notional_per_symbol_usd" for v in r3.violations))
 
     def test_different_symbols_independent(self):
-        r1 = self.checker.check("BTC/USDT", 0.08, 50000, portfolio_value=1_000_000)
+        r1 = self.checker.check("BTC/USD", 0.08, 50000, portfolio_value=1_000_000)
         self.assertTrue(r1.passed)  # 4000 < 5000
-        r2 = self.checker.check("ETH/USDT", 1.0, 4000, portfolio_value=1_000_000)
+        r2 = self.checker.check("ETH/USD", 1.0, 4000, portfolio_value=1_000_000)
         self.assertTrue(r2.passed)  # 4000 < 5000 (different symbol)
 
 
@@ -164,21 +164,21 @@ class TestZeroNegativeInputs(unittest.TestCase):
         self.checker = OrderSanityChecker()
 
     def test_zero_quantity_rejected(self):
-        result = self.checker.check("BTC/USDT", 0, 50000, portfolio_value=100_000)
+        result = self.checker.check("BTC/USD", 0, 50000, portfolio_value=100_000)
         self.assertFalse(result.passed)
         self.assertTrue(any(v["check"] == "positive_quantity" for v in result.violations))
 
     def test_negative_quantity_rejected(self):
-        result = self.checker.check("BTC/USDT", -1.0, 50000, portfolio_value=100_000)
+        result = self.checker.check("BTC/USD", -1.0, 50000, portfolio_value=100_000)
         self.assertFalse(result.passed)
 
     def test_zero_price_rejected(self):
-        result = self.checker.check("BTC/USDT", 1.0, 0, portfolio_value=100_000)
+        result = self.checker.check("BTC/USD", 1.0, 0, portfolio_value=100_000)
         self.assertFalse(result.passed)
         self.assertTrue(any(v["check"] == "positive_price" for v in result.violations))
 
     def test_negative_price_rejected(self):
-        result = self.checker.check("BTC/USDT", 1.0, -100, portfolio_value=100_000)
+        result = self.checker.check("BTC/USD", 1.0, -100, portfolio_value=100_000)
         self.assertFalse(result.passed)
 
 
@@ -198,9 +198,9 @@ class TestMetrics(unittest.TestCase):
             max_order_pct_of_portfolio=1.0,
         ))
         # Pass
-        checker.check("BTC/USDT", 0.01, 50000, portfolio_value=1_000_000)
+        checker.check("BTC/USD", 0.01, 50000, portfolio_value=1_000_000)
         # Reject (notional 5000 > 1000)
-        checker.check("BTC/USDT", 0.1, 50000, portfolio_value=1_000_000)
+        checker.check("BTC/USD", 0.1, 50000, portfolio_value=1_000_000)
 
         m = checker.get_metrics()
         self.assertEqual(m["total_checks"], 2)
@@ -248,7 +248,7 @@ class TestMultipleViolations(unittest.TestCase):
             max_order_pct_of_portfolio=0.05,
             max_order_notional_usd=1000,
         ))
-        result = checker.check("BTC/USDT", 1.0, 50000, portfolio_value=100_000)
+        result = checker.check("BTC/USD", 1.0, 50000, portfolio_value=100_000)
         # 50000 is 50% of portfolio AND > $1000
         self.assertFalse(result.passed)
         checks = {v["check"] for v in result.violations}

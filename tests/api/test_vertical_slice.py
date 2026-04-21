@@ -33,7 +33,7 @@ async def test_complete_vertical_slice():
         # Initialize stream
         stream_config = {
             "source_type": "mock",
-            "symbols": ["BTC/USDT", "ETH/USDT"],
+            "symbols": ["BTC/USD", "ETH/USD"],
             "polling_interval": 1.0
         }
         stream = MarketDataStream(stream_config)
@@ -48,7 +48,7 @@ async def test_complete_vertical_slice():
             "agent_id": "vertical_slice_agent",
             "expertise_score": 0.8,
             "risk_factor": 0.4,
-            "symbols": ["BTC/USDT", "ETH/USDT"],
+            "symbols": ["BTC/USD", "ETH/USD"],
             "confidence_threshold": 0.6
         }
         agent = CryptoPredictionAgent(agent_config)
@@ -92,7 +92,7 @@ async def test_complete_vertical_slice():
         print("-" * 40)
         
         # Get prices from oracle
-        symbols = ["BTC/USDT", "ETH/USDT"]
+        symbols = ["BTC/USD", "ETH/USD"]
         oracle_prices = await oracle.get_prices(symbols)
         print(f"✅ Oracle prices fetched: {len(oracle_prices)}")
         for symbol, price in oracle_prices.items():
@@ -235,13 +235,13 @@ async def test_integration_metrics():
     
     try:
         # Initialize components
-        stream = MarketDataStream({"source_type": "mock", "symbols": ["BTC/USDT"]})
+        stream = MarketDataStream({"source_type": "mock", "symbols": ["BTC/USD"]})
         oracle = CoinGeckoOracle()
         agent = CryptoPredictionAgent({
             "agent_id": "metrics_agent",
             "expertise_score": 0.7,
             "risk_factor": 0.5,
-            "symbols": ["BTC/USDT"]
+            "symbols": ["BTC/USD"]
         })
         
         # Connect components
@@ -255,9 +255,9 @@ async def test_integration_metrics():
         # Complete workflow
         await agent.observe(MarketState(
             timestamp=time.time(),
-            prices={"BTC/USDT": 45000.0},
-            volumes={"BTC/USDT": 1000000.0},
-            funding_rates={"BTC/USDT": 0.0001},
+            prices={"BTC/USD": 45000.0},
+            volumes={"BTC/USD": 1000000.0},
+            funding_rates={"BTC/USD": 0.0001},
             news_sentiment=0.5,
             volatility_index=0.25
         ))

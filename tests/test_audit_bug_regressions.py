@@ -99,7 +99,7 @@ class TestBug01StaleSpotPrice:
 
         mock_feed = MagicMock()
         mock_feed.get_current_price.return_value = _PriceData(
-            symbol="BTC/USDT", price=50000.0, bid=49990.0, ask=50010.0
+            symbol="BTC/USD", price=50000.0, bid=49990.0, ask=50010.0
         )
 
         model = PredictionMarketModel()
@@ -134,7 +134,7 @@ class TestBug01StaleSpotPrice:
 
         mock_feed = MagicMock()
         mock_feed.get_current_price.return_value = _PriceData(
-            symbol="BTC/USDT", price=99999.0, bid=99998.0, ask=100000.0,
+            symbol="BTC/USD", price=99999.0, bid=99998.0, ask=100000.0,
             timestamp=stale_ts,
         )
 
@@ -211,7 +211,7 @@ class TestBug03BacktestFeeModel:
         from backtesting.engine import BacktestConfig
         cfg = BacktestConfig(
             backtest_id="t1", strategy_name="momentum",
-            symbols=["BTC/USDT"],
+            symbols=["BTC/USD"],
             start_date=datetime(2025, 1, 1),
             end_date=datetime(2025, 2, 1),
         )
@@ -221,7 +221,7 @@ class TestBug03BacktestFeeModel:
         from backtesting.engine import BacktestConfig, _compute_trade_fee
         cfg = BacktestConfig(
             backtest_id="t2", strategy_name="momentum",
-            symbols=["BTC/USDT"],
+            symbols=["BTC/USD"],
             start_date=datetime(2025, 1, 1),
             end_date=datetime(2025, 2, 1),
             commission_pct=0.001,
@@ -235,7 +235,7 @@ class TestBug03BacktestFeeModel:
         from backtesting.engine import BacktestConfig, _compute_trade_fee
         cfg = BacktestConfig(
             backtest_id="t3", strategy_name="momentum",
-            symbols=["BTC/USDT"],
+            symbols=["BTC/USD"],
             start_date=datetime(2025, 1, 1),
             end_date=datetime(2025, 2, 1),
             commission_pct=0.001,

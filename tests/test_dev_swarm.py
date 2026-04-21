@@ -4786,10 +4786,10 @@ class TestMarketDataAPI:
         result = subprocess.run(
             [sys.executable, "-c",
              "from core.market_data_dxfeed import DxFeedAdapter; "
-             "a = DxFeedAdapter(watchlist=['BTC/USDT']); "
-             "a.add_symbol('ETH/USDT'); "
-             "a.remove_symbol('BTC/USDT'); "
-             "print(a.watchlist_symbols == ['ETH/USDT'])"],
+             "a = DxFeedAdapter(watchlist=['BTC/USD']); "
+             "a.add_symbol('ETH/USD'); "
+             "a.remove_symbol('BTC/USD'); "
+             "print(a.watchlist_symbols == ['ETH/USD'])"],
             capture_output=True, text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
             timeout=30,
@@ -4800,9 +4800,9 @@ class TestMarketDataAPI:
         result = subprocess.run(
             [sys.executable, "-c",
              "from core.market_data_dxfeed import TickData; "
-             "t = TickData(symbol='BTC/USDT', price=50000.0); "
+             "t = TickData(symbol='BTC/USD', price=50000.0); "
              "d = t.to_dict(); "
-             "print(d['symbol'] == 'BTC/USDT' and d['price'] == 50000.0)"],
+             "print(d['symbol'] == 'BTC/USD' and d['price'] == 50000.0)"],
             capture_output=True, text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
             timeout=30,
@@ -4817,7 +4817,7 @@ class TestMarketHeatmapHelper:
         result = subprocess.run(
             [sys.executable, "-c",
              "from core.market_heatmap import build_heatmap_snapshot; "
-             "quotes = [{'symbol': 'BTC/USDT', 'change_pct_24h': 2.5}]; "
+             "quotes = [{'symbol': 'BTC/USD', 'change_pct_24h': 2.5}]; "
              "positions = [{'symbol': 'BTC', 'pnl': 100, 'exposure': 5000, 'side': 'long'}]; "
              "s = build_heatmap_snapshot(quotes, positions); "
              "print('Crypto Major' in s and s['Crypto Major'][0]['pnl'] == 100)"],
@@ -4843,7 +4843,7 @@ class TestMarketHeatmapHelper:
         result = subprocess.run(
             [sys.executable, "-c",
              "from core.market_heatmap import build_radar_snapshot; "
-             "quotes = [{'symbol': 'BTC/USDT', 'price': 50000}]; "
+             "quotes = [{'symbol': 'BTC/USD', 'price': 50000}]; "
              "r = build_radar_snapshot(quotes, [], 'core'); "
              "symbols = [i['symbol'] for i in r]; "
              "print('BTC' in symbols and 'DOGE' not in symbols)"],
@@ -5114,11 +5114,11 @@ class TestE2ELatencyPipeline:
         out = self._run_script(
             "import time, json\n"
             "from core.market_data_dxfeed import DxFeedAdapter\n"
-            "adapter = DxFeedAdapter(watchlist=['BTC/USDT', 'ETH/USDT', 'SOL/USDT'])\n"
+            "adapter = DxFeedAdapter(watchlist=['BTC/USD', 'ETH/USD', 'SOL/USD'])\n"
             "latencies = []\n"
             "for _ in range(50):\n"
             "    start = time.perf_counter()\n"
-            "    tick = adapter.get_snapshot('BTC/USDT')\n"
+            "    tick = adapter.get_snapshot('BTC/USD')\n"
             "    candle = {\n"
             "        'time': int(time.time()),\n"
             "        'open': tick.bid or tick.last or 0,\n"

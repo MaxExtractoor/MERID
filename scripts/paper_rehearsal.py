@@ -61,7 +61,7 @@ class RehearsalConfig:
                 self.symbols = [a.symbol for a in get_swarm_eligible()
                                 if "/" in a.symbol and ":" not in a.symbol]
             except Exception:
-                self.symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+                self.symbols = ["BTC/USD", "ETH/USD", "SOL/USD"]
 
 
 @dataclass
@@ -542,7 +542,7 @@ async def run_paper_rehearsal(config: RehearsalConfig) -> PaperRehearsalValidato
         opinion = StrategyOpinion(
             opinion_id=f"op_{i}",
             agent_id=f"strategy_{i % 3}",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             confidence=0.7,
             timestamp=start_time + i,
         )
@@ -552,7 +552,7 @@ async def run_paper_rehearsal(config: RehearsalConfig) -> PaperRehearsalValidato
     for i in range(3):
         decision = ConsensusDecision(
             decision_id=f"cd_{i}",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             participating_agents=[f"strategy_{j}" for j in range(3)],
             opinion_ids=[f"op_{j}" for j in range(i*3, (i+1)*3)],
             dissent_ratio=0.1,
@@ -565,7 +565,7 @@ async def run_paper_rehearsal(config: RehearsalConfig) -> PaperRehearsalValidato
         intent = TradeIntent(
             intent_id=f"ti_{i}",
             consensus_id=f"cd_{i}",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             risk_checked=True,
             mode=config.mode,
             opinion_refs=[f"op_{j}" for j in range(i*3, (i+1)*3)],
@@ -602,7 +602,7 @@ def main():
     parser.add_argument(
         "--symbols",
         nargs="+",
-        default=["BTC/USDT", "ETH/USDT"],
+        default=["BTC/USD", "ETH/USD"],
         help="Symbols to trade",
     )
     

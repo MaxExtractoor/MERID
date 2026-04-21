@@ -120,7 +120,7 @@ class TestCoinbaseExecutorHelpers:
     def test_to_product_id_unsupported(self, executor):
         """Test unsupported symbol raises NonRetryableError."""
         with pytest.raises(NonRetryableError, match="Unsupported"):
-            executor._to_product_id("ETH-USDT")
+            executor._to_product_id("ETH-USD")
     
     def test_to_product_id_other_unsupported(self, executor):
         """Test non-USD pairs are not supported."""

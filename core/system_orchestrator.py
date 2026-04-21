@@ -403,9 +403,9 @@ class SystemOrchestrator:
                 try:
                     from data.asset_universe import get_swarm_eligible
                     _eligible = get_swarm_eligible()
-                    _asset_sym = _eligible[0].symbol if _eligible else "BTC/USDT"
+                    _asset_sym = _eligible[0].symbol if _eligible else "BTC/USD"
                 except Exception:
-                    _asset_sym = "BTC/USDT"
+                    _asset_sym = "BTC/USD"
             position = PositionRequest(
                 asset=_asset_sym,
                 side=side,

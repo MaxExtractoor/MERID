@@ -28,7 +28,7 @@ async def test_liquidation_monitor():
         
         # Test liquidation data fetching
         print("\n📊 Testing Liquidation Data Fetching")
-        liquidations = monitor.fetch_heatmap(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+        liquidations = monitor.fetch_heatmap(["BTCUSD", "ETHUSD", "SOLUSD"])
         print(f"✅ Fetched {len(liquidations)} liquidation events")
         
         if liquidations:

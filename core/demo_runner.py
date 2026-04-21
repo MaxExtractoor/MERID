@@ -112,10 +112,10 @@ def run_demo(fast: bool = False) -> None:
         _ok(f"{len(contracts)} data contracts registered")
 
         # Simulate a valid tick
-        sample = {"price": 50123.45, "volume": 1234.5, "timestamp": time.time(), "symbol": "BTC/USDT"}
+        sample = {"price": 50123.45, "volume": 1234.5, "timestamp": time.time(), "symbol": "BTC/USD"}
         result = registry.validate("binance", sample)
         if result.valid:
-            _ok("Sample BTC/USDT tick passed binance contract validation")
+            _ok("Sample BTC/USD tick passed binance contract validation")
         else:
             _warn(f"Validation failed: {result.errors}")
 
@@ -134,11 +134,11 @@ def run_demo(fast: bool = False) -> None:
         from core.order_sanity_check import get_order_sanity_checker
         checker = get_order_sanity_checker()
         # Good order
-        good = checker.check(symbol="BTC/USDT", quantity=0.01, price=50000, portfolio_value=100000, side="buy")
+        good = checker.check(symbol="BTC/USD", quantity=0.01, price=50000, portfolio_value=100000, side="buy")
         if good.passed:
             _ok("Small BTC order (0.01 @ $50K) passed sanity check")
         # Oversized order
-        big = checker.check(symbol="BTC/USDT", quantity=100, price=50000, portfolio_value=100000, side="buy")
+        big = checker.check(symbol="BTC/USD", quantity=100, price=50000, portfolio_value=100000, side="buy")
         if not big.passed:
             _ok(f"Oversized order correctly blocked: {big.violations[0]['message']}")
     except Exception as exc:

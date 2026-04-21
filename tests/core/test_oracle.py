@@ -92,17 +92,17 @@ async def test_price_fetching():
         await oracle.connect()
         
         # Test single price fetch
-        price = await oracle.get_price("BTC/USDT")
+        price = await oracle.get_price("BTC/USD")
         if price:
-            print(f"✅ BTC/USDT price: ${price.price:.2f}")
+            print(f"✅ BTC/USD price: ${price.price:.2f}")
             print(f"✅ Confidence: {price.confidence:.2f}")
             print(f"✅ Age: {price.age_seconds():.1f}s")
         else:
-            print("❌ Failed to fetch BTC/USDT price")
+            print("❌ Failed to fetch BTC/USD price")
             return False
         
         # Test multiple prices
-        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        symbols = ["BTC/USD", "ETH/USD", "SOL/USD"]
         prices = await oracle.get_prices(symbols)
         print(f"✅ Fetched {len(prices)} prices:")
         for symbol, oracle_price in prices.items():
@@ -110,7 +110,7 @@ async def test_price_fetching():
         
         # Test caching
         start_time = time.time()
-        cached_price = await oracle.get_price("BTC/USDT")  # Should use cache
+        cached_price = await oracle.get_price("BTC/USD")  # Should use cache
         cache_time = (time.time() - start_time) * 1000
         print(f"✅ Cache response time: {cache_time:.1f}ms")
         
@@ -140,13 +140,13 @@ async def test_error_handling():
         print(f"✅ Unsupported symbol handling: {unsupported_price is None}")
         
         # Test symbol validation
-        supported = oracle.is_symbol_supported("BTC/USDT")
+        supported = oracle.is_symbol_supported("BTC/USD")
         unsupported = oracle.is_symbol_supported("INVALID/SYMBOL")
-        print(f"✅ BTC/USDT supported: {supported}")
+        print(f"✅ BTC/USD supported: {supported}")
         print(f"✅ INVALID/SYMBOL supported: {unsupported}")
         
         # Test retry logic with retry
-        retry_price = await oracle.get_price_with_retry("BTC/USDT")
+        retry_price = await oracle.get_price_with_retry("BTC/USD")
         if retry_price:
             print(f"✅ Retry logic working: ${retry_price.price:.2f}")
         
@@ -172,7 +172,7 @@ async def test_performance():
         await oracle.connect()
         
         # Test multiple concurrent requests
-        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] * 3  # 9 requests
+        symbols = ["BTC/USD", "ETH/USD", "SOL/USD"] * 3  # 9 requests
         start_time = time.time()
         
         tasks = [oracle.get_price(symbol) for symbol in symbols]

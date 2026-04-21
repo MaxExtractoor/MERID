@@ -30,7 +30,7 @@ def mock_price_feed():
     mock_feed = MagicMock()
     mock_feed.subscribe.return_value = None
     mock_feed.get_current_price.return_value = MagicMock(
-        symbol="BTC/USDT",
+        symbol="BTC/USD",
         price=50000.0,
         volume=1000000.0,
         timestamp=time.time()
@@ -45,11 +45,11 @@ def paper_engine(mock_price_feed):
         engine = PaperTradingEngine(starting_balance=10000.0)
         # Set initial prices
         engine.current_prices = {
-            "BTC/USDT": 50000.0,
+            "BTC/USD": 50000.0,
             "BTC": 50000.0,
-            "ETH/USDT": 3000.0,
+            "ETH/USD": 3000.0,
             "ETH": 3000.0,
-            "SOL/USDT": 100.0,
+            "SOL/USD": 100.0,
             "SOL": 100.0
         }
         yield engine
@@ -197,7 +197,7 @@ class TestOrderExecution:
         assert order.status == PaperOrderStatus.PENDING
         
         # Update price to trigger limit order
-        paper_engine.update_prices({"BTC": 48500.0, "BTC/USDT": 48500.0})
+        paper_engine.update_prices({"BTC": 48500.0, "BTC/USD": 48500.0})
         
         # Order should now be filled
         portfolio = paper_engine.get_portfolio("test_user")
@@ -219,7 +219,7 @@ class TestOrderExecution:
         assert order.status == PaperOrderStatus.PENDING
         
         # Update price to trigger stop-loss
-        paper_engine.update_prices({"BTC": 51500.0, "BTC/USDT": 51500.0})
+        paper_engine.update_prices({"BTC": 51500.0, "BTC/USD": 51500.0})
         
         # Order should now be filled
         portfolio = paper_engine.get_portfolio("test_user")
@@ -267,7 +267,7 @@ class TestPositionManagement:
         )
         
         # Update price
-        paper_engine.update_prices({"BTC": 52000.0, "BTC/USDT": 52000.0})
+        paper_engine.update_prices({"BTC": 52000.0, "BTC/USD": 52000.0})
         
         # Second order at new price (~52000)
         order2 = paper_engine.place_order(
@@ -304,7 +304,7 @@ class TestPositionManagement:
         
         # Update price to create profit
         new_price = entry_price * 1.10  # 10% gain
-        paper_engine.update_prices({"BTC": new_price, "BTC/USDT": new_price})
+        paper_engine.update_prices({"BTC": new_price, "BTC/USD": new_price})
         
         # Close position
         position_key = "BTC_long_perp_paper"
@@ -337,7 +337,7 @@ class TestPositionManagement:
         
         # Update price to create loss
         new_price = entry_price * 0.90  # 10% loss
-        paper_engine.update_prices({"BTC": new_price, "BTC/USDT": new_price})
+        paper_engine.update_prices({"BTC": new_price, "BTC/USD": new_price})
         
         # Close position
         position_key = "BTC_long_perp_paper"
@@ -463,7 +463,7 @@ class TestPortfolioStats:
             order_type="market"
         )
         entry_price = order1.fill_price
-        paper_engine.update_prices({"BTC": entry_price * 1.1, "BTC/USDT": entry_price * 1.1})
+        paper_engine.update_prices({"BTC": entry_price * 1.1, "BTC/USD": entry_price * 1.1})
         paper_engine.close_position("test_user", "BTC_long_perp_paper")
         
         # Lose trade
@@ -475,7 +475,7 @@ class TestPortfolioStats:
             order_type="market"
         )
         entry_price2 = order2.fill_price
-        paper_engine.update_prices({"ETH": entry_price2 * 0.9, "ETH/USDT": entry_price2 * 0.9})
+        paper_engine.update_prices({"ETH": entry_price2 * 0.9, "ETH/USD": entry_price2 * 0.9})
         paper_engine.close_position("test_user", "ETH_long_perp_paper")
         
         stats = paper_engine.get_portfolio_stats("test_user")

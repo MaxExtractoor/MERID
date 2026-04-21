@@ -140,7 +140,7 @@ def _build_crypto_instruments(reg: InstrumentRegistry) -> None:
         if key in _SKIP_ASSET_KEYS:
             continue
         if "/" not in asset.symbol or ":" in asset.symbol:
-            continue  # skip perp aliases (BTC/USDT:USDT format)
+            continue  # skip perp aliases (BTC/USD:USD format)
         if asset.category == "Stable":
             continue
         base = asset.symbol.split("/")[0]

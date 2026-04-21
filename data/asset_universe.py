@@ -31,15 +31,15 @@ class Asset:
 
 ASSET_UNIVERSE: Dict[str, Asset] = {
     # ── Layer 1: Large Cap (rank 1-10) ────────────────────────────────────────
-    'BTC':      Asset('BTC/USDT',      'Bitcoin',          'Layer1', 'bitcoin',                1,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
-    'BTC-PERP': Asset('BTC/USDT:USDT', 'Bitcoin Perp',     'Perp',   'bitcoin',                1,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
-    'ETH':      Asset('ETH/USDT',      'Ethereum',         'Layer1', 'ethereum',               2,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
-    'ETH-PERP': Asset('ETH/USDT:USDT', 'Ethereum Perp',    'Perp',   'ethereum',               2,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
+    'BTC':      Asset('BTC/USD',       'Bitcoin',          'Layer1', 'bitcoin',                1,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
+    'BTC-PERP': Asset('BTC/USD:USD',   'Bitcoin Perp',     'Perp',   'bitcoin',                1,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
+    'ETH':      Asset('ETH/USD',       'Ethereum',         'Layer1', 'ethereum',               2,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
+    'ETH-PERP': Asset('ETH/USD:USD',   'Ethereum Perp',    'Perp',   'ethereum',               2,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
     'BNB':      Asset('BNB/USDT',      'BNB',              'Layer1', 'binancecoin',            4,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
     'BNBUS':    Asset('BNB/USD',        'BNB (USD)',        'Layer1', 'binancecoin',            4,  is_layer1=True,  liquidity_tier=1, signal_quality='high'),
-    'SOL':      Asset('SOL/USDT',      'Solana',           'Layer1', 'solana',                 5,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
-    'SOL-PERP': Asset('SOL/USDT:USDT', 'Solana Perp',      'Perp',   'solana',                 5,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
-    'XRP':      Asset('XRP/USDT',      'Ripple',           'Layer1', 'ripple',                 6,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
+    'SOL':      Asset('SOL/USD',       'Solana',           'Layer1', 'solana',                 5,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
+    'SOL-PERP': Asset('SOL/USD:USD',   'Solana Perp',      'Perp',   'solana',                 5,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
+    'XRP':      Asset('XRP/USD',       'Ripple',           'Layer1', 'ripple',                 6,  is_layer1=True,  liquidity_tier=1, has_perp=True,  signal_quality='high', arb_eligible=True),
     'ADA':      Asset('ADA/USDT',      'Cardano',          'Layer1', 'cardano',                9,  is_layer1=True,  liquidity_tier=2, has_perp=True,  arb_eligible=True),
     'AVAX':     Asset('AVAX/USDT',     'Avalanche',        'Layer1', 'avalanche-2',            10, is_layer1=True,  liquidity_tier=2, has_perp=True,  arb_eligible=True),
     # ── Layer 1: Mid Cap (rank 13-33) ───────────────────────────────────────
@@ -63,7 +63,7 @@ ASSET_UNIVERSE: Dict[str, Asset] = {
     'ARB':      Asset('ARB/USDT',      'Arbitrum',         'Layer2', 'arbitrum',               29, is_layer2=True,  has_perp=True,  arb_eligible=True),
     'STRK':     Asset('STRK/USDT',     'Starknet',         'Layer2', 'starknet',               41, is_layer2=True,  signal_quality='low'),
     # ── Perp aliases (top-50 underlyings only) ──────────────────────────────────
-    'DOGE-PERP':Asset('DOGE/USDT:USDT','Dogecoin Perp',    'Perp',   'dogecoin',               8,  liquidity_tier=2, has_perp=True,  arb_eligible=True),
+    'DOGE-PERP':Asset('DOGE/USD:USD',  'Dogecoin Perp',    'Perp',   'dogecoin',               8,  liquidity_tier=2, has_perp=True,  arb_eligible=True),
     # ── DeFi ─────────────────────────────────────────────────────────────
     'LINK':     Asset('LINK/USDT',     'Chainlink',        'DeFi',   'chainlink',              14, is_defi=True,    liquidity_tier=2, has_perp=True,  signal_quality='high', arb_eligible=True),
     'UNI':      Asset('UNI/USDT',      'Uniswap',          'DeFi',   'uniswap',                16, is_defi=True,    liquidity_tier=2, has_perp=True,  signal_quality='high', arb_eligible=True),
@@ -80,7 +80,7 @@ ASSET_UNIVERSE: Dict[str, Asset] = {
     'IMX':      Asset('IMX/USDT',      'Immutable X',      'Gaming', 'immutable-x',             47, signal_quality='low'),
     'FIL':      Asset('FIL/USDT',      'Filecoin',         'Storage','filecoin',                30, signal_quality='low'),
     # ── Meme ──────────────────────────────────────────────────────────────
-    'DOGE':     Asset('DOGE/USDT',     'Dogecoin',         'Meme',   'dogecoin',               8,  liquidity_tier=2, has_perp=True,  arb_eligible=True),
+    'DOGE':     Asset('DOGE/USD',      'Dogecoin',         'Meme',   'dogecoin',               8,  liquidity_tier=2, has_perp=True,  arb_eligible=True),
     'SHIB':     Asset('SHIB/USDT',     'Shiba Inu',        'Meme',   'shiba-inu',              11, liquidity_tier=2, has_perp=True),
     'PEPE':     Asset('PEPE/USDT',     'Pepe',             'Meme',   'pepe',                   25, has_perp=True),
     'FLOKI':    Asset('FLOKI/USDT',    'Floki',            'Meme',   'floki',                  48, signal_quality='low'),

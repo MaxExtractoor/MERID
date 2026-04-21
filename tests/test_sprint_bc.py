@@ -484,8 +484,8 @@ class TestPerpContext(unittest.TestCase):
     def _stub_snap(self):
         from merid.prediction.perp_context import PerpContextSnapshot, AssetPerpData
         return PerpContextSnapshot(
-            btc=AssetPerpData("BTCUSDT", funding_rate=0.0001, mark_price=60000.0, iv_30d=0.55),
-            eth=AssetPerpData("ETHUSDT", funding_rate=-0.0002, mark_price=3000.0, iv_30d=0.65),
+            btc=AssetPerpData("BTCUSD", funding_rate=0.0001, mark_price=60000.0, iv_30d=0.55),
+            eth=AssetPerpData("ETHUSD", funding_rate=-0.0002, mark_price=3000.0, iv_30d=0.65),
             source="stub",
         )
 

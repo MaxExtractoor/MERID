@@ -15,14 +15,14 @@ class TestAsset:
     def test_creation(self):
         """Test Asset creation."""
         asset = Asset(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             name="Bitcoin",
             category="Layer1",
             coingecko_id="bitcoin",
             market_cap_rank=1,
             is_layer1=True
         )
-        assert asset.symbol == "BTC/USDT"
+        assert asset.symbol == "BTC/USD"
         assert asset.name == "Bitcoin"
         assert asset.category == "Layer1"
         assert asset.coingecko_id == "bitcoin"
@@ -34,7 +34,7 @@ class TestAsset:
     def test_default_flags(self):
         """Test Asset with default boolean flags."""
         asset = Asset(
-            symbol="ETH/USDT",
+            symbol="ETH/USD",
             name="Ethereum",
             category="Layer1",
             coingecko_id="ethereum",
@@ -46,7 +46,7 @@ class TestAsset:
 
     def test_swarm_metric_defaults(self):
         """New swarm metric fields default correctly."""
-        asset = Asset("X/USDT", "X Token", "Layer1", "x-token", 99)
+        asset = Asset("X/USD", "X Token", "Layer1", "x-token", 99)
         assert asset.liquidity_tier == 3
         assert asset.has_perp is False
         assert asset.signal_quality == "medium"
@@ -68,14 +68,14 @@ class TestAssetUniverse:
         """Test BTC is in asset universe."""
         assert "BTC" in ASSET_UNIVERSE
         btc = ASSET_UNIVERSE["BTC"]
-        assert btc.symbol == "BTC/USDT"
+        assert btc.symbol == "BTC/USD"
         assert btc.is_layer1 is True
 
     def test_eth_in_universe(self):
         """Test ETH is in asset universe."""
         assert "ETH" in ASSET_UNIVERSE
         eth = ASSET_UNIVERSE["ETH"]
-        assert eth.symbol == "ETH/USDT"
+        assert eth.symbol == "ETH/USD"
         assert eth.is_layer1 is True
 
     def test_defi_assets(self):
@@ -164,7 +164,7 @@ class TestGetAsset:
         """Test getting existing asset."""
         asset = get_asset("BTC")
         assert asset is not None
-        assert asset.symbol == "BTC/USDT"
+        assert asset.symbol == "BTC/USD"
 
     def test_get_missing_asset(self):
         """Test getting non-existent asset."""
@@ -202,8 +202,8 @@ class TestGetAllSymbols:
         """Test that symbols are returned."""
         symbols = get_all_symbols()
         assert len(symbols) > 0
-        assert "BTC/USDT" in symbols
-        assert "ETH/USDT" in symbols
+        assert "BTC/USD" in symbols
+        assert "ETH/USD" in symbols
 
     def test_all_symbols_valid(self):
         """Test that all returned symbols are valid."""
@@ -269,7 +269,7 @@ class TestSwarmViews:
         assert len(candidates) > 0
         for a in candidates:
             assert a.arb_eligible is True
-        assert any(a.symbol == "BTC/USDT" for a in candidates)
+        assert any(a.symbol == "BTC/USD" for a in candidates)
 
     def test_get_perp_universe(self):
         """get_perp_universe returns base assets with has_perp=True."""

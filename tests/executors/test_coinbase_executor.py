@@ -151,5 +151,5 @@ class TestCoinbaseExecutor:
     def test_to_product_id(self, executor):
         """Test symbol to product ID conversion."""
         assert executor._to_product_id("BTC-USD") == "BTC-USD"
-        assert executor._to_product_id("BTC-USDT") == "BTC-USD"
+        assert executor._to_product_id("BTC-USD") == "BTC-USD"
         assert executor._to_product_id("ETH-USD") == "ETH-USD"

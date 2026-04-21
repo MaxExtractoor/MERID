@@ -53,9 +53,9 @@ class EnhancedMarketFeed:
         Initialize enhanced market feed.
         
         Args:
-            symbols: List of symbols to track (e.g., ['BTC/USDT', 'ETH/USDT'])
+            symbols: List of symbols to track (e.g., ['BTC/USD', 'ETH/USD'])
         """
-        self.symbols = symbols or ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'AVAX/USDT']
+        self.symbols = symbols or ['BTC/USD', 'ETH/USD', 'SOL/USD', 'AVAX/USD']
         self.aggregator = None
         self.prediction_aggregator = None
         self.market_data_cache: Dict[str, EnhancedMarketData] = {}
@@ -293,7 +293,7 @@ async def get_market_feed() -> MarketFeedAdapter:
 # Testing and validation
 async def test_enhanced_feed():
     """Test the enhanced market feed."""
-    symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+    symbols = ['BTC/USD', 'ETH/USD', 'SOL/USD']
     
     adapter = MarketFeedAdapter()
     await adapter.start()

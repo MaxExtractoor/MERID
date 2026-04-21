@@ -46,7 +46,7 @@ class TestPaperTradingSmoke:
         engine = get_paper_engine()
         
         # Set up a price
-        engine.update_prices({"BTC/USDT": 50000.0, "BTC": 50000.0})
+        engine.update_prices({"BTC/USD": 50000.0, "BTC": 50000.0})
         
         # Place a market order
         order = engine.place_order(
@@ -75,7 +75,7 @@ class TestPaperTradingSmoke:
         initial_balance = portfolio.current_balance
         
         # Set price and place order
-        engine.update_prices({"ETH/USDT": 3000.0, "ETH": 3000.0})
+        engine.update_prices({"ETH/USD": 3000.0, "ETH": 3000.0})
         engine.place_order(
             user_id=user_id,
             asset="ETH",
@@ -99,7 +99,7 @@ class TestPaperTradingSmoke:
         user_id = f"pnl_test_{int(time.time())}"
         
         # Entry at 100
-        engine.update_prices({"TEST/USDT": 100.0, "TEST": 100.0})
+        engine.update_prices({"TEST/USD": 100.0, "TEST": 100.0})
         engine.place_order(
             user_id=user_id,
             asset="TEST",
@@ -111,7 +111,7 @@ class TestPaperTradingSmoke:
         initial_stats = engine.get_portfolio_stats(user_id)
         
         # Price goes up 10%
-        engine.update_prices({"TEST/USDT": 110.0, "TEST": 110.0})
+        engine.update_prices({"TEST/USD": 110.0, "TEST": 110.0})
         
         updated_stats = engine.get_portfolio_stats(user_id)
         
@@ -125,7 +125,7 @@ class TestPaperTradingSmoke:
         controller = get_trading_mode_controller()
         controller.set_mode("paper", changed_by="smoke_test")
         
-        can_execute, reason = controller.can_execute_live("BTC/USDT", 1000.0)
+        can_execute, reason = controller.can_execute_live("BTC/USD", 1000.0)
         
         assert can_execute is False
         assert "paper" in reason.lower()

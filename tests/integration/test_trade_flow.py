@@ -55,9 +55,9 @@ def paper_engine():
         # Set initial prices
         engine.current_prices = {
             "BTC": 50000.0,
-            "BTC/USDT": 50000.0,
+            "BTC/USD": 50000.0,
             "ETH": 3000.0,
-            "ETH/USDT": 3000.0,
+            "ETH/USD": 3000.0,
         }
         return engine
 
@@ -109,7 +109,7 @@ class TestBasicTradeFlow:
         
         # Step 5: Update price and check P&L
         new_price = 51000.0  # 2% gain
-        paper_engine.update_prices({"BTC": new_price, "BTC/USDT": new_price})
+        paper_engine.update_prices({"BTC": new_price, "BTC/USD": new_price})
         
         # Step 6: Close position
         pnl = paper_engine.close_position("test_user", position_key)
@@ -333,7 +333,7 @@ class TestProfitAndLoss:
         
         # Price increases 10%
         new_price = entry_price * 1.10
-        paper_engine.update_prices({"BTC": new_price, "BTC/USDT": new_price})
+        paper_engine.update_prices({"BTC": new_price, "BTC/USD": new_price})
         
         # Exit
         pnl = paper_engine.close_position(user_id, "BTC_long_perp")
@@ -376,7 +376,7 @@ class TestProfitAndLoss:
         
         # Price decreases 5%
         new_price = entry_price * 0.95
-        paper_engine.update_prices({"BTC": new_price, "BTC/USDT": new_price})
+        paper_engine.update_prices({"BTC": new_price, "BTC/USD": new_price})
         
         # Exit
         pnl = paper_engine.close_position(user_id, "BTC_long_perp")

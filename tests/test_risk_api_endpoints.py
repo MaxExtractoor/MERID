@@ -33,8 +33,8 @@ class TestWireStalenessMonitor(unittest.TestCase):
         coord.wire_staleness_monitor(mon)
 
         # Record stale data
-        mon.record_update("binance", "BTC/USDT", ts=time.time() - 30)
-        mon.check_feed("binance", "BTC/USDT")
+        mon.record_update("binance", "BTC/USD", ts=time.time() - 30)
+        mon.check_feed("binance", "BTC/USD")
 
         self.assertTrue(coord.halt_manager.is_halted)
         self.assertIn("Stale data", coord.halt_manager.halt_reason)
@@ -45,7 +45,7 @@ class TestWireStalenessMonitor(unittest.TestCase):
         mon = FeedStalenessMonitor(default_max_age=10)
         coord.wire_staleness_monitor(mon)
 
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
+        mon.record_update("binance", "BTC/USD", ts=time.time())
         status = coord.get_comprehensive_risk_status()
 
         self.assertIn("staleness", status)
@@ -68,7 +68,7 @@ class TestCheckAllRisksWithStaleness(unittest.TestCase):
         coord.wire_staleness_monitor(mon)
 
         # Record stale data
-        mon.record_update("kraken", "ETH/USDT", ts=time.time() - 30)
+        mon.record_update("kraken", "ETH/USD", ts=time.time() - 30)
 
         # Run _check_all_risks
         asyncio.get_event_loop().run_until_complete(coord._check_all_risks())
@@ -125,7 +125,7 @@ class TestHaltStatusSerialization(unittest.TestCase):
         coord = RiskControlCoordinator()
         mon = FeedStalenessMonitor(default_max_age=10)
         coord.wire_staleness_monitor(mon)
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
+        mon.record_update("binance", "BTC/USD", ts=time.time())
 
         status = coord.get_comprehensive_risk_status()
         serialized = json.dumps(status)
@@ -139,8 +139,8 @@ class TestStalenessEndpointLogic(unittest.TestCase):
 
     def test_staleness_summary_structure(self):
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
-        mon.record_update("kraken", "ETH/USDT", ts=time.time() - 60)
+        mon.record_update("binance", "BTC/USD", ts=time.time())
+        mon.record_update("kraken", "ETH/USD", ts=time.time() - 60)
 
         summary = mon.get_summary()
         self.assertIn("total_feeds", summary)
@@ -151,7 +151,7 @@ class TestStalenessEndpointLogic(unittest.TestCase):
 
     def test_staleness_summary_json(self):
         mon = FeedStalenessMonitor(default_max_age=30)
-        mon.record_update("binance", "BTC/USDT", ts=time.time())
+        mon.record_update("binance", "BTC/USD", ts=time.time())
         summary = mon.get_summary()
         serialized = json.dumps(summary)
         self.assertIn("total_feeds", serialized)

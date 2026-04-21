@@ -16,7 +16,7 @@ class TestMarketStreamConfig:
         """Test default config values."""
         config = MarketStreamConfig()
         assert config.exchanges == ["binance", "coinbase"]
-        assert config.symbols == ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        assert config.symbols == ["BTC/USD", "ETH/USD", "SOL/USD"]
         assert config.ticker_interval_seconds == 1.0
         assert config.funding_interval_seconds == 60.0
         assert config.orderbook_depth == 10
@@ -52,9 +52,9 @@ class TestMarketStreamConfig:
             assert ":" not in sym, f"Perp alias leaked into stream config: {sym!r}"
 
     def test_from_asset_universe_contains_btc(self):
-        """from_asset_universe() must include BTC/USDT (tier-1 high-signal asset)."""
+        """from_asset_universe() must include BTC/USD (tier-1 high-signal asset)."""
         config = MarketStreamConfig.from_asset_universe()
-        assert "BTC/USDT" in config.symbols
+        assert "BTC/USD" in config.symbols
 
     def test_from_asset_universe_kwargs_forwarded(self):
         """from_asset_universe() forwards extra kwargs to MarketStreamConfig."""
@@ -138,14 +138,14 @@ class TestMarketStream:
     def test_get_perp_symbol_with_colon(self):
         """Test _get_perp_symbol with already perpetual symbol."""
         stream = MarketStream()
-        result = stream._get_perp_symbol("BTC/USDT:USDT")
-        assert result == "BTC/USDT:USDT"
+        result = stream._get_perp_symbol("BTC/USD:USDT")
+        assert result == "BTC/USD:USDT"
 
     def test_get_perp_symbol_conversion(self):
         """Test _get_perp_symbol conversion."""
         stream = MarketStream()
-        result = stream._get_perp_symbol("BTC/USDT")
-        assert result == "BTC/USDT:USDT"
+        result = stream._get_perp_symbol("BTC/USD")
+        assert result == "BTC/USD:USDT"
 
     def test_get_perp_symbol_no_slash(self):
         """Test _get_perp_symbol without slash."""
@@ -169,11 +169,11 @@ class TestMarketStream:
             "timestamp": 1234567890000
         }
         
-        event = stream._create_ticker_event("binance", "BTC/USDT", ticker)
+        event = stream._create_ticker_event("binance", "BTC/USD", ticker)
         
         assert event.event_type.value == "market_data"
-        assert event.source == "binance:BTC/USDT"
-        assert event.payload["symbol"] == "BTC/USDT"
+        assert event.source == "binance:BTC/USD"
+        assert event.payload["symbol"] == "BTC/USD"
         assert event.payload["price"] == 50000.0
         assert event.payload["bid"] == 49990.0
         assert event.payload["ask"] == 50010.0
@@ -187,7 +187,7 @@ class TestMarketStream:
             "ask": 50010.0
         }
         
-        event = stream._create_ticker_event("binance", "BTC/USDT", ticker)
+        event = stream._create_ticker_event("binance", "BTC/USD", ticker)
         
         assert event.payload["price"] == 50000.0
 
@@ -203,11 +203,11 @@ class TestMarketStream:
             "interestRate": 0.00001
         }
         
-        event = stream._create_funding_event("binance", "BTC/USDT", funding)
+        event = stream._create_funding_event("binance", "BTC/USD", funding)
         
         assert event.event_type.value == "market_data"
-        assert event.source == "binance:BTC/USDT:funding"
-        assert event.payload["symbol"] == "BTC/USDT"
+        assert event.source == "binance:BTC/USD:funding"
+        assert event.payload["symbol"] == "BTC/USD"
         assert event.payload["funding_rate"] == 0.0001
         assert event.payload["mark_price"] == 50000.0
 

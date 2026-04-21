@@ -45,7 +45,7 @@ class TestTradeRequest:
     def test_trade_request_creation(self):
         request = TradeRequest(
             venue="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
             order_type=OrderType.MARKET,
@@ -56,7 +56,7 @@ class TestTradeRequest:
             live=True,
         )
         assert request.venue == "binance"
-        assert request.symbol == "BTC/USDT"
+        assert request.symbol == "BTC/USD"
         assert request.side == TradeSide.BUY
         assert request.quantity == 1.0
         assert request.order_type == OrderType.MARKET
@@ -69,7 +69,7 @@ class TestTradeRequest:
     def test_trade_request_defaults(self):
         request = TradeRequest(
             venue="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
         )
@@ -87,7 +87,7 @@ class TestOrderResult:
     def test_order_result_creation(self):
         result = OrderResult(
             venue="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
             executed_price=50100.0,
@@ -97,7 +97,7 @@ class TestOrderResult:
             metadata={"fee": 10.0},
         )
         assert result.venue == "binance"
-        assert result.symbol == "BTC/USDT"
+        assert result.symbol == "BTC/USD"
         assert result.side == TradeSide.BUY
         assert result.quantity == 1.0
         assert result.executed_price == 50100.0
@@ -109,7 +109,7 @@ class TestOrderResult:
     def test_order_result_defaults(self):
         result = OrderResult(
             venue="binance",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
             executed_price=50100.0,
@@ -152,14 +152,14 @@ class TestPositionSnapshot:
 
     def test_position_snapshot_creation(self):
         snapshot = PositionSnapshot(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             quantity=1.0,
             entry_price=50000.0,
             mark_price=51000.0,
             unrealized_pnl=1000.0,
             metadata={"leverage": 2},
         )
-        assert snapshot.symbol == "BTC/USDT"
+        assert snapshot.symbol == "BTC/USD"
         assert snapshot.quantity == 1.0
         assert snapshot.entry_price == 50000.0
         assert snapshot.mark_price == 51000.0
@@ -168,7 +168,7 @@ class TestPositionSnapshot:
 
     def test_position_snapshot_defaults(self):
         snapshot = PositionSnapshot(
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             quantity=1.0,
             entry_price=50000.0,
             mark_price=51000.0,
@@ -292,7 +292,7 @@ class TestTradingVenueAdapterBase:
     def test_submit_order_mock_mode_raises(self, adapter):
         request = TradeRequest(
             venue="venue",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
         )
@@ -303,7 +303,7 @@ class TestTradingVenueAdapterBase:
         adapter_with_env.supports_trading = False
         request = TradeRequest(
             venue="test",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
         )
@@ -340,7 +340,7 @@ class TestTradingVenueAdapterBase:
         # Test that _submit_order_live raises NotImplementedError
         request = TradeRequest(
             venue="venue",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             side=TradeSide.BUY,
             quantity=1.0,
         )

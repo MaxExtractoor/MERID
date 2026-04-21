@@ -156,13 +156,13 @@ class TestDrillStaleFeed:
         _update_blocked_state(False)
         clear_events()
         set_staleness_config([
-            SymbolGroupConfig(name="major", symbols={"BTC/USDT"}, threshold_seconds=60, critical=True),
+            SymbolGroupConfig(name="major", symbols={"BTC/USD"}, threshold_seconds=60, critical=True),
         ])
 
     def test_stale_major_blocks(self):
         result = _gate_with_mocks(
             feed_safe=False,
-            stale_symbols=[{"symbol": "BTC/USDT", "age_seconds": 120}],
+            stale_symbols=[{"symbol": "BTC/USD", "age_seconds": 120}],
         )
 
         assert result.blocked is True
@@ -172,7 +172,7 @@ class TestDrillStaleFeed:
     def test_stale_feed_records_session_event(self):
         _gate_with_mocks(
             feed_safe=False,
-            stale_symbols=[{"symbol": "BTC/USDT"}],
+            stale_symbols=[{"symbol": "BTC/USD"}],
         )
 
         events = get_events(category="gate")
@@ -181,7 +181,7 @@ class TestDrillStaleFeed:
     @patch("data.live_price_feed.get_live_price_feed")
     def test_staleness_check_with_real_config(self, mock_feed_fn):
         """End-to-end: stale BTC feed triggers staleness check correctly."""
-        mock_feed_fn.return_value = _mock_feed({"BTC/USDT": 90})  # 90s > 60s
+        mock_feed_fn.return_value = _mock_feed({"BTC/USD": 90})  # 90s > 60s
 
         result = check_price_feed_staleness()
         assert result["safe_to_trade"] is False
@@ -189,7 +189,7 @@ class TestDrillStaleFeed:
 
     @patch("data.live_price_feed.get_live_price_feed")
     def test_fresh_feed_passes(self, mock_feed_fn):
-        mock_feed_fn.return_value = _mock_feed({"BTC/USDT": 10})  # 10s < 60s
+        mock_feed_fn.return_value = _mock_feed({"BTC/USD": 10})  # 10s < 60s
 
         result = check_price_feed_staleness()
         assert result["safe_to_trade"] is True
@@ -322,7 +322,7 @@ class TestDrillMultipleCauses:
     def test_kill_switch_plus_stale_feed(self):
         result = _gate_with_mocks(
             kill=True, kill_details="Emergency",
-            feed_safe=False, stale_symbols=[{"symbol": "BTC/USDT"}],
+            feed_safe=False, stale_symbols=[{"symbol": "BTC/USD"}],
         )
 
         assert result.blocked is True
@@ -334,7 +334,7 @@ class TestDrillMultipleCauses:
         result = _gate_with_mocks(
             kill=True, kill_details="Emergency",
             discrepancies=True, ever_completed=True,
-            feed_safe=False, stale_symbols=[{"symbol": "ETH/USDT"}],
+            feed_safe=False, stale_symbols=[{"symbol": "ETH/USD"}],
             pnl_consistent=False, pnl_divergence=20.0,
         )
 

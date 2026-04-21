@@ -19,9 +19,9 @@ class TestOrderPlacementLoad:
             from trading.paper_trading import PaperTradingEngine
             engine = PaperTradingEngine(starting_balance=1000000.0)
             engine.current_prices["BTC"] = 50000.0
-            engine.current_prices["BTC/USDT"] = 50000.0
+            engine.current_prices["BTC/USD"] = 50000.0
             engine.current_prices["ETH"] = 3000.0
-            engine.current_prices["ETH/USDT"] = 3000.0
+            engine.current_prices["ETH/USD"] = 3000.0
             return engine
 
     def test_order_placement_throughput(self, paper_engine):
@@ -223,7 +223,7 @@ class TestEndToEndLoad:
             
             engine = PaperTradingEngine(starting_balance=100000.0)
             engine.current_prices["BTC"] = 50000.0
-            engine.current_prices["BTC/USDT"] = 50000.0
+            engine.current_prices["BTC/USD"] = 50000.0
 
             num_cycles = 50
             latencies = []
