@@ -8,6 +8,24 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from merid.event_venues.kalshi.ws import KalshiWebSocket
+from core.fault_manager import reset_fault_manager
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fault_manager():
+    """Reset the process-wide ``FaultManager`` around each test.
+
+    ``KalshiWebSocket._reconnect`` consults ``can_attempt_reconnect("kalshi")``
+    and short-circuits once the venue circuit breaker opens.  Without this
+    fixture, failure state from earlier tests in the session leaks into
+    later tests and silently blocks reconnects — breaking assertions that
+    are otherwise correct for the code under test.
+    """
+    reset_fault_manager()
+    try:
+        yield
+    finally:
+        reset_fault_manager()
 
 
 class TestKalshiWebSocketReconnect:

@@ -125,11 +125,11 @@ class TestEnhancedKalshiExecutor:
     async def test_quote_management_and_validation(self, enhanced_executor, mock_client):
         """Test quote management with validation."""
         # Configure mock responses
-        mock_client.get_market_result.return_value = OperationResult.success({
+        mock_client.get_market_result.return_value = OperationResult.ok({
             "ticker": "TEST-TICKER",
             "status": "open"
         })
-        mock_client.get_orderbook_result.return_value = OperationResult.success({
+        mock_client.get_orderbook_result.return_value = OperationResult.ok({
             "bid": 45,
             "ask": 55,
             "bid_size": 100,
@@ -152,7 +152,7 @@ class TestEnhancedKalshiExecutor:
     async def test_trade_execution_with_validation(self, enhanced_executor, mock_client):
         """Test trade execution with comprehensive validation."""
         # Configure mock response
-        mock_client.place_order_result.return_value = OperationResult.success({
+        mock_client.place_order_result.return_value = OperationResult.ok({
             "order_id": "ORD123",
             "status": "pending"
         })
@@ -215,7 +215,7 @@ class TestEnhancedKalshiExecutor:
     async def test_balance_tracking_and_monitoring(self, enhanced_executor, mock_client):
         """Test balance tracking and monitoring."""
         # Configure mock response
-        mock_client.get_balance_result.return_value = OperationResult.success({
+        mock_client.get_balance_result.return_value = OperationResult.ok({
             "USD": 1000.0,
             "locked": 100.0
         })
@@ -256,7 +256,7 @@ class TestEnhancedKalshiExecutor:
     async def test_health_monitoring_and_statistics(self, enhanced_executor, mock_client):
         """Test comprehensive health monitoring."""
         # Configure mixed success/failure
-        mock_client.get_balance_result.return_value = OperationResult.success({
+        mock_client.get_balance_result.return_value = OperationResult.ok({
             "USD": 1000.0,
             "locked": 100.0
         })
@@ -277,15 +277,15 @@ class TestEnhancedKalshiExecutor:
     async def test_concurrent_operation_handling(self, enhanced_executor, mock_client):
         """Test concurrent operation handling."""
         # Configure mock responses
-        mock_client.get_balance_result.return_value = OperationResult.success({
+        mock_client.get_balance_result.return_value = OperationResult.ok({
             "USD": 1000.0,
             "locked": 100.0
         })
-        mock_client.get_market_result.return_value = OperationResult.success({
+        mock_client.get_market_result.return_value = OperationResult.ok({
             "ticker": "TEST-TICKER",
             "status": "open"
         })
-        mock_client.get_orderbook_result.return_value = OperationResult.success({
+        mock_client.get_orderbook_result.return_value = OperationResult.ok({
             "bid": 45,
             "ask": 55,
             "bid_size": 100,
@@ -321,7 +321,7 @@ class TestEnhancedKalshiExecutor:
         assert "get_balance" in health["open_circuits"]
         
         # Configure mock to succeed
-        mock_client.get_balance_result.return_value = OperationResult.success({
+        mock_client.get_balance_result.return_value = OperationResult.ok({
             "USD": 1000.0,
             "locked": 100.0
         })
@@ -337,10 +337,10 @@ class TestEnhancedKalshiExecutor:
     async def test_cancel_order_with_validation(self, enhanced_executor, mock_client):
         """Test cancel order with validation."""
         # Configure mock responses
-        mock_client.get_open_orders_result.return_value = OperationResult.success([
+        mock_client.get_open_orders_result.return_value = OperationResult.ok([
             {"order_id": "ORD123", "ticker": "TEST-TICKER"}
         ])
-        mock_client.cancel_order_result.return_value = OperationResult.success(True)
+        mock_client.cancel_order_result.return_value = OperationResult.ok(True)
         
         # Cancel order
         result = await enhanced_executor.cancel_order("ORD123")
@@ -352,7 +352,7 @@ class TestEnhancedKalshiExecutor:
     async def test_cancel_order_not_found(self, enhanced_executor, mock_client):
         """Test cancel order when order not found."""
         # Configure mock responses
-        mock_client.get_open_orders_result.return_value = OperationResult.success([])
+        mock_client.get_open_orders_result.return_value = OperationResult.ok([])
         
         # Cancel non-existent order
         result = await enhanced_executor.cancel_order("NONEXISTENT")
@@ -364,15 +364,15 @@ class TestEnhancedKalshiExecutor:
     async def test_comprehensive_health_check(self, enhanced_executor, mock_client):
         """Test comprehensive health check functionality."""
         # Configure successful responses
-        mock_client.get_balance_result.return_value = OperationResult.success({
+        mock_client.get_balance_result.return_value = OperationResult.ok({
             "USD": 1000.0,
             "locked": 100.0
         })
-        mock_client.get_market_result.return_value = OperationResult.success({
+        mock_client.get_market_result.return_value = OperationResult.ok({
             "ticker": "TEST-TICKER",
             "status": "open"
         })
-        mock_client.get_orderbook_result.return_value = OperationResult.success({
+        mock_client.get_orderbook_result.return_value = OperationResult.ok({
             "bid": 45,
             "ask": 55
         })
@@ -492,7 +492,7 @@ class TestEnhancedKalshiExecutorEdgeCases:
     async def test_malformed_order_response(self, enhanced_executor, mock_client):
         """Test handling of malformed order responses."""
         # Configure client to return malformed data
-        mock_client.place_order_result.return_value = OperationResult.success(None)
+        mock_client.place_order_result.return_value = OperationResult.ok(None)
         
         result = await enhanced_executor.execute_trade("TEST-TICKER", "buy", 10)
         
@@ -515,7 +515,7 @@ class TestEnhancedKalshiExecutorEdgeCases:
     async def test_partial_failure_scenarios(self, enhanced_executor, mock_client):
         """Test handling of partial failures."""
         # Configure some operations to fail, others to succeed
-        mock_client.get_balance_result.return_value = OperationResult.success({
+        mock_client.get_balance_result.return_value = OperationResult.ok({
             "USD": 1000.0,
             "locked": 100.0
         })
@@ -561,7 +561,7 @@ class TestEnhancedKalshiExecutorEdgeCases:
     async def test_state_isolation_between_operations(self, enhanced_executor, mock_client):
         """Test that operations don't interfere with each other's state."""
         # Configure different responses for different operations
-        mock_client.get_balance_result.return_value = OperationResult.success({
+        mock_client.get_balance_result.return_value = OperationResult.ok({
             "USD": 1000.0,
             "locked": 100.0
         })
@@ -603,7 +603,7 @@ class TestEnhancedKalshiExecutorEdgeCases:
         """Test quote error handling."""
         # Configure mock to fail for market data
         mock_client.get_market_result.return_value = OperationResult.fail("Market not found")
-        mock_client.get_orderbook_result.return_value = OperationResult.success({
+        mock_client.get_orderbook_result.return_value = OperationResult.ok({
             "bid": 45,
             "ask": 55,
             "bid_size": 100,
@@ -618,7 +618,7 @@ class TestEnhancedKalshiExecutorEdgeCases:
     async def test_position_management(self, enhanced_executor, mock_client):
         """Test position management."""
         # Configure mock response
-        mock_client.get_positions_result.return_value = OperationResult.success([
+        mock_client.get_positions_result.return_value = OperationResult.ok([
             {
                 "ticker": "TEST-TICKER",
                 "size": 10,

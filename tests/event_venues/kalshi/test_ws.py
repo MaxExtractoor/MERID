@@ -9,6 +9,22 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 from merid.event_venues.kalshi.ws import KalshiWebSocket
 from merid.event_venues.kalshi.models import KalshiConfig
 from merid.event_venues.base import QuoteEvent
+from core.fault_manager import reset_fault_manager
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fault_manager():
+    """Reset the process-wide ``FaultManager`` around each test.
+
+    ``KalshiWebSocket._reconnect`` consults ``can_attempt_reconnect("kalshi")``
+    and short-circuits once the venue circuit breaker opens.  Without this
+    fixture, failure state leaks across tests and silently blocks reconnects.
+    """
+    reset_fault_manager()
+    try:
+        yield
+    finally:
+        reset_fault_manager()
 
 
 @pytest.fixture
@@ -300,25 +316,36 @@ class TestKalshiWebSocketReconnect:
     """Test KalshiWebSocket reconnection logic."""
     
     async def test_reconnect_increases_delay(self, ws_client):
-        """Test reconnect increases delay exponentially."""
+        """Test reconnect increases delay exponentially on *failure*.
+
+        Current production semantics (``ws.py`` ``_reconnect``):
+          * success → delay is reset to 1.0
+          * failure → delay doubles, capped at ``_max_reconnect_delay``
+        """
         ws_client._running = True
         ws_client._reconnect_delay = 1.0
-        
-        with patch.object(ws_client, 'connect', new_callable=AsyncMock) as mock_connect:
+
+        async def failing_connect():
+            raise ConnectionError("simulated")
+
+        with patch.object(ws_client, 'connect', side_effect=failing_connect) as mock_connect:
             await ws_client._reconnect()
-            
-            # Delay should double
+
+            # Delay should double after one failed attempt
             assert ws_client._reconnect_delay == 2.0
             mock_connect.assert_called_once()
     
     async def test_reconnect_max_delay_cap(self, ws_client):
-        """Test reconnect delay is capped at max."""
+        """Test reconnect delay is capped at max on repeated failure."""
         ws_client._running = True
         ws_client._reconnect_delay = 40.0  # Close to max
-        
-        with patch.object(ws_client, 'connect', new_callable=AsyncMock):
+
+        async def failing_connect():
+            raise ConnectionError("simulated")
+
+        with patch.object(ws_client, 'connect', side_effect=failing_connect):
             await ws_client._reconnect()
-            
+
             # Should be capped at 60
             assert ws_client._reconnect_delay == 60.0
     

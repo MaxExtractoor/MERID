@@ -36,6 +36,29 @@ def client(kalshi_config):
     return KalshiVenueClient(kalshi_config)
 
 
+@pytest.fixture(autouse=True)
+def _bypass_pre_send_ticker_catalog(monkeypatch):
+    """Bypass live-catalog lookup in KALSHI_PRE_SEND_VALIDATION for unit tests.
+
+    ``KalshiVenueClient.place_order_result`` calls
+    ``_validate_ticker_exists`` which falls back to the live market catalog.
+    Under respx the catalog is never populated, so every mocked ticker is
+    rejected with ``Ticker not found in catalog: ...``.  Tests still exercise
+    the KX-prefix rule (tickers here start with ``KX``); we only short-circuit
+    the catalog presence check.
+    """
+    import merid.event_venues.kalshi.client as _client_mod
+
+    async def _validator(ticker: str):
+        if not ticker:
+            return False, "Empty ticker"
+        if not ticker.startswith("KX"):
+            return False, f"Invalid ticker format (must start with KX): {ticker}"
+        return True, None
+
+    monkeypatch.setattr(_client_mod, "_validate_ticker_exists", _validator)
+
+
 # =============================================================================
 # Initialization Tests
 # =============================================================================
@@ -301,7 +324,7 @@ async def test_place_order_limit(client):
     )
     
     order = VenueOrder(
-        market_id="FED-25DEC-T3.00",
+        market_id="KXFED-25DEC-T3.00",
         side="buy",
         size=Decimal("100"),
         order_type="limit",
@@ -330,7 +353,7 @@ async def test_place_order_market(client):
         return_value=Response(200, json={
             "order": {
                 "order_id": "ord_456",
-                "ticker": "FED-25DEC-T3.00",
+                "ticker": "KXFED-25DEC-T3.00",
                 "action": "buy",
                 "side": "yes",
                 "count": 50,
@@ -340,7 +363,7 @@ async def test_place_order_market(client):
     )
     
     order = VenueOrder(
-        market_id="FED-25DEC-T3.00",
+        market_id="KXFED-25DEC-T3.00",
         side="buy",
         size=Decimal("50"),
         order_type="market"
