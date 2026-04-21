@@ -26,7 +26,7 @@
 2. **Edge thresholds too permissive** - Fee drag exceeding edge
 3. **Position sizing too aggressive** - 2% risk per trade with small bankroll
 4. **Exposure concentration** - 30% per asset too high for volatiles
-
+ 
 ---
 
 ## End-to-End Audit Results (Post-Calibration Verification)

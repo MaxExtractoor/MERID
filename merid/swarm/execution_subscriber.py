@@ -90,6 +90,11 @@ class ExecutionSubscriber:
             self._task = asyncio.create_task(
                 self._process_loop(), name="execution-subscriber"
             )
+            self._task.add_done_callback(
+                lambda t: logger.error(
+                    "execution-subscriber task crashed: %s", t.exception()
+                ) if not t.cancelled() and t.exception() else None
+            )
             logger.info("Execution subscriber started (listening on CONSENSUS, EXECUTION, MARKET_DATA)")
         except Exception as exc:
             logger.warning(f"Execution subscriber start failed: {exc}")

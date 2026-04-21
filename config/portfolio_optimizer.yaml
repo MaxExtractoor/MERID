@@ -1,0 +1,156 @@
+# Portfolio Optimizer Configuration for MERID Kalshi Crypto Trading
+# 
+# This config controls the mean-variance portfolio optimizer that selects
+# the best 1-3 assets from BTC/ETH/SOL/XRP/DOGE for trading.
+
+portfolio_optimizer:
+  # Master switch
+  enabled: true
+  
+  # Asset universe (subset of Kalshi crypto markets)
+  assets:
+    - BTC
+    - ETH
+    - SOL
+    - XRP
+    - DOGE
+  
+  # Cardinality constraint: max concurrent positions
+  max_concurrent_assets: 3
+  
+  # Percent-of-equity risk per trade (fixed fractional position sizing)
+  # Values are fractions of current equity, e.g. 0.01 = 1% of equity
+  # Band: 0.5% min → 2.0% max (hard cap per trade)
+  min_risk_pct_per_trade: 0.005   # 0.5% minimum risk per trade
+  max_risk_pct_per_trade: 0.02    # 2.0% maximum risk per trade (hard cap)
+  
+  # Global risk budget as percent of equity
+  # Default: 3 assets × 2% max = 6% total portfolio risk
+  max_risk_pct_global: 0.06       # 6% total portfolio risk budget
+  
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MOMENTUM SCALPING ENFORCEMENT (No Hold-to-Expiry)
+  # ═══════════════════════════════════════════════════════════════════════════
+  # When enabled, all crypto positions MUST use price-based exits (TP/SL).
+  # Holding to expiry is prohibited. This is a safety/configuration-level guard.
+  # 
+  # This flag is enforced at the portfolio optimizer level and should be wired
+  # into strategy selection to ensure only momentum-scalping strategies are used.
+  enforce_momentum_scalping_only: true  # Block hold-to-expiry strategies
+  
+  # Exit configuration for momentum scalping
+  momentum_scalp_config:
+    # Maximum time-in-trade before forced exit (minutes)
+    # For scalping, this should be short (e.g., 15m contracts: 30-60 min)
+    max_hold_minutes: 60
+    
+    # Profit target as % of max possible gain (0.15 = 15%)
+    profit_target_pct: 0.15
+    
+    # Stop loss as % of entry price/risk (0.10 = 10%)
+    stop_loss_pct: 0.10
+    
+    # Enforce price-based exits (do not allow expiry-based exits)
+    require_price_based_exits: true
+  
+  # Legacy USD caps (deprecated, kept for rollback compatibility)
+  # min_risk_usd_per_trade: 0.40  # DEPRECATED - use min_risk_pct_per_trade
+  # max_risk_usd_per_trade: 1.00   # DEPRECATED - use max_risk_pct_per_trade
+  # global_risk_budget: 3          # DEPRECATED - use max_risk_pct_global
+  
+  # Risk-free rate for Sharpe calculation (annualized)
+  # Set to 0 for crypto prediction markets
+  risk_free_rate: 0.0
+  
+  # Lookback period for historical return estimation
+  # Kalshi daily contracts: 60 days ≈ 60 data points
+  # Kalshi hourly contracts: 60 days ≈ 1440 data points
+  lookback_days: 60
+  
+  # Number of points on the efficient frontier (for analysis)
+  num_frontier_points: 50
+  
+  # Optimization objective for ranking portfolios
+  # Options: "sharpe", "return", "return_per_vol"
+  objective: "sharpe"
+  
+  # Rebalance settings
+  rebalance:
+    # Minimum weight change to trigger a rebalance action
+    weight_tolerance: 0.05  # 5%
+    
+    # Check for rebalance opportunities every N cycles
+    check_interval_cycles: 10
+    
+    # Maximum rebalance frequency (don't rebalance more than once per N minutes)
+    min_minutes_between_rebalances: 30
+  
+  # Strategy selection filter (momentum-only enforcement)
+  # Only strategies with these tags are eligible for selection
+  allowed_strategy_tags:
+    - "momentum"
+    - "scalping"
+    - "mean_reversion"  # Mean reversion is allowed (also price-based exits)
+  
+  # Blocked strategy patterns (regex patterns for strategy names)
+  blocked_strategy_patterns:
+    - ".*hold.*expiry.*"
+    - ".*resolution.*based.*"
+    - ".*expiry.*farmer.*"
+  
+  # Data source configuration
+  data:
+    # Primary source: "kalshi_cache", "backtest", "paper_trading", "synthetic"
+    primary_source: "kalshi_cache"
+    
+    # Fallback to synthetic data if primary fails
+    fallback_to_synthetic: true
+    
+    # Cache TTL for return data (seconds)
+    cache_ttl_seconds: 300
+  
+  # Integration hooks
+  merid_integration:
+    # Call optimizer before sizing/execution
+    gate_trades: true
+    
+    # Only allow trades in top-N selected assets
+    allowed_assets_only: true
+    
+    # Log all optimization decisions
+    audit_optimizations: true
+    
+    # Emit metrics for monitoring
+    emit_metrics: true
+
+
+# Environment-specific overrides
+# Use MERID_ENV to select profile
+
+profiles:
+  development:
+    portfolio_optimizer:
+      enabled: true
+      lookback_days: 30  # Shorter for faster testing
+      data:
+        primary_source: "synthetic"
+        fallback_to_synthetic: true
+  
+  paper:
+    portfolio_optimizer:
+      enabled: true
+      # Standard 6% budget for paper (3 assets × 2% max per trade)
+      max_risk_pct_global: 0.06
+      data:
+        primary_source: "paper_trading"
+  
+  live:
+    portfolio_optimizer:
+      enabled: true
+      # Conservative 6% budget for live: 3 assets × 2% max per trade
+      max_risk_pct_global: 0.06
+      rebalance:
+        min_minutes_between_rebalances: 60  # Less frequent in live
+      data:
+        primary_source: "kalshi_cache"
+        fallback_to_synthetic: false  # Don't use synthetic in live

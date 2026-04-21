@@ -19,6 +19,19 @@ param(
 $env:MERID_PROFILE = "kalshi-only"
 $env:MERID_ENV = "development"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# RISK MANAGEMENT — TOP-N ALLOCATOR (CRITICAL: prevents oversizing bugs)
+# ═══════════════════════════════════════════════════════════════════════════
+# When TRUE: Uses TopNEdgeAllocator with 1-2% cycle-wide risk cap + GlobalRiskGuard
+# When FALSE: Uses legacy Kelly per-trade sizing (DANGEROUS — can cause oversizing)
+# 
+# This flag is the primary defense against the 7-BTC-orders-with-28-equity bug.
+# Regresssion test: tests/trading/test_risk_oversizing_regression.py
+# ═══════════════════════════════════════════════════════════════════════════
+$env:USE_TOPN_ALLOCATOR = "true"
+$env:MAX_CYCLE_RISK_PCT = "0.02"
+$env:MAX_TOTAL_RISK_PCT = "0.02"
+
 if ($FreshStart) {
     $env:MERID_FRESH_START = "1"
     Write-Host "[dev] Fresh start enabled — paper state will be cleared" -ForegroundColor Yellow
@@ -40,6 +53,11 @@ Write-Host "  MERID kalshi-only dev instance"        -ForegroundColor Cyan
 Write-Host "  Profile:  $env:MERID_PROFILE"          -ForegroundColor Cyan
 Write-Host "  Mode:     $env:MERID_PM_TRADING_MODE"  -ForegroundColor Cyan
 Write-Host "  Port:     $Port"                       -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  RISK CONFIG:"                          -ForegroundColor Green
+Write-Host "    USE_TOPN_ALLOCATOR: $env:USE_TOPN_ALLOCATOR"  -ForegroundColor Green
+Write-Host "    MAX_CYCLE_RISK_PCT: $env:MAX_CYCLE_RISK_PCT"  -ForegroundColor Green
+Write-Host "    MAX_TOTAL_RISK_PCT: $env:MAX_TOTAL_RISK_PCT"  -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

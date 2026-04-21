@@ -755,7 +755,18 @@ class Crypto15MLane:
             return
         
         self._running = True
-        self._task = asyncio.create_task(self._main_loop())
+        self._task = asyncio.create_task(self._main_loop(), name=f"{self.lane_id}-main-loop")
+        # Surface crashes loudly: without this hook a silently-raised exception
+        # in ``_main_loop`` leaves ``self._running=True`` and the lane silently
+        # stops producing signals with no indication in the logs.
+        def _on_loop_done(t: asyncio.Task, *, lane_id: str = self.lane_id) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("[%s] main loop crashed: %s", lane_id, exc, exc_info=exc)
+                self._running = False
+        self._task.add_done_callback(_on_loop_done)
         logger.info("%s: started (paper=%s)", self.lane_id, self.cfg.paper)
 
     async def stop(self) -> None:
@@ -1162,8 +1173,12 @@ class Crypto15MLane:
             # Get bankroll and calculate position size
             try:
                 bankroll = self.portfolio.get_lane_bankroll(self.lane_id)
-            except Exception:
+            except Exception as _bankroll_exc:
                 bankroll = self.cfg.base_trade_size * 100  # Fallback bankroll
+                logger.warning(
+                    "%s: bankroll lookup failed (using fallback=%s): %s",
+                    self.lane_id, bankroll, _bankroll_exc,
+                )
             
             # Position sizing with RCK
             kelly_size = bankroll * f_used
@@ -1283,30 +1298,59 @@ class Crypto15MLane:
             return {"submitted": False, "reason": str(exc), "cycle_id": order["cycle_id"]}
 
     async def _execute_live_order(self, order: Dict[str, Any], ctx: Dict[str, Any], consensus: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute live order on Kalshi with proper API fields."""
+        """Execute live order on Kalshi via the canonical router.
+
+        Goes through ``route_order_async`` so the shared ``GlobalRiskGuard``,
+        cross-caller dedup registry, caller-allowlist audit, pre-trade gate,
+        and all downstream safety checks apply.  No direct venue client calls.
+        """
         try:
             # Calculate contract details with proper Kalshi API format
             limit_prob = consensus.get("probability", 0.5)   # 0-1 probability
-            price_cents = max(int(limit_prob * 100), 1)     # Kalshi expects price in cents
-            
+            price_cents = max(1, min(99, int(limit_prob * 100)))
+
             # Calculate contracts based on position size and price
             price_dollars = price_cents / 100.0
             contracts = max(1, int(order["size"] / price_dollars))
 
-            order_result = await self.kalshi.place_order(
-                market_ticker=order["market_id"],
-                outcome=order["side"].upper(),  # "YES" / "NO"
-                side="buy",
-                quantity=contracts,
+            # ── Canonical router path ────────────────────────────────────
+            from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
+            from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+            from merid.prediction.venue_gate import TradingMode
+
+            intent = OrderIntent(
+                ticker=order["market_id"],
+                side=str(order["side"]).lower(),        # "yes" / "no"
+                action="buy",
+                price_cents=price_cents,
+                count=contracts,
+                mode=TradingMode.LIVE,
                 order_type="limit",
-                price=price_cents,
-                metadata={"cycle_id": order["cycle_id"]},
+                time_in_force="gtc",
+                source="crypto15m_lane",
+                agent_id=self.lane_id,
+                edge_pct=float(ctx.get("edge_bps", 0.0)) / 10000.0,
+                decision_trace_id=new_decision_trace_id("crypto15m_lane"),
+                sentiment_driven=False,
             )
-            
+            router_result = await route_order_async(intent)
+
+            if router_result.status == "rejected":
+                logger.warning(
+                    "%s: router REJECTED %s on %s size=%.2f reason=%s",
+                    self.lane_id, order["side"], order["market_id"],
+                    order["size"], router_result.reason or "unknown",
+                )
+                return {
+                    "submitted": False,
+                    "reason": router_result.reason or "router_rejected",
+                    "cycle_id": order["cycle_id"],
+                }
+
             await self.risk_bus.publish_order_event(self.cfg.risk_stream_topic, order, ctx)
-            
+
             logger.info(
-                "%s: placed %s on %s size=%.2f edge_bps=%.1f price=%d¢ contracts=%d",
+                "%s: placed %s on %s size=%.2f edge_bps=%.1f price=%d¢ contracts=%d status=%s",
                 self.lane_id,
                 order["side"],
                 order["market_id"],
@@ -1314,8 +1358,9 @@ class Crypto15MLane:
                 ctx["edge_bps"],
                 price_cents,
                 contracts,
+                router_result.status,
             )
-            
+
             return {
                 "submitted": True,
                 "simulated": False,
@@ -1325,10 +1370,12 @@ class Crypto15MLane:
                 "size": order["size"],
                 "contracts": contracts,
                 "price_cents": price_cents,
-                "order_result": order_result,
+                "order_result": router_result.fill or {},
+                "status": router_result.status,
+                "latency_ms": router_result.latency_ms,
                 "cycle_id": order["cycle_id"],
             }
-            
+
         except Exception as exc:
             logger.warning("%s: order failed: %s", self.lane_id, exc)
             return {"submitted": False, "reason": str(exc), "cycle_id": order["cycle_id"]}

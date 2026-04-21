@@ -66,7 +66,7 @@ from merid.market_regime import get_regime_gate, RegimeAction
 
 # Top-3 Edge Selector & Allocator — cross-agent selection and sizing
 from merid.trading.top3_edge_allocator import (
-    EdgeCandidate,
+    EdgeCandidate as Top3EdgeCandidate,  # Legacy alias
     Top3Allocation,
     Top3Batch,
     BatchStatus,
@@ -79,7 +79,34 @@ from merid.trading.top3_batch_manager import (
     REJECT_NOTIONAL_LIMIT_REACHED,
 )
 
+# Module-level logger (must be defined before feature flag logging)
 logger = get_logger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Top-N Allocator (NEW) — Fixed fractional risk per cycle
+# ═══════════════════════════════════════════════════════════════════════════
+# Import canonical settings (single source of truth)
+# These come from environment via core/settings.py
+from core.settings import USE_TOPN_ALLOCATOR, MAX_CYCLE_RISK_PCT, MAX_TOTAL_RISK_PCT
+
+# Module-level alias for backwards compatibility in this file
+_USE_TOPN_ALLOCATOR = USE_TOPN_ALLOCATOR
+
+# Log on module load (startup verification)
+if _USE_TOPN_ALLOCATOR:
+    logger.info("[RISK-MODE] Using new TopNEdgeAllocator with fixed fractional risk (1-2% per cycle)")
+    logger.info("[RISK-CONFIG] USE_TOPN_ALLOCATOR=true, max_cycle_risk_pct=%.2f%%, max_total_risk_pct=%.2f%%",
+                MAX_CYCLE_RISK_PCT * 100, MAX_TOTAL_RISK_PCT * 100)
+else:
+    logger.warning("[RISK-MODE] Using legacy Kelly sizing (per-trade risk) — DANGEROUS, can cause oversizing!")
+    logger.warning("[RISK-CONFIG] USE_TOPN_ALLOCATOR=false — Set to 'true' to enable safe sizing")
+
+from merid.trading.topn_allocator import (
+    EdgeCandidate as TopNEdgeCandidate,
+    TopNEdgeAllocator,
+    TopNAllocatorConfig,
+    get_topn_allocator,
+)
 
 # Local transport/connection failures — not an HTTP status from Kalshi (avoid 503 confusion).
 _CT_TRANSPORT_FAILURE_STATUS = 0
@@ -193,11 +220,13 @@ class TraderConfig:
 
     # ── CT -> Router Migration (Phase 2: Canary Flip) ────────────────
     # Percentage of orders to route through canonical router vs direct HTTP.
-    # 0 = all HTTP (Phase 1 shadow mode)
+    # 0 = all HTTP (Phase 1 shadow mode; legacy, now disabled by default)
     # 1-99 = canary flip (random selection)
-    # 100 = all router (Phase 3 complete)
-    # Env: CT_USE_ROUTER_PERCENT (default 0 until parity validated)
-    use_router_percent: int = 0
+    # 100 = all router (Phase 3 — canonical chokepoint)
+    # Env: CT_USE_ROUTER_PERCENT (default 100 — routes via route_order_async so
+    # the shared GlobalRiskGuard / dedup / pre-trade gate all apply).  Set to 0
+    # only as an emergency break-glass (logged as WARNING at startup).
+    use_router_percent: int = 100
 
     # ── Market selection ─────────────────────────────────────────────
     # Default: 15m–weekly from kalshi_universe (excludes monthly/annual); see kalshi_ct_default_series_tickers
@@ -359,7 +388,7 @@ class TraderConfig:
             yes_stop_loss_cents=int(os.getenv("KALSHI_TRADER_YES_STOP_CENTS", "8")),
             yes_profit_take_cents=int(os.getenv("KALSHI_TRADER_YES_PROFIT_CENTS", "85")),
             # Phase 2: CT -> Router migration canary flip
-            use_router_percent=int(os.getenv("CT_USE_ROUTER_PERCENT", "0")),
+            use_router_percent=int(os.getenv("CT_USE_ROUTER_PERCENT", "100")),
         )
 
     def __post_init__(self) -> None:
@@ -509,6 +538,42 @@ class OrderTracker:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# GLOBAL RISK GUARD — Re-exported from the shared singleton module.
+# ═══════════════════════════════════════════════════════════════════════════
+# Canonical definition now lives in ``merid.guards.global_risk_guard``.
+# CT imports the shared types so every order flow (CT, agent grid, lanes,
+# web) shares the same per-cycle / total risk envelope on a unified
+# ``equity_cents``.  See ``docs/TRADING_OWNERSHIP_DECISION.md`` and
+# ``docs/ORDER_FLOW_AND_OVERTRADING_AUDIT.md``.
+# ═══════════════════════════════════════════════════════════════════════════
+from merid.guards.global_risk_guard import (  # noqa: E402
+    PendingOrderRisk as PendingOrderRisk,
+    GlobalRiskGuard as _SharedGlobalRiskGuard,
+    get_global_risk_guard as _get_global_risk_guard,
+)
+
+
+# Keep the local symbol name so existing tests/imports continue to work.
+class GlobalRiskGuard(_SharedGlobalRiskGuard):  # type: ignore[misc]
+    """Last-line global risk guard — enforces hard caps before any order submit.
+    
+    This code enforces a hard 1-2% per-cycle and total risk cap. No orders may bypass this.
+    
+    Invariants enforced:
+    1. Sum of max loss for all new orders in a cycle ≤ cycle_risk_cents
+    2. Total open risk (existing + new) ≤ max_total_risk_cents
+    3. Each asset's total risk ≤ asset_max_risk_cents
+    
+    If any invariant would be violated, the guard logs CRITICAL and returns (allowed=False).
+
+    Implementation lives in ``merid.guards.global_risk_guard.GlobalRiskGuard``;
+    this subclass exists only to preserve the ``merid.trading.kalshi_continuous_trader.GlobalRiskGuard``
+    import path for existing tests.  No additional behavior.
+    """
+    pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Market candidate — unified with canonical definition from market_filter
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -601,6 +666,40 @@ class KalshiContinuousTrader:
         self._cycle = 0
         self._task: Optional[asyncio.Task] = None
         self._cycle_lock = threading.Lock()
+
+        # ═════════════════════════════════════════════════════════════════
+        # GLOBAL RISK GUARD — Last-line defense (NEW for Top-N allocator)
+        # ═════════════════════════════════════════════════════════════════
+        # This enforces hard 1-2% per-cycle risk cap at the final order submission point.
+        # No orders may bypass this. See GlobalRiskGuard class for details.
+        # Uses canonical settings from core.settings (env -> settings -> here)
+        # Shared process-wide singleton — same guard is invoked by
+        # route_order_async for agent-grid / lane / web callers, so the
+        # 1-2% envelope is enforced across every order source.  The
+        # singleton loads the same MAX_*_RISK_PCT values lazily.
+        self._risk_guard = _get_global_risk_guard()
+        # Note: CT computes ``total_value_cents`` (cash + MTM) per cycle and
+        # passes it explicitly to ``check_order``.  The default equity
+        # provider used by ``route_order_async`` for agent-grid / lane / web
+        # callers reads from ``KalshiPositionCache.total_value_cents`` with
+        # ``MERID_INITIAL_CAPITAL`` as fallback — see
+        # ``merid.guards.global_risk_guard.default_equity_cents``.
+        logger.info(
+            "[RISK-GUARD] Initialized | max_cycle_risk_pct=%.2f%%, max_total_risk_pct=%.2f%%",
+            MAX_CYCLE_RISK_PCT * 100, MAX_TOTAL_RISK_PCT * 100
+        )
+        
+        # Top-N allocator instance (used when USE_TOPN_ALLOCATOR=true)
+        self._topn_allocator: Optional[TopNEdgeAllocator] = None
+        if _USE_TOPN_ALLOCATOR:
+            self._topn_allocator = get_topn_allocator()
+            logger.info(
+                "[CT-INIT] Top-N allocator enabled | max_cycle_risk=%.2f%% | "
+                "max_edges=%d | min_contracts=%d",
+                self._risk_guard.max_cycle_risk_pct * 100,
+                self._topn_allocator.config.max_edges_per_cycle,
+                self._topn_allocator.config.min_contracts,
+            )
 
         # Cached portfolio value (updated each cycle from positions total_cost).
         # Used by status_snapshot so it doesn't need to re-fetch positions on every poll.
@@ -1425,6 +1524,39 @@ class KalshiContinuousTrader:
 
         return resp
 
+    def _build_synthetic_rejection(
+        self,
+        order_data: dict,
+        reason: str,
+    ) -> requests.Response:
+        """Build a synthetic HTTP-like rejection response (router failure path).
+
+        Used when the canonical router path errors — we refuse to fall back
+        to the legacy direct ``_post`` bypass, so downstream code sees a
+        rejected-order response instead.
+        """
+        from requests import Response
+
+        resp = Response()
+        resp.status_code = 409  # conflict/blocked — not 2xx, not a transport failure
+        order_payload = {
+            "order_id": "",
+            "client_order_id": order_data.get("client_order_id"),
+            "status": "rejected",
+            "reason": reason,
+            "ticker": order_data.get("ticker"),
+            "action": order_data.get("action"),
+            "side": order_data.get("side"),
+            "count": order_data.get("count"),
+            "price": order_data.get("yes_price") or order_data.get("no_price"),
+            "fill_count_fp": 0,
+            "taker_fees_dollars": "0.00",
+        }
+        import json
+        resp._content = json.dumps({"order": order_payload, "error": reason}).encode("utf-8")
+        resp.headers["Content-Type"] = "application/json"
+        return resp
+
     # ── Data helpers (all sync, called via run_in_executor) ──────────
 
     _CG_IDS = {
@@ -2199,6 +2331,15 @@ class KalshiContinuousTrader:
 
         self._cycle += 1
         cycle = self._cycle
+        
+        # ═════════════════════════════════════════════════════════════════
+        # RESET GLOBAL RISK GUARD for new cycle
+        # ═════════════════════════════════════════════════════════════════
+        # This ensures the per-cycle risk accumulation starts fresh each cycle.
+        self._risk_guard.reset_cycle()
+        if _USE_TOPN_ALLOCATOR:
+            logger.debug("[RISK-GUARD] Cycle %d: risk guard reset", cycle)
+        
         try:
             from merid.event_venues.kalshi.market_catalog import get_market_catalog
 
@@ -3004,6 +3145,7 @@ class KalshiContinuousTrader:
             
             # Create EdgeCandidate list
             _edge_candidates = []
+            _topn_candidates = []  # For new allocator when USE_TOPN_ALLOCATOR=true
             for asset, candidate in _asset_candidates.items():
                 # Compute per-asset max notional cap from config
                 _asset_max_pct = self.config.asset_max_exposure_pct.get(
@@ -3011,7 +3153,18 @@ class KalshiContinuousTrader:
                 )
                 _max_notional = int(balance_cents * _asset_max_pct)
                 
-                _edge_candidates.append(EdgeCandidate(
+                # Determine direction from best_side
+                _direction = "long" if candidate.best_side == "yes" else "short"
+                
+                # For binary contracts, entry price is limit_price_cents
+                _entry_price = candidate.limit_price_cents
+                
+                # For binary contracts, stop is at settlement boundary:
+                # - Long: max loss = entry price (if settles NO at 0)
+                # - Short: max loss = 100 - entry (if settles YES at 100)
+                _stop_price = 0 if _direction == "long" else 100
+                
+                _edge_candidates.append(Top3EdgeCandidate(
                     asset=asset,
                     edge=_asset_best_edge[asset],
                     max_notional_cap=_max_notional,
@@ -3021,6 +3174,22 @@ class KalshiContinuousTrader:
                         "limit_price_cents": candidate.limit_price_cents,
                     }
                 ))
+                
+                # Build candidates for new Top-N allocator (when enabled)
+                if _USE_TOPN_ALLOCATOR:
+                    _topn_candidates.append(TopNEdgeCandidate(
+                        asset=asset,
+                        edge=_asset_best_edge[asset],
+                        direction=_direction,
+                        entry_price_cents=_entry_price,
+                        stop_price_cents=_stop_price,
+                        max_notional_cap=_max_notional,
+                        metadata={
+                            "ticker": candidate.ticker,
+                            "best_side": candidate.best_side,
+                            "timeframe": getattr(candidate, "timeframe", "15m"),
+                        }
+                    ))
             
             # Get batch manager and check/create batch
             _batch_mgr = get_top3_batch_manager()
@@ -3046,6 +3215,61 @@ class KalshiContinuousTrader:
                 )
             else:
                 logger.info("[TOP3-BATCH] No active batch (no valid allocations)")
+            
+            # ═════════════════════════════════════════════════════════════════
+            # TOP-N ALLOCATOR (NEW) — Fixed fractional risk per cycle
+            # ═════════════════════════════════════════════════════════════════
+            # When USE_TOPN_ALLOCATOR=true, use the new allocator that enforces
+            # 1-2% cycle-wide risk cap with max-loss-based sizing.
+            # This replaces the per-trade Kelly sizing.
+            # 
+            # CRITICAL: Use total_value_cents (cash + portfolio) for bankroll, NOT just cash.
+            # This aligns with KalshiRiskManager equity view and the production spec.
+            if _USE_TOPN_ALLOCATOR and self._topn_allocator and _topn_candidates:
+                # Use total equity (cash + positions) as bankroll_B per spec Section 3
+                # This matches the risk manager's view of equity and ensures consistent
+                # risk % calculations across all risk layers.
+                _bankroll_cents = total_value_cents  # cash + portfolio, NOT just balance_cents
+                
+                # Log both sources for observability and verification
+                if abs(balance_cents - total_value_cents) > 100:  # >$1 difference
+                    logger.info(
+                        "[BANKROLL-SOURCES] topn_B=$%.2f (total equity), "
+                        "cash_B=$%.2f (available), portfolio=$%.2f | delta=$%.2f",
+                        _bankroll_cents / 100,
+                        balance_cents / 100,
+                        portfolio_cents / 100,
+                        (total_value_cents - balance_cents) / 100
+                    )
+                
+                _cycle = self._topn_allocator.compute_allocations(
+                    equity_cents=_bankroll_cents,
+                    candidates=_topn_candidates,
+                    current_open_risk_usd=_current_exposure_cents / 100.0,  # Actual open risk
+                )
+                
+                # Build lookup from asset to TradeAllocation
+                _topn_allocations = {a.asset: a for a in _cycle.allocations}
+                
+                logger.info(
+                    "[TOPN-ALLOCATOR] Cycle %s | equity=$%.2f | risk_pct=%.2f%% | "
+                    "risk_budget=$%.2f | N=%d | sum_risk=$%.2f | assets=%s",
+                    _cycle.cycle_id,
+                    _cycle.equity_cents / 100,
+                    _cycle.cycle_risk_pct * 100,
+                    _cycle.cycle_risk_usd,
+                    _cycle.num_edges_traded,
+                    _cycle.sum_risk_usd,
+                    list(_topn_allocations.keys()),
+                )
+                
+                # Validate invariants (should always pass, but log if not)
+                _is_valid, _violations = _cycle.validate_invariants()
+                if not _is_valid:
+                    logger.critical(
+                        "[TOPN-INVARIANT-VIOLATION] Cycle %s | violations=%s",
+                        _cycle.cycle_id, _violations
+                    )
         else:
             logger.debug("[TOP3-BATCH] Top-3 selector disabled or no tradeable candidates")
 
@@ -3274,14 +3498,43 @@ class KalshiContinuousTrader:
             )
             existing = _pos_info["qty"]
 
-            # BankrollManager decides how many contracts (or 0 = skip)
-            order_count = self.bankroll.calculate_order_size(
-                balance_cents=balance_cents,
-                edge=c.best_edge,
-                contract_price_cents=c.limit_price_cents,
-                existing_position=existing,
-                total_open_positions=total_open,
-            )
+            # ═══════════════════════════════════════════════════════════════════════
+            # POSITION SIZING: Kelly (legacy) vs Top-N Allocator (new)
+            # ═══════════════════════════════════════════════════════════════════════
+            if _USE_TOPN_ALLOCATOR and _topn_allocations and _candidate_asset in _topn_allocations:
+                # Use new Top-N allocator output (max-loss-based sizing)
+                _tn_alloc = _topn_allocations[_candidate_asset]
+                order_count = _tn_alloc.target_contracts
+                
+                # Verify ticker matches (should always match, but safety check)
+                if _tn_alloc.metadata.get("ticker") != c.ticker:
+                    logger.warning(
+                        "[TOPN-MISMATCH] Asset %s ticker mismatch: allocation=%s vs candidate=%s",
+                        _candidate_asset, _tn_alloc.metadata.get("ticker"), c.ticker
+                    )
+                
+                logger.info(
+                    "[TOPN-SIZE] %s | asset=%s | contracts=%d | max_loss=$%.2f | "
+                    "allocated_risk=$%.2f | edge=%.4f",
+                    c.ticker, _candidate_asset, order_count,
+                    _tn_alloc.max_loss_usd, _tn_alloc.risk_budget_usd, _tn_alloc.edge
+                )
+            else:
+                # Legacy: BankrollManager Kelly sizing (per-trade risk)
+                if _USE_TOPN_ALLOCATOR:
+                    logger.debug(
+                        "[TOPN-SKIP] %s | asset=%s not in top-n allocations, skipping",
+                        c.ticker, _candidate_asset
+                    )
+                    continue
+                
+                order_count = self.bankroll.calculate_order_size(
+                    balance_cents=balance_cents,
+                    edge=c.best_edge,
+                    contract_price_cents=c.limit_price_cents,
+                    existing_position=existing,
+                    total_open_positions=total_open,
+                )
 
             if order_count <= 0:
                 logger.debug(
@@ -3796,6 +4049,49 @@ class KalshiContinuousTrader:
                 c.ticker, c.limit_price_cents, c.best_edge, cost_cents, expected_fee,
             )
 
+            # ═══════════════════════════════════════════════════════════════════════
+            # GLOBAL RISK GUARD — Last-line defense before order submission
+            # ═══════════════════════════════════════════════════════════════════════
+            # This enforces hard 1-2% per-cycle risk cap. No orders may bypass this.
+            # Compute max loss for this order
+            _direction = "long" if c.best_side == "yes" else "short"
+            if _direction == "long":
+                _max_loss_cents = order_count * c.limit_price_cents
+            else:
+                _max_loss_cents = order_count * (100 - c.limit_price_cents)
+            
+            _pending_order = PendingOrderRisk(
+                ticker=c.ticker,
+                asset=_candidate_asset,
+                contracts=order_count,
+                entry_price_cents=c.limit_price_cents,
+                direction=_direction,
+                max_loss_cents=_max_loss_cents,
+                edge=float(c.best_edge) if c.best_edge else 0.0,
+            )
+            
+            # Calculate existing open risk (simplified: cost basis of open positions)
+            _existing_risk_cents = _current_exposure_cents  # From earlier in the loop
+            
+            # CRITICAL: Use total equity (cash + portfolio) for guard check
+            # This aligns with TopN allocator and risk manager equity view
+            _guard_equity_cents = total_value_cents  # NOT just balance_cents
+            
+            _guard_allowed, _guard_reason = self._risk_guard.check_order(
+                equity_cents=_guard_equity_cents,
+                existing_risk_cents=_existing_risk_cents,
+                pending_order=_pending_order,
+            )
+            
+            if not _guard_allowed:
+                logger.critical(
+                    "[GLOBAL-RISK-GUARD] BLOCKED | %s | reason=%s | "
+                    "This order would exceed the 1-2%% per-cycle risk cap. "
+                    "Skipping and logging for audit.",
+                    c.ticker, _guard_reason
+                )
+                continue  # Skip this order - don't submit
+            
             # GUARD CHECK: Observation mode - log what we would do but don't execute
             if self._guardian and self._guardian.checklist.mode == TradingMode.OBSERVATION:
                 logger.info(
@@ -3869,23 +4165,37 @@ class KalshiContinuousTrader:
             )
 
             if use_router:
-                # Phase 2/3: Use canonical router (live execution)
+                # Phase 3 (canonical): All orders flow through route_order_async
+                # via the CT execution adapter. Shared GlobalRiskGuard, dedup,
+                # pre-trade gate, sanity checks, caller audit all apply.
+                # Router failures are TERMINAL — no HTTP fallback.  The legacy
+                # ``_post`` path is reachable only with CT_USE_ROUTER_PERCENT=0.
                 try:
                     adapter = get_ct_execution_adapter()
                     router_result = asyncio.get_event_loop().run_until_complete(
                         adapter.execute_live(order_data)
                     )
-                    # Build synthetic HTTP-like response for downstream compatibility
                     resp = self._build_synthetic_response(router_result, order_data)
                     logger.info(
                         "[CT-CANARY] Routed via canonical router | ticker=%s | status=%s | pct=%d%%",
                         c.ticker, router_result.status, router_pct,
                     )
                 except Exception as _router_exc:
-                    logger.error("[CT-CANARY] Router execution failed, falling back to HTTP: %s", _router_exc)
-                    resp = self._post("/portfolio/orders", order_data)
+                    logger.error(
+                        "[CT-CANARY] Router execution FAILED (terminal, no HTTP fallback): %s",
+                        _router_exc,
+                    )
+                    # Synthesize a rejected response; no direct venue submit.
+                    resp = self._build_synthetic_rejection(order_data, f"router_error:{_router_exc}")
             else:
-                # Phase 1: Direct HTTP (current behavior)
+                # Break-glass only: legacy direct HTTP (bypasses shared guard).
+                # Emits a prominent audit log so this is not silently reached.
+                logger.warning(
+                    "[CT-CANARY] LEGACY_DIRECT_HTTP path reached (CT_USE_ROUTER_PERCENT=%d) | "
+                    "ticker=%s — bypasses shared GlobalRiskGuard/dedup. This path is "
+                    "emergency-only; flip CT_USE_ROUTER_PERCENT back to 100 ASAP.",
+                    router_pct, c.ticker,
+                )
                 resp = self._post("/portfolio/orders", order_data)
 
             # SHADOW MODE: Call canonical router for parity comparison (when in Phase 1 or 2)
@@ -3924,7 +4234,12 @@ class KalshiContinuousTrader:
                     AUDIT_SPEC_VERSION,
                 )
                 
-                # Update pre-trade gate: submitted → filled
+                # Update pre-trade gate: submitted → filled.
+                # When routing through the canonical router the gate is already
+                # advanced internally (route_order_async -> mark_submitted +
+                # mark_filled using intent.client_tag), so this block is a
+                # best-effort idempotent no-op for the legacy HTTP path.
+                # Warn-level logging here so silent leaks don't recur.
                 try:
                     from merid.event_venues.kalshi.order_gate import get_pre_trade_gate as _get_ptg
                     _ptg = _get_ptg()
@@ -3932,8 +4247,11 @@ class KalshiContinuousTrader:
                     _ct_fill_n = int(float(fill)) if fill else 0
                     if _ct_fill_n > 0:
                         _ptg.mark_filled(_ct_coid, _ct_fill_n)
-                except Exception:
-                    pass
+                except Exception as _gate_update_exc:
+                    logger.warning(
+                        "[CT] pre_trade_gate update failed coid=%s: %s",
+                        (_ct_coid or "")[:16], _gate_update_exc,
+                    )
 
                 # DRY-RUN INSTRUMENTATION: Fill reconciliation
                 _filled_count = int(float(fill)) if fill else 0

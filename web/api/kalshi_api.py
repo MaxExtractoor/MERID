@@ -2804,6 +2804,35 @@ async def place_order(
     if mode_value not in ("mock", "paper", "live"):
         raise HTTPException(400, f"Invalid mode: {mode!r}, must be one of ['mock', 'paper', 'live']")
 
+    # Fail-closed execution-gate pre-check (LIVE only).
+    # Runs BEFORE the router so that gate outages return a structured
+    # ``{status=rejected, reason=execution_gate_unavailable:...}`` to the
+    # caller instead of being masked by a downstream sanity rejection.
+    if mode_value == "live":
+        try:
+            from core.execution_gate import check_execution_gate
+            _gate = check_execution_gate()
+            if getattr(_gate, "blocked", False):
+                _reasons = "; ".join(
+                    getattr(r, "message", str(r)) for r in (getattr(_gate, "reasons", None) or [])
+                ) or "unknown_execution_gate_reasons"
+                return {
+                    "status": "rejected",
+                    "mode": mode_value,
+                    "ticker": ticker,
+                    "reason": f"execution_gate_blocked:{_reasons}",
+                }
+        except Exception as exc:
+            logger.error(
+                "execution_gate_unavailable_live_order_blocked: %s", exc, exc_info=True
+            )
+            return {
+                "status": "rejected",
+                "mode": mode_value,
+                "ticker": ticker,
+                "reason": f"execution_gate_unavailable:{exc}",
+            }
+
     # Risk pre-check (if risk manager available)
     risk = _get_risk()
     if risk:
@@ -2998,31 +3027,96 @@ async def batch_place_orders(
     if len(orders) > 20:
         raise HTTPException(400, f"Max 20 orders per batch, received {len(orders)}")
 
-    client = _get_client()
-    if not client:
-        raise HTTPException(503, "Kalshi client not configured")
-
+    # Route every order in the batch through the canonical ``route_order_async``
+    # pipeline so the shared ``GlobalRiskGuard``, cross-caller dedup, pre-trade
+    # gate, and sanity checks apply uniformly.  The previous code path bypassed
+    # all of these by calling ``client.batch_place_orders`` directly.
     try:
-        await client.connect()
-        result = await client.batch_place_orders(order_specs=orders)
+        from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
+        from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+        from merid.prediction.venue_gate import TradingMode
+    except ImportError as exc:
+        logger.error("Batch place orders: router import failed: %s", exc)
+        raise HTTPException(503, "Order router unavailable")
 
-        if not result.success:
-            raise HTTPException(502, str(result.error))
+    default_mode = _get_default_order_mode().lower().strip()
+    mode_map = {"mock": TradingMode.MOCK, "paper": TradingMode.PAPER, "live": TradingMode.LIVE}
 
-        placed_orders = result.data
-        return {
-            "status": "success",
-            "count": len(placed_orders),
-            "orders": placed_orders,
-            "latency_ms": result.latency_ms,
-        }
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    except Exception as exc:
-        logger.error(f"Batch place orders failed: {exc}")
-        raise HTTPException(500, f"Batch place failed: {exc}")
+    import time as _time
+    t0 = _time.monotonic()
+    results: List[Dict[str, Any]] = []
+    approved = 0
+    rejected = 0
+    for idx, spec in enumerate(orders):
+        try:
+            ticker = spec.get("ticker")
+            side = (spec.get("side") or "yes").lower()
+            action = (spec.get("action") or "buy").lower()
+            count = int(spec.get("count", 0))
+            price_cents = int(spec.get("yes_price") or spec.get("no_price") or spec.get("price_cents") or 0)
+            order_type = (spec.get("type") or spec.get("order_type") or "limit").lower()
+            tif = (spec.get("time_in_force") or "gtc").lower()
+            mode_str = (spec.get("mode") or default_mode).lower()
+            if mode_str not in mode_map:
+                raise ValueError(f"invalid mode: {mode_str!r}")
+            if side not in ("yes", "no"):
+                raise ValueError(f"invalid side: {side!r}")
+            if action not in ("buy", "sell"):
+                raise ValueError(f"invalid action: {action!r}")
+            if count <= 0:
+                raise ValueError("count must be > 0")
+            if not (1 <= price_cents <= 99):
+                raise ValueError("price_cents must be 1-99")
+
+            intent = OrderIntent(
+                ticker=ticker,
+                side=side,
+                action=action,
+                price_cents=price_cents,
+                count=count,
+                mode=mode_map[mode_str],
+                order_type=order_type,
+                time_in_force=tif,
+                source="api_batch",
+                client_tag=spec.get("client_order_id"),
+                post_only=bool(spec.get("post_only", False)),
+                self_trade_prevention_type=spec.get("self_trade_prevention_type"),
+                decision_trace_id=new_decision_trace_id("api_batch"),
+                sentiment_driven=False,
+            )
+            result = await route_order_async(intent)
+            entry = {
+                "index": idx,
+                "ticker": ticker,
+                "status": result.status,
+                "mode": getattr(result.mode, "value", str(result.mode)).lower(),
+                "fill": result.fill,
+                "reason": result.reason,
+                "latency_ms": round(result.latency_ms or 0.0, 2),
+            }
+            if result.status == "rejected":
+                rejected += 1
+            else:
+                approved += 1
+            results.append(entry)
+        except Exception as exc:
+            rejected += 1
+            results.append({
+                "index": idx,
+                "ticker": spec.get("ticker"),
+                "status": "rejected",
+                "reason": f"validation:{exc}",
+            })
+
+    total_latency = (_time.monotonic() - t0) * 1000
+    return {
+        "status": "success" if rejected == 0 else "partial" if approved > 0 else "all_rejected",
+        "count": len(results),
+        "approved": approved,
+        "rejected": rejected,
+        "orders": results,
+        "latency_ms": round(total_latency, 2),
+    }
 
 
 @router.patch("/orders/{order_id}/amend")
@@ -5870,10 +5964,54 @@ async def fix_submit_order(
     fix = _get_fix_client()
     if not fix:
         raise HTTPException(503, "FIX client not configured")
-    
+
     if not fix.is_connected:
         raise HTTPException(503, "FIX not connected - connect first via POST /fix/connect")
-    
+
+    # ── Shared-risk-guard + cross-caller dedup (FIX path) ────────────────
+    # The FIX path uses a separate transport so ``route_order_async`` cannot
+    # execute it directly. Apply the canonical shared ``GlobalRiskGuard`` and
+    # ``OrderDedupRegistry`` explicitly here so FIX orders participate in the
+    # same 1-2% global risk envelope and single-batch invariants as REST.
+    try:
+        from merid.guards.global_risk_guard import check_intent as _grg_check_intent
+        from merid.guards.order_dedup_registry import get_order_dedup_registry
+    except ImportError as _imp_exc:
+        logger.error("FIX submit: shared risk-guard import failed: %s", _imp_exc)
+        raise HTTPException(503, "Risk guard unavailable — FIX submit blocked") from _imp_exc
+
+    _side_lower = (side or "").lower()
+    # Map FIX "buy"/"sell" (no yes/no distinction in wire) to guard semantics:
+    # for risk accounting we treat "buy" as a BUY-YES long entry at ``price``.
+    _guard_side = "yes"
+    _guard_action = "buy" if _side_lower == "buy" else "sell"
+    _guard_price = int(price) if price is not None else 50
+    _ok, _reason = _grg_check_intent(
+        ticker=ticker, asset="UNKNOWN",
+        side=_guard_side, action=_guard_action,
+        price_cents=_guard_price, count=int(quantity),
+        edge=0.0,
+    )
+    if not _ok:
+        logger.warning("[FIX] shared-guard REJECTED %s side=%s qty=%d: %s",
+                       ticker, side, quantity, _reason)
+        raise HTTPException(429, f"Shared risk guard blocked order: {_reason}")
+
+    _dedup_admitted = False
+    _dedup_registry = None
+    if _guard_action == "buy":
+        _dedup_registry = get_order_dedup_registry()
+        _ok_dedup, _existing = _dedup_registry.try_admit(
+            ticker=ticker, side=_guard_side, action=_guard_action,
+            caller="fix_api",
+        )
+        if not _ok_dedup:
+            _orig = getattr(_existing, "caller", "unknown") if _existing else "unknown"
+            logger.warning("[FIX] dedup REJECTED %s side=%s — already in bucket (original=%s)",
+                           ticker, side, _orig)
+            raise HTTPException(429, f"Duplicate order in bucket (original_caller={_orig})")
+        _dedup_admitted = True
+
     try:
         cl_ord_id = await fix.submit_order(
             ticker=ticker,
@@ -5892,6 +6030,13 @@ async def fix_submit_order(
             "price": price,
         }
     except Exception as exc:
+        # Release the dedup slot so retries in the same bucket aren't
+        # permanently blocked on transient FIX errors.
+        if _dedup_admitted and _dedup_registry is not None:
+            try:
+                _dedup_registry.release(ticker, _guard_side, _guard_action)
+            except Exception as _rel_exc:
+                logger.warning("[FIX] dedup release failed after submit error: %s", _rel_exc)
         logger.error(f"FIX order submission failed: {exc}")
         raise HTTPException(500, f"Order submission failed: {exc}")
 
@@ -6583,7 +6728,14 @@ async def lane_control(body: Dict[str, Any]) -> Dict[str, Any]:
             lane = get_btc15m_lane()
             if not getattr(lane, 'running', getattr(lane, '_running', False)):
                 import asyncio
-                asyncio.create_task(lane.start())
+                # Fire-and-forget; attach a done-callback so startup crashes
+                # surface in the logs instead of being swallowed by the GC.
+                _start_task = asyncio.create_task(lane.start(), name="btc15m-lane-start")
+                _start_task.add_done_callback(
+                    lambda t: logger.error(
+                        "btc15m lane start task failed: %s", t.exception()
+                    ) if not t.cancelled() and t.exception() else None
+                )
                 result.update(ok=True, detail="lane start task created")
             else:
                 result.update(ok=True, detail="lane already running")

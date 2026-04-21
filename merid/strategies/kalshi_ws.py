@@ -224,7 +224,11 @@ class KalshiWebSocketClient:
         self._running = True
         self._reconnect_count = 0
         
-        self._task = asyncio.create_task(self._run_with_reconnect())
+        self._task = asyncio.create_task(self._run_with_reconnect(), name="kalshi-ws-reconnect")
+        self._task.add_done_callback(
+            lambda t: logger.error("kalshi_ws reconnect task crashed: %s", t.exception())
+            if not t.cancelled() and t.exception() else None
+        )
         logger.info("Kalshi WebSocket client started")
     
     async def stop(self):

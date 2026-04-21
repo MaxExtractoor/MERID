@@ -1,6 +1,6 @@
 {
   "session_id": "test-session",
-  "session_start": 1776479839.5516155,
+  "session_start": 1776795418.7238483,
   "live_promoted": [],
   "benchmark": {
     "min_trades": 50,
@@ -33,7 +33,7 @@
       "circuit_breaker_trips": 0,
       "first_trade_at": null,
       "last_trade_at": null,
-      "last_updated": "2026-04-18T02:37:19.551615+00:00",
+      "last_updated": "2026-04-21T18:16:58.723848+00:00",
       "daily_loss_cents": 0.0,
       "daily_reset_date": null,
       "weekly_loss_cents": 0.0,
