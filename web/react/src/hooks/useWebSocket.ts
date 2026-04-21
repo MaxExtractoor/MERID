@@ -217,8 +217,17 @@ export function useWebSocket<TMessage = unknown>(
 /**
  * Hook for Kalshi-specific risk stream WebSocket.
  */
+function getWsBaseUrl(): string {
+  try {
+    const meta = (globalThis as any).import?.meta;
+    return meta?.env?.VITE_WS_URL || 'ws://localhost:8011';
+  } catch {
+    return 'ws://localhost:8011';
+  }
+}
+
 export function useKalshiRiskStream(token?: string): WebSocketState {
-  const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8011';
+  const WS_BASE_URL = getWsBaseUrl();
   
   return useWebSocket({
     url: `${WS_BASE_URL}/ws/risk`,
@@ -233,7 +242,7 @@ export function useKalshiRiskStream(token?: string): WebSocketState {
  * Hook for trade events WebSocket.
  */
 export function useTradeEventsStream(token?: string): WebSocketState {
-  const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8011';
+  const WS_BASE_URL = getWsBaseUrl();
   
   return useWebSocket({
     url: `${WS_BASE_URL}/ws/trades`,
@@ -248,7 +257,7 @@ export function useTradeEventsStream(token?: string): WebSocketState {
  * Hook for live tick stream WebSocket.
  */
 export function useLiveTickStream(token?: string): WebSocketState {
-  const WS_BASE_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8011';
+  const WS_BASE_URL = getWsBaseUrl();
   
   return useWebSocket({
     url: `${WS_BASE_URL}/ws/live`,

@@ -6,6 +6,16 @@ jest.mock('./config/constants', () => ({
   WS_URL: 'ws://127.0.0.1:8011/ws/trades',
   WS_PORTFOLIO_URL: 'ws://127.0.0.1:8011/ws/risk',
   AUTH_TOKEN_KEY: 'merid-access',
+  CHART_COLORS: {
+    GREEN: '#22c55e',
+    RED: '#ef4444',
+    YELLOW: '#eab308',
+    BLUE: '#3b82f6',
+    PURPLE: '#a855f7',
+    ORANGE: '#f97316',
+    WHITE: '#ffffff',
+    GRAY: '#6b7280',
+  },
   API_ENDPOINTS: {
     SYSTEM_HEALTH: '/api/v1/system/health',
     SYSTEM_EXECUTION_GATE: '/api/v1/system/execution-gate',

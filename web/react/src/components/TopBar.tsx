@@ -4,12 +4,13 @@ import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 import { useTheme } from '../theme';
 import { useKalshiMode } from '../context/KalshiModeContext';
+import type { View } from '../types/views';
 import LiveNotifications from './LiveNotifications';
 import ConnectionStatusIndicator from './ConnectionStatusIndicator';
 
-interface TopBarProps {
+export interface TopBarProps {
   onMenuClick: () => void;
-  onNavigate?: (v: string) => void;
+  onNavigate?: (v: View) => void;
   onOpenSearch?: () => void;
 }
 
