@@ -121,19 +121,30 @@ class EnhancedKalshiExecutor:
 
     @staticmethod
     def _retry_wrapper(max_retries: int = 3):
-        """Create retry wrapper for operations."""
+        """Create retry wrapper for operations.
+
+        NOTE: ``retry_async`` (alias of ``retry_with_backoff``) is a *decorator
+        factory* — it takes config kwargs and returns a decorator.  The earlier
+        implementation called it like a function with ``func`` as the first
+        positional argument, which made Python map ``func`` to the ``max_retries``
+        slot and then conflict with the explicit ``max_retries=`` kwarg.  We
+        instead build the decorator once and apply it to ``func`` on each call.
+        """
+        retry_decorator = retry_async(
+            max_retries=max_retries,
+            backoff_base=2.0,
+            retry_on=(
+                asyncio.TimeoutError,
+                ConnectionError,
+            ),
+        )
+
         def decorator(func: Callable) -> Callable:
+            decorated = retry_decorator(func)
+
             @wraps(func)
             async def wrapper(*args, **kwargs):
-                return await retry_async(
-                    func,
-                    max_retries=max_retries,
-                    backoff_base=2.0,
-                    retryable_exceptions=(
-                        asyncio.TimeoutError,
-                        ConnectionError,
-                    ),
-                )(*args, **kwargs)
+                return await decorated(*args, **kwargs)
             return wrapper
         return decorator
 

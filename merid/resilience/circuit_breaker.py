@@ -114,7 +114,17 @@ class CircuitBreaker:
     def failure_count(self) -> int:
         """Current failure count."""
         return self._failure_count
-    
+
+    @property
+    def last_failure_time(self) -> float:
+        """Wall-clock timestamp of the most recent recorded failure.
+
+        Returns ``0.0`` before any failure has occurred.  Exposed as a public
+        property so executor health probes (e.g. ``KalshiEnhancedExecutor``) can
+        surface the breaker state without reaching into private fields.
+        """
+        return self._last_failure_time
+
     @property
     def is_closed(self) -> bool:
         """True if circuit is closed (normal operation)."""

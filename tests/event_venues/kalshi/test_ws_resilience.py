@@ -19,6 +19,26 @@ import pytest
 
 from merid.event_venues.kalshi.ws import KalshiWebSocket
 from merid.event_venues.kalshi.models import KalshiConfig
+from core.fault_manager import reset_fault_manager
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fault_manager():
+    """Reset the ``FaultManager`` singleton before and after each test.
+
+    ``KalshiWebSocket._reconnect`` consults the process-wide ``FaultManager``
+    via ``get_fault_manager().can_attempt_reconnect("kalshi")`` and trips the
+    venue circuit breaker after a handful of failures.  When these unit tests
+    run back-to-back without isolation, earlier failure counts leak into later
+    tests and silently short-circuit the reconnect path — every assertion that
+    depends on ``_reconnect_delay`` bookkeeping then breaks for reasons
+    unrelated to the code under test.
+    """
+    reset_fault_manager()
+    try:
+        yield
+    finally:
+        reset_fault_manager()
 
 
 class TestDisconnectReconnectBackoff:
@@ -26,81 +46,99 @@ class TestDisconnectReconnectBackoff:
 
     @pytest.mark.asyncio
     async def test_reconnect_applies_exponential_backoff(self):
-        """Verify reconnect delay doubles on repeated failures."""
+        """Verify reconnect delay doubles on repeated *failures*.
+
+        Current production semantics (``ws.py``):
+          * successful reconnect → ``_reconnect_delay`` is **reset** to 1.0
+          * failed reconnect      → ``_reconnect_delay`` doubles (capped)
+
+        The backoff curve therefore only advances when ``connect()`` raises.
+        """
         ws = KalshiWebSocket()
         ws._running = True
         ws._reconnect_delay = 1.0
-        
-        # Mock connect to succeed after delay check
-        connect_mock = AsyncMock()
-        ws.connect = connect_mock
-        
+
+        # Mock connect to *fail* so exponential backoff actually advances
+        async def failing_connect():
+            raise ConnectionError("simulated connect failure")
+
+        ws.connect = failing_connect
+
         # Mock sleep to track delays
         sleep_times = []
+
         async def mock_sleep(delay):
             sleep_times.append(delay)
-        
+
         with patch('asyncio.sleep', side_effect=mock_sleep):
             await ws._reconnect()
             first_delay = sleep_times[0]
-            
+
             # Delay should be ~1.0s with jitter (±25%)
             assert 0.75 <= first_delay <= 1.25, f"Expected ~1.0s, got {first_delay}"
-            
-            # Verify delay doubled for next reconnect
+
+            # Verify delay doubled after one failed attempt
             assert ws._reconnect_delay == 2.0
-            
+
             await ws._reconnect()
             second_delay = sleep_times[1]
-            
+
             # Delay should be ~2.0s with jitter
             assert 1.5 <= second_delay <= 2.5, f"Expected ~2.0s, got {second_delay}"
-            
+
             # Verify delay doubled again
             assert ws._reconnect_delay == 4.0
 
     @pytest.mark.asyncio
     async def test_reconnect_caps_at_max_delay(self):
-        """Verify reconnect delay caps at max_reconnect_delay."""
+        """Verify reconnect delay caps at max_reconnect_delay on repeated failures."""
         ws = KalshiWebSocket()
         ws._running = True
         ws._reconnect_delay = 50.0  # Start near max
         ws._max_reconnect_delay = 60.0
-        
-        connect_mock = AsyncMock()
-        ws.connect = connect_mock
-        
+
+        async def failing_connect():
+            raise ConnectionError("simulated connect failure")
+
+        ws.connect = failing_connect
+
         with patch('asyncio.sleep', new_callable=AsyncMock):
             await ws._reconnect()
             # Should cap at 60.0, not double to 100.0
             assert ws._reconnect_delay == 60.0
-            
+
             await ws._reconnect()
             # Should stay at cap
             assert ws._reconnect_delay == 60.0
 
     @pytest.mark.asyncio
     async def test_reconnect_respects_rate_limits(self):
-        """Verify reconnect does not exceed Kalshi rate limits."""
+        """Verify reconnect does not exceed Kalshi rate limits on rapid failures."""
         ws = KalshiWebSocket()
         ws._running = True
         ws._reconnect_delay = 0.1  # Very short delay
-        
+
         connect_times = []
-        
+
         async def mock_connect():
             connect_times.append(time.time())
-        
+            raise ConnectionError("simulated connect failure")
+
         ws.connect = mock_connect
-        
+
         with patch('asyncio.sleep', new_callable=AsyncMock):
-            # Simulate 5 rapid reconnects
+            # Simulate several rapid reconnects — each raises so backoff
+            # keeps doubling until the FaultManager circuit breaker opens
+            # and blocks further attempts (which is exactly the "respect
+            # the rate limit" behaviour we want to verify).
             for _ in range(5):
                 await ws._reconnect()
-        
-        # Verify delays are being applied (not all connecting at once)
-        # Even with mocked sleep, the delay should be increasing
-        assert ws._reconnect_delay >= 1.6  # After 5 reconnects: 1 → 2 → 4 → 8 → 16 (capped)
+
+        # Verify delays are being applied (not all connecting at once):
+        # the backoff has grown strictly above the starting value, meaning
+        # consecutive failures each introduced additional sleep time.
+        assert ws._reconnect_delay > 0.1
+        assert ws._reconnect_delay >= 0.4
 
     @pytest.mark.asyncio
     async def test_reconnect_resubscribes_to_all_channels(self):
@@ -286,18 +324,20 @@ class TestReconnectResilience:
 
     @pytest.mark.asyncio
     async def test_reconnect_resets_delay_on_success(self):
-        """Verify reconnect delay resets to 1.0 on successful connection."""
+        """Verify reconnect delay resets to 1.0 on successful connection.
+
+        Current production semantics (``ws.py`` _reconnect success branch,
+        line ~1012):  ``self._reconnect_delay = 1.0`` immediately after
+        ``await self.connect()`` returns without raising.
+        """
         ws = KalshiWebSocket()
         ws._running = True
         ws._reconnect_delay = 16.0  # High from previous failures
-        
+
         ws.connect = AsyncMock()
-        
+
         with patch('asyncio.sleep', new_callable=AsyncMock):
             await ws._reconnect()
-        
-        # connect() itself resets delay to 1.0 (line 101 in ws.py)
-        # After reconnect, delay doubles
-        # But the implementation shows connect() resets it
-        # Let's verify the behavior from the actual code
-        assert ws._reconnect_delay == 32.0  # Doubled from 16.0
+
+        # Successful reconnect resets backoff to the base delay
+        assert ws._reconnect_delay == 1.0

@@ -167,6 +167,16 @@ class TestKalshiExecutorPositions:
         assert len(positions) == 0
 
 
+@pytest.mark.skip(
+    reason=(
+        "KalshiExecutor._symbol_to_ticker / _ticker_to_symbol helpers were "
+        "removed when the executor began delegating symbol/ticker coercion "
+        "to KalshiVenueClient + the order router. See "
+        "merid/event_venues/kalshi/client.py for the canonical mapping and "
+        "tests/event_venues/kalshi/test_kalshi_client_refactored.py for the "
+        "covering suite."
+    )
+)
 class TestKalshiExecutorHelpers:
     """Test KalshiExecutor helper methods."""
     
