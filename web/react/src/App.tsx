@@ -26,7 +26,6 @@ import OperatorDashboard from "./views/OperatorDashboard";
 import ErrorBoundary from "./components/ErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
 import { OfflineIndicator } from "./components/OfflineIndicator";
-import { StubRegistryProvider } from "./components/GlobalStubBanner";
 import { KalshiModeProvider } from "./context/KalshiModeContext";
 import { NetworkProvider } from "./hooks/useNetworkStatusProvider";
 import { RealtimeDisconnectedBanner } from "./components/RealtimeDisconnectedBanner";
@@ -145,7 +144,6 @@ export default function App() {
   return (
     <ThemeProvider>
     <NetworkProvider>
-    <StubRegistryProvider>
     <KalshiModeProvider>
     <ToastProvider>
       <div className="flex h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -207,7 +205,6 @@ export default function App() {
       <GateChangeToast />
     </ToastProvider>
     </KalshiModeProvider>
-    </StubRegistryProvider>
     </NetworkProvider>
     </ThemeProvider>
   );

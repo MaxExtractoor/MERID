@@ -1,5 +1,5 @@
 {
-  "timestamp": 1777218563.8741395,
+  "timestamp": 1777219167.316052,
   "count": 3,
   "critical": 0,
   "discrepancies": [
@@ -14,7 +14,7 @@
       "delta_price": 0.0,
       "severity": "info",
       "reason": "minor drift",
-      "timestamp": 1777218563.8727877
+      "timestamp": 1777219167.3117206
     },
     {
       "venue": "kalshi",
@@ -27,7 +27,7 @@
       "delta_price": 0.0,
       "severity": "info",
       "reason": "minor drift",
-      "timestamp": 1777218563.8727877
+      "timestamp": 1777219167.3117206
     },
     {
       "venue": "kalshi",
@@ -40,7 +40,7 @@
       "delta_price": 0.0,
       "severity": "info",
       "reason": "minor drift",
-      "timestamp": 1777218563.8727877
+      "timestamp": 1777219167.3117206
     }
   ]
 }
